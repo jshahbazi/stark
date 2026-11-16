@@ -266,6 +266,10 @@ def verify_project(workspace: Path, stage: str) -> dict:
                 "non_object_row": [5],
                 "missing_field": [{"id": "a", "category": "food"}],
                 "duplicate_id": [rows[0], rows[0]],
+                "duplicate_id_different_fields": [
+                    rows[0],
+                    {"id": rows[0]["id"], "category": "other", "amount_cents": 7},
+                ],
                 "boolean_amount": [
                     {"id": "a", "category": "food", "amount_cents": True}
                 ],

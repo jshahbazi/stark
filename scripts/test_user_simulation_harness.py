@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import plistlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,7 +24,17 @@ class HarnessTests(unittest.TestCase):
             patch.object(
                 harness,
                 "installed_identities",
-                return_value={"stark": {"version": "test"}},
+                return_value={
+                    "stark": {
+                        "app_path": "/synthetic/Stark.app",
+                        "executable_sha256": "a" * 64,
+                        "runtime_sha256": {"libexec/stark-generate": "b" * 64},
+                    },
+                    "pi": {
+                        "executable_path": "/synthetic/pi",
+                        "executable_sha256": "c" * 64,
+                    },
+                },
             ),
         ]
         for item in self.patches:
@@ -153,6 +164,48 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(harness.summarize(self.run, self.state)["status"], "passed")
         self.assertEqual(len(self.state["clients"]["pi"]["observations"]["cancel"]), 3)
 
+    def test_failure_survives_helper_or_application_identity_drift(self):
+        self.complete()
+        harness.observe(self.state, "pi", "cancel", "fail")
+        for drift in ("helper", "application"):
+            with self.subTest(drift=drift):
+                self.state["harness_sha256"] = (
+                    "0" * 64
+                    if drift == "helper"
+                    else harness.digest(Path(harness.__file__))
+                )
+                builds = self.state["installed"] if drift == "helper" else {}
+                with patch.object(harness, "installed_identities", return_value=builds):
+                    result = harness.report(self.run, self.state)
+                self.assertEqual(result["status"], "failed")
+                self.assertFalse(result["evidence_valid"])
+                self.assertIn("Outcome: failed", (self.run / "report.md").read_text())
+
+    def test_missing_build_identity_cannot_be_bound_or_pass(self):
+        with (
+            patch.object(harness, "installed_identities", return_value={}),
+            self.assertRaisesRegex(
+                harness.UserTestError, "tested_application_unavailable"
+            ),
+        ):
+            self.identity()
+        self.complete()
+        self.state["installed"]["stark"] = {"executable_sha256": None}
+        with patch.object(
+            harness, "installed_identities", return_value=self.state["installed"]
+        ):
+            self.assertEqual(
+                harness.summarize(self.run, self.state)["status"], "incomplete"
+            )
+
+    def test_changed_running_application_blocks_verification(self):
+        self.complete()
+        with (
+            patch.object(harness, "installed_identities", return_value={}),
+            self.assertRaisesRegex(harness.UserTestError, "tested_application_changed"),
+        ):
+            self.accepted("recover")
+
     def test_foreign_or_public_manifest_rejected(self):
         with self.assertRaises(harness.UserTestError):
             harness.load(self.root)
@@ -171,6 +224,91 @@ class HarnessTests(unittest.TestCase):
             self.assertEqual(harness.main(), 2)
         self.assertEqual(output.getvalue().strip(), "user_test_operation_failed")
         self.assertNotIn("private-sentinel", json.dumps(self.state))
+
+
+class ApplicationIdentityTests(unittest.TestCase):
+    def test_running_user_install_is_bound_and_worker_changes_are_detected(self):
+        with tempfile.TemporaryDirectory(prefix="stark-app-identity-") as temporary:
+            root = Path(temporary)
+            user_app = root / "user/Applications/Stark.app"
+            other_app = root / "Applications/Stark.app"
+            for app in (user_app, other_app):
+                contents = app / "Contents"
+                (contents / "MacOS").mkdir(parents=True)
+                (contents / "Info.plist").write_bytes(
+                    plistlib.dumps(
+                        {
+                            "CFBundleExecutable": "Stark",
+                            "CFBundleShortVersionString": "test",
+                        }
+                    )
+                )
+                (contents / "MacOS/Stark").write_bytes(b"launcher")
+                runtime = contents / "Resources/runtime"
+                (runtime / "libexec").mkdir(parents=True)
+                for name in ("stark-generate", "stark-template"):
+                    (runtime / "libexec" / name).write_bytes(b"worker")
+                (runtime / "libexec/python/bin").mkdir(parents=True)
+                (runtime / "libexec/python/bin/python3.13").write_bytes(b"python")
+                backend = runtime / "lib/python/site-packages/stark_convert"
+                backend.mkdir(parents=True)
+                (backend / "desktop.py").write_text("# synthetic backend")
+            with (
+                patch.object(
+                    harness, "running_app_paths", return_value={"stark": user_app}
+                ),
+                patch.object(harness.shutil, "which", return_value=None),
+            ):
+                original = harness.installed_identities()
+            self.assertEqual(original["stark"]["app_path"], str(user_app.resolve()))
+            self.assertTrue(harness.available_builds(original, []))
+            # Rehash the bound bundle even after cleanup closes the application.
+            with patch.object(
+                harness,
+                "running_app_paths",
+                side_effect=AssertionError("must use bound path"),
+            ):
+                unchanged = harness.installed_identities(original)
+                self.assertEqual(original, unchanged)
+                for relative in (
+                    "libexec/stark-generate",
+                    "libexec/python/bin/python3.13",
+                    "lib/python/site-packages/stark_convert/desktop.py",
+                ):
+                    with self.subTest(changed=relative):
+                        target = user_app / "Contents/Resources/runtime" / relative
+                        previous = target.read_bytes()
+                        target.write_bytes(b"changed-runtime")
+                        changed = harness.installed_identities(original)
+                        self.assertEqual(
+                            original["stark"]["executable_sha256"],
+                            changed["stark"]["executable_sha256"],
+                        )
+                        self.assertNotEqual(
+                            original["stark"]["runtime_sha256"],
+                            changed["stark"]["runtime_sha256"],
+                        )
+                        target.write_bytes(previous)
+
+    def test_running_bundle_discovery_fails_closed_on_ambiguity(self):
+        reply = [
+            {"id": "com.starkengine.menubar", "path": "/first/Stark.app"},
+            {"id": "com.starkengine.menubar", "path": "/second/Stark.app"},
+            {
+                "id": "com.differentai.openwork",
+                "path": "/user/Applications/OpenWork.app",
+            },
+        ]
+        with patch.object(
+            harness.subprocess,
+            "run",
+            return_value=type(
+                "Reply", (), {"stdout": json.dumps(reply), "returncode": 0}
+            )(),
+        ):
+            paths = harness.running_app_paths()
+        self.assertNotIn("stark", paths)
+        self.assertEqual(paths["openwork"], Path("/user/Applications/OpenWork.app"))
 
 
 if __name__ == "__main__":

@@ -51,8 +51,12 @@ subfolders contain only `expenses.json` and the initial authored `BRIEF.md`.
 Use that absolute directory as `RUN` in the examples below. `CLIENT` is one of
 `openwork`, `opencode` or `pi`. An explicit single-client request can use
 `prepare --clients pi` (or a list). Do not reuse a completed run for a new build
-or model. The run records harness/oracle hashes and installed application
-executable hashes; these do not establish the installed engine's source revision.
+or model. Preparation records harness/oracle hashes. The identity command, run
+after opening the apps, binds the actual running bundle paths reported by macOS,
+application executable hashes, and Stark's bundled generation/template workers,
+bundled Python, Python backend and native libraries. It does not assume `/Applications`; source
+installs under `~/Applications` are supported. These hashes do not establish the
+installed engine's source revision.
 
 For each client, inspect Stark's running model and the client's selected model.
 Record the actual model identifier, context, client version and visible settings:
@@ -67,6 +71,12 @@ Unknown is an evidence limit. Supply `--artifact-sha256` only when the exact
 loaded artifact's SHA-256 is already established; otherwise it remains null.
 A catalog name is not a weight digest. Model/context/setting identity changes
 require a new run. Do not silently change the model or a supported default.
+Identity capture requires Stark and the selected desktop client to be running;
+missing or ambiguous application locations cannot satisfy build identity. Pi's
+CLI path is resolved from the helper's PATH; confirm it is the same executable
+selected by Stark's Connections setup. Verification rechecks running app paths
+and fingerprints. Final reporting rehashes the bound paths so cleanup may close
+the apps without invalidating otherwise unchanged build evidence.
 
 ## Drive the real client
 
@@ -125,11 +135,12 @@ attest that a UI action happened. There is no arbitrary diagnostic-text field.
    Stark Pi flow and project; record `session_restart`. In the fresh session
    read and run the ledger, observe Stark activity and successful tools, then
    record `restart_recovery`. Pi has no managed Disconnect/revocation test.
-7. **Cleanup.** Stop only test activity, close test sessions, restore changed
+7. **Cleanup.** If tool code changed the final artifact after its last verification,
+   repeat `verify --stage recover` while the apps are still open. Stop only test
+   activity, close test sessions, restore changed
    connection/working-folder choices and confirm Stark idle. Do not stop a shared
    OpenCode engine, delete unrelated sessions, rotate credentials or erase the
-   run evidence. Record `cleanup`. If tool code changed the final artifact after
-   its last verification, repeat `verify --stage recover` before reporting.
+   run evidence. Record `cleanup`.
 
 Get a brief and run independent verification with:
 
@@ -166,6 +177,9 @@ attempt history. Exit codes are 0 for passed, 1 for failed and 2 for incomplete.
 Every selected client's required UI observation and all three project stages
 must pass; current program and input hashes must still match. Missing/blocked
 checks, a changed harness or changed installed applications prevent a full pass.
+Observed failures retain the `failed` outcome even when identities change;
+`evidence_valid`, `harness_unchanged` and `installed_unchanged` report identity
+validity separately. Unchanged missing identities never count as valid evidence.
 UI observations remain distinct from independently executed project checks.
 The run establishes one task on the recorded versions/settings; an unknown
 artifact digest limits artifact-specific conclusions. It does not qualify

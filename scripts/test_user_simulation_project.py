@@ -104,6 +104,16 @@ class ProjectAcceptanceTests(unittest.TestCase):
         source = REFERENCE + "\nopen(a.input, 'w').write('[]')\n"
         self.assertFalse(self.verify(source, "build")["passed"])
 
+    def test_duplicate_whole_row_detection_does_not_satisfy_unique_ids(self):
+        source = REFERENCE.replace(
+            "row['id'] in ids", "tuple(row.values()) in ids"
+        ).replace("ids.add(row['id'])", "ids.add(tuple(row.values()))")
+        result = self.verify(source)
+        checks = {check["id"]: check["passed"] for check in result["checks"]}
+        self.assertTrue(checks["duplicate_id"])
+        self.assertFalse(checks["duplicate_id_different_fields"])
+        self.assertFalse(result["passed"])
+
     def test_timeout_and_output_flood_are_bounded_and_content_free(self):
         with patch.object(project, "CASE_TIMEOUT", 0.1):
             result = self.verify("import time; time.sleep(60)", "build")

@@ -125,26 +125,117 @@ def load(run: Path) -> dict:
     return value
 
 
-def app_identity(name: str) -> dict:
-    app = Path("/Applications") / (name + ".app")
+def running_app_paths() -> dict[str, Path]:
+    """Read running bundle locations without launching/activating any app."""
+    script = """ObjC.import('AppKit');
+    var apps = $.NSWorkspace.sharedWorkspace.runningApplications;
+    var result = [];
+    for (var i = 0; i < apps.count; i++) {
+        var app = apps.objectAtIndex(i);
+        if (app.bundleURL && app.bundleIdentifier) result.push({
+            id: ObjC.unwrap(app.bundleIdentifier), path: ObjC.unwrap(app.bundleURL.path)});
+    }
+    JSON.stringify(result);"""
+    identifiers = {
+        "stark": "com.starkengine.menubar",
+        "openwork": "com.differentai.openwork",
+        "opencode": "ai.opencode.desktop",
+    }
     try:
+        result = subprocess.run(
+            ["/usr/bin/osascript", "-l", "JavaScript", "-e", script],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        apps = json.loads(result.stdout) if result.returncode == 0 else []
+        paths = {}
+        for name, identifier in identifiers.items():
+            matches = {
+                Path(app["path"]).resolve() for app in apps if app["id"] == identifier
+            }
+            if len(matches) == 1:
+                paths[name] = matches.pop()
+        return paths
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return {}
+
+
+def app_identity(name: str, app: Path | None) -> dict:
+    if app is None:
+        return {"version": "unavailable", "executable_sha256": None, "app_path": None}
+    try:
+        app = app.resolve()
         info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
         executable = app / "Contents/MacOS" / info["CFBundleExecutable"]
-        return {
+        identity = {
+            "app_path": str(app),
             "version": str(info.get("CFBundleShortVersionString", "unknown")),
             "executable_sha256": digest(executable),
         }
+        if name == "stark":
+            runtime = app / "Contents/Resources/runtime"
+            files = [
+                runtime / "libexec" / name
+                for name in ("stark-generate", "stark-template")
+            ]
+            files.append(runtime / "libexec/python/bin/python3.13")
+            files += [
+                p
+                for p in runtime.rglob("*")
+                if p.is_file() and p.suffix in (".py", ".so", ".dylib")
+            ]
+            if not any("stark_convert" in p.parts for p in files):
+                raise ValueError("missing_backend")
+            identity["runtime_sha256"] = {
+                str(p.relative_to(runtime)): digest(p) for p in sorted(set(files))
+            }
+        return identity
     except (OSError, KeyError, ValueError, plistlib.InvalidFileException):
-        return {"version": "unavailable", "executable_sha256": None}
+        return {
+            "version": "unavailable",
+            "executable_sha256": None,
+            "app_path": str(app),
+        }
 
 
-def installed_identities() -> dict:
+def installed_identities(bound: dict | None = None) -> dict:
+    paths = (
+        running_app_paths()
+        if bound is None
+        else {
+            name: Path(value["app_path"])
+            for name, value in bound.items()
+            if value.get("app_path")
+        }
+    )
     result = {
-        name.lower(): app_identity(name) for name in ("Stark", "OpenWork", "OpenCode")
+        name: app_identity(name, paths.get(name))
+        for name in ("stark", "openwork", "opencode")
     }
-    pi = shutil.which("pi")
-    result["pi"] = {"executable_sha256": digest(Path(pi).resolve()) if pi else None}
+    pi = (
+        shutil.which("pi")
+        if bound is None
+        else bound.get("pi", {}).get("executable_path")
+    )
+    try:
+        result["pi"] = (
+            {
+                "executable_path": str(Path(pi).resolve()),
+                "executable_sha256": digest(Path(pi).resolve()),
+            }
+            if pi
+            else {}
+        )
+    except OSError:
+        result["pi"] = {}
     return result
+
+
+def available_builds(builds: dict, clients: tuple | list) -> bool:
+    return all(
+        builds.get(name, {}).get("executable_sha256") for name in ("stark", *clients)
+    ) and bool(builds.get("stark", {}).get("runtime_sha256"))
 
 
 def prepare(clients: list[str]) -> Path:
@@ -158,7 +249,7 @@ def prepare(clients: list[str]) -> Path:
         "clients": {},
         "harness_sha256": digest(Path(__file__)),
         "oracle_sha256": digest(Path(__file__).with_name("user_simulation_project.py")),
-        "installed": installed_identities(),
+        "installed": {},
     }
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, check=False
@@ -213,6 +304,13 @@ def record_identity(
     entry = state["clients"][client]
     if entry["identity"] is not None and entry["identity"] != value:
         raise UserTestError("identity_changed_start_new_run")
+    current = installed_identities()
+    if not available_builds(current, [client]):
+        raise UserTestError("tested_application_unavailable")
+    for name in ("stark", client):
+        if name in state["installed"] and state["installed"][name] != current[name]:
+            raise UserTestError("tested_application_changed_start_new_run")
+        state["installed"][name] = current[name]
     entry["identity"] = value
 
 
@@ -245,6 +343,11 @@ def observe(state: dict, client: str, step: str, outcome: str) -> None:
 def verify(run: Path, state: dict, client: str, stage: str) -> dict:
     if not tooling_unchanged(state):
         raise UserTestError("harness_changed_start_new_run")
+    current = installed_identities()
+    if not available_builds(current, [client]) or any(
+        current.get(name) != state["installed"].get(name) for name in ("stark", client)
+    ):
+        raise UserTestError("tested_application_changed_start_new_run")
     entry = state["clients"][client]
     required = ("connection", "model", "stark_activity", stage + "_tools")
     if stage == "recover":
@@ -358,12 +461,17 @@ def summarize(run: Path, state: dict) -> dict:
         else "incomplete"
     )
     result["harness_unchanged"] = tooling_unchanged(state)
-    current_installed = installed_identities()
-    result["installed_unchanged"] = all(
+    current_installed = installed_identities(state["installed"])
+    result["installed_unchanged"] = available_builds(
+        state["installed"], list(state["clients"])
+    ) and all(
         current_installed.get(client) == state["installed"].get(client)
         for client in ("stark", *state["clients"])
     )
-    if not result["harness_unchanged"] or not result["installed_unchanged"]:
+    result["evidence_valid"] = (
+        result["harness_unchanged"] and result["installed_unchanged"]
+    )
+    if not result["evidence_valid"] and result["status"] != "failed":
         result["status"] = "incomplete"
     return result
 
@@ -381,6 +489,7 @@ def report(run: Path, state: dict) -> dict:
         f"Harness source: `{state['source_commit']}`",
         "",
         f"Helpers unchanged: {result['harness_unchanged']}. Selected installed apps unchanged: {result['installed_unchanged']}.",
+        f"Evidence identities valid: {result['evidence_valid']}.",
         "",
         "UI checks are operator observations. Project checks are independently executed.",
         "",
