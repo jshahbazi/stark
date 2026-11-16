@@ -2899,6 +2899,16 @@ extension EngineController {
             engine.state = "stopping"
             engine.apply(["event": "ready", "mode": "decision", "model_id": "fixture-model"])
             return engine.state == "stopping" && !engine.modelReady
+        case "automatic-runtime-preserves-playground":
+            engine.decisionText = "synthetic input"
+            engine.apply(["event": "status", "state": "loading", "message": "Preparing model"])
+            engine.apply(["event": "runtime_ready", "mode": "chat", "model_id": "fixture-model",
+                          "tools": true, "tool_parser": "fixture", "context_capacity_known": true,
+                          "max_context_tokens": 8192, "api_context_tokens": 8192, "api_max_output_tokens": 1024])
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            return engine.mode == .decision && engine.loadedMode == .decision && engine.modelReady &&
+                engine.decisionText == "synthetic input" && engine.supportsTools && engine.apiContextTokens == 8192 &&
+                engine.apiMaxNewTokens == 1024
         case "wrong-mode-decision":
             engine.mode = .chat
             engine.loadedMode = .chat
@@ -3131,6 +3141,7 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_ready_requires_requested_model_and_mode(self):
         self.exercise("ready-mode-guard")
+        self.exercise("automatic-runtime-preserves-playground")
 
     def test_chat_mode_ignores_decision_event(self):
         self.exercise("wrong-mode-decision")

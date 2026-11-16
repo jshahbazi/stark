@@ -1574,7 +1574,7 @@ final class EngineController: ObservableObject {
         snapshot: { [weak self] in
             guard let self else { return ["api_base_url": "", "models": []] }
             var served: [[String: Any]] = []
-            if let model = self.activeModel, self.loadedMode == .chat, !self.apiBaseURL.isEmpty {
+            if let model = self.activeModel, !self.apiBaseURL.isEmpty {
                 served = [["id": model.apiID, "name": model.name,
                            "context_length": self.contextCapacityKnown ? self.apiContextTokens as Any : NSNull(),
                            "context_capacity_known": self.contextCapacityKnown,
@@ -1945,6 +1945,17 @@ final class EngineController: ObservableObject {
             applyMTPCapabilities(event)
             state = "ready"
             message = "Ready"
+        case "runtime_ready":
+            // External requests can change the native protocol while the
+            // Playground keeps its selected mode and in-memory decision inputs.
+            guard event["model_id"] as? String == loadedID, !loadedID.isEmpty,
+                  state != "stopping" else { return }
+            if event["mode"] as? String == "chat" {
+                applyLimits(event)
+                apiMaxNewTokens = event["api_max_output_tokens"] as? Int ?? 0
+            }
+            supportsTools = event["tools"] as? Bool == true
+            toolParser = event["tool_parser"] as? String ?? ""
         case "configured":
             guard let configured = pendingOptions,
                   pendingOptionsModelID == loadedID, loadedMode == .chat, mode == .chat,
@@ -2183,7 +2194,7 @@ final class EngineController: ObservableObject {
     }
 
     private func applyImageCapabilities(_ event: [String: Any]) {
-        supportsTools = mode == .chat && event["tools"] as? Bool == true
+        supportsTools = event["tools"] as? Bool == true
         toolParser = supportsTools ? event["tool_parser"] as? String ?? "" : ""
         supportsImages = mode == .chat && event["images"] as? Bool == true &&
             event["image_attachment_transport"] as? String == "private-file-v1" &&

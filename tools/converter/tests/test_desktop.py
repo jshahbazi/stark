@@ -769,18 +769,13 @@ def test_unused_schemas_do_not_block_none_or_named_tool_choice(tool_desktop):
     assert desktop.job is None and desktop.api_queue == []
 
 
-def test_tool_capabilities_follow_parser_and_chat_mode(tool_desktop, monkeypatch):
+def test_tool_capabilities_follow_parser(tool_desktop, monkeypatch):
     from stark_convert.local_api import APIError
 
     desktop, payload, seen, reply = tool_desktop
     parser = desktop.settings_summary()["tool_parser"]
     assert desktop.api_models()[0]["tool_calling"] is True
     assert desktop.api_status()["capabilities"]["tool_parser"] == parser
-    desktop.active_mode = "decision"
-    assert desktop.api_models() == []
-    assert desktop.settings_summary()["tools"] is False
-    assert desktop.api_status()["capabilities"]["tool_parser"] is None
-    desktop.active_mode = "chat"
     monkeypatch.setattr("stark_convert.desktop.tool_parser_for", lambda codec: None)
     assert desktop.api_models()[0]["tool_calling"] is False
     assert desktop.api_status()["capabilities"]["tool_choices"] == []
@@ -1807,20 +1802,124 @@ def running_decision(desktop, model, score_executable):
     return identifier
 
 
-def test_api_rejects_decision_worker_and_does_not_touch_protocol(desktop, model, score_executable):
+def test_api_prepares_generation_and_next_decision_restores_scoring(desktop, model, score_executable):
+    identifier = running_decision(desktop, model, score_executable)
+    scoring = desktop.worker
+    result = desktop.api_complete(
+        {"model": identifier, "messages": [{"role": "user", "content": "fixture"}], "max_tokens": 1024}
+    )
+    assert result["choices"][0]["message"]["content"] == "synthetic answer"
+    assert scoring.process.poll() is not None
+    assert desktop.active_mode == "chat" and desktop.playground_mode == "decision"
+    generation = desktop.worker
+    desktop.dispatch(decision_command())
+    finish(desktop)
+    assert generation.process.poll() is not None
+    assert desktop.active_mode == "decision" and desktop.playground_mode == "decision"
+    assert any(e["event"] == "decision" for e in events(desktop))
+    # Discovery prepares a generation worker too, so first-time Pi setup works.
+    assert desktop.api_models()[0]["id"]
+    assert desktop.api_status()["model_loaded"] is True
+    assert desktop.active_mode == "chat"
+    assert [e["mode"] for e in events(desktop) if e["event"] == "ready"] == ["decision"]
+
+
+def test_api_busy_decision_preserves_worker_and_has_actionable_error(desktop, model, score_executable):
+    import threading
+
     from stark_convert.local_api import APIError
 
     identifier = running_decision(desktop, model, score_executable)
-    assert desktop.api_models() == []
-    status = desktop.api_status()
-    assert status["model_loaded"] is False
-    assert status["capabilities"]["stop_sequences"] is False
-    assert status["capabilities"]["cancellation"] is False
+    desktop.job = threading.Thread()
+    worker = desktop.worker
     with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
         with pytest.raises(APIError) as error:
-            desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "fixture"}]})
-        assert error.value.code == "model_not_loaded"
+            desktop.api_complete(
+                {"model": identifier, "messages": [{"role": "user", "content": "fixture"}], "max_tokens": 1024}
+            )
+        assert error.value.status == 429 and error.value.code == "model_busy"
         request.assert_not_called()
+    assert desktop.worker is worker and worker.process.poll() is None
+    desktop.job = None
+
+
+def test_api_missing_model_precedes_stale_output_limit(desktop):
+    from stark_convert.local_api import APIError
+
+    with pytest.raises(APIError) as error:
+        desktop.api_complete({"messages": [{"role": "user", "content": "fixture"}], "max_tokens": 1024})
+    assert error.value.status == 503 and error.value.code == "model_not_loaded"
+
+
+def test_api_failed_automatic_load_releases_slot_and_reports_fixed_error(desktop, model, score_executable):
+    from stark_convert.local_api import APIError
+
+    identifier = running_decision(desktop, model, score_executable)
+    with patch.object(desktop, "run", side_effect=RuntimeError("private failure canary")):
+        with pytest.raises(APIError) as error:
+            desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "fixture"}]})
+    assert error.value.code == "runtime_load_failed"
+    assert "canary" not in error.value.message
+    assert desktop.job is None and desktop.worker is None
+    assert "canary" not in desktop.output.getvalue()
+
+
+def test_stop_during_automatic_preparation_fences_worker_and_readiness(desktop, model, score_executable):
+    import threading
+
+    from stark_convert.local_api import APIError
+
+    identifier = running_decision(desktop, model, score_executable)
+    entered, resume = threading.Event(), threading.Event()
+    original = desktop.run
+    errors = []
+
+    def blocked(*args, **kwargs):
+        entered.set()
+        assert resume.wait(3)
+        return original(*args, **kwargs)
+
+    def request():
+        try:
+            desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "fixture"}]})
+        except APIError as error:
+            errors.append(error.code)
+
+    with patch.object(desktop, "run", side_effect=blocked):
+        thread = threading.Thread(target=request)
+        thread.start()
+        assert entered.wait(3)
+        # Stop's join is bounded; unblock preparation once its epoch is fenced.
+        with desktop.lock:
+            desktop.epoch += 1
+            desktop.api_condition.notify_all()
+        resume.set()
+        thread.join(3)
+    assert not thread.is_alive()
+    assert errors == ["model_changed"]
+    assert desktop.worker is None and desktop.job is None
+    assert not any(e["event"] == "runtime_ready" for e in events(desktop))
+
+
+def test_cancelled_or_wrong_model_request_keeps_decision_worker(desktop, model, score_executable):
+    import threading
+
+    from stark_convert.local_api import APIError
+
+    identifier = running_decision(desktop, model, score_executable)
+    worker = desktop.worker
+    cancelled = threading.Event()
+    cancelled.set()
+    for selected, control, code in [
+        ("missing", None, "model_not_found"),
+        (identifier, cancelled, "request_cancelled"),
+    ]:
+        with pytest.raises(APIError) as error:
+            desktop.api_complete(
+                {"model": selected, "messages": [{"role": "user", "content": "fixture"}]}, cancelled=control
+            )
+        assert error.value.code == code
+        assert desktop.worker is worker and worker.process.poll() is None
 
 
 def decision_command(**overrides):

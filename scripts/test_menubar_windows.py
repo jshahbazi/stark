@@ -323,7 +323,7 @@ extension EngineController {
         apiKey = apiAvailable ? String(repeating: "a", count: 64) : ""
         apiMessage = apiAvailable ? "Local API is available on this Mac."
             : "The saved API port is occupied. Close the conflicting app or choose another port."
-        supportsTools = nextMode == .chat && !["idle", "error", "loading", "stopping"].contains(nextState)
+        supportsTools = nextMode != nil && !["idle", "error", "loading", "stopping"].contains(nextState)
         apiContextTokens = 32_768
         apiMaxNewTokens = 512
     }
@@ -463,7 +463,7 @@ extension AppDelegate {
             ("removing", .chat, true, true, true),
             ("stopping", .chat, true, true, false),
             ("error", .chat, false, true, false),
-            ("ready", .decision, true, true, false)
+            ("ready", .decision, true, true, true)
         ]
         for (state, mode, apiAvailable, hasModels, servesChat) in scenarios {
             engine.configureConnectionFixture(state: state, loadedMode: mode,
