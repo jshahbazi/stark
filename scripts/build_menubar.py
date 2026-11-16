@@ -1038,7 +1038,11 @@ def build(options: argparse.Namespace) -> Path:
     runtime = options.runtime.expanduser().resolve()
     worker = options.worker.expanduser().resolve()
     score_worker = options.score_worker.expanduser().resolve()
-    decide_worker = getattr(options, "decide_worker", ROOT / "target/release/stark-decide").expanduser().resolve()
+    decide_worker = (
+        getattr(options, "decide_worker", ROOT / "target/release/stark-decide")
+        .expanduser()
+        .resolve()
+    )
     template_worker = options.template_worker.expanduser().resolve()
     worker_record_path = getattr(options, "worker_build_record", None)
     if worker_record_path is not None:
@@ -1077,7 +1081,8 @@ def build(options: argparse.Namespace) -> Path:
         not decide_worker.is_file()
         or "arm64"
         not in run(
-            ["/usr/bin/lipo", "-archs", str(decide_worker)], "decide_worker_architecture"
+            ["/usr/bin/lipo", "-archs", str(decide_worker)],
+            "decide_worker_architecture",
         ).split()
     ):
         raise BuildError("arm64_decide_worker_missing")

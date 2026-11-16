@@ -1005,9 +1005,10 @@ def family_catalog(
     native_family = family_id in {NATIVE_FAMILY_ID, FLINT_FAMILY_ID, RIPPLE_FAMILY_ID}
     family = family_id if native_family or family_id == _DECIDER_FAMILY_ID else normalize_architecture(family_id)
     definition = next((item for item in support_matrix()["families"] if item["family_id"] == family), None)
-    if family != _DECIDER_FAMILY_ID and (definition is None or not any(
-        definition["modes"][mode]["status"] == "conditional" for mode in ("text", "vision-language")
-    )):
+    if family != _DECIDER_FAMILY_ID and (
+        definition is None
+        or not any(definition["modes"][mode]["status"] == "conditional" for mode in ("text", "vision-language"))
+    ):
         return report(family or "", "error", "This model family is not available in Stark.")
     if type(limit) is not int or not 1 <= limit <= MAX_ITEMS:
         return report(family, "error", "The model catalogue request is invalid.")
