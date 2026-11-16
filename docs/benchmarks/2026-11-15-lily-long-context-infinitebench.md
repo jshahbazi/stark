@@ -3,6 +3,13 @@
 Date: 2026-11-15, local time; execution receipts use UTC.
 Attempt: `20261115-LILY-LONGCTX-01`.
 
+Follow-up, 2026-11-16: the user accepted this modest benefit. The
+[adoption attempt](../model-experiments/2026-11-16-lily-projection-reuse.md)
+makes group-64 projection reuse the normal branch path after final-build
+component and native lifecycle/replay controls pass. This report retains the
+original experiment's source, measurements and state at execution; no new
+paired performance result is substituted. Two drafts remain recommended.
+
 ## Question and state
 
 Run an additional matched baseline/projection-reuse comparison with a genuinely

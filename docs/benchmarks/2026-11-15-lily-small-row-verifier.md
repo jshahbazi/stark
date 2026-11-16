@@ -3,6 +3,13 @@
 Date: 2026-11-15, local time; execution receipts use UTC on 2026-11-16.
 Attempts: `20261115-LILY-VERIFY-01` through `-04`.
 
+Follow-up, 2026-11-16: after the separate
+[whole-book comparison](2026-11-15-lily-long-context-infinitebench.md), the user
+accepted the modest gain and authorized
+[default-dispatch adoption](../model-experiments/2026-11-16-lily-projection-reuse.md).
+Final-build checks are separate evidence. The original study and failed 10%
+performance gate below remain unchanged.
+
 ## Decision
 
 **The projection-reuse prototype does not meet the practical performance

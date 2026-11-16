@@ -28,6 +28,13 @@ retains the same candidate and two drafts on 88,398 input tokens. It observes
 identical outputs/work. This is additional evidence for a modest decode gain
 under accepted host load, separately recorded without a production promotion.
 
+On 2026-11-16 the user accepted that modest benefit and authorized
+[adoption](../model-experiments/2026-11-16-lily-projection-reuse.md).
+Group-64 verifier projection reuse is now the normal branch path after final
+exactness and lifecycle controls, including the full original-prompt/book
+replays. The earlier study decisions and source-bound data remain intact.
+Two drafts remain recommended; the installed app is unchanged.
+
 ## Engineering judgment
 
 The release is worth using as a source of narrowly scoped experiments. The
