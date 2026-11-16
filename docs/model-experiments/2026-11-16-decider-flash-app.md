@@ -64,6 +64,40 @@ stay in memory/private pipes. Never log exceptions or request/response content.
 
 ## Attempt history, results and disposition
 
-Implementation, checks, artifact/bundle identities, actual app execution,
-failures and delivery status will be appended. Current state: implementation in
-progress; no app-bound model run or app installation for this attempt yet.
+Implementation and bounded packaged-backend qualification passed. Canonical
+results and build identities are in the
+[app run record](../archive/runs/2026-11-16-decider-flash-app.md).
+
+- Added the dedicated app adapter, Decision-only registry/catalog/source setup,
+  checkpoint-temperature readout, private one-image attachments, native GPU
+  telemetry and separate default-feature worker packaging. The Swift controls
+  preserve answer order and reject stale replies; generic scoring stays separate.
+- Review caught and fixed the desktop catalogue's language-only filter, which
+  would have hidden the new Decision family. Fixed its image-progress phase to
+  match the Swift controller. Source preparation now safely reads metadata from
+  standard Hugging Face snapshot/blob links without another weight copy.
+- Local raw-source preflight was resource-deferred by the 15 GiB free-space
+  margin plus planned output. No duplicate weights were downloaded/converted.
+  Prepared-artifact import was exercised through the actual packaged backend.
+- App control run 01 was invalid: a relative model path was resolved from the
+  relocated backend's private directory, so import failed. Run 02 imported the
+  model but was invalid because the harness used `id` instead of the existing
+  `model_id` Run field. Both stopped before native model inference. The harness
+  fixes are separate from the unchanged packaged app implementation.
+- App control run 03 passed all five reference choices (two text, three image,
+  including an image-only state), maximum probability error 0.000790242319442.
+  Repetition after images and reset was exact. Attachment consumption,
+  reset/stop/shutdown cleanup, Chat refusal and 13 GPU memory events passed.
+- Initial complete converter check: 7,875 passed, 95 skipped, one failure in an
+  input-budget test double missing the new shared request-ID validator. Updated
+  the test double; no production fix was needed. Focused recovery/Decider tests:
+  23 passed. Final complete rerun: 7,878 passed, 95 skipped in 338.26 seconds.
+- Separate packaging/signing checks: 99 passed. Swift Decider controller checks:
+  10 passed; existing controller regressions and full Swift typecheck also passed.
+  Repository policy, Rust formatting and Python lint checks passed.
+
+Disposition: adopt on this development branch with the image tower retained.
+The signed bundle was tested after relocation with an isolated model library;
+the user's installed app and library were not replaced. Full manual GUI use,
+fresh multi-gigabyte download/conversion, release/notarization and performance
+promotion are not claimed. Native `DF13-03` evidence remains unchanged.

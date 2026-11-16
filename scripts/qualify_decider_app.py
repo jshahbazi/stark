@@ -177,12 +177,12 @@ def qualify(args):
             model = library["models"][0]
             identifier = model["id"]
             require(model.get("artifact_mode") == "decision", "import_not_decision")
-            backend.send({"command": "run", "id": identifier, "mode": "chat"})
+            backend.send({"command": "run", "model_id": identifier, "mode": "chat"})
             rejected = until(
                 lambda event: event.get("event") == "error", allow_error=True
             )
             require("Decision" in rejected.get("message", ""), "chat_not_rejected")
-            backend.send({"command": "run", "id": identifier, "mode": "decision"})
+            backend.send({"command": "run", "model_id": identifier, "mode": "decision"})
             ready = until(lambda event: event.get("event") == "ready")
             require(
                 ready.get("mode") == "decision"

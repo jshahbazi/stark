@@ -15,8 +15,10 @@ exceeded its fixed limit. Long requests remain slow on this initial path.
 
 The app exposes the dedicated worker through its Decision workflow. Its
 `DeciderModelConfig` artifact is registered as Decision-only and retains the
-image tower. Packaged-app qualification is pending; the native results above
-keep their original artifact and execution scope.
+image tower. A [separate packaged-app run](archive/runs/2026-11-16-decider-flash-app.md)
+matched 5/5 reference choices, including three image cases, and passed
+repeat/reset, attachment cleanup and GPU telemetry checks. The native results
+above keep their original artifact and execution scope.
 
 ## Use in the app
 
