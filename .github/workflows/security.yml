@@ -75,6 +75,7 @@ jobs:
             -L vendor/lily-core/Cargo.lock \
             -L tools/uv.lock \
             -L tools/converter/uv.lock \
+            -L tools/validation/decider_flash/uv.lock \
             -L tools/stock_benchmark/mlx/uv.lock \
             -L tools/stock_benchmark/mlx_current/uv.lock \
             -L tools/stock_benchmark/vllm/uv.lock \
@@ -92,6 +93,7 @@ jobs:
             --lockfile vendor/lily-core/Cargo.lock \
             --lockfile tools/uv.lock \
             --lockfile tools/converter/uv.lock \
+            --lockfile tools/validation/decider_flash/uv.lock \
             --lockfile tools/stock_benchmark/mlx/uv.lock \
             --lockfile tools/stock_benchmark/mlx_current/uv.lock \
             --lockfile tools/stock_benchmark/vllm/uv.lock \

@@ -2065,6 +2065,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "stark-engine-macros",
+ "stark-resource-budget",
  "stark_lily_core",
  "syn",
  "tempfile",

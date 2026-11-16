@@ -328,6 +328,14 @@ extension EngineController {
         apiMaxNewTokens = 512
     }
 
+    func configureDecisionConnectionFixture(metadata: Bool, includeChat: Bool) {
+        configureConnectionFixture(state: "ready", loadedMode: .decision, apiAvailable: true, hasModels: true)
+        models[0] = InstalledModel(id: "window-fixture", name: "Decision fixture", path: "/window-fixture",
+                                   apiID: "fixture/decision-model", artifactMode: metadata ? .decision : .text)
+        if !includeChat { models.removeLast() }
+        decisionModel = !metadata
+    }
+
     func switchConnectionFixtureToOtherModel() {
         selectedID = "window-fixture-other"
         loadedID = selectedID
@@ -501,6 +509,17 @@ extension AppDelegate {
                 guard !window.isVisible, window.contentView?.fittingSize.width == 570,
                       window.contentView?.fittingSize.height == 680 else { return false }
                 window.close()
+            }
+        }
+        for metadata in [false, true] {
+            for includeChat in [false, true] {
+                engine.configureDecisionConnectionFixture(metadata: metadata, includeChat: includeChat)
+                let view = ConnectionDetailsView.windowFixture(engine: engine, otherApps: true,
+                    advanced: false, revealKey: false, inspectedModel: "window-fixture")
+                guard !view.windowFixtureServesChat,
+                      view.windowFixtureExportMatches(servesChat: false, selectedMatches: false),
+                      view.windowFixtureInspectedID == (includeChat
+                          ? "fixture/a-long-saved-model-identifier-for-layout-coverage" : "") else { return false }
             }
         }
         engine.desktopConnections.shutdown()

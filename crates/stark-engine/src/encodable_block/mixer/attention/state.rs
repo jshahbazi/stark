@@ -31,12 +31,29 @@ fn checked_preparation_rows(
     prefix: u32,
     suffix: u32,
     capacity: u32,
+    suffix_capacity: u32,
 ) -> Result<u32, InvalidInput> {
     let rows = prefix.checked_add(suffix).ok_or(InvalidInput("attention preparation overflow"))?;
-    if suffix > ATTENTION_SUFFIX_CAPACITY || rows > capacity {
+    if suffix > suffix_capacity || rows > capacity {
         return Err(InvalidInput("attention preparation exceeds cache capacity"));
     }
     Ok(rows)
+}
+
+#[cfg(test)]
+mod decider_admission_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::*;
+
+    #[stark_test]
+    fn full_noncausal_sequence_uses_its_own_suffix_bound() {
+        assert_eq!(checked_preparation_rows(0, 1600, 5120, 4096).unwrap(), 1600);
+        assert!(checked_preparation_rows(0, 1600, 5120, ATTENTION_SUFFIX_CAPACITY).is_err());
+        assert!(checked_preparation_rows(0, 4097, 5120, 4096).is_err());
+        assert!(checked_preparation_rows(4096, 1600, 5120, 4096).is_err());
+        assert!(checked_preparation_rows(u32::MAX, 1, u32::MAX, 4096).is_err());
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -245,6 +262,7 @@ pub struct AttentionState<B: Backend> {
     pub data_type: DataType,
     cache: KVCacheState,
     capacity_elements: u32,
+    suffix_capacity: u32,
     pub is_sparse: bool,
     pub keys: Box<dyn Buffer<Backend = B>>,
     pub values: Box<dyn Buffer<Backend = B>>,
@@ -360,6 +378,13 @@ impl<B: Backend> AttentionState<B> {
             data_type,
             cache,
             capacity_elements: max_elements,
+            // A noncausal request must present its complete sequence at once.
+            // Causal generation retains its established chunk admission.
+            suffix_capacity: if attention.is_causal {
+                ATTENTION_SUFFIX_CAPACITY
+            } else {
+                max_prefix_elements
+            },
             is_sparse,
             keys,
             values,
@@ -425,6 +450,7 @@ impl<B: Backend> MixerState<B> for AttentionState<B> {
             self.cache.required_prefix_len(context_length),
             suffix_length,
             self.capacity_elements,
+            self.suffix_capacity,
         )?;
 
         if self.is_sparse {

@@ -197,6 +197,8 @@ class BundleConstructionTests(unittest.TestCase):
             score_worker.write_bytes(b"fresh release score worker")
             template_worker = bundle / "libexec/stark-template"
             template_worker.write_bytes(b"fresh release template worker")
+            decide_worker = bundle / "libexec/stark-decide"
+            decide_worker.write_bytes(b"fresh release decide worker")
             calls = []
 
             def command_result(command, stage, *_args, **_kwargs):
@@ -211,6 +213,13 @@ class BundleConstructionTests(unittest.TestCase):
                 self.assertEqual(
                     command[command.index("--template-worker") + 1],
                     str(template_worker),
+                )
+                self.assertEqual(
+                    command[command.index("--decide-worker") + 1], str(decide_worker)
+                )
+                self.assertNotEqual(
+                    command[command.index("--decide-worker") + 1],
+                    str(distribution.ROOT / "target/release/stark-decide"),
                 )
                 self.assertNotEqual(
                     command[command.index("--score-worker") + 1],
@@ -952,7 +961,13 @@ class BundleConstructionTests(unittest.TestCase):
             root = Path(temporary)
             release = root / "target" / "release"
             release.mkdir(parents=True)
-            for name in ("stark-score", "stark-generate", "stark-template"):
+            workers = (
+                "stark-score",
+                "stark-generate",
+                "stark-template",
+                "stark-decide",
+            )
+            for name in workers:
                 (release / name).write_bytes(name.encode())
             bundle = root / "bundle"
             with (
@@ -963,22 +978,29 @@ class BundleConstructionTests(unittest.TestCase):
             ):
                 distribution.build_native(bundle, "cargo", {})
             calls = [call.args[0] for call in command.call_args_list]
-            self.assertEqual(len(calls), 3)
-            self.assertEqual(calls[0][-2:], ["--features", "optimized"])
-            self.assertNotIn("--features", calls[1])
-            self.assertNotIn("--features", calls[2])
-            self.assertTrue(
-                all("--locked" in call and "+1.98.1" in call for call in calls)
-            )
-            self.assertEqual(verify.call_count, 3)
+            self.assertEqual(len(calls), 4)
+            for name, invocation in zip(workers, calls, strict=True):
+                with self.subTest(worker=name):
+                    expected = [
+                        "cargo",
+                        "+1.98.1",
+                        "build",
+                        "--release",
+                        "--locked",
+                        "-p",
+                        "stark-score" if name == "stark-decide" else name,
+                        "--bin",
+                        name,
+                    ]
+                    if name == "stark-score":
+                        expected.extend(["--features", "optimized"])
+                    self.assertEqual(invocation, expected)
+                    self.assertEqual(
+                        (bundle / "libexec" / name).read_bytes(), name.encode()
+                    )
             self.assertEqual(
-                (bundle / "libexec" / "stark-score").read_bytes(), b"stark-score"
-            )
-            self.assertEqual(
-                (bundle / "libexec" / "stark-generate").read_bytes(), b"stark-generate"
-            )
-            self.assertEqual(
-                (bundle / "libexec" / "stark-template").read_bytes(), b"stark-template"
+                [call.args[0] for call in verify.call_args_list],
+                [release / name for name in workers],
             )
 
     def test_version_cannot_escape_archive_or_install_directory(self):

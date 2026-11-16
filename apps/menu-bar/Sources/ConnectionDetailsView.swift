@@ -20,23 +20,27 @@ struct ConnectionDetailsView: View {
 
     private var canConnect: Bool { !engine.apiBaseURL.isEmpty && !engine.apiKey.isEmpty }
     private var hasKey: Bool { !engine.apiKey.isEmpty }
+    private var apiModels: [InstalledModel] {
+        engine.models.filter { !$0.decisionOnly && !(engine.decisionModel && $0.id == engine.loadedID) }
+    }
     private var modelID: String {
-        // The running model serves apps independently of the Playground mode.
-        !engine.loadedID.isEmpty && !["idle", "error", "loading", "stopping"].contains(engine.state) ? engine.loadedID : ""
+        // Chat-capable models serve apps independently of the Playground mode.
+        !engine.decisionModel && apiModels.contains(where: { $0.id == engine.loadedID }) &&
+            !["idle", "error", "loading", "stopping"].contains(engine.state) ? engine.loadedID : ""
     }
     private var inspectedLibraryID: String {
-        if engine.models.contains(where: { $0.id == inspectedModelID }) { return inspectedModelID }
-        if engine.models.contains(where: { $0.id == engine.loadedID }) { return engine.loadedID }
-        if engine.models.contains(where: { $0.id == engine.selectedID }) { return engine.selectedID }
-        return engine.models.first?.id ?? ""
+        if apiModels.contains(where: { $0.id == inspectedModelID }) { return inspectedModelID }
+        if apiModels.contains(where: { $0.id == engine.loadedID }) { return engine.loadedID }
+        if apiModels.contains(where: { $0.id == engine.selectedID }) { return engine.selectedID }
+        return apiModels.first?.id ?? ""
     }
     private var displayedModelID: String {
-        engine.models.first { $0.id == inspectedLibraryID }?.apiID ?? ""
+        apiModels.first { $0.id == inspectedLibraryID }?.apiID ?? ""
     }
     private var connectionInfo: ConnectionInfo {
         ConnectionInfo(
             baseURL: engine.apiBaseURL, apiKey: engine.apiKey, modelID: displayedModelID,
-            runningModelID: engine.models.first { $0.id == modelID }?.apiID ?? "",
+            runningModelID: apiModels.first { $0.id == modelID }?.apiID ?? "",
             selectedModelIsRunning: !modelID.isEmpty && inspectedLibraryID == modelID,
             status: engine.state, contextTokens: engine.apiContextTokens, maxNewTokens: engine.apiMaxNewTokens,
             contextCapacityKnown: engine.contextCapacityKnown,
@@ -200,9 +204,9 @@ struct ConnectionDetailsView: View {
             HStack {
                 Text("Model ID").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                if engine.models.count > 1 {
+                if apiModels.count > 1 {
                     Picker("Model", selection: Binding(get: { inspectedLibraryID }, set: { inspectedModelID = $0 })) {
-                        ForEach(engine.models) { Text($0.apiID).tag($0.id) }
+                        ForEach(apiModels) { Text($0.apiID).tag($0.id) }
                     }
                     .pickerStyle(.menu).labelsHidden().frame(maxWidth: 200).accessibilityLabel("Model to view ID")
                 }

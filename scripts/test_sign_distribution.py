@@ -34,6 +34,7 @@ NATIVE_NAMES = (
     "libexec/stark-score",
     "libexec/stark-generate",
     "libexec/stark-template",
+    "libexec/stark-decide",
     "libexec/python/bin/python3.13",
     "libexec/python/lib/libpython3.13.dylib",
     "libexec/python/lib/python3.13/site-packages/example/native.so",
@@ -883,7 +884,7 @@ class SigningTests(unittest.TestCase):
                     for call in verify.call_args_list
                     if call.kwargs.get("notarized")
                 ]
-                self.assertEqual(len(online), 4)
+                self.assertEqual(len(online), 5)
 
 
 if __name__ == "__main__":

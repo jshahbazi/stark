@@ -1,5 +1,9 @@
 # Model change and experiment ledger
 
+- [20261116-DF13APP-01–02: Decider Flash app integration](2026-11-16-decider-flash-app.md): Decision-only setup and one-image workflow; signed relocated bundles match 5/5 reference choices, including three image cases. Installed GUI image decision/removal/Stop passed after fixing Add from Source defaults; performance remains separate.
+
+- [20261116-DF13-01–03: Decider Flash v1.3](2026-11-16-decider-flash-v13.md): dedicated native BF16 text/image scoring; final artifact matches 15/15 reference decisions and passes lifecycle checks. Tower-residency timing is inconclusive; desktop integration remains separate.
+
 - [20261116-PIAUTO-01: automatic API worker selection](../archive/runs/2026-11-16-automatic-api-worker.md): Decision Playground to Pi generation and back, typed preparation errors, one-worker ownership, signed local installation and bounded Qwen3-4B checks; no timing or broader artifact qualification.
 
 - [20261116-LILY-REUSE-02: independent review and clean PR preparation](../archive/runs/2026-11-16-lily-projection-pr-review.md): no kernel blocker; a corpus-copy privacy issue in the bundled benchmark CLI is fixed with one RAM snapshot and 27 passing model-free tests. A main-based branch excludes inherited app/catalog and retired MTP-policy edits, preserves all benchmark data, and matches all 1,213 validated Rust/Metal/build-input files. Fresh isolated release build and 240-case physical component replay pass; original model results keep their build identities and the old corpus-copy behavior receives a dated correction.
