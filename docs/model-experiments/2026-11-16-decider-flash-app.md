@@ -183,4 +183,20 @@ qualification unchanged. Do not modify the model or its historical receipt.
 Acceptance: the installed row visibly links to the official Hugging Face repo,
 Model Catalog visibly includes the separate Decider family and its pinned BF16
 entry, and the installed bundle matches the newly signed build. This is a
-display/installation check; no numerical or performance promotion. Pending.
+display/installation check; no numerical or performance promotion.
+
+Passed with implementation `8d1c8658c2b1de7ced7453a6f113c7e45e1e4d3b`, clean
+at signed build `20261116213746314865`. The installed 4,097-file inventory matched
+the staged bundle and deep/strict signature verification passed. In the actual
+GUI, the saved Decider row showed its official Hugging Face link; Model Catalog
+showed the separate Decider family and opened its pinned BF16 4B Decision and
+images entry with a Hugging Face link and Download control. No download or
+inference was requested in this display check. The previous installed build was
+preserved in ignored local app backups.
+
+Validation: 70 inventory/Decider desktop tests passed; the final inventory-only
+rerun passed 46 tests. Eleven Swift controller checks passed, including upstream
+link fallback, rejected malformed repository strings and unchanged unbound
+revision/group identity. Repository policy, lint, diff and the signed app build
+passed. Exact delivery hashes are in the
+[catalogue/link run record](../archive/runs/2026-11-16-decider-flash-app.md#installed-catalogue-and-link-check-20261116-df13app-03).

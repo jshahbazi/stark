@@ -171,3 +171,41 @@ tests passed, with one common test skipped. Repository policy, lint and diff
 checks passed. The earlier complete 7,878-test run retains its earlier source
 binding. No performance or broad vision-quality promotion, PR, notarization or
 release publication was performed.
+
+## Installed catalogue and link check: 20261116-DF13APP-03
+
+The user's newer installed app came from another branch and lacked Decider
+catalogue support. Its local model row also lacked a source link: the historical
+prepared artifact's receipt does not satisfy the newer display-provenance
+binding. A separate optional, validated `upstream_repo` display field now links
+the typed model family to Hugging Face. It does not change artifact grouping,
+the unbound source revision, numerical qualification or the historical receipt.
+
+| Binding | Identity |
+| --- | --- |
+| Implementation | `8d1c8658c2b1de7ced7453a6f113c7e45e1e4d3b`, clean at build |
+| Signed development build | `20261116213746314865` |
+| Manifest SHA-256 | `7d16456d0fcb6d27b5963547237bc92d6a0a0efdff8ad1374bba35c0db6a0578` |
+| Installed/staged inventory SHA-256 | `51ebbb37a7b60c726137624b8e471b7253e125c6adb2c788535b250ffea7f2b8` |
+| Signed app executable SHA-256 | `c2ced8a9f1ce9c6a2a8136a80e941d58f6d08a5fce63074f97ad0a0c9692e6a3` |
+| Signed Decider worker SHA-256 | `9b9187021ff5dde3350c9fd469cf76ee483f1f8f44f85e9def8354c6a274b767` |
+| Private aggregate GUI receipt SHA-256 | `e44af292863c1cdf0627e4c8680c17e17d520e01baf1a56cc686a575f19c709a` |
+
+The prior installed app was preserved in ignored local backups. The new signed
+Decider branch build was installed at `~/Applications/Stark.app`; all 4,097
+delivered files matched staging, and deep/strict signature verification passed.
+Actual visible controls confirmed:
+
+- Installed row: `Decider Flash v1.3`, Decision and images, with a link to
+  `huggingface.co/perplexity-ai/pplx-decider-flash-v1.3`.
+- Model Catalog: a separate **Decider Flash v1.3** family, alongside Qwen3.5.
+- Opening that family: pinned revision `d06fb3f2d97e0a52325a0d463c450cf0338f44fe`,
+  BF16, 4B, 9.08 GB, Decision and images, official Hugging Face link and Download
+  control. No download was started.
+
+Seventy focused Python inventory/Decider desktop checks passed, followed by a
+46-test inventory rerun. Eleven Swift checks passed, including the upstream-link
+fallback without changing qualification/grouping, malformed repository-string
+rejection and bound-group precedence. Policy, lint, diff and signed build checks
+passed. No inference, new numerical comparison or performance test was run for
+this display-only change; earlier source-bound model results remain separate.
