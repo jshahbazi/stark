@@ -146,8 +146,10 @@ not full-model distribution or lifecycle qualification.
   no added stop strings. Temperature 1, top-k 20, top-p 0.95, no min-p,
   seed 42; explicit `mtp_drafts: 2` in both arms.
 - Image-loaded workers, fresh logical requests, prefix cache disabled and
-  zero reported reused tokens. Tokenization, model loading and fixed
-  64-token warmups are outside measured request timings.
+  zero reported reused tokens. Preparation/tokenization probes, model loading
+  and fixed 64-token warmups are outside measured requests. Complete request
+  wall time includes repeated native tokenization of each rendered prompt;
+  backend-native prefill/decode excludes that tokenization.
 - Coarse profile: four sessions off/stage/stage/off, one measured response
   and one warmup per prompt per session: eight measured and eight warmups.
 - Detailed profile: two stage sessions with reversed prompt order, one
@@ -288,3 +290,15 @@ native profiles stay under ignored `runtime/lily-verifier-study/`.
 No prompt, response, token vector, probability or exception dump is saved.
 No installation, release or PR is part of this study. The original benchmark
 JSON and archived experiment sources remain byte-for-byte unchanged.
+
+## Follow-up
+
+At the user's request, a separate
+[very-long-context InfiniteBench case](2026-11-15-lily-long-context-infinitebench.md)
+tests the same sealed candidate on 88,398 input tokens. It observes +5.40%
+median paired useful decode (8/8 wins) and −2.39% request time (7/8), retaining
+identical answers and MTP work. It uses streaming and a different public task,
+so its timing observations are separate from this study. The follow-up adds
+evidence for a modest benefit; this record's original gate result, native
+receipts, source hashes and promotion decision remain unchanged. No production
+default or installed build is changed.

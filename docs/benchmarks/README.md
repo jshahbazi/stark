@@ -12,6 +12,17 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Lily very-long-context public benchmark case (2026-11-15).** The
+[InfiniteBench whole-book case](2026-11-15-lily-long-context-infinitebench.md)
+uses 88,398 unmodified native input tokens with two drafts fixed. Sixteen
+measured responses and four warmups retain identical output hashes and MTP
+work. The projection candidate improves median paired useful decode 5.40%
+(8/8 wins; both run orders improve) and complete request time 2.39% (7/8).
+Prefill dominates the request; all busy-host observations, including paging,
+are retained. This is additional evidence for a modest decode gain, not an
+official benchmark score or production promotion. The candidate stays
+experimental; two drafts remain recommended and the installed app is unchanged.
+
 **Lily small-row verifier follow-up (2026-11-15).** The
 [two-draft natural-response study](2026-11-15-lily-small-row-verifier.md)
 profiles both existing requests and tests packed-weight reuse across remaining

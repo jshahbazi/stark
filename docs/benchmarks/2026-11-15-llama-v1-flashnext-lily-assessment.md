@@ -22,6 +22,12 @@ planning, below the 10% practical minimum. The candidate is archived and
 rejected for promotion. Production code and the installed app are unchanged;
 no llama.cpp optimization is represented as adopted.
 
+A later [very-long-context public benchmark case](2026-11-15-lily-long-context-infinitebench.md)
+retains the same candidate and two drafts on 88,398 input tokens. It observes
++5.40% paired useful decode (8/8 wins) and −2.39% request time (7/8), with
+identical outputs/work. This is additional evidence for a modest decode gain
+under accepted host load, separately recorded without a production promotion.
+
 ## Engineering judgment
 
 The release is worth using as a source of narrowly scoped experiments. The
