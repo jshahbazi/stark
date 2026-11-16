@@ -17,7 +17,10 @@ use crate::{
         Backend, BufferCpuAccessible, BufferRef, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending,
         Context, gpu_types::trie::TrieNode,
     },
-    config::{decoder::DecoderConfig, token_mixer::AnyTokenMixerConfig, weight_matrix::AnyWeightMatrixSpec},
+    config::{
+        decoder::DecoderConfig, rope::AnyRoPEConfig, token_mixer::AnyTokenMixerConfig,
+        weight_matrix::AnyWeightMatrixSpec,
+    },
     data_type::DataType,
     encodable_block::{
         batch_topology::BatchTopology,
@@ -50,6 +53,41 @@ impl std::fmt::Display for DeciderError {
     }
 }
 impl std::error::Error for DeciderError {}
+
+#[cfg(test)]
+mod image_admission_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::*;
+
+    #[stark_test]
+    fn decider_image_admission_rejects_text_rotary_and_incorrect_spatial_sections() {
+        let valid = serde_json::json!({
+            "type":"Qwen35MRoPEConfig", "base":10000000.0, "head_dim":64,
+            "max_sequence_length":262144, "mrope_section":[11,11,10], "interleaved":true,
+        });
+        let rope: AnyRoPEConfig = serde_json::from_value(valid.clone()).unwrap();
+        assert!(admits_decider_image_positions(Some(&rope)));
+        assert!(!admits_decider_image_positions(None));
+        let text: AnyRoPEConfig = serde_json::from_value(serde_json::json!({
+            "type":"UnscaledRoPEConfig", "base":10000000.0, "head_dim":64,
+            "max_sequence_length":262144,
+        }))
+        .unwrap();
+        assert!(!admits_decider_image_positions(Some(&text)));
+        for (name, value) in [
+            ("mrope_section", serde_json::json!([32, 0, 0])),
+            ("interleaved", serde_json::json!(false)),
+            ("base", serde_json::json!(10000.0)),
+            ("max_sequence_length", serde_json::json!(2048)),
+        ] {
+            let mut candidate = valid.clone();
+            candidate[name] = value;
+            let rope: AnyRoPEConfig = serde_json::from_value(candidate).unwrap();
+            assert!(!admits_decider_image_positions(Some(&rope)));
+        }
+    }
+}
 
 #[derive(Deserialize)]
 struct Config {
@@ -91,6 +129,16 @@ fn integer(
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| *value > 0)
         .ok_or(DeciderError("invalid_decider_config"))
+}
+
+fn admits_decider_image_positions(rope: Option<&AnyRoPEConfig>) -> bool {
+    matches!(rope, Some(AnyRoPEConfig::Qwen35MRoPEConfig(config))
+        if config.validate().is_ok()
+            && config.base == 10_000_000.0
+            && config.head_dim == 64
+            && config.mrope_section == [11, 11, 10]
+            && config.interleaved
+            && config.max_sequence_length >= MAX_DECIDER_INPUT_TOKENS)
 }
 
 fn tower_config(value: &serde_json::Value) -> Result<VisionTowerConfig, DeciderError> {
@@ -145,6 +193,11 @@ impl<B: Backend> Engine<B> {
                         && !attention.is_kv_sharing
                         && attention.sliding_window_size.is_none() =>
                 {
+                    // Text-only RoPE can pass text parity while failing image
+                    // requests. Check spatial geometry before loading weights.
+                    if !admits_decider_image_positions(layer.rope_config.as_ref()) {
+                        return Err(DeciderError("unsupported_decider_image_positions"));
+                    }
                     full += 1
                 },
                 AnyTokenMixerConfig::DeltaNetConfig(_) => recurrent += 1,

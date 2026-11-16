@@ -129,9 +129,33 @@ def build_decider_plan(source):
     if set(readout_tensors) != {"weight"} or readout.dtype != "BF16" or readout.shape != (255, dim):
         raise ConversionError("Decider requires its complete BF16 255-option readout")
     decoder = plan.decoder_config
+    position = config["text_config"].get("rope_parameters", {})
+    sections = position.get("mrope_section")
+    if (
+        position.get("mrope_interleaved") is not True
+        or not isinstance(sections, list)
+        or len(sections) != 3
+        or any(type(section) is not int or section < 0 for section in sections)
+    ):
+        raise UnsupportedConversion("Decider images require explicit interleaved M-RoPE sections")
     for layer in decoder["transformer_config"]["layer_configs"]:
         if layer["mixer_config"]["type"] == "AttentionConfig":
             layer["mixer_config"]["is_causal"] = False
+            rope = layer["rope_config"]
+            half_width = rope["head_dim"] // 2
+            if sum(sections) != half_width or any(
+                sections[axis] and (sections[axis] - 1) * 3 + axis >= half_width for axis in (1, 2)
+            ):
+                raise UnsupportedConversion("Decider M-RoPE sections disagree with the rotary width")
+            # The ordinary vision writer performs this replacement after the
+            # Qwen3.5 planner. This dedicated writer must preserve the same
+            # image-position contract instead of leaving scalar text RoPE.
+            layer["rope_config"] = {
+                **rope,
+                "type": "Qwen35MRoPEConfig",
+                "mrope_section": list(sections),
+                "interleaved": True,
+            }
     plan = replace(
         plan,
         operations=(*plan.operations, TensorOperation("decision.readout.weights", (readout,), "BF16", (255, dim))),

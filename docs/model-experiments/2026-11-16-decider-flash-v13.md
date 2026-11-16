@@ -215,3 +215,32 @@ failure; the prior component tests did not exercise it.
 At pre-run screening and after the corrective probe, system pageouts remained
 146,097 and swapouts 220,868; existing swap use stayed 3,299.06 MiB. Existing
 swap is historical host state, not new paging caused by the experiment.
+
+### DF13-02 image admission failure and DF13-03 artifact
+
+`20261116-DF13-02` passed all 10 text decisions across seven requests, including
+255 options and 2,106-token input, with exact usage counts and top choices.
+Maximum absolute probability error was 0.005955703936837753 against MPS FP32.
+Its first image failed before a decision with `decider_forward_failed`.
+The dedicated artifact writer had omitted the normal vision writer's scalar
+RoPE → spatial M-RoPE replacement. Existing decoder image guards rejected that
+configuration correctly. No image numerical pass is claimed for v1.
+
+`20261116-DF13-03` preserves the source's exact spatial sections `[11,11,10]`
+and interleaving on all eight full-attention layers; DeltaNet remains unchanged.
+The loader now rejects missing/scalar/incompatible image positions before
+tokenizer/weight allocation. No generic image guard was relaxed. Converter
+regressions (170 focused tests) and lint passed. The old artifact is now an
+actual load-rejection control (`unsupported_decider_image_positions`); a real
+PNG forward on the new artifact passed with 144 expanded input tokens.
+
+| New artifact binding | SHA-256 / identity |
+| --- | --- |
+| Directory | `runtime/decider-flash-v13/native-v2` |
+| Configuration | `d859a249a3089252f164c755d2a584e41c1041ab91dc32751a742ddad29e8337` |
+| Weights | `c3ab2961a63c3342ff3390b41036c6029d62095414db4cffbd59a8944c754c97` (byte-identical to v1; configuration qualification remains separate) |
+| Conversion receipt | `bb96b0ffad3060622cb81d3f5730ab8460a2dc8008388e2d0299970493352069` |
+| Rebuilt worker | `4e23cb1cb0e611fd0d2d2ea0eaff27e6ccf0ca722de85c39e065c2b61b8f3aeb` |
+
+The original source, v1 artifact and failed-run receipts remain untouched. The
+same complete corpus and fixed criteria will be replayed for this new artifact.

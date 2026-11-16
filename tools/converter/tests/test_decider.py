@@ -42,6 +42,7 @@ def decider_fixture(path):
     config["architectures"] = ["Qwen3_5Model"]
     config["tie_word_embeddings"] = True
     config["text_config"]["tie_word_embeddings"] = True
+    config["text_config"]["rope_parameters"].update(mrope_section=[1, 0, 0], mrope_interleaved=True)
     config["vision_config"]["rope_parameters"] = {"rope_theta": 10000.0, "rope_type": "axial"}
     tensors.pop("lm_head.weight")
     tensors = {name.removeprefix("model."): value for name, value in tensors.items()}
@@ -66,6 +67,16 @@ def test_plan_preserves_backbone_vision_and_readout(tmp_path):
     assert mixers[0]["reference_bf16"] is True
     assert mixers[1]["is_causal"] is False
     assert mixers[1]["reference_bf16"] is True
+    layers = plan.decoder_config["transformer_config"]["layer_configs"]
+    assert layers[0]["rope_config"] is None
+    assert layers[1]["rope_config"] == {
+        "type": "Qwen35MRoPEConfig",
+        "base": 10000.0,
+        "max_sequence_length": 64,
+        "head_dim": 2,
+        "mrope_section": [1, 0, 0],
+        "interleaved": True,
+    }
     assert "vision.blocks.1.attn.qkv.weight" in {op.name for op in plan.operations}
     write_plan(plan, tmp_path / "output.safetensors")
     metadata, output = read_safetensors_header(tmp_path / "output.safetensors")
@@ -142,6 +153,20 @@ def test_failed_preparation_does_not_publish_output(tmp_path):
         prepare(source, tmp_path / "output")
     assert not (tmp_path / "output").exists()
     assert not list(tmp_path.glob(".decider-*"))
+
+
+@pytest.mark.parametrize(
+    "sections,interleaved", [(None, True), ([1, 0, 0], False), ([1, 1, 0], True), ([True, 0, 0], True)]
+)
+def test_image_conversion_rejects_missing_or_invalid_mrope_contract(tmp_path, sections, interleaved):
+    source = tmp_path / "source"
+    config, _, _ = decider_fixture(source)
+    position = config["text_config"]["rope_parameters"]
+    position["mrope_section"] = sections
+    position["mrope_interleaved"] = interleaved
+    (source / "config.json").write_text(json.dumps(config))
+    with pytest.raises((ConversionError, UnsupportedConversion)):
+        build_decider_plan(source)
 
 
 class CharacterTokenizer:
