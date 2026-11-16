@@ -244,3 +244,35 @@ PNG forward on the new artifact passed with 144 expanded input tokens.
 
 The original source, v1 artifact and failed-run receipts remain untouched. The
 same complete corpus and fixed criteria will be replayed for this new artifact.
+
+### DF13-03 final result
+
+The [canonical run record](../archive/runs/2026-11-16-decider-flash-v13.md)
+binds implementation `61a2a27d1cd0359b085b3e7d00b9396f870b7ae7` and the final
+artifact/worker hashes above. All 15 reference choices matched, including all
+five image cases; maximum probability error was 0.005955703936837753 against
+the fixed 0.02 gate, with exact token usage. Repeat, invalid-schema recovery,
+reset, invalid-image worker clearing, pending-request cancellation and restart
+controls passed. The new admission table test passed CPU-only in release mode.
+
+Aggregate receipt SHA-256:
+`8653ade4d7717c0acb0d77ca806c5263606b2cf0579add482048ff30146588c6`.
+Private receipt: `runtime/decider-flash-v13/qualification-03.json`.
+
+Matched tower-off/on text has identical valid-option readouts and median ratio 1.000870,
+but baseline range 15.35% exceeds the 10% variability ceiling. Timing remains
+inconclusive; no repeated search for a passing timing result was performed.
+Final paging/swapout counters match pre-run values. The current path remains
+slow for longer inputs; performance observations and untested scope are in the
+run record. Correctness, timing and shipping status are separate.
+
+Disposition: adopted on branch; bounded numerical/lifecycle qualification
+passed, performance open. No PR, release or app installation. Native CLI only;
+one image, 4,096-position admission, model-bound corpus through 2,106 positions.
+Do not transfer this result to another checkpoint, format, precision or backend.
+
+After validation, byte-identical v1/v2 weight files were deduplicated with a
+verified APFS copy-on-write clone and atomic v1 inode replacement. Distinct
+inodes and matching hashes preserve both complete artifact contents, v1/v2
+configuration/receipt hashes and source bytes. This recovered 9.09 GB; no
+artifact or failed receipt was deleted.

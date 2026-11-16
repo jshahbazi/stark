@@ -1,6 +1,6 @@
 # Model change and experiment ledger
 
-- [20261116-DF13-01: Decider Flash v1.3](2026-11-16-decider-flash-v13.md): native noncausal classification/scoring with images; implementation and reference qualification in progress.
+- [20261116-DF13-01–03: Decider Flash v1.3](2026-11-16-decider-flash-v13.md): dedicated native BF16 text/image scoring; final artifact matches 15/15 reference decisions and passes lifecycle checks. Tower-residency timing is inconclusive; desktop integration remains separate.
 
 - [20261113-PIGUI-05: persistent Pi restart](../archive/runs/2026-11-13-pi-persistent-default.md): installed signed build, preserved normal Pi configuration, actual Keychain-backed authentication and native Qwen3-4B generation across two fresh default-profile client processes.
 - [20261113-PIGUI-01–04: Pi Connections delivery](2026-11-13-pi-connections.md): signed app/candidate, retained nvm/fd and pre-PR recovery/build findings, manual GUI setup and fresh bundled-profile Qwen3-4B checks.

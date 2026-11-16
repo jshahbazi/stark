@@ -7,6 +7,12 @@ custom answer choices, ordinal scores and one PNG/JPEG image per request.
 The vision tower is loaded by default. Qualification results and their exact
 scope are recorded in [20261116-DF13-01](model-experiments/2026-11-16-decider-flash-v13.md).
 
+The [DF13-03 run](archive/runs/2026-11-16-decider-flash-v13.md) passed all 15
+reference decisions, including five image cases, with maximum probability
+error 0.00596. Repeat/error/reset/cancellation/restart controls passed. The
+matched text residency timing was inconclusive because baseline variability
+exceeded its fixed limit. Long requests remain slow on this initial path.
+
 This is a standalone engine/CLI integration. The desktop catalogue, existing
 generic Decision workflow and HTTP chat endpoint do not dispatch this model.
 Its `DeciderModelConfig` artifact cannot be loaded as a causal language model.
