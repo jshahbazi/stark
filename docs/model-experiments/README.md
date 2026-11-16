@@ -4,6 +4,7 @@
 
 - [20261116-DF13-01–03: Decider Flash v1.3](2026-11-16-decider-flash-v13.md): dedicated native BF16 text/image scoring; final artifact matches 15/15 reference decisions and passes lifecycle checks. Tower-residency timing is inconclusive; desktop integration remains separate.
 
+- [20261116-PIAUTO-01: automatic API worker selection](../archive/runs/2026-11-16-automatic-api-worker.md): Decision Playground to Pi generation and back, typed preparation errors, one-worker ownership, signed local installation and bounded Qwen3-4B checks; no timing or broader artifact qualification.
 - [20261113-PIGUI-05: persistent Pi restart](../archive/runs/2026-11-13-pi-persistent-default.md): installed signed build, preserved normal Pi configuration, actual Keychain-backed authentication and native Qwen3-4B generation across two fresh default-profile client processes.
 - [20261113-PIGUI-01–04: Pi Connections delivery](2026-11-13-pi-connections.md): signed app/candidate, retained nvm/fd and pre-PR recovery/build findings, manual GUI setup and fresh bundled-profile Qwen3-4B checks.
 - [20261113-PI-01–08: guarded Pi manual qualification](2026-11-13-pi-manual-qualification.md): missing-usage/DONE guard, retained failed/superseded harness recipes, and final 21-check installed-Pi/Qwen3-4B backend qualification; manual RPC scope only.

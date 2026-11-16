@@ -99,7 +99,7 @@ before implementing against a later revision.
 | Transport | Loopback HTTP; validates Host; rejects browser Origin requests | Run clients/adapters on the same host; do not expose a LAN listener or enable browser access |
 | Authentication | Bearer key from Connections; master key stored in macOS Keychain | Obtain credentials through the supported user flow; never embed them in examples or checked-in configuration |
 | Endpoints | `GET /health`, `/v1/health`, `/v1/capabilities`, `/v1/models`, `/v1/models/{id}`; `POST /v1/chat/completions` | Responses and Messages need external adapters |
-| Model selection | Public API model ID identifies the loaded model in Chat mode | Do not use private library IDs or silently route an unavailable ID to another model |
+| Model selection | Public API model ID identifies the running model; runtime selection is automatic | Do not use private library IDs or silently route an unavailable ID to another model |
 | Model metadata | HTTP model entry includes API context/output limits, tool support and MTP capability/default data | Use the HTTP API ceiling, not a native worker limit; reject unknown limits for a managed catalog |
 | Request validation | Unknown fields fail; `store` must be omitted, false or null; token-limit aliases cannot both be present | Normalize explicitly; report unsupported semantic fields before generation |
 | Roles and options | `developer` becomes `system`; template-specific thinking/reasoning options | Do not assume a model supports OpenAI or Claude reasoning controls |
@@ -272,7 +272,7 @@ no qualification from these checks. See the
 
 ### Manual setup
 
-1. Select Advanced in Stark, start the intended model in Chat mode, and open
+1. Select Advanced in Stark, start the intended model in either Playground mode, and open
    Connections → Connect your own app. Obtain the displayed Base URL and key
    through Stark's user flow. Pi is not part of Beginner Guided Setup.
 2. Inspect authenticated `/v1/models` and `/v1/capabilities` without writing

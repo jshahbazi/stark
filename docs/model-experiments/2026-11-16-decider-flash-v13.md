@@ -297,4 +297,31 @@ no longer finding Pillow, exact formatter comparison including images, and the
 existing 15-decision native/reference corpus with 100% top-choice agreement,
 maximum probability error <=0.02 and existing usage/lifecycle checks. No timing
 or performance claim. Run model checks sequentially and publish only aggregate
-results/hashes. Record new environment/results separately; status pending.
+results/hashes. Record new environment/results separately.
+
+The scoped uv update changed only Pillow, to 13.0.0. Locked sync/check passed;
+the OSV query returned 62 advisory records for 12.3.0 and none for 13.0.0.
+All 6,460 formatter tokens across 15 sequences (five image sequences) matched
+exactly. The full updated-reference comparison passed 15/15 choices over 12
+requests, including five image decisions; maximum probability error remained
+0.00595570393684 and mean error 0.0000553653162528. Usage and all existing
+repeat/reset/error/cancellation/restart controls passed. New aggregate receipt
+SHA-256: `1c186f3aee118463cf21a5fb35b46573778efde0ff19bfdf27d0ba9afde1f681`;
+new reference lock: `13d1743023d04ab6997161b300699d406561cec50b03759f5cb20a834019dfd5`.
+The 38 focused protocol/qualification tests passed. Source, weights, worker and
+runner were unchanged; no performance result was promoted.
+
+PR checks could not start after the dependency push because the recent PR #168
+API-worker merge into main conflicted with this branch. Updating the feature
+branch from main and preserving both generic API worker selection and Decider's
+Decision-only contract is required to rerun the unchanged security gates. This
+does not merge PR #169. The resolved integration preserves generic Decision's
+automatic Chat/API worker selection while rejecting native Decider Chat/API
+requests without unloading its Decision worker. Fifty-four focused
+native/API/input-budget tests and four automatic-worker regressions passed.
+Swift checks passed: 11 Decider, five API/controller, one connection regression
+with Decider exclusion combinations, and full typecheck. The security gates
+remain unchanged; final CI results are recorded on PR #169.
+
+The new environment's source-bound numerical results are recorded in
+[20261116-DF13SEC-01](../archive/runs/2026-11-16-decider-reference-security.md).

@@ -17,6 +17,7 @@ from stark_convert.chat import ChatCancelled
 from stark_convert.decider import SOURCE_REPO, SOURCE_REVISION
 from stark_convert.decider_install import FAMILY_ID
 from stark_convert.desktop import Desktop, DesktopError, model_valid
+from stark_convert.local_api import APIError
 from stark_convert.model_catalog import family_catalog
 
 PNG = b"\x89PNG\r\n\x1a\nsynthetic image fixture"
@@ -220,6 +221,27 @@ def test_decider_cannot_run_as_chat(desktop):
     with pytest.raises(DesktopError, match="Decision mode only"):
         instance.run(instance.epoch, instance.models[0]["id"], "chat")
     assert instance.worker is None
+
+
+def test_api_chat_rejects_native_decider_before_switching_or_closing_it(desktop):
+    instance, _ = desktop
+    identifier = run(instance)
+    worker = instance.worker
+    assert instance.api_models() == []
+    assert instance.api_status()["model_loaded"] is False
+    with pytest.raises(APIError) as rejected:
+        instance.api_complete({"model": identifier, "messages": [{"role": "user", "content": "fixture"}]})
+    assert rejected.value.status == 400 and rejected.value.code == "mode_not_supported"
+    with pytest.raises(APIError) as wrong_model:
+        instance.api_complete({"model": "not-running", "messages": [{"role": "user", "content": "fixture"}]})
+    assert wrong_model.value.status == 404 and wrong_model.value.code == "model_not_found"
+    assert instance.worker is worker and worker.process.poll() is None
+    assert instance.active_model == identifier
+    assert instance.active_mode == instance.playground_mode == "decision"
+    assert instance.job is None
+    instance.dispatch(request(request_id="after-api-rejection"))
+    finish(instance)
+    assert any(x["event"] == "decision" and x.get("request_id") == "after-api-rejection" for x in events(instance))
 
 
 def test_ordered_choices_use_checkpoint_temperature(desktop):

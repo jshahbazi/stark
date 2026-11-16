@@ -486,6 +486,7 @@ class Desktop:
         self.guided_catalog_cache = {}
         self.active_model = None
         self.active_mode = None
+        self.playground_mode = None
         self.vocab_size = None
         self.template = None
         self.codec = None
@@ -1510,8 +1511,10 @@ class Desktop:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def close_worker(self):
+    def close_worker(self, *, expected=None):
         with self.lock:
+            if expected is not None and self.worker is not expected:
+                return
             worker, self.worker = self.worker, None
             self.active_model = None
             self.active_mode = None
@@ -2478,7 +2481,7 @@ class Desktop:
             if not current and worker is not None:
                 worker.close()
 
-    def run(self, epoch, identifier, mode="chat", *, guided_context=None, guided_request_id=None):
+    def run(self, epoch, identifier, mode="chat", *, guided_context=None, guided_request_id=None, automatic=False):
         model = next((m for m in self.models if m["id"] == identifier), None)
         if model is None or not model_valid(Path(model["path"])):
             raise DesktopError("Select an installed model whose folder is still available.")
@@ -2495,9 +2498,11 @@ class Desktop:
         with self.lock:
             if epoch != self.epoch:
                 return
+            if not automatic:
+                self.playground_mode = mode
 
             def on_gpu_memory(source, amount):
-                self.report_gpu_memory(epoch, identifier, mode, source, amount)
+                self.report_gpu_memory(epoch, identifier, self.playground_mode or mode, source, amount)
 
             worker = (
                 DesktopDeciderWorker(
@@ -2545,21 +2550,28 @@ class Desktop:
                 self.active_model, self.active_mode = identifier, mode
                 self.vocab_size = ready.get("vocab_size")
                 self.messages = []
-                fields = {"resource_budget": self.resource_budget_summary()}
+                fields = {
+                    "resource_budget": self.resource_budget_summary(),
+                    "tools": bool(not native_decision and tool_parser_for(codec)),
+                    "tool_parser": tool_parser_for(codec) if not native_decision else None,
+                }
                 if native_decision:
                     self.context_limit = self.context = ready["max_input_tokens"]
                     self.context_capacity_known = True
                     self.output_limit = self.maximum = 0
                     self.api_context = self.api_maximum = self.api_vocab = 0
                     fields.update(self.settings_summary())
+                elif not automatic:
+                    fields.update(context_capacity_known=False, api_context_tokens=0, api_max_output_tokens=0)
                 self.emit(
-                    "ready",
+                    "runtime_ready" if automatic else "ready",
                     epoch,
                     model_id=identifier,
                     mode=mode,
                     **fields,
                 )
-                self.status("ready", "Ready", epoch)
+                if not automatic:
+                    self.status("ready", "Ready", epoch)
             return
         if (
             ready.get("ready") is not True
@@ -2596,14 +2608,101 @@ class Desktop:
             self.prefix_reset_pending = False
             self.reset()
             self.emit(
-                "ready",
+                "runtime_ready" if automatic else "ready",
                 epoch,
                 model_id=identifier,
                 mode=mode,
                 **self.settings_summary(),
                 **({"request_id": guided_request_id} if guided_request_id else {}),
             )
-            self.status("ready", "Ready", epoch)
+            if not automatic:
+                self.status("ready", "Ready", epoch)
+
+    def ensure_runtime(self, mode, *, cancelled=None, model_id=None):
+        """Select the protocol required by an operation, without changing the Playground.
+
+        Reserve the existing operation slot before releasing the lock to load.
+        Stop/model replacement can close a loading worker and fence its readiness.
+        Only one worker is resident; all native caches disappear on a switch.
+        """
+        current = threading.current_thread()
+        with self.lock:
+            if self.api_closing:
+                raise APIError(503, "Stark is shutting down.", "server_stopped")
+            if self.job is not None and self.job is not current and self.current_state == "loading":
+                raise APIError(
+                    429, "Stark is preparing the model. Wait for loading to finish, then retry.", "model_busy"
+                )
+            if self.active_model is None or self.worker is None:
+                raise APIError(
+                    503, "Run a model in Stark, then retry. Either Playground mode works.", "model_not_loaded"
+                )
+            active = next(m for m in self.models if m["id"] == self.active_model)
+            if model_id not in (None, api_model_id(active), self.active_model, active["name"]):
+                raise APIError(
+                    404, "Select the running model ID from Connection Details or /v1/models.", "model_not_found"
+                )
+            if cancelled is not None and cancelled.is_set():
+                raise cancellation_error(cancelled)
+            if mode == "chat" and getattr(self.worker, "backend", None) == "decision-native":
+                raise APIError(
+                    400,
+                    "This Decider model supports Decision mode only. Run a chat model for connected apps.",
+                    "mode_not_supported",
+                )
+            if self.active_mode == mode:
+                return
+            if (self.job is not None and self.job is not current) or self.api_queue:
+                raise APIError(
+                    429, "Stark is using the model. Wait for the current operation, then retry.", "model_busy"
+                )
+            epoch, identifier = self.epoch, self.active_model
+            previous_worker = self.worker
+            owned_slot = self.job is None
+            self.job = current
+            self.status(
+                "loading",
+                "Preparing model for the connected app…" if mode == "chat" else "Preparing model for a decision…",
+                epoch,
+            )
+        try:
+            with self.lock:
+                if self.epoch != epoch:
+                    raise APIError(503, "Model changed or stopped while preparing the request.", "model_changed")
+            self.close_worker(expected=previous_worker)
+            self.run(epoch, identifier, mode, automatic=True)
+            with self.lock:
+                if self.epoch != epoch or self.active_model != identifier or self.active_mode != mode:
+                    raise APIError(
+                        503,
+                        "Model changed or stopped while preparing the request. Retry with the running model.",
+                        "model_changed",
+                    )
+                if cancelled is not None and cancelled.is_set():
+                    raise cancellation_error(cancelled)
+        except APIError:
+            raise
+        except Exception:
+            with self.lock:
+                if self.epoch != epoch:
+                    raise APIError(
+                        503, "Model changed or stopped while preparing the request.", "model_changed"
+                    ) from None
+                self.close_worker()
+            raise APIError(
+                503,
+                "Stark could not prepare the model for this request. Run the model again or choose another model.",
+                "runtime_load_failed",
+            ) from None
+        finally:
+            with self.lock:
+                if owned_slot and self.job is current:
+                    self.job = None
+                    self.api_condition.notify_all()
+                if epoch == self.epoch:
+                    self.status(
+                        "ready" if self.worker else "error", "Ready" if self.worker else "Model stopped", epoch
+                    )
 
     def settings_summary(self):
         # Prompts stay in memory; acknowledgements contain limits and capabilities.
@@ -3274,6 +3373,23 @@ class Desktop:
 
     def api_models(self):
         with self.lock:
+            if self.job is not None and self.current_state == "loading":
+                raise APIError(
+                    429, "Stark is preparing the model. Wait for loading to finish, then retry.", "model_busy"
+                )
+            needs_generation = (
+                self.active_model is not None
+                and self.active_mode == "decision"
+                and getattr(self.worker, "backend", None) != "decision-native"
+            )
+        if needs_generation:
+            self.ensure_runtime("chat")
+        with self.lock:
+            return self._api_models()
+
+    def _api_models(self):
+        """Read discovery under self.lock without starting a worker."""
+        with self.lock:
             if self.active_model is None or self.active_mode != "chat":
                 return []
             model = next(m for m in self.models if m["id"] == self.active_model)
@@ -3295,6 +3411,7 @@ class Desktop:
             ]
 
     def api_status(self):
+        self.api_models()
         with self.lock:
             capability, enabled = self.mtp_settings()
             return {
@@ -3305,7 +3422,7 @@ class Desktop:
                 "queued_requests": len(self.api_queue),
                 "queue_limit": self.api_queue_limit,
                 "queue_timeout_seconds": self.api_queue_timeout,
-                "models": self.api_models(),
+                "models": self._api_models(),
                 "defaults": {"mtp": enabled},
                 "image_verification": (
                     getattr(self.worker, "image_verification", "unverified")
@@ -3354,7 +3471,12 @@ class Desktop:
         and the app shows the model as stopped).
         """
         cancelled = cancelled or threading.Event()
+        self.ensure_runtime(
+            "chat", cancelled=cancelled, model_id=payload.get("model") if isinstance(payload, dict) else None
+        )
         with self.lock:
+            if self.active_model is None or self.worker is None or self.active_mode != "chat":
+                raise APIError(503, "Model changed or stopped before this request started.", "model_changed")
             request = parse_chat_request(
                 payload,
                 self.api_maximum,
@@ -3587,6 +3709,17 @@ class Desktop:
                 pass
 
     def decide(self, epoch, text, question, answers, reference=None, request_id=None):
+        with self.lock:
+            if epoch != self.epoch:
+                return
+            if self.playground_mode != "decision":
+                self.discard_decision_attachment(reference)
+                raise DesktopError("Choose Decision mode and run a model before evaluating a decision.")
+        try:
+            self.ensure_runtime("decision")
+        except APIError as error:
+            self.discard_decision_attachment(reference)
+            raise DesktopError(error.message) from None
         with self.lock:
             if epoch != self.epoch:
                 return
