@@ -187,6 +187,33 @@ def test_prepared_local_import_and_decision_native_ready(desktop):
     assert not ready["tools"] and not ready["mtp"]["supported"]
 
 
+def test_add_source_chat_default_imports_prepared_decider_as_native_decision(desktop, artifact):
+    instance, _ = desktop
+    instance.models.clear()
+    instance.dispatch(
+        {
+            "command": "install",
+            "kind": "local",
+            "source": str(artifact),
+            "support_mode": "text",
+            "support_request_id": "gui-add-source",
+        }
+    )
+    finish(instance)
+    assert len(instance.models) == 1 and instance.models[0]["artifact_mode"] == "decision"
+    assert any(x["event"] == "installed" and x.get("support_request_id") == "gui-add-source" for x in events(instance))
+    assert not [x for x in events(instance) if x["event"] == "error"]
+
+
+@pytest.mark.parametrize(
+    "artifact_mode,support_mode", [("text", "text"), ("vision-language", "vision-language"), ("decision", "text")]
+)
+def test_explicit_conflicting_decider_install_modes_remain_rejected(desktop, artifact, artifact_mode, support_mode):
+    instance, _ = desktop
+    with pytest.raises(DesktopError):
+        instance.install(instance.epoch, "local", str(artifact), artifact_mode, support_mode)
+
+
 def test_decider_cannot_run_as_chat(desktop):
     instance, _ = desktop
     with pytest.raises(DesktopError, match="Decision mode only"):
@@ -345,7 +372,8 @@ def test_scalar_rope_decider_is_not_importable(artifact):
 
 
 @pytest.mark.parametrize("kind", ["local", "huggingface"])
-def test_raw_decider_install_uses_pinned_native_helper(desktop, artifact, tmp_path, monkeypatch, kind):
+@pytest.mark.parametrize("mode,purpose", [("decision", "decision"), (None, "text")])
+def test_raw_decider_install_uses_pinned_native_helper(desktop, artifact, tmp_path, monkeypatch, kind, mode, purpose):
     instance, _ = desktop
     raw = tmp_path / "raw-decider"
     raw.mkdir()
@@ -380,7 +408,7 @@ def test_raw_decider_install_uses_pinned_native_helper(desktop, artifact, tmp_pa
     monkeypatch.setattr(instance, "run_install_support_check", preflight)
     monkeypatch.setattr(instance, "run_converter", convert)
     monkeypatch.setattr(instance, "run_download_converter", convert)
-    instance.install(instance.epoch, kind, source, "decision", "decision")
+    instance.install(instance.epoch, kind, source, mode, purpose)
     assert calls == ["preflight", "prepare"]
     assert instance.models[-1]["artifact_mode"] == "decision"
     assert instance.models[-1]["name"] == "Decider Flash v1.3"

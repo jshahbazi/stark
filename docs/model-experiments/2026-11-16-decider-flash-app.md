@@ -101,3 +101,34 @@ The signed bundle was tested after relocation with an isolated model library;
 the user's installed app and library were not replaced. Full manual GUI use,
 fresh multi-gigabyte download/conversion, release/notarization and performance
 promotion are not claimed. Native `DF13-03` evidence remains unchanged.
+
+## Installed app image check: 20261116-DF13APP-02
+
+Registered before installation and GUI model execution on 2026-11-16, following
+the user's explicit request to install the signed build and test an image in the
+actual app. Baseline branch head: `f1071817`; use the unchanged signed build
+`20261116192037701994` qualified in `DF13APP-01`.
+
+Acceptance: verify the installed bundle matches the tested build, import the
+qualified prepared artifact using visible app controls, load Decision mode,
+attach one private synthetic image, submit an image decision and observe a
+valid matching top choice in the visible result. Check image removal/reset and
+Stop through the app. Keep fixture contents, probabilities and screenshots
+private; publish aggregate observations and identity hashes only. No timing,
+fresh-download, broad task-quality or release claim. Push the record on the same
+branch; do not open a PR. Current state: in progress.
+
+The original signed bundle installed successfully and its full 4,097-file
+inventory matched `DF13APP-01`. Initial CUA attachment failed because the app
+starts with a menu-bar popup; the user opened Manage Models to expose a normal
+window. Actual Add from Source import then revealed a gap in the earlier
+backend recipe: the visible form omits `artifact_mode` and inherits Chat's
+`support_mode=text`. The typed Decider artifact was detected but refused that
+inherited purpose. No GUI model inference had run.
+
+The default-purpose route now selects Decision for an auto-detected typed or
+pinned Decider source when no explicit artifact mode was chosen. Explicit
+conflicting modes still fail. Added GUI-shaped import regressions and changed
+the packaged validation recipe to exercise that same default payload. Rebuild,
+installed GUI retest and final hashes are pending; preserve the original bundle
+and qualification identities separately.

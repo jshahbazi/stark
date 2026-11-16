@@ -2201,6 +2201,11 @@ class Desktop:
                 selected_mode = "decision"
                 name = "Decider Flash v1.3"
         purpose = support_mode or selected_mode
+        if selected_mode == "decision" and artifact_mode is None and support_mode == "text":
+            # Add Source inherits the current Chat purpose before inspecting a
+            # folder/repository. A recognized Decider source determines its
+            # only supported workflow when no artifact mode was requested.
+            purpose = "decision"
         if selected_mode == "decision" and purpose != "decision":
             raise DesktopError("Decider artifacts support native Decision mode only.")
         if selected_mode == "decision" and not converted and not raw_decider:

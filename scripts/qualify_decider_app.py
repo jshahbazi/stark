@@ -81,7 +81,7 @@ def qualify(args):
     print(json.dumps({"phase": "reference", "completed": len(cases)}), flush=True)
     app_hashes = inventory(args.app)
     report = {
-        "attempt_id": "20261116-DF13APP-01",
+        "attempt_id": args.attempt_id,
         "reference_readiness": readiness,
         "fixtures_sha256": file_hash(args.fixtures),
         "script_sha256": file_hash(__file__),
@@ -160,8 +160,7 @@ def qualify(args):
                     "command": "install",
                     "kind": "local",
                     "source": str(args.model),
-                    "artifact_mode": "decision",
-                    "support_mode": "decision",
+                    "support_mode": "text",
                     "request_id": "import",
                 }
             )
@@ -344,6 +343,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for key in ("app", "model", "snapshot", "fixtures", "output"):
         parser.add_argument("--" + key, type=Path, required=True)
+    parser.add_argument("--attempt-id", default="20261116-DF13APP-01")
     args = parser.parse_args()
     for key in ("app", "model", "snapshot", "fixtures", "output"):
         setattr(args, key, getattr(args, key).resolve())
