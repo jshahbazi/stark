@@ -1,0 +1,230 @@
+"""Prepare an applyable, opt-in-only diagnostic patch without editing source."""
+
+from pathlib import Path
+import difflib
+import hashlib
+import json
+
+ROOT = Path(__file__).resolve().parents[2]
+OUT = Path(__file__).resolve().parent
+
+RUST = '''
+/// Diagnostic F32-valued Q8 verifier head. Each input keeps the ordinary
+/// generic Q8 expression, accumulation order and SIMD32 reduction; only the
+/// packed weight/affine loads are shared across the short input-row batch.
+fn gemv_quant_logits_q8_rows_f32_candidate(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    x: &Tensor,
+    y: &Tensor,
+) -> Result<()> {
+    ensure!(w.bits == 8, "F32 verifier head reuse requires Q8");
+    let (n, k) = check_quant(w)?;
+    ensure!(x.dtype() == DType::BF16 && x.shape().len() == 2,
+        "F32 verifier head reuse needs BF16 rows");
+    let m = x.shape()[0];
+    ensure!((1..=4).contains(&m) && x.shape()[1] == k
+        && y.dtype() == DType::F32 && y.numel() == m * n,
+        "F32 verifier head reuse geometry");
+    let name = match m {
+        1 => "stark_decode_q8_f32_reuse_rows1",
+        2 => "stark_decode_q8_f32_reuse_rows2",
+        3 => "stark_decode_q8_f32_reuse_rows3",
+        4 => "stark_decode_q8_f32_reuse_rows4",
+        _ => unreachable!(),
+    };
+    // Match the ordinary Q8 pipeline's PlatformDefault arithmetic policy.
+    let pipeline = ctx.pipeline(name, DECODE_ROWS_SOURCE, MslVersion::V3_1)?;
+    ensure!(pipeline.thread_execution_width() == 32,
+        "F32 verifier head reuse needs SIMD32");
+    pass.dispatch_at(
+        &pipeline,
+        &[w.codes.binding(), w.scales.binding(), w.biases.binding(),
+            x.binding(), y.binding()],
+        &[&u32_bytes(k), &u32_bytes(w.group_size), &u32_bytes(n)],
+        Grid::Threadgroups { groups: (n, 1, 1), threadgroup: (32, 1, 1) },
+    )
+}
+
+#[cfg(test)]
+#[path = "stark_q8_f32_head_reuse_tests.rs"]
+mod stark_q8_f32_head_reuse_tests;
+
+'''
+
+METAL = '''
+// Diagnostic F32-valued Q8 verifier head. Same per-row arithmetic as
+// GEMV_Q8_BODY; only packed weights and affine metadata share their loads.
+template <uint M>
+inline void stark_decode_q8_f32_reuse_body(
+    device const uint* codes, device const bfloat* scales,
+    device const bfloat* biases, device const bfloat* input,
+    device float* output, constant uint& K, constant uint& GS,
+    constant uint& N, uint row, uint lane) {
+    const uint words = K / 4;
+    const uint blocks = words / 4;
+    const uint bpg = GS / 16;
+    const uint groups = K / GS;
+    device const uint4* wrow = (device const uint4*)(codes + (ulong)row * words);
+    float sums[M] = {};
+    for (uint i = lane; i < blocks; i += 32) {
+        const uint g = i / bpg;
+        const float s = float(scales[row * groups + g]);
+        const float b = float(biases[row * groups + g]);
+        const uint4 w4 = wrow[i];
+        #pragma clang loop unroll(full)
+        for (uint m = 0; m < M; ++m) {
+            device const bfloat4* xv =
+                (device const bfloat4*)(input + (ulong)m * K);
+            sums[m] += dot_word_q8(w4.x, s, b, xv, 4 * i)
+                + dot_word_q8(w4.y, s, b, xv, 4 * i + 1)
+                + dot_word_q8(w4.z, s, b, xv, 4 * i + 2)
+                + dot_word_q8(w4.w, s, b, xv, 4 * i + 3);
+        }
+    }
+    #pragma clang loop unroll(full)
+    for (uint m = 0; m < M; ++m) {
+        const float sum = simd_sum(sums[m]);
+        if (lane == 0) output[(ulong)m * N + row] = sum;
+    }
+}
+
+#define STARK_DECODE_Q8_F32_REUSE_ROWS(M) \\
+kernel void stark_decode_q8_f32_reuse_rows##M( \\
+    device const uint* codes [[buffer(0)]], \\
+    device const bfloat* scales [[buffer(1)]], \\
+    device const bfloat* biases [[buffer(2)]], \\
+    device const bfloat* input [[buffer(3)]], \\
+    device float* output [[buffer(4)]], \\
+    constant uint& K [[buffer(5)]], constant uint& GS [[buffer(6)]], \\
+    constant uint& N [[buffer(7)]], \\
+    uint row [[threadgroup_position_in_grid]], \\
+    uint lane [[thread_index_in_threadgroup]]) { \\
+    stark_decode_q8_f32_reuse_body<M>( \\
+        codes, scales, biases, input, output, K, GS, N, row, lane); \\
+}
+STARK_DECODE_Q8_F32_REUSE_ROWS(1)
+STARK_DECODE_Q8_F32_REUSE_ROWS(2)
+STARK_DECODE_Q8_F32_REUSE_ROWS(3)
+STARK_DECODE_Q8_F32_REUSE_ROWS(4)
+'''
+
+TEST = '''// SPDX-License-Identifier: Apache-2.0
+//! Diagnostic Q8 F32 verifier-head controls; no tensor values are logged.
+use super::*;
+
+fn word(state: &mut u32) -> u32 {
+    *state ^= *state << 13;
+    *state ^= *state >> 17;
+    *state ^= *state << 5;
+    *state
+}
+
+#[test]
+#[ignore = "requires physical Apple Silicon; actual vocabulary geometry"]
+fn q8_f32_head_reuse_matches_ordinary_bytes() -> Result<()> {
+    let ctx = MetalContext::new()?;
+    let mut seed = 0x3fa2_81b5;
+    let mut compared = 0usize;
+    for (n, k, patterns) in [(17, 128, 4), (256, 2560, 4), (248320, 2560, 1)] {
+        let storage_n = n + 2;
+        let codes: Vec<u32> = (0..storage_n * k / 4)
+            .map(|_| word(&mut seed)).collect();
+        let scales: Vec<f32> = (0..storage_n * k / 64)
+            .map(|_| (word(&mut seed) % 127 + 1) as f32 / 65536.0).collect();
+        let biases: Vec<f32> = (0..storage_n * k / 64)
+            .map(|_| (word(&mut seed) % 257) as f32 / 4096.0 - 0.03125).collect();
+        let w = QuantWeights {
+            codes: Tensor::from_bytes(&ctx, bytemuck::cast_slice(&codes),
+                &[storage_n, k / 4], DType::U32)?,
+            scales: Tensor::from_f32_as_bf16(&ctx, &scales, &[storage_n, k / 64])?,
+            biases: Tensor::from_f32_as_bf16(&ctx, &biases, &[storage_n, k / 64])?,
+            group_size: 64, bits: 8,
+        }.view_rows(2, n)?;
+        for m in 1..=4 {
+            for pattern in 0..patterns {
+                let values: Vec<f32> = (0..(m + 2) * k).map(|i| match pattern {
+                    0 => (word(&mut seed) % 4097) as f32 / 1024.0 - 2.0,
+                    1 => if i % 2 == 0 { 0.0 } else { -0.0 },
+                    2 => if i % 2 == 0 { f32::from_bits(0x0001_0000) }
+                         else { -f32::from_bits(0x0001_0000) },
+                    _ => if i % 2 == 0 { 256.0 } else { -256.0 },
+                }).collect();
+                let x = Tensor::from_f32_as_bf16(&ctx, &values, &[m + 2, k])?
+                    .view(k, &[m, k])?;
+                let guard = Tensor::zeros(&ctx, &[m * n + 16], DType::F32)?;
+                guard.write_bytes(&vec![0xa5; guard.byte_len()])?;
+                let candidate = guard.view(8, &[m, n])?;
+                let reference = Tensor::zeros(&ctx, &[m, n], DType::F32)?;
+                let pass = ctx.begin_concurrent()?;
+                for row in 0..m {
+                    gemv_quant(&ctx, &pass, &w, &x.view(row * k, &[k])?,
+                        &reference.view(row * n, &[n])?)?;
+                }
+                gemv_quant_logits_q8_rows_f32_candidate(&ctx, &pass, &w, &x, &candidate)?;
+                pass.end()?.commit()?.wait()?;
+                ensure!(candidate.raw_bytes() == reference.raw_bytes(),
+                    "F32 Q8 head reuse changed exact output");
+                let bytes = guard.raw_bytes();
+                ensure!(bytes[..32].iter().chain(&bytes[bytes.len() - 32..])
+                    .all(|&b| b == 0xa5), "F32 Q8 head reuse changed guards");
+                compared += m * n;
+            }
+        }
+    }
+    println!("{{\\"q8_f32_head_reuse\\":\\"exact\\",\\"compared_values\\":{compared}}}");
+    Ok(())
+}
+'''
+
+path = "vendor/lily-core/src/kernels/quant.rs"
+original = (ROOT / path).read_text()
+needle = "    if !bf16_values {\n        return gemv_quant_rows_decode_exact(ctx, pass, w, x, y);\n    }"
+replacement = '''    if !bf16_values {
+        // Private experimental selector. Production behavior remains the
+        // existing row-axis kernel unless the diagnostic is explicitly set.
+        if w.bits == 8 && x.shape().len() == 2 && x.shape()[0] > 1
+            && std::env::var_os("STARK_LILY_VERIFY_Q8_HEAD_REUSE")
+                .is_some_and(|value| value == "1")
+        {
+            return gemv_quant_logits_q8_rows_f32_candidate(ctx, pass, w, x, y);
+        }
+        return gemv_quant_rows_decode_exact(ctx, pass, w, x, y);
+    }'''
+assert original.count(needle) == 1
+changed = original.replace(needle, replacement)
+anchor = "/// Q8 verifier implementation and its row-axis reference control."
+# The comment in the existing source starts with Q8 verifier implementation
+# only on some revisions. Locate the stable helper signature instead.
+anchor = "fn gemv_quant_logits_q8_rows_candidate("
+idx = changed.index(anchor)
+comment_idx = changed.rfind("/// Q8 verifier", 0, idx)
+if comment_idx < 0:
+    comment_idx = idx
+changed = changed[:comment_idx] + RUST + changed[comment_idx:]
+
+metal_path = "vendor/lily-core/src/kernels/metal/stark_decode_rows.metal"
+test_path = "vendor/lily-core/src/kernels/stark_q8_f32_head_reuse_tests.rs"
+changes = [(path, original, changed),
+           (metal_path, (ROOT / metal_path).read_text(), (ROOT / metal_path).read_text() + METAL),
+           (test_path, "", TEST)]
+patch = "".join("".join(difflib.unified_diff(old.splitlines(keepends=True),
+    new.splitlines(keepends=True), fromfile="a/" + name if old else "/dev/null",
+    tofile="b/" + name)) for name, old, new in changes)
+(OUT / "q8-f32-head-reuse-diagnostic.patch").write_text(patch)
+metadata = {
+    "selector": "STARK_LILY_VERIFY_Q8_HEAD_REUSE=1",
+    "default": "existing row-axis verifier head",
+    "scope": "non-official F32-valued Q8 head; 2..4 verifier rows",
+    "production_sources_modified": False,
+    "patch_sha256": hashlib.sha256(patch.encode()).hexdigest(),
+    "owning_source_sha256": {name: hashlib.sha256(old.encode()).hexdigest()
+                              for name, old, _ in changes if old},
+    "numerics": "unchanged Q8 dot expressions, loop/accumulation order, SIMD32 sum, F32 store",
+    "risks": ["compiler scheduling/register allocation may change numerical output",
+              "larger per-thread accumulator count may reduce occupancy",
+              "weight reads may already hit cache, limiting memory savings"],
+}
+(OUT / "q8-f32-head-reuse-candidate.json").write_text(json.dumps(metadata, indent=2) + "\n")
+print(json.dumps(metadata, indent=2))
