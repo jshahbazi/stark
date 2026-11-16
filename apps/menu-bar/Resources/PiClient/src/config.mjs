@@ -92,7 +92,9 @@ async function getJson(url, key) {
     }, (response) => {
       if (response.statusCode !== 200) {
         response.destroy();
-        rejectCode(response.statusCode === 401 ? 'authentication_failed' : 'discovery_http_error');
+        rejectCode(response.statusCode === 401 ? 'authentication_failed'
+          : response.statusCode === 429 ? 'model_busy'
+          : response.statusCode === 503 ? 'runtime_unavailable' : 'discovery_http_error');
         return;
       }
       if (!/^application\/json(?:;|$)/i.test(response.headers['content-type'] ?? '')) {
