@@ -1156,7 +1156,6 @@ class ConverterPackageTests(unittest.TestCase):
                 "guided_models.py",
                 "recommendation_leaderboard.py",
                 "recommendation_leaderboard.json",
-                "llmbench_coding.json",
                 "_third_party/whatmodel/README.md",
                 "_third_party/whatmodel/DATA-LICENSE.md",
                 "_third_party/whatmodel/LICENSE",

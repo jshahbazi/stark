@@ -608,17 +608,17 @@ struct CatalogReferenceScore: Equatable {
               let relationship = (raw["relationship"] as? String).flatMap(Relationship.init(rawValue:)),
               let general = score(raw["general"]), let coding = score(raw["coding"]), general != nil || coding != nil,
               let source = SupportMetadata.string(raw["source_url"], maximum: 256),
-              source == "https://llmbench.site/data/", let sourceURL = URL(string: source),
+              source.hasPrefix("https://whatmodel.sh/model/"), let sourceURL = URL(string: source),
               let captured = SupportMetadata.string(raw["captured"], maximum: 10), captured.utf8.count == 10 else { return nil }
         self.modelID = modelID; self.relationship = relationship; self.general = general; self.coding = coding
         self.sourceURL = sourceURL; self.captured = captured
     }
 
-    /// The coding index a sort order ranks by and shows. The stored general
-    /// order remains an alias for users upgrading from the previous source.
+    /// The score a sort order ranks by and shows. General and coding scores are on
+    /// separate scales, so a rating order never substitutes one for the other.
     func score(for sort: ModelBrowserSort) -> (value: Double, task: String)? {
         switch sort {
-        case .ratingGeneral: return coding.map { ($0, "coding") }
+        case .ratingGeneral: return general.map { ($0, "general") }
         case .ratingCoding: return coding.map { ($0, "coding") }
         default: return general.map { ($0, "general") } ?? coding.map { ($0, "coding") }
         }
@@ -628,14 +628,11 @@ struct CatalogReferenceScore: Equatable {
 enum ModelBrowserSort: String, CaseIterable {
     case ratingGeneral, ratingCoding, nameAscending, nameDescending, sizeAscending, sizeDescending
 
-    // Preserve the previous general-sort setting as a coding-sort alias.
-    static let allCases: [Self] = [.ratingCoding, .nameAscending, .nameDescending, .sizeAscending, .sizeDescending]
-
     var isRating: Bool { self == .ratingGeneral || self == .ratingCoding }
 
     var title: String {
         switch self {
-        case .ratingGeneral: return "Top rated (coding)"
+        case .ratingGeneral: return "Top rated (general)"
         case .ratingCoding: return "Top rated (coding)"
         case .nameAscending: return "Name (A–Z)"
         case .nameDescending: return "Name (Z–A)"
@@ -3204,9 +3201,9 @@ struct ModelsView: View {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         if catalogSort.isRating {
                             HStack(spacing: 4) {
-                                Text("Ranked by a coding index derived from llmbench.site. Quantized versions show their original model's index. Memory fit is checked separately.")
+                                Text("Models that fit this Mac come first, ranked by whatmodel.sh scores. Quantized versions show their original model's score.")
                                     .fixedSize(horizontal: false, vertical: true)
-                                Link("About scores", destination: URL(string: "https://llmbench.site/method/")!).fixedSize()
+                                Link("About scores", destination: URL(string: "https://whatmodel.sh/")!).fixedSize()
                             }.font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer(minLength: 0)

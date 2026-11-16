@@ -838,7 +838,7 @@ class Desktop:
                     )
                     or all(score is None for score in scores)
                     or not isinstance(reference["source_url"], str)
-                    or reference["source_url"] != "https://llmbench.site/data/"
+                    or re.fullmatch(r"https://whatmodel\.sh/model/[a-z0-9-]{1,200}", reference["source_url"]) is None
                     or not isinstance(reference["captured"], str)
                     or re.fullmatch(r"\d{4}-\d{2}-\d{2}", reference["captured"]) is None
                 ):
