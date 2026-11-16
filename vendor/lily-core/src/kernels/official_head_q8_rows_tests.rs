@@ -207,7 +207,7 @@ fn official_q8_head_verifier_full_vocabulary_timing() -> Result<()> {
                 "{}",
                 serde_json::json!({
                     "scope":"synthetic_official_generic_q8_head_full_vocabulary",
-                    "candidate":if reuse { "weight_reuse_fused_round" } else { "row_axis_then_round" },
+                    "candidate":if reuse { "weight_reuse_fused_round" } else { "generic_rows_then_round" },
                     "timer":"metal_command_buffer_gpu_end_minus_start_seconds",
                     "math_policy":"generic_q8_platform_default_integer_bf16_value_round",
                     "rows":rows,"input_width":k,"vocabulary_size":n,"weight_bytes":weight_bytes,
