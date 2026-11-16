@@ -5,9 +5,13 @@ official `pplx_decider` reference implementation. The bridge uses
 `source/src/pplx_decider` from a caller-supplied local model snapshot; it does
 not copy, patch, or install that source. It does not download checkpoints.
 
-The dependency versions match the upstream `source/pyproject.toml` and
+The dependency versions follow the upstream `source/pyproject.toml` and
 `requirements.txt` at revision
-`d06fb3f2d97e0a52325a0d463c450cf0338f44fe`. Use the project environment with
+`d06fb3f2d97e0a52325a0d463c450cf0338f44fe`, with one security override:
+Pillow is pinned to **13.0.0** instead of upstream's vulnerable 12.3.0. The
+official model source and snapshot remain unchanged. Historical qualifications
+using 12.3.0 keep their original environment identity; new runs record the
+updated lockfile separately. Use the project environment with
 `uv sync --locked`. Start a child process with:
 
 ```sh

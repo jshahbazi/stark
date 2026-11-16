@@ -276,3 +276,25 @@ verified APFS copy-on-write clone and atomic v1 inode replacement. Distinct
 inodes and matching hashes preserve both complete artifact contents, v1/v2
 configuration/receipt hashes and source bytes. This recovered 9.09 GB; no
 artifact or failed receipt was deleted.
+
+## Reference dependency security update: 20261116-DF13SEC-01
+
+Registered before checks under the updated reference environment, following the
+user's request to fix PR #169's security dependency blocker. Baseline:
+`e9b900c3`. The isolated reference environment pins Pillow 12.3.0, which CI's
+unchanged dependency gates reject. The reference's path/base64/PIL image inputs
+reach Pillow decoding through the official encoder/processor; the native
+Rust/Metal image path does not use this package.
+
+Update only the reference project's Pillow pin to the patched 13.0.0 release
+and regenerate its lock through uv. Keep all other resolved package versions,
+the official model source, artifact, existing receipts and historical results
+unchanged. Document the deliberate deviation from upstream's dependency pin.
+No advisory suppression or gate change is authorized.
+
+Fixed gates: locked environment consistency, original dependency advisory check
+no longer finding Pillow, exact formatter comparison including images, and the
+existing 15-decision native/reference corpus with 100% top-choice agreement,
+maximum probability error <=0.02 and existing usage/lifecycle checks. No timing
+or performance claim. Run model checks sequentially and publish only aggregate
+results/hashes. Record new environment/results separately; status pending.
