@@ -237,6 +237,10 @@ negotiate `images`, `image_attachment_transport: private-file-v1`, and
 these are phases, not measured percentages. Native validation remains
 authoritative. See [native image support](MULTIMODAL_IMPLEMENTATION.md).
 
+### Automatic runtime selection for connected apps
+
+The Playground mode selects its interaction. The backend selects the native worker protocol for each operation: generation for the OpenAI-compatible API, scoring for Playground decisions. Authenticated discovery may prepare generation before returning its live capabilities. Automatic preparation reserves the existing operation slot, closes the previous worker, clears native caches, and fences readiness against Stop/model replacement. It emits `runtime_ready` without changing the Playground selection. A busy decision is preserved and clients receive `429/model_busy`; an unsuccessful load produces `503/runtime_load_failed`. Only one worker is resident. Repeated API generations retain the worker and its existing cache-scope rules.
+
 ## Where validation lives
 
 - Scoring parity and generation acceptance records: [docs/validation](validation/).

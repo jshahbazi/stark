@@ -21,8 +21,8 @@ struct ConnectionDetailsView: View {
     private var canConnect: Bool { !engine.apiBaseURL.isEmpty && !engine.apiKey.isEmpty }
     private var hasKey: Bool { !engine.apiKey.isEmpty }
     private var modelID: String {
-        // Unrelated library work can be busy while the same chat worker stays loaded.
-        engine.loadedMode == .chat && !["idle", "error", "loading", "stopping"].contains(engine.state) ? engine.loadedID : ""
+        // The running model serves apps independently of the Playground mode.
+        !engine.loadedID.isEmpty && !["idle", "error", "loading", "stopping"].contains(engine.state) ? engine.loadedID : ""
     }
     private var inspectedLibraryID: String {
         if engine.models.contains(where: { $0.id == inspectedModelID }) { return inspectedModelID }
@@ -94,7 +94,7 @@ struct ConnectionDetailsView: View {
                     if !modelID.isEmpty {
                         Text(engine.activeName)
                             .font(.headline).fixedSize(horizontal: false, vertical: true)
-                        Text(engine.supportsTools ? "Chat mode · Tool use available" : "Chat mode · Text chat available")
+                        Text(engine.supportsTools ? "Tool use available" : "Text chat available")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
                         HStack(alignment: .center, spacing: 8) {
@@ -217,7 +217,7 @@ struct ConnectionDetailsView: View {
             Text(displayedModelID.isEmpty ? "Install a model in Manage Models to get its connection ID."
                  : !modelID.isEmpty && inspectedLibraryID == modelID
                  ? "This is the model currently served to your apps."
-                 : "Preview only. This model is not running in Chat mode. Choose Chat mode and Run in Stark before using it.")
+                 : "Preview only. Use Run in Stark to serve this model before using it.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -315,7 +315,7 @@ private struct PiConnectionView: View {
             }
             Text(connection.message).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if !available {
-                Text("Start a Chat model with tool support to set up Pi.")
+                Text("Run a model with tool support to set up Pi. Either Playground mode works.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else if connection.profile != nil && !current {
                 Text("The running model or API address changed. Update setup before opening Pi.")
@@ -410,7 +410,7 @@ private struct OpenWorkConnectionView: View {
             name: "OpenWork", symbol: "macwindow", approved: connection.approved,
             busy: connection.busy, disconnectPending: connection.disconnectPending,
             message: connection.message == "OpenWork is not connected." ? "" : connection.message,
-            detail: "Select Stark in OpenWork’s model picker. It uses the model currently running in Chat mode in Stark.",
+            detail: "Select Stark in OpenWork’s model picker. It uses the running model, in either Playground mode.",
             connect: connection.connect, disconnect: connection.disconnect
         )
     }
