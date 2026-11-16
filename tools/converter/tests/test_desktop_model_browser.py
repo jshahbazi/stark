@@ -509,7 +509,9 @@ def test_glm_registry_failure_keeps_completed_download_for_retry(host, native_do
     if failure == "persist":
         monkeypatch.setattr(host, "persist", lambda: (_ for _ in ()).throw(OSError("synthetic registry failure")))
     else:
-        monkeypatch.setattr(host, "check_family_install", lambda *_args: (_ for _ in ()).throw(DesktopError("Insufficient RAM")))
+        monkeypatch.setattr(
+            host, "check_family_install", lambda *_args: (_ for _ in ()).throw(DesktopError("Insufficient RAM"))
+        )
     args = (host.epoch, "native", "glm53-q2", "text", "text", "install", native_download["weights_revision"])
     with pytest.raises((OSError, DesktopError)):
         host.install(*args)

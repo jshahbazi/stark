@@ -92,6 +92,11 @@ Nothing in this run needs a model or the network. The ignored `test_metadata_loa
 
 ## Run a model-bound smoke test
 
+For an explicitly invoked project-building test through OpenWork, OpenCode
+Desktop and Pi, use `$stark-user-test` and the
+[manual desktop user simulation](docs/USER_SIMULATION.md). It uses real app UI
+and independent project checks. It is not a CI or scheduled live test.
+
 CI never loads a model. After changing the engine, a worker, or the converter, check the real path once:
 
 ```sh
