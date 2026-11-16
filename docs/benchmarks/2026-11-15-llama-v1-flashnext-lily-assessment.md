@@ -5,17 +5,22 @@ Date: 2026-11-15. Attempts: `20261115-LCPP1-01`, `-02`, `-03`.
 ## Current reference update
 
 The release audit and image-resident baseline below retain their recorded
-scope. A later, separate follow-up implements a receipt-bound one-draft
-recommendation only for the pinned Lily stochastic temperature-1/top-k-20/
-top-p-0.95 request with min-p absent/null. The scalar recommendation remains
-two. Branch qualification is complete for this artifact and sampler: the
-held-out top-k endpoint reduced median request latency by 14.66% with 8/8
-paired blocks favoring one, and seven image-loaded prefix checks matched fresh
-runs through one-to-two and two-to-one transitions. This is a sampler policy
-based on the earlier Stark MTP measurements, not an adopted llama.cpp
-optimization. No installation or release is claimed. See the
-[sampling-specific follow-up](2026-11-15-lily-sampling-mtp-policy.md) and
-[aggregates](data/lily-sampling-mtp-policy-2026-11-15.json).
+scope. The later sampling-specific one-draft policy was reverted at
+`2ac1b713`; enabled Lily requests again recommend two drafts. Its held-out
+top-k endpoint had reduced median request latency by 14.66% with 8/8 paired
+wins, and seven prefix checks matched fresh outputs. The subsequent natural
+coding counterexample and planning tie prevented that result from supporting
+the automatic policy. The [historical policy record](2026-11-15-lily-sampling-mtp-policy.md)
+and [restoration record](../archive/runs/2026-11-15-lily-mtp-two-draft-default-restored.md)
+preserve that chronology and evidence.
+
+The rank-one verifier investigation has now completed a separate
+[two-draft long-response study](2026-11-15-lily-small-row-verifier.md).
+Packed-weight reuse in remaining generic projections passed 60 component
+cases, but improved paired useful decode only 1.84% on coding and 4.54% on
+planning, below the 10% practical minimum. The candidate is archived and
+rejected for promotion. Production code and the installed app are unchanged;
+no llama.cpp optimization is represented as adopted.
 
 ## Engineering judgment
 
@@ -135,8 +140,10 @@ That is included in the baseline matrix. It can reveal a useful existing option
 without pretending that MTP was introduced in llama.cpp 1.0. No automatic draft
 controller or default change is justified by one synthetic workload.
 
-Only rank 1 warrants a new optimization-specific diagnostic at this point;
-rank 2 is already covered by this study. The other rows are a documented
+At registration, only rank 1 warranted a new optimization-specific diagnostic;
+its bounded [follow-up](2026-11-15-lily-small-row-verifier.md) is now complete
+and its tested projection candidate failed the practical performance gate.
+Rank 2 is already covered by the draft-depth studies. The other rows are a documented
 backlog of checks with explicit reasons to stop or defer. No row currently has
 local evidence supporting an expected 10% implementation gain.
 
@@ -507,7 +514,7 @@ improvement ceiling can clear the applicable hurdle. Otherwise stop. FP8,
 expert-cache architecture and a complete GPU sampler rewrite do not become
 worthwhile because an unrelated CUDA workload improved.
 
-No after-optimization result exists. The deliverable is a sealed before
+This initial study produced no after-optimization result. Its deliverable is a sealed before
 baseline, a reproducible recipe, and ranked decisions with stop conditions.
 
 ### Setup follow-up before measured execution

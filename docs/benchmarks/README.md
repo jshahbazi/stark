@@ -12,6 +12,17 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Lily small-row verifier follow-up (2026-11-15).** The
+[two-draft natural-response study](2026-11-15-lily-small-row-verifier.md)
+profiles both existing requests and tests packed-weight reuse across remaining
+generic projections. The candidate passes 60 component cases byte-for-byte;
+32 measured responses plus eight warmups preserve output hashes and MTP work.
+Paired useful decode improves 1.84% for coding (6/8 wins) and 4.54% for planning
+(8/8). Coding is inside baseline variation; planning is a modest positive
+result below the 10% practical minimum. The candidate is rejected for promotion,
+with source and all observations archived. Production code, the two-draft
+recommendation, installed app and prior benchmark data are unchanged.
+
 **Lily natural long-response checks (2026-11-15).** Each comparison retains
 eight measured responses and four warmups on image-loaded before/candidate
 workers. The [coding request](2026-11-15-lily-long-coding-response.md) favors
