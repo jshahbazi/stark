@@ -367,6 +367,59 @@ def normalize_python_configuration(runtime: Path, managed_prefix: Path) -> None:
     )
 
 
+def prune_python_runtime(runtime: Path) -> list[str]:
+    """Remove development and Tk GUI payload from the pinned private runtime."""
+    patterns = (
+        "include",
+        "lib/python3.13/idlelib",
+        "lib/python3.13/tkinter",
+        "lib/python3.13/turtledemo",
+        "lib/python3.13/turtle.py",
+        "lib/python3.13/lib-dynload/_tkinter.*",
+        "lib/libtcl*.dylib",
+        "lib/libpython*.dylib",
+        "lib/tcl*",
+        "lib/tk*",
+        "lib/itcl*",
+        "lib/thread*",
+    )
+    removed = []
+    for pattern in patterns:
+        for path in sorted(runtime.glob(pattern)):
+            removed.append(path.relative_to(runtime).as_posix())
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+    return removed
+
+
+def verify_python_linkage(runtime: Path, environment: dict[str, str]) -> None:
+    """Fail closed if a runtime change adds a dependency on a removed library."""
+    for path in runtime.rglob("*"):
+        if not path.is_file():
+            continue
+        with path.open("rb") as stream:
+            magic = stream.read(4)
+        if magic not in {
+            b"\xcf\xfa\xed\xfe",
+            b"\xfe\xed\xfa\xcf",
+            b"\xca\xfe\xba\xbe",
+            b"\xca\xfe\xba\xbf",
+        }:
+            continue
+        dependencies = run(
+            ["/usr/bin/otool", "-L", str(path)], "python_linkage", environment
+        ).stdout.decode()
+        if any(
+            Path(line.strip().split(" (", 1)[0]).name.startswith(
+                ("libpython", "libtcl", "libtk")
+            )
+            for line in dependencies.splitlines()[1:]
+        ):
+            raise BuildError("python_dependency_on_removed_library")
+
+
 def build_python(
     bundle: Path, temporary: Path, uv: str, environment: dict[str, str]
 ) -> None:
@@ -503,6 +556,8 @@ def build_python(
             shutil.rmtree(entry)
     for entry in runtime.rglob("*.pyc"):
         entry.unlink()
+    prune_python_runtime(runtime)
+    verify_python_linkage(runtime, environment)
     shutil.copyfile(
         requirements, bundle / "share" / "stark" / "converter-requirements.txt"
     )

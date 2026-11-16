@@ -380,8 +380,14 @@ class RuntimeVerificationTests(unittest.TestCase):
             make_runtime(runtime)
             (runtime / "app/Stark.app").mkdir(parents=True)
             (runtime / "app/Stark.app/payload").write_bytes(b"old application")
+            header = runtime / "libexec/python/include/python3.13/Python.h"
+            header.parent.mkdir(parents=True)
+            header.write_bytes(b"unused development header")
             manifest_path = runtime / builder.RUNTIME_MANIFEST
             manifest = json.loads(manifest_path.read_text())
+            manifest["files_sha256"][header.relative_to(runtime).as_posix()] = (
+                builder.sha256(header)
+            )
             manifest["files_sha256"]["app/Stark.app/payload"] = builder.sha256(
                 runtime / "app/Stark.app/payload"
             )
@@ -392,6 +398,8 @@ class RuntimeVerificationTests(unittest.TestCase):
             excluded = builder.copy_runtime_for_application(runtime, embedded, manifest)
             self.assertEqual(excluded, ["app"])
             self.assertFalse((embedded / "app").exists())
+            self.assertFalse((embedded / "libexec/python/include").exists())
+            self.assertTrue(header.exists())
             self.assertEqual(manifest_path.read_bytes(), parent_manifest)
             derived = builder.verify_runtime(embedded)
             self.assertEqual(

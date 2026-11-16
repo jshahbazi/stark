@@ -471,7 +471,10 @@ def copy_runtime_for_application(
 
     shutil.copytree(runtime, embedded, symlinks=False, ignore=ignore)
     (embedded / ".archive-sha256").unlink(missing_ok=True)
-    if excluded:
+    python = embedded / "libexec/python"
+    pruned = signing.distribution.prune_python_runtime(python)
+    signing.distribution.verify_python_linkage(python, signing.environment())
+    if excluded or pruned:
         derived = json.loads(json.dumps(manifest))
         (embedded / RUNTIME_MANIFEST).unlink()
         derived["files_sha256"] = {
@@ -482,6 +485,7 @@ def copy_runtime_for_application(
         derived["application_embedding"] = {
             "parent_manifest_sha256": sha256(runtime / RUNTIME_MANIFEST),
             "excluded_payload": excluded,
+            "pruned_python_payload": pruned,
         }
         (embedded / RUNTIME_MANIFEST).write_text(
             json.dumps(derived, indent=2, sort_keys=True) + "\n"
@@ -1151,6 +1155,9 @@ def build(options: argparse.Namespace) -> Path:
         native_notices = install_native_notices(embedded, temporary)
         converter_package = install_converter(embedded, temporary)
         desktop_dependencies = install_desktop_dependencies(embedded, temporary)
+        signing.distribution.verify_python_linkage(
+            embedded / "libexec/python", signing.environment()
+        )
         shutil.copy2(artwork, resources / "Stark.jpg")
         shutil.copy2(template, resources / "MenuBarTemplate.png")
         if worker_record_path is not None:
