@@ -1021,7 +1021,7 @@ struct ControllerChecks {
         manualController.performAction()
         await waitFor { manual.fetchGate != nil }
         precondition(manualController.message == "Checking for updates…")
-        precondition(manualController.actionTitle == "Check for Upgrades")
+        precondition(manualController.actionTitle == "Check for Updates")
         manualController.performAction()
         manualController.checkIfNeeded()
         precondition(manual.fetchCount == 1 && manualController.busy)
@@ -1288,7 +1288,7 @@ struct ControllerChecks {
         withdrawnController.check()
         await waitFor { !withdrawnController.busy }
         precondition(withdrawnController.available == nil)
-        precondition(withdrawnController.actionTitle == "Check for Upgrades")
+        precondition(withdrawnController.actionTitle == "Check for Updates")
         precondition(!FileManager.default.fileExists(atPath: withdrawnWorkspace.path))
         precondition(!withdrawn.events.contains("install"))
 
@@ -1300,7 +1300,7 @@ struct ControllerChecks {
         await waitFor { !third.busy }
         precondition(third.message.isEmpty && third.available == nil)
         precondition(quiet.scheduleStarts == 1 && quiet.scheduledInterval == 900)
-        precondition(third.actionTitle == "Check for Upgrades")
+        precondition(third.actionTitle == "Check for Updates")
         quiet.fetchFailure = nil
         quiet.date += 900
         await quiet.scheduledCheck?()
