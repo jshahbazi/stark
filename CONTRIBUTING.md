@@ -92,6 +92,9 @@ Nothing in this run needs a model or the network. The ignored `test_metadata_loa
 
 ## Run a model-bound smoke test
 
+The dedicated `stark-decide` worker and its model-bound upstream comparison are
+described in [Decider Flash v1.3](docs/DECIDER.md).
+
 For an explicitly invoked project-building test through OpenWork, OpenCode
 Desktop and Pi, use `$stark-user-test` and the
 [manual desktop user simulation](docs/USER_SIMULATION.md). It uses real app UI

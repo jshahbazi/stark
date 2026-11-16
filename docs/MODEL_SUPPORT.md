@@ -502,6 +502,13 @@ the active worker. Local qualification receipts retain their separate identity.
 
 ## Modes and support states
 
+Perplexity Decider Flash v1.3 has a separate, explicit BF16 native route through
+`stark-decide` and `python -m stark_convert.decider`. Its typed artifact retains
+the vision tower, noncausal full attention and a separate decision readout.
+This route is outside the registry modes below; the generic desktop Decision
+workflow does not load it. See [Decider](DECIDER.md) for its one-image/4,096-token
+limits, unsupported Locate capability and artifact-bound qualification record.
+
 The registry uses these mode identifiers:
 
 | Mode | Intended use |

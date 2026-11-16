@@ -29,6 +29,8 @@ const MAX_JPEG_SCANS: usize = 64;
 /// Internal admission bounds, not qualified product/hardware capabilities.
 #[derive(Clone, Copy)]
 pub(crate) struct PreprocessLimits {
+    /// The source processor's resize policy, separate from admission bounds.
+    pub(crate) processor_max_pixels: u64,
     pub(crate) max_encoded_bytes: usize,
     pub(crate) max_source_dimension: u32,
     pub(crate) max_source_pixels: u64,
@@ -39,6 +41,7 @@ pub(crate) struct PreprocessLimits {
 impl Default for PreprocessLimits {
     fn default() -> Self {
         Self {
+            processor_max_pixels: MAX_PIXELS,
             max_encoded_bytes: 20 * 1024 * 1024,
             max_source_dimension: 16_384,
             max_source_pixels: 32_000_000,
@@ -149,8 +152,11 @@ pub(crate) fn resized_dimensions(
     let (h, w) = (f64::from(height), f64::from(width));
     let mut target_h = (h / factor).round_ties_even() * factor;
     let mut target_w = (w / factor).round_ties_even() * factor;
-    if target_h * target_w > MAX_PIXELS as f64 {
-        let beta = ((h * w) / MAX_PIXELS as f64).sqrt();
+    if limits.processor_max_pixels < MIN_PIXELS || limits.processor_max_pixels > MAX_PIXELS {
+        return Err(InvalidInput("unsupported processor pixel bound"));
+    }
+    if target_h * target_w > limits.processor_max_pixels as f64 {
+        let beta = ((h * w) / limits.processor_max_pixels as f64).sqrt();
         target_h = factor.max((h / beta / factor).floor() * factor);
         target_w = factor.max((w / beta / factor).floor() * factor);
     } else if target_h * target_w < MIN_PIXELS as f64 {
@@ -416,7 +422,7 @@ pub(crate) fn decode_image(
     data: &[u8],
     limits: &PreprocessLimits,
 ) -> Result<RgbImage, InvalidInput> {
-    decode_image_alpha(data, limits, true, |width, height| resized_dimensions(width, height, limits).map(|_| ()))
+    decode_image_alpha(data, limits, true, true, |width, height| resized_dimensions(width, height, limits).map(|_| ()))
 }
 
 /// Match PIL's RGB conversion for processors that discard alpha channels.
@@ -426,13 +432,25 @@ pub(super) fn decode_image_discard_alpha<F: FnOnce(u32, u32) -> Result<(), Inval
     limits: &PreprocessLimits,
     validate_processed: F,
 ) -> Result<RgbImage, InvalidInput> {
-    decode_image_alpha(data, limits, false, validate_processed)
+    decode_image_alpha(data, limits, false, true, validate_processed)
+}
+
+/// Perplexity protocol-v4 calls PIL `convert("RGB")` without EXIF transpose.
+/// Alpha is discarded and encoded pixel orientation is preserved.
+pub(crate) fn decode_decider_image(
+    data: &[u8],
+    limits: &PreprocessLimits,
+) -> Result<RgbImage, InvalidInput> {
+    decode_image_alpha(data, limits, false, false, |width, height| {
+        resized_dimensions(width, height, limits).map(|_| ())
+    })
 }
 
 fn decode_image_alpha<F: FnOnce(u32, u32) -> Result<(), InvalidInput>>(
     data: &[u8],
     limits: &PreprocessLimits,
     white_background: bool,
+    apply_orientation: bool,
     validate_processed: F,
 ) -> Result<RgbImage, InvalidInput> {
     if data.is_empty() || data.len() > limits.max_encoded_bytes {
@@ -454,7 +472,11 @@ fn decode_image_alpha<F: FnOnce(u32, u32) -> Result<(), InvalidInput>>(
     } else {
         decode_png_rgb(data, width, height, limits, white_background)?
     };
-    let (pixels, width, height) = orient_rgb(pixels, width, height, orientation)?;
+    let (pixels, width, height) = if apply_orientation {
+        orient_rgb(pixels, width, height, orientation)?
+    } else {
+        (pixels, width, height)
+    };
     RgbImage::try_new(width, height, pixels, limits)
 }
 

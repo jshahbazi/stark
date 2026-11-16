@@ -94,6 +94,7 @@ xxhash-rust = { workspace = true, features = ["xxh3"], optional = true }
 
 [dependencies]
 stark-engine-macros.workspace = true
+stark-resource-budget = { path = "../stark-resource-budget" }
 bitflags.workspace = true
 derive_more = { workspace = true, features = ["debug"] }
 half.workspace = true

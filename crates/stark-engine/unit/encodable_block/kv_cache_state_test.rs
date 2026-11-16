@@ -8,10 +8,10 @@ fn cache_capacity_and_preparation_reject_overflow_before_dispatch() {
     assert!(checked_cache_capacity(u32::MAX - 511, 64, 2).is_err());
     assert!(checked_cache_capacity(u32::MAX - 1024, u32::MAX, 8).is_err());
     assert_eq!(checked_cache_capacity(1024, 64, 2).unwrap(), (2048, 262144));
-    assert!(checked_preparation_rows(u32::MAX, 1, u32::MAX).is_err());
-    assert!(checked_preparation_rows(2048, 1, 2048).is_err());
-    assert!(checked_preparation_rows(0, 1025, 2048).is_err());
-    assert_eq!(checked_preparation_rows(1024, 1024, 2048).unwrap(), 2048);
+    assert!(checked_preparation_rows(u32::MAX, 1, u32::MAX, 1024).is_err());
+    assert!(checked_preparation_rows(2048, 1, 2048, 1024).is_err());
+    assert!(checked_preparation_rows(0, 1025, 2048, 1024).is_err());
+    assert_eq!(checked_preparation_rows(1024, 1024, 2048, 1024).unwrap(), 2048);
 }
 
 fn accept(
