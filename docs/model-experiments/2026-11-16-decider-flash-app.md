@@ -116,7 +116,7 @@ valid matching top choice in the visible result. Check image removal/reset and
 Stop through the app. Keep fixture contents, probabilities and screenshots
 private; publish aggregate observations and identity hashes only. No timing,
 fresh-download, broad task-quality or release claim. Push the record on the same
-branch; do not open a PR. Current state: in progress.
+branch; do not open a PR. Current state: passed with the import-default fix below.
 
 The original signed bundle installed successfully and its full 4,097-file
 inventory matched `DF13APP-01`. Initial CUA attachment failed because the app
@@ -129,6 +129,26 @@ inherited purpose. No GUI model inference had run.
 The default-purpose route now selects Decision for an auto-detected typed or
 pinned Decider source when no explicit artifact mode was chosen. Explicit
 conflicting modes still fail. Added GUI-shaped import regressions and changed
-the packaged validation recipe to exercise that same default payload. Rebuild,
-installed GUI retest and final hashes are pending; preserve the original bundle
-and qualification identities separately.
+the packaged validation recipe to exercise that same default payload.
+
+Implementation `9bef02aed7354e5f8b79597b91e32b452eb0e59c` was rebuilt from a
+clean source tree, Developer ID signed and installed at
+`~/Applications/Stark.app`. The complete installed inventory and signature
+matched that newly tested bundle. The revised packaged reference run again
+passed 5/5 choices, including three images, with maximum probability error
+0.000790242319442; exact repeat/reset and cleanup passed, with 14 GPU events.
+
+The actual installed GUI passed Add from Source import, automatic Decision
+selection, loading and a single image-only colour decision. The visible result
+selected the expected answer and rendered three probability rows and the saved
+calibration caption. Remove Image cleared the preview/result; Stop cleared the
+worker and GPU display. Private staging was empty afterward. Synthetic inputs
+were cleared and the model remains imported as `Native V2`, stopped. There is
+no separate Decision Reset button; native reset is covered by the packaged
+backend run, not claimed as a clicked GUI control.
+
+Focused regression tests: 59 passed. Common desktop regressions: 363 passed,
+one skipped. Repository policy and lint/diff checks passed. Earlier full-suite
+results remain bound to the earlier source. Exact new bundle/receipt hashes and
+GUI scope are recorded in the [installed follow-up](../archive/runs/2026-11-16-decider-flash-app.md#installed-gui-follow-up-20261116-df13app-02).
+No PR, notarization or release was created.

@@ -20,6 +20,10 @@ matched 5/5 reference choices, including three image cases, and passed
 repeat/reset, attachment cleanup and GPU telemetry checks. The native results
 above keep their original artifact and execution scope.
 
+The [installed GUI follow-up](archive/runs/2026-11-16-decider-flash-app.md#installed-gui-follow-up-20261116-df13app-02)
+also passed a visible image-only decision, image removal and Stop. It fixed Add
+from Source's inherited Chat-purpose setting for detected Decider sources.
+
 ## Use in the app
 
 In **Manage Models**, open **Model Catalog**, browse **Decider Flash v1.3** and

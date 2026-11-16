@@ -102,3 +102,72 @@ The signed development app remains an ignored local build under
 implementation commit even though the external validation harness was corrected
 later. The user's installed app, model library and credentials were not changed.
 No PR was opened. Branch push status is recorded in the final delivery response.
+
+## Installed GUI follow-up: 20261116-DF13APP-02
+
+The user subsequently requested installation and an actual-app image check.
+The original `DF13APP-01` build was installed and verified unchanged. CUA could
+not initially attach to the menu-bar popup; the user opened Manage Models.
+The visible Add from Source flow then exposed a missing control: it sends no
+explicit artifact mode and inherits Chat's text support purpose. That payload
+was rejected for the detected Decision artifact. Earlier backend checks had
+explicitly requested Decision. This was a GUI-path failure before inference,
+and does not erase or invalidate the earlier explicitly scoped backend results.
+
+The fix routes an auto-detected prepared or pinned Decider source to Decision
+when the source form has not explicitly selected an artifact mode. Explicit
+conflicting modes are still refused. New regressions mirror the visible form,
+and the external packaged validator now exercises its inherited default payload.
+
+| New binding | Identity |
+| --- | --- |
+| Implementation | `9bef02aed7354e5f8b79597b91e32b452eb0e59c`, clean at build |
+| Signed development build | `20261116200836904445` |
+| App manifest SHA-256 | `4f1392231ad17346bb870bc5f604e78ca70290df99207f0795ecd7a5339f5437` |
+| Signed app executable SHA-256 | `5890f7cd5e076c916146f85eece1d6636d1e91be1a835c933052bc03a6290647` |
+| Signed Decider worker SHA-256 | `258245aa6674397c21f9677e03e04aa2f5051df35ee6a4011f2bf5bb2b272bc3` |
+| Installed and staged inventory SHA-256 | `0dd5445a3fe81b97c3b6ec1821ae15579ea8dac21a1e722f60bb28245fe471a3` |
+| Updated app validator SHA-256 | `888d00003211765614089d087661dac268dc1d91cc9f0ffb32deec27c3085a9f` |
+| New private reference receipt SHA-256 | `98f2502db36309d659c87f438127f9d2aae05fe56eb9866f8ab5035a76e9e2b6` |
+| Private installed-GUI receipt SHA-256 | `aca425af2a0521e1be65d6ec93210eb6ce863c6aa5ad945d1fb73b0d1f8fe3e5` |
+| GUI test image SHA-256 | `c07d7cc870c2345d68f7bb38ee814d16d0a9cadb41520dd25f97459f683ebed0` |
+
+Model configuration, weights, reference source/runner and fixture identities
+remain as above. Native inference code and the unsigned worker did not change;
+new signatures change delivered executable hashes. All 4,097 installed files
+matched the new staged app, including after GUI execution. Deep/strict signature
+verification passed. This build was installed at `~/Applications/Stark.app`.
+
+The new relocated packaged-backend run passed all five choices (two text, three
+image), maximum absolute probability error 0.000790242319442 and mean error
+0.000146810055544. Repeat after images and reset were exact, private attachment
+cleanup passed, and 14 GPU memory events were received. Reference/native models
+ran sequentially on the same host and precision policy as `DF13APP-01`.
+
+The installed GUI was then exercised through visible controls:
+
+- Manage Models → Add from Source → Local Folder imported the same prepared
+  artifact. The row showed Decision and images and no tools. Run automatically
+  selected Decision and loaded the native model.
+- The Playground accepted one private 256×256 synthetic PNG with an empty text
+  state. Run decision produced the expected top answer, three rendered
+  probability rows, the saved-calibration caption and Ready status. GPU memory
+  was visibly reported. This observes the result presentation, not a separate
+  numerical comparison of rounded GUI percentages.
+- Remove Image cleared the preview and result. Stop left the app stopped,
+  removed the worker and cleared GPU telemetry. The backend's private
+  attachment directory was empty afterward. Test inputs were cleared.
+
+The imported model remains available as `Native V2`; its prepared folder must
+remain available. The four pre-existing model entries and credentials were
+retained. There is no standalone Reset button in this Decision view, so GUI
+reset is not claimed; the external packaged check exercised native reset.
+Raw GUI accessibility output containing inputs/results was inspected in memory
+and reduced to aggregate checks; no result screenshot or raw probability record
+was saved or published.
+
+Verification after the fix: 59 focused regression tests and 363 common desktop
+tests passed, with one common test skipped. Repository policy, lint and diff
+checks passed. The earlier complete 7,878-test run retains its earlier source
+binding. No performance or broad vision-quality promotion, PR, notarization or
+release publication was performed.

@@ -1,6 +1,6 @@
 # Model change and experiment ledger
 
-- [20261116-DF13APP-01: Decider Flash app integration](2026-11-16-decider-flash-app.md): Decision-only setup and one-image workflow; signed relocated bundle matches 5/5 reference choices, including three image cases. Installed GUI execution and performance are separate.
+- [20261116-DF13APP-01–02: Decider Flash app integration](2026-11-16-decider-flash-app.md): Decision-only setup and one-image workflow; signed relocated bundles match 5/5 reference choices, including three image cases. Installed GUI image decision/removal/Stop passed after fixing Add from Source defaults; performance remains separate.
 
 - [20261116-DF13-01–03: Decider Flash v1.3](2026-11-16-decider-flash-v13.md): dedicated native BF16 text/image scoring; final artifact matches 15/15 reference decisions and passes lifecycle checks. Tower-residency timing is inconclusive; desktop integration remains separate.
 
