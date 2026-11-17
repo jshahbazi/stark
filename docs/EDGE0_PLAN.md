@@ -60,7 +60,8 @@ With that schedule, `STARK_EDGE0_PREFILL_TOKENS` of 16, 24 or 32 raises the
 ordinary prefill batch so more rows share an expert dispatch
 ([larger batches](benchmarks/2026-11-17-edge0-prefill-batches.md)): observed
 prefill is 41.49 tok/s at 8 tokens, 48.26 at 16 and 54.18 at 32. It defaults
-to 8.
+to 8. The [performance outlook](archive/runs/2026-11-17-edge0-performance-outlook.md)
+summarizes these attempts, where the time goes now and estimated ceilings.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
 records the intake and prerequisites. The
