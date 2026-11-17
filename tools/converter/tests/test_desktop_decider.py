@@ -89,7 +89,7 @@ def artifact(tmp_path, monkeypatch):
     return path
 
 
-def fake_worker(tmp_path, behavior="normal"):
+def fake_worker(tmp_path, behavior="normal", dispatch_marker=None):
     path = tmp_path / f"decide-worker-{behavior}"
     path.write_text(
         f"#!{sys.executable}\n"
@@ -101,7 +101,12 @@ def fake_worker(tmp_path, behavior="normal"):
         " r=json.loads(line)\n"
         " if r['operation']=='reset_cache':\n"
         "  print(json.dumps({'ok':True,'cache_cleared':True}),flush=True);continue\n"
-        f" if {behavior!r}=='wait':time.sleep(30)\n"
+        + (
+            f" if r['operation']=='decide':Path({str(dispatch_marker)!r}).write_text('dispatched')\n"
+            if dispatch_marker is not None
+            else ""
+        )
+        + f" if {behavior!r}=='wait':time.sleep(30)\n"
         f" if {behavior!r}=='fail':raise SystemExit(3)\n"
         " images=r.get('images',[])\n"
         " if images and (len(images)!=1 or not Path(images[0]).is_file() or "
@@ -178,9 +183,8 @@ def request(image=None, text="State", request_id="request-1"):
 def api_request(state="State", *, model=None, questions=None, images=None):
     payload = {
         "state": state,
-        "questions": questions or {
-            "choice": {"type": "choice", "instructions": "Pick one", "criteria": {"first": None, "second": None}}
-        },
+        "questions": questions
+        or {"choice": {"type": "choice", "instructions": "Pick one", "criteria": {"first": None, "second": None}}},
     }
     if model is not None:
         payload["model"] = model
@@ -273,9 +277,7 @@ def test_api_decision_supports_all_question_types_and_preserves_order(desktop):
     assert result["answers"]["binary"]["noul"] == pytest.approx(1 / (1 + math.exp(-1)))
     assert result["answers"]["rank"]["choice"] == "a"
     assert result["answers"]["score"]["legend"] == {"0": "low", "1": "mid", "2": "high"}
-    assert result["answers"]["score"]["score"] == pytest.approx(
-        (math.e + 2 * math.e**2) / (1 + math.e + math.e**2)
-    )
+    assert result["answers"]["score"]["score"] == pytest.approx((math.e + 2 * math.e**2) / (1 + math.e + math.e**2))
     assert result["usage"]["sequences"] == 3
     assert result["usage"]["input_tokens"] > 0
 
@@ -291,7 +293,8 @@ def test_api_decision_images_are_staged_and_cleaned(desktop):
 
 
 @pytest.mark.parametrize(
-    "payload", [
+    "payload",
+    [
         {"state": "x", "questions": {}},
         {"state": "x", "questions": {"bad": {"type": "unknown"}}},
         {"state": "x", "questions": {"too-many": {"type": "noul"}}, "extra": True},
@@ -322,6 +325,7 @@ def test_api_decisions_share_fifo_queue_and_cancel_waiter(desktop, tmp_path):
     instance, _ = desktop
     instance.decide_executable = fake_worker(tmp_path, "wait")
     run(instance)
+    worker, child = instance.worker, instance.worker.process
     first_error, second_error = [], []
     second_cancelled = threading.Event()
 
@@ -345,6 +349,7 @@ def test_api_decisions_share_fifo_queue_and_cancel_waiter(desktop, tmp_path):
     second_cancelled.set()
     second.join(timeout=2)
     assert second_error == ["request_cancelled"]
+    assert instance.worker is worker and child.poll() is None
     instance.stop(quiet=True)
     first.join(timeout=5)
     assert first_error
@@ -402,7 +407,8 @@ def test_stop_fences_active_and_queued_api_decisions(desktop, tmp_path):
 
 def test_running_api_decision_cancellation_reaps_worker_without_reply(desktop, tmp_path):
     instance, _ = desktop
-    instance.decide_executable = fake_worker(tmp_path, "wait")
+    dispatch_marker = tmp_path / "decision-dispatched"
+    instance.decide_executable = fake_worker(tmp_path, "wait", dispatch_marker)
     identifier = run(instance)
     child = instance.worker.process
     cancelled = threading.Event()
@@ -418,13 +424,50 @@ def test_running_api_decision_cancellation_reaps_worker_without_reply(desktop, t
     thread = threading.Thread(target=call)
     thread.start()
     deadline = time.monotonic() + 2
-    while instance.job is None and time.monotonic() < deadline:
+    while not dispatch_marker.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
+    assert dispatch_marker.exists(), "native worker must receive decide before active cancellation"
     cancelled.set()
     thread.join(timeout=5)
     assert not thread.is_alive()
     assert child.poll() is not None and instance.worker is None
     assert "reply" not in outcomes and "request_cancelled" in outcomes
+    assert instance.job is None and instance.api_queue == []
+
+
+def test_api_decision_cancelled_before_native_dispatch_preserves_worker(desktop):
+    instance, _ = desktop
+    run(instance)
+    worker = instance.worker
+    child = worker.process
+    entered, release = threading.Event(), threading.Event()
+    original = worker.decide_request
+
+    def pause_before_dispatch(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=2)
+        return original(*args, **kwargs)
+
+    worker.decide_request = pause_before_dispatch
+    cancelled = threading.Event()
+    outcomes = []
+
+    def call():
+        try:
+            instance.api_decide(api_request(), cancelled=cancelled)
+            outcomes.append("reply")
+        except APIError as error:
+            outcomes.append(error.code)
+
+    thread = threading.Thread(target=call)
+    thread.start()
+    assert entered.wait(timeout=2)
+    cancelled.set()
+    release.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert outcomes == ["request_cancelled"]
+    assert instance.worker is worker and child.poll() is None
     assert instance.job is None and instance.api_queue == []
 
 
