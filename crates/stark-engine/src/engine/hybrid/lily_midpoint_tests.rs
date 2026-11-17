@@ -103,9 +103,14 @@ fn private_lily_midpoint_full_logits_and_mtp() {
     let mut model = LilyModel::load_with_options(Path::new(&path), true, true).unwrap();
     assert_eq!(model.prefill_chunk_tokens(), 4096);
     assert!(model.supports_images());
+    model.enable_prefix_midpoint();
+    assert!(!model.prefix_suffix_compatible(2048, 127));
+    assert!(model.prefix_suffix_compatible(2048, 128));
+    assert!(model.prefix_suffix_compatible(4096, 2));
 
     let mut exact = true;
     for (source, followed, checkpoint) in [
+        (&input[0][..2205], &input[0][..2176], 2048),
         (&input[0][..2205], &input[0][..2341], 2048),
         (&input[0][..2205], &input[0][..4517], 2048),
         (input[0].as_slice(), input[0].as_slice(), 6144),

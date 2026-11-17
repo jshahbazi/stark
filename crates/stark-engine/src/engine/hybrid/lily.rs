@@ -736,6 +736,10 @@ impl LilyModel {
         if self.prefix_midpoint { physical / 2 } else { physical }
     }
 
+    pub(super) fn prefix_suffix_compatible(&self, position: usize, suffix_len: usize) -> bool {
+        !self.prefix_midpoint || self.model.midpoint_suffix_compatible(position, suffix_len)
+    }
+
     /// Capture the recurrent state when this request's prefill reaches
     /// `position`, an eligible boundary beyond the current position. The
     /// ordinary path splits at a completed pass. The midpoint path can

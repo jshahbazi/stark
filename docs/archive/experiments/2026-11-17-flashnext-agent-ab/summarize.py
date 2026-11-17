@@ -320,6 +320,9 @@ def summarize(rows, partial_lines):
     } if midpoint else {}
     invalid_geometry_sessions = {label for label, session in sessions.items() if midpoint
         and validated_launches.get(session["start"]["block"]) != session["start"]["grid"]}
+    reused_initial_sessions = {label for label, session in sessions.items() if midpoint and session["requests"]
+                               and session["requests"][0].get("cached_tokens") != 0}
+    invalid_control_sessions = invalid_geometry_sessions | reused_initial_sessions
     indexed = {(session["start"]["block"], session["start"]["task"]): label for label, session in sessions.items()}
     arms = {}
     for grid in (BASELINE, CANDIDATE):
@@ -358,7 +361,7 @@ def summarize(rows, partial_lines):
             native_pairs = []
             user_turns = []
             inputs = None
-            comparison_control_valid = base_label not in invalid_geometry_sessions and candidate_label not in invalid_geometry_sessions
+            comparison_control_valid = base_label not in invalid_control_sessions and candidate_label not in invalid_control_sessions
             quality_delta = None
             exact_sequence = None
             if base and candidate and comparison_control_valid:
@@ -460,6 +463,7 @@ def summarize(rows, partial_lines):
                       physical_chunk_tokens=BASELINE, quality_changes=dict(changes),
                       midpoint_controls={"valid_ready_blocks": sorted(validated_launches),
                                          "sessions_without_valid_launch_controls": len(invalid_geometry_sessions),
+                                         "sessions_with_invalid_initial_reuse": len(reused_initial_sessions),
                                          "sessions_with_zero_initial_reuse": sum(bool(session["requests"])
                                              and session["requests"][0].get("cached_tokens") == 0 for session in sessions.values())})
         result["limits"].append("For midpoint, accepted session timing also requires an identical ordered native work sequence. Arm labels identify prefix grids; both physical chunks are 4,096 tokens.")

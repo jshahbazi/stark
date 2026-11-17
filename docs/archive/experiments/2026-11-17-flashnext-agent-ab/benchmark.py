@@ -112,7 +112,9 @@ class NativeTrace:
         if self.previous is not None:
             old, old_context, old_scope = self.previous
             boundary = (len(old) - 1) // self.grid * self.grid
-            if context == old_context and scope == old_scope and len(tokens) >= boundary + 2:
+            is_midpoint = os.environ.get("STARK_LILY_PREFIX_MIDPOINT") == "1" and boundary % 4096 != 0
+            min_suffix = 128 if is_midpoint else 2
+            if context == old_context and scope == old_scope and len(tokens) >= boundary + min_suffix:
                 if tokens[:boundary] == old[:boundary]:
                     expected = boundary
 

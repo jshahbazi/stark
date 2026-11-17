@@ -1796,6 +1796,12 @@ impl Qwen4ExpModel {
         self.prefill_chunk
     }
 
+    /// A short resumed midpoint can switch the GDN scan or projection
+    /// arithmetic from the path selected for the full containing chunk.
+    pub fn midpoint_suffix_compatible(&self, position: usize, suffix_rows: usize) -> bool {
+        position.is_multiple_of(self.prefill_chunk) || suffix_rows >= crate::kernels::gdn::GDN_CHUNK_MIN_ROWS
+    }
+
     /// Sets the prompt tokens per batched prefill pass (a power of two up
     /// to twice `PREFILL_CHUNK`; for measurement and tests).
     pub fn set_prefill_chunk(&mut self, chunk: usize) -> Result<()> {
@@ -2123,7 +2129,8 @@ impl Qwen4ExpModel {
             vision.is_none()
                 && !self.config.official_mlx_rounding()
                 && self.prefill_chunk == PREFILL_CHUNK
-                && state.pos.is_multiple_of(PREFILL_MIDPOINT),
+                && state.pos.is_multiple_of(PREFILL_MIDPOINT)
+                && self.midpoint_suffix_compatible(state.pos, tokens.len()),
             "midpoint prefill requires text on the Lily 4096 grid"
         );
         ensure!(

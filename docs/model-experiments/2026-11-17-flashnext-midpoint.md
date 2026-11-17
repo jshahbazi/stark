@@ -2,6 +2,8 @@
 
 This prototype adds a default-off `STARK_LILY_PREFIX_MIDPOINT=1` selector for the retained-vision Lily Q4-XL artifact pinned at `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl@0f94842e3682b49acace4daeb4cf2e65a6f94f83`, with artifact digest `18c7bcc1e97d1fefdd361472c2daa59d81d89fcd6f3a61983d995a032b44bfb4`. The baseline and candidate keep 4,096-token physical chunks. The candidate captures one selected boundary on the 2,048 grid. It retains only the immediately preceding matching scoped text request, with the existing context, sampling and MTP lifecycle rules. At an interior boundary it writes one F32 GDN state per recurrent layer, the convolution windows, PLE history and draft hidden. After midpoint restore, the first suffix pass bridges to the next absolute 4,096 boundary. [Prior trace and design](2026-11-17-flashnext-kernel-and-prefix-follow-up.md)
 
+Interior reuse requires at least 128 suffix rows. A smaller suffix can select the serial GDN recurrence or small-row projections where the containing pass used batched arithmetic. Those requests follow fresh prefill. The existing restriction for full-chunk boundaries stays at two suffix tokens.
+
 | Attempt | Control | Decision criterion |
 | --- | --- | --- |
 | 20261117-FLASHSPEED-11 | Model-free and physical Metal GDN selected-row tests, then full-model capture/no-capture and fresh/resume controls with MTP enabled. | Require bit-identical complete-vocabulary first logits and draft and target readouts consumed by the sampler, plus equal sampled tokens and all four MTP work counts. Cover initial 2,048 midpoint with append and bridge to a full physical boundary, plus capture and repeat at 8K, 12K and 32K. |
