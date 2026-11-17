@@ -221,6 +221,7 @@ class Pi:
         started = time.monotonic()
         ident = self.send("prompt", message=text)
         tools = {"calls": 0, "errors": 0}
+        tool_totals = {}
         first_text = None
         assistant = []
 
@@ -234,6 +235,10 @@ class Pi:
             if kind == "tool_execution_end":
                 tools["calls"] += 1
                 tools["errors"] += int(event.get("isError") is True)
+                name = event.get("toolName")
+                totals = tool_totals.setdefault(name if name in TOOLS else "other", {"calls": 0, "errors": 0})
+                totals["calls"] += 1
+                totals["errors"] += int(event.get("isError") is True)
             message = event.get("message", {})
             if kind == "message_end" and message.get("role") == "assistant":
                 reason = message.get("stopReason")
@@ -246,7 +251,8 @@ class Pi:
         self.wait(lambda row: row.get("type") == "agent_settled", started + timeout, observe)
         reason, category = assistant[-1] if assistant else ("missing", None)
         return {**tools, "wall_seconds": time.monotonic() - started, "first_text_seconds": first_text,
-                "assistant_messages": len(assistant), "client_finish": reason, "client_error": category}
+                "assistant_messages": len(assistant), "client_finish": reason, "client_error": category,
+                "tool_totals": tool_totals}
 
     def close(self):
         self.process.stdin.close()
@@ -284,7 +290,9 @@ def session(args, desktop, tasks, grid, block, report, base, key, models):
     worker = desktop.worker
     for task in tasks:
         report.session = f"{block}-{task}"
-        workspace = args.output / f"{report.session}-work"
+        # Pi embeds the actual cwd in its system prompt. Every session needs
+        # fresh files at the same path for any exact native inputs to match.
+        workspace = args.output / "active-workspace"
         profile = args.output / f"{report.session}-pi"
         workspace.mkdir()
         profile.mkdir()
@@ -318,6 +326,7 @@ def session(args, desktop, tasks, grid, block, report, base, key, models):
             report.emit("session_failure", code=str(error) if isinstance(error, TrialError) else type(error).__name__)
         finally:
             worker.request = trace.original
+            workspace.rename(args.output / f"{report.session}-work")
             report.phase = report.session = None
 
 

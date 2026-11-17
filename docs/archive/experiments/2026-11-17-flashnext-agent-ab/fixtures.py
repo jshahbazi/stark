@@ -270,7 +270,9 @@ if __name__ == "__main__":
         f"        self.assertEqual({name}({arg}), {expected!r})\n",
         encoding="utf-8",
     )
-    suffix = "\n\nImplement the change in this workspace. Run relevant tests and summarize the result."
+    suffix = ("\n\nImplement the change in service.py in this workspace. Keep the existing CLI working. "
+              "Use the available file tools. An independent grader will run the tests. "
+              "Summarize the result after saving the implementation.")
     return tuple(" ".join(textwrap.dedent(spec).split()) + suffix for spec in phases)
 
 

@@ -65,8 +65,8 @@ def request_integrity(row, grid):
         and (cached == 0 or input_count - cached >= 2)
         and row.get("mtp_valid") is True and accepted <= proposed <= 2 * rounds
         and verified == rounds + proposed and (sampled <= 3 or proposed > 0)
-        and finish in ("length", "eos", "stop_sequence")
-        and sampled == output + (finish == "eos") and sampled <= budget
+        and finish in ("length", "eos", "stop_token", "stop_sequence")
+        and sampled == output + (finish in ("eos", "stop_token")) and sampled <= budget
         and (finish != "length" or sampled == budget)
         and all(isinstance(row.get(key), str) and len(row[key]) == 64 for key in ("input_sha256", "output_sha256"))
     )
