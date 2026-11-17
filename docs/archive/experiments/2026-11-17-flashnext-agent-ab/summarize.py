@@ -305,9 +305,21 @@ def extended_arm(sessions):
 
 def summarize(rows, partial_lines):
     manifest = next((row for row in rows if row.get("type") == "manifest"), {})
+    midpoint = manifest.get("mode") == "midpoint"
     schedule = manifest.get("schedule") or []
     sessions, arm_failures = collect(rows)
     status = {label: session_status(session) for label, session in sessions.items()}
+    launch_counts = Counter(row.get("block") for row in rows if row.get("type") == "arm_ready")
+    validated_launches = {
+        row["block"]: row["grid"] for row in rows
+        if row.get("type") == "arm_ready" and type(row.get("block")) is int and 1 <= row["block"] <= len(schedule)
+        and launch_counts[row["block"]] == 1 and row.get("grid") in (BASELINE, CANDIDATE)
+        and row["grid"] == schedule[row["block"] - 1][0] and row.get("loaded_vision") is True
+        and row.get("physical_chunk_tokens") == BASELINE and row.get("prefix_chunk_tokens") == row["grid"]
+        and row.get("midpoint_enabled") is (row["grid"] == CANDIDATE)
+    } if midpoint else {}
+    invalid_geometry_sessions = {label for label, session in sessions.items() if midpoint
+        and validated_launches.get(session["start"]["block"]) != session["start"]["grid"]}
     indexed = {(session["start"]["block"], session["start"]["task"]): label for label, session in sessions.items()}
     arms = {}
     for grid in (BASELINE, CANDIDATE):
@@ -332,6 +344,7 @@ def summarize(rows, partial_lines):
     matched = defaultdict(list)
     matched_sessions = defaultdict(list)
     inputs_total = Counter()
+    changes = Counter()
     for first in range(0, len(schedule) - 1, 2):
         left, right = schedule[first:first + 2]
         if {left[0], right[0]} != {BASELINE, CANDIDATE} or set(left[1]) != set(right[1]):
@@ -345,7 +358,10 @@ def summarize(rows, partial_lines):
             native_pairs = []
             user_turns = []
             inputs = None
-            if base and candidate:
+            comparison_control_valid = base_label not in invalid_geometry_sessions and candidate_label not in invalid_geometry_sessions
+            quality_delta = None
+            exact_sequence = None
+            if base and candidate and comparison_control_valid:
                 base_session, candidate_session = sessions[base_label], sessions[candidate_label]
                 user_turns = paired_user_turns(base_session, candidate_session)
                 user_turn_rows.extend(user_turns)
@@ -355,6 +371,21 @@ def summarize(rows, partial_lines):
                 native_pairs = list(exact_pairs(base_session, candidate_session))
                 inputs = input_observations(base_session, candidate_session, len(native_pairs))
                 inputs_total.update(inputs)
+                if midpoint:
+                    phase_rows = {turn["phase"]: turn for turn in candidate_session["turns"]}
+                    matched_phases = [(turn, phase_rows[turn["phase"]]) for turn in base_session["turns"]
+                                      if turn["phase"] in phase_rows]
+                    quality_delta = {
+                        "grades_changed": sum(before.get("grade") != after.get("grade") for before, after in matched_phases),
+                        "pi_finish_changed": sum(before.get("client_finish") != after.get("client_finish") for before, after in matched_phases),
+                        "grade_and_pi_acceptance_changed": sum(accepted_turn(before) != accepted_turn(after) for before, after in matched_phases),
+                        "session_acceptance_changed": int(base["accepted"] != candidate["accepted"]),
+                    }
+                    changes.update(quality_delta)
+                    exact_sequence = (len(matched_phases) == 3 and all(
+                        (work := phase_work(base_session, before)) is not None and work == phase_work(candidate_session, after)
+                        for before, after in matched_phases))
+                    equal = equal and exact_sequence
                 by_reuse = defaultdict(list)
                 for current, trial in native_pairs:
                     group = ("fresh_both" if current["cached_tokens"] == trial["cached_tokens"] == 0 else
@@ -370,13 +401,17 @@ def summarize(rows, partial_lines):
                 if equal:
                     paired_turns.append((base["turn_seconds"], candidate["turn_seconds"]))
                     paired_sessions.append((base["session_seconds"], candidate["session_seconds"]))
-            pairs.append({
+            group = {
                 "task": task, "order": [left[0], right[0]], "blocks": blocks, "equal_accepted_work": equal,
                 "exact_matched_native_requests": len(native_pairs), "4096": base, "2048": candidate,
                 "same_input_observations": inputs,
                 "accepted_user_turn_pairs": user_turns,
                 "accepted_user_turn_summary": turn_comparison(user_turns),
-            })
+            }
+            if midpoint:
+                group.update(launch_controls_valid=comparison_control_valid if base and candidate else None,
+                             identical_full_native_sequence=exact_sequence, quality_changes=quality_delta)
+            pairs.append(group)
 
     groups = {}
     for group in ("fresh_both", "same_reuse", "different_reuse", "fresh_both_at_least_4096", "fresh_both_below_4096"):
@@ -395,7 +430,7 @@ def summarize(rows, partial_lines):
                 if all(number(base.get(field)) and number(candidate.get(field)) for base, candidate in group_pairs)
             ]) for field in fields},
         }
-    return {
+    result = {
         "campaign_end_marker": any(row.get("type") == "complete" for row in rows),
         "ignored_partial_or_invalid_lines": partial_lines,
         "planned_pairs": len(pairs),
@@ -420,6 +455,15 @@ def summarize(rows, partial_lines):
             "Host deltas are system-wide counters over each session and only available when sampled before and after.",
         ],
     }
+    if midpoint:
+        result.update(mode="midpoint", grid_labels={"4096": "baseline prefix grid", "2048": "midpoint prefix grid"},
+                      physical_chunk_tokens=BASELINE, quality_changes=dict(changes),
+                      midpoint_controls={"valid_ready_blocks": sorted(validated_launches),
+                                         "sessions_without_valid_launch_controls": len(invalid_geometry_sessions),
+                                         "sessions_with_zero_initial_reuse": sum(bool(session["requests"])
+                                             and session["requests"][0].get("cached_tokens") == 0 for session in sessions.values())})
+        result["limits"].append("For midpoint, accepted session timing also requires an identical ordered native work sequence. Arm labels identify prefix grids; both physical chunks are 4,096 tokens.")
+    return result
 
 
 def main():

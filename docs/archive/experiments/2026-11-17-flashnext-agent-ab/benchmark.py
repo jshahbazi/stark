@@ -337,7 +337,13 @@ def session(args, desktop, tasks, grid, block, report, base, key, models):
 
 
 def arm(args, report, block, grid, tasks):
-    os.environ["STARK_LILY_PREFILL_CHUNK"] = str(grid)
+    physical = 4096 if args.midpoint else grid
+    midpoint_enabled = args.midpoint and grid == 2048
+    os.environ["STARK_LILY_PREFILL_CHUNK"] = str(physical)
+    if midpoint_enabled:
+        os.environ["STARK_LILY_PREFIX_MIDPOINT"] = "1"
+    else:
+        os.environ.pop("STARK_LILY_PREFIX_MIDPOINT", None)
     library = args.output / "library"
     with open(os.devnull, "w") as sink:
         desktop = AgentDesktop(args.worker, library, output=sink)
@@ -358,7 +364,8 @@ def arm(args, report, block, grid, tasks):
             call_api(base + "/chat/completions", key, {"model": MODEL, "max_tokens": 16,
                 "messages": [{"role": "user", "content": "Summarize the invariant in this Rust source excerpt:\n" +
                               (ROOT / "vendor/lily-core/src/qwen4exp/model.rs").read_text()[:12000]}]})
-            report.emit("arm_ready", block=block, grid=grid, loaded_vision=True,
+            report.emit("arm_ready", block=block, grid=grid, loaded_vision=True, physical_chunk_tokens=physical,
+                        prefix_chunk_tokens=grid, midpoint_enabled=midpoint_enabled,
                         startup_and_warmup_seconds=time.monotonic() - started)
             session(args, desktop, tasks, grid, block, report, base, key, models)
         finally:
@@ -376,6 +383,8 @@ def main():
     for option in ("worker", "model", "pi", "node", "guard", "output"):
         parser.add_argument("--" + option, required=True, type=Path)
     parser.add_argument("--block", type=int, action="append", choices=range(1, 9))
+    parser.add_argument("--midpoint", action="store_true", help="Keep both arms at physical 4096; test interior capture")
+    parser.add_argument("--order", choices=("abba", "baab"), default="abba", help="Launch order for the first four blocks")
     parser.add_argument("--turn-timeout", type=int, default=180)
     args = parser.parse_args()
     os.umask(0o077)
@@ -385,6 +394,7 @@ def main():
     for name in tuple(os.environ):
         if name.startswith(("STARK_", "UZU_", "LILY_", "GGML_")):
             os.environ.pop(name)
+    schedule = SCHEDULE if args.order == "abba" else SCHEDULE[4:] + SCHEDULE[:4]
     with (args.output / "aggregate.jsonl").open("x") as file:
         report = Recorder(file)
         report.emit("manifest", git_head=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
@@ -392,8 +402,9 @@ def main():
                     fixtures_sha256=digest(Path(__file__).with_name("fixtures.py")),
                     model_manifest_sha256=digest(args.model / "stark-image-artifact.json"), guard_sha256=digest(args.guard),
                     context_tokens=CONTEXT, max_output=MAX_OUTPUT, tools=TOOLS, tool_limit=TOOL_LIMIT,
-                    sampling=SAMPLING, schedule=SCHEDULE)
-        for block, (grid, tasks) in enumerate(SCHEDULE, 1):
+                    sampling=SAMPLING, schedule=schedule, order=args.order,
+                    mode="midpoint" if args.midpoint else "physical_grid")
+        for block, (grid, tasks) in enumerate(schedule, 1):
             if args.block and block not in args.block:
                 continue
             try:

@@ -501,6 +501,10 @@ const GDN_SCAN_KERNEL: &str = "gdn_prefill_regscan";
 /// The name that selects the chunked scan (`gdn_chunk_wy` + `gdn_chunk_scan`).
 pub const GDN_CHUNK_SCAN: &str = "gdn_chunk";
 
+#[cfg(test)]
+#[path = "gdn_chunk_capture_tests.rs"]
+mod chunk_capture_tests;
+
 /// [`gdn_prefill_mid`] through the scan kernel given by name (the shipped
 /// scan takes four value columns per simdgroup; `_c1` / `_c2` are the
 /// one- and two-column instantiations).
@@ -537,6 +541,50 @@ pub fn gdn_prefill_scan_named(
         mid,
         scan_name,
         false,
+        None,
+    )
+}
+
+/// Runs the ordinary Lily KeyValue chunked recurrence and also stores its
+/// F32 state after one interior, whole 64-row block.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gdn_prefill_capture_key_value(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qkv: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    staging: &GdnRegscanStaging<'_>,
+    state: &Tensor,
+    out: &Tensor,
+    scale: f32,
+    num_k_heads: usize,
+    capture_after: usize,
+    snapshot: &Tensor,
+) -> Result<()> {
+    ensure!(
+        num_k_heads == 16 && a_log.numel() == 48,
+        "GDN midpoint capture requires Lily Hk16/Hv48/D128"
+    );
+    gdn_prefill_scan_named_with_rounding(
+        ctx,
+        pass,
+        qkv,
+        a,
+        b,
+        a_log,
+        dt_bias,
+        staging,
+        state,
+        out,
+        scale,
+        num_k_heads,
+        None,
+        GDN_CHUNK_SCAN,
+        false,
+        Some((capture_after, snapshot)),
     )
 }
 
@@ -558,6 +606,7 @@ fn gdn_prefill_chunked(
     out: &Tensor,
     scale: f32,
     num_k_heads: usize,
+    capture: Option<(usize, &Tensor)>,
 ) -> Result<()> {
     let num_heads = a_log.numel();
     let dim = GDN_HEAD_DIM;
@@ -613,7 +662,17 @@ fn gdn_prefill_chunked(
         },
     )?;
     pass.level_barrier(&[chunk.w, chunk.u, chunk.p, chunk.g])?;
-    let scan = ctx.pipeline("gdn_chunk_scan", SOURCE, MslVersion::V4_0)?;
+    let (name, capture_after, snapshot, extra_args) = match capture {
+        Some((after, snapshot)) => ("stark_gdn_chunk_scan_capture", after, snapshot, 1),
+        None => ("gdn_chunk_scan", 0, state, 0),
+    };
+    let scan = ctx.pipeline(name, SOURCE, MslVersion::V4_0)?;
+    let params: [&[u8]; 4] = [
+        &u32_bytes(m),
+        &u32_bytes(num_heads),
+        &u32_bytes(vpk),
+        &u32_bytes(capture_after),
+    ];
     pass.dispatch_at(
         &scan,
         &[
@@ -624,8 +683,9 @@ fn gdn_prefill_chunked(
             chunk.g.binding(),
             state.binding(),
             out.binding(),
-        ],
-        &[&u32_bytes(m), &u32_bytes(num_heads), &u32_bytes(vpk)],
+            snapshot.binding(),
+        ][..7 + extra_args],
+        &params[..3 + extra_args],
         Grid::Threadgroups {
             groups: (dim / GDN_CHUNK_NB, num_heads, 1),
             threadgroup: (32 * 4, 1, 1),
@@ -1089,6 +1149,7 @@ fn gdn_prefill_scan_named_with_rounding(
     mid: Option<&Tensor>,
     scan_name: &str,
     official: bool,
+    capture: Option<(usize, &Tensor)>,
 ) -> Result<()> {
     let num_heads = a_log.numel();
     let dim = GDN_HEAD_DIM;
@@ -1129,6 +1190,19 @@ fn gdn_prefill_scan_named_with_rounding(
 
     if scan_name == GDN_CHUNK_SCAN {
         ensure!(mid.is_none(), "the chunked scan records no mid states");
+        if let Some((after, snapshot)) = capture {
+            ensure!(
+                m >= GDN_CHUNK_MIN_ROWS
+                    && after > 0
+                    && after < m
+                    && after.is_multiple_of(GDN_CHUNK)
+                    && snapshot.shape() == state.shape()
+                    && snapshot.dtype() == DType::F32
+                    && !std::ptr::eq(snapshot.buffer(), state.buffer())
+                    && !std::ptr::eq(snapshot.buffer(), out.buffer()),
+                "GDN chunk capture requires an interior block boundary and separate F32 state"
+            );
+        }
         let chunk = staging.chunk.as_ref().ok_or_else(|| {
             anyhow::anyhow!("the chunked scan needs its chunk staging")
         })?;
@@ -1151,6 +1225,7 @@ fn gdn_prefill_scan_named_with_rounding(
                 out,
                 scale,
                 num_k_heads,
+                capture,
             );
         }
         let rows = |t: &Tensor, start: usize, len: usize| -> Result<Tensor> {
@@ -1185,6 +1260,7 @@ fn gdn_prefill_scan_named_with_rounding(
                 &rows(out, 0, m_main)?,
                 scale,
                 num_k_heads,
+                capture,
             )?;
             pass.level_barrier(&[state])?;
         }
@@ -1307,6 +1383,7 @@ pub fn gdn_prefill_mid_with_rounding(
             mid,
             GDN_SCAN_KERNEL,
             true,
+            None,
         )
     } else {
         gdn_prefill_mid(

@@ -590,3 +590,12 @@ The row-axis shader is the reference for the component comparisons. Stark
 also exposes existing thread-local prefill timings to its private aggregate
 profile and can select a smaller physical prefill chunk at model load for
 matched cache experiments.
+
+The optional 2,048-token prefill midpoint uses Lily's existing KeyValue
+`gdn_chunk_scan_body` in `src/kernels/metal/gdn.metal`. The checkpoint entry
+point writes one F32 accumulator at a selected 64-row boundary, retaining
+the original BF16 working copies and serial-tail policy. Model integration
+uses the existing convolution rollback primitive and draft-hidden row
+layout. The normal prefill entry point and non-Lily layouts remain separate.
+Lily's Apache-2.0 attribution applies. Operator and full-model qualification
+are tracked independently in the midpoint experiment record.

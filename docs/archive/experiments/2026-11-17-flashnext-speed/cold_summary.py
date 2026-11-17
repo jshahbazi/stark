@@ -93,10 +93,10 @@ def work_signature(row):
             or not all(is_hash(row.get(key)) for key in ("generated_sha256", "text_sha256"))):
         return None
     return (row["generated_sha256"], row["text_sha256"], finish, emitted, sampled,
-            row.get("output_budget"), *(counts[key] for key in MTP_KEYS))
+            row.get("output_budget", row.get("max_new_tokens")), *(counts[key] for key in MTP_KEYS))
 
 
-def classify(pairs):
+def classify(pairs, *, midpoint=False):
     equal_input = []
     exact = []
     nonmatching_work = []
@@ -108,16 +108,29 @@ def classify(pairs):
                 exact.append((left, right))
             else:
                 nonmatching_work.append((left, right))
-    return {
+    result = {
         "paired_observations": len(pairs),
         "same_fresh_input_pairs": len(equal_input),
         "exact_work_pairs": len(exact),
-        "prefill_same_fresh_input": timing_pairs(equal_input, "prefill_seconds"),
+        "prefill_same_fresh_input": timing_pairs(exact if midpoint else equal_input, "prefill_seconds"),
         "prefill_exact_work": timing_pairs(exact, "prefill_seconds"),
         "prefill_same_input_nonmatching_work": timing_pairs(nonmatching_work, "prefill_seconds"),
         "decode_exact_work": timing_pairs(exact, "decode_seconds"),
         "wall_exact_work": timing_pairs(exact, "wall_seconds"),
     }
+    if midpoint:
+        output_fields = ("generated_sha256", "text_sha256", "sampled_tokens", "output_tokens", "finish")
+        output_changed = sum(any(left.get(key) != right.get(key) for key in output_fields)
+                             for left, right in nonmatching_work)
+        result.update(input_mismatch_pairs=len(pairs) - len(equal_input), output_change_pairs=output_changed,
+                      unchanged_output_nonmatching_work_pairs=len(nonmatching_work) - output_changed)
+    return result
+
+
+def midpoint_geometry(row):
+    grid = row.get("grid")
+    return (grid in (BASELINE, CANDIDATE) and row.get("prefix_chunk_tokens") == grid
+            and row.get("physical_chunk_tokens") == BASELINE and row.get("midpoint_enabled") is (grid == CANDIDATE))
 
 
 def host_stats(rows):
@@ -144,6 +157,9 @@ def host_stats(rows):
 
 def aggregate(rows, dropped):
     manifests = [row for row in rows if row.get("type") == "manifest"]
+    manifest = manifests[0] if manifests else {}
+    midpoint = manifest.get("mode") == "midpoint"
+    probe = midpoint and manifest.get("probe_only") is True
     ready = [row for row in rows if row.get("type") == "ready"]
     requests = [row for row in rows if row.get("type") == "request"]
     blocks = defaultdict(set)
@@ -152,11 +168,17 @@ def aggregate(rows, dropped):
         if block in (1, 2, 3, 4) and grid in (BASELINE, CANDIDATE):
             blocks[block].add(grid)
     expected_ready = {row.get("block") for row in ready if row.get("block") in (1, 2, 3, 4)}
+    ready_seen = Counter(row.get("block") for row in ready)
+    valid_ready = {row.get("block"): row for row in ready if midpoint_geometry(row) and ready_seen[row.get("block")] == 1}
+    scope_declared = manifest.get("scored_unique_scopes") is True
+    scope_digests_present = any("scope_sha256" in row for row in requests)
+    scope_digests = Counter(row.get("scope_sha256") for row in requests if is_hash(row.get("scope_sha256")))
 
     by_fixture = defaultdict(lambda: defaultdict(list))
     fixture_hashes = defaultdict(set)
     unscheduled = 0
     timing_requests = [row for row in requests if row.get("warmup") is False]
+    invalid_midpoint = 0
     for row in timing_requests:
         block, pair, grid = (row.get(key) for key in ("block", "pair", "grid"))
         length, prompt = row.get("input_tokens"), row.get("prompt")
@@ -164,6 +186,12 @@ def aggregate(rows, dropped):
                 or grid not in (BASELINE, CANDIDATE) or length not in LENGTHS or not isinstance(prompt, str)
                 or len(blocks[block]) != 1):
             unscheduled += 1
+            continue
+        if midpoint and (not scope_declared or not midpoint_geometry(row) or block not in valid_ready
+                         or valid_ready[block].get("grid") != grid or row.get("expected_cached_tokens") != 0
+                         or not is_count(row.get("cached_tokens")) or row["cached_tokens"] != 0
+                         or (scope_digests_present and scope_digests[row.get("scope_sha256")] != 1)):
+            invalid_midpoint += 1
             continue
         by_fixture[(pair, prompt, length)][grid].append(row)
         if is_hash(row.get("input_sha256")):
@@ -209,7 +237,7 @@ def aggregate(rows, dropped):
         if values:
             identities[field] = {"observations": len(values), "valid_hashes": sum(map(is_hash, values)),
                                  "distinct_valid_hashes": len({value for value in values if is_hash(value)})}
-    return {
+    result = {
         "end_marker": any(row.get("type") == "complete" for row in rows),
         "artifact_identity_unchanged": any(row.get("type") == "complete" and row.get("artifact_identity_unchanged") is True
                                            for row in rows),
@@ -225,13 +253,13 @@ def aggregate(rows, dropped):
         "unpaired_observations_missing_grid": {str(grid): missing[grid] for grid in (BASELINE, CANDIDATE)},
         "invalid_schedule_observations": unscheduled,
         "arms": arms,
-        "overall": classify(all_pairs),
-        "by_length": {length: classify([match for (pair, n), matches in paired.items() if n == length for match in matches])
+        "overall": classify(all_pairs, midpoint=midpoint),
+        "by_length": {length: classify([match for (pair, n), matches in paired.items() if n == length for match in matches], midpoint=midpoint)
                       for length in LENGTHS},
         "by_pair_order": {
             pair: {"first_grid": block_grids[2 * pair - 2], "second_grid": block_grids[2 * pair - 1],
-                   "overall": classify([match for (p, _), matches in paired.items() if p == pair for match in matches]),
-                   "by_length": {length: classify(paired[(pair, length)]) for length in LENGTHS}}
+                   "overall": classify([match for (p, _), matches in paired.items() if p == pair for match in matches], midpoint=midpoint),
+                   "by_length": {length: classify(paired[(pair, length)], midpoint=midpoint) for length in LENGTHS}}
             for pair in (1, 2)
         },
         "limits": [
@@ -241,6 +269,20 @@ def aggregate(rows, dropped):
             "Host paging counters are system-wide deltas, with no attribution to the worker or implication of exclusive host access.",
         ],
     }
+    if midpoint:
+        result.update(mode="midpoint", grid_labels={"4096": "baseline prefix grid", "2048": "midpoint prefix grid"},
+                      physical_chunk_tokens=BASELINE, probe_only=probe,
+                      capture_proofs={str(grid): sum(row.get("type") == "capture_proof" and midpoint_geometry(row)
+                          and row.get("grid") == grid and row.get("exact_work") is True and is_count(row.get("input_tokens"))
+                          and row.get("confirmed_cached_tokens") == (row["input_tokens"] - 1) // grid * grid
+                          for row in rows) for grid in (BASELINE, CANDIDATE)},
+                      midpoint_controls={"valid_ready_blocks": sorted(valid_ready), "invalid_measured_requests": invalid_midpoint,
+                                         "scored_unique_scope_declared": scope_declared,
+                                         "scope_digest_evidence_present": scope_digests_present,
+                                         "all_request_scope_digests_unique": (len(scope_digests) == len(requests))
+                                         if scope_digests_present else None})
+        result["limits"].append("Midpoint headline ratios use exact-work pairs only. Each arm uses a 4,096-token physical chunk; arm labels identify prefix grids. Scope uniqueness is runner-declared unless digests are present.")
+    return result
 
 
 def main():

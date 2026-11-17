@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Compare Lily's physical prefill grids on fresh coding prompts with exact MTP2."""
+"""Compare Lily's physical prefill grids or midpoint capture on exact MTP2 coding prompts."""
 
 import argparse
 import os
 from pathlib import Path
+import secrets
 import signal
 import subprocess
 import time
@@ -56,6 +57,11 @@ def validate_ready(worker, grid):
     return image["family_profile"]
 
 
+def work_signature(row):
+    return (row["input_sha256"], row["generated_sha256"], row["text_sha256"], row["sampled_tokens"],
+            row["output_tokens"], row["finish"], row["mtp_counts"])
+
+
 def run(args, output):
     for name in tuple(os.environ):
         if name.startswith(("STARK_", "UZU_", "LILY_", "GGML_")):
@@ -70,6 +76,10 @@ def run(args, output):
     require(all(len(ids) == length for (_, length), ids in matrix.items()), "prompt_lengths")
     jobs = [(names[(rotation + column) % 3], length)
             for rotation in range(3) for column, length in enumerate(LENGTHS)]
+    schedule = SCHEDULE if args.order == "abba" else (2048, 4096, 4096, 2048)
+    if args.probe_only:
+        schedule = schedule[:2]
+        jobs = list(zip(names, LENGTHS, strict=True))
     record(output, {"type": "manifest", "schema": 1,
                     "source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                     "worker_sha256": hash_file(args.worker), "runner_sha256": hash_file(Path(__file__)),
@@ -77,46 +87,82 @@ def run(args, output):
                     "cargo_lock_sha256": hash_file(ROOT / "Cargo.lock"),
                     "image_manifest_sha256": hash_file(args.model / "stark-image-artifact.json"),
                     "source": SOURCE, "revision": REVISION, "artifact_sha256": ARTIFACT,
-                    "fixtures": fixtures, "schedule": SCHEDULE, "pair1_jobs": jobs,
+                    "fixtures": fixtures, "schedule": schedule, "pair1_jobs": jobs,
+                    "mode": "midpoint" if args.midpoint else "physical_grid", "probe_only": args.probe_only,
+                    "order": args.order, "scored_unique_scopes": args.midpoint and not args.probe_only,
                     "context_tokens": CONTEXT, "output_cap": BUDGET, "drafts": DRAFTS,
                     "sampling": SAMPLING, "seed": SEED, "host": host_snapshot()})
 
-    for block, grid in enumerate(SCHEDULE, 1):
+    observed = {}
+    exact_work = 0
+    work_comparisons = 0
+    probe_reports = 0
+    for block, grid in enumerate(schedule, 1):
         pair = (block + 1) // 2
-        os.environ["STARK_LILY_PREFILL_CHUNK"] = str(grid)
+        physical = 4096 if args.midpoint else grid
+        midpoint_enabled = args.midpoint and grid == 2048
+        os.environ["STARK_LILY_PREFILL_CHUNK"] = str(physical)
+        if midpoint_enabled:
+            os.environ["STARK_LILY_PREFIX_MIDPOINT"] = "1"
+        else:
+            os.environ.pop("STARK_LILY_PREFIX_MIDPOINT", None)
+        arm = {"block": block, "pair": pair, "grid": grid, "physical_chunk_tokens": physical,
+               "prefix_chunk_tokens": grid, "midpoint_enabled": midpoint_enabled}
         launched = time.monotonic()
         with Worker(str(args.worker), str(args.model), prefix_cache=True, vision=True, timeout=240) as worker:
             profile = validate_ready(worker, grid)
-            record(output, {"type": "ready", "block": block, "pair": pair, "grid": grid,
+            record(output, {"type": "ready", **arm,
                             "image_profile": profile, "startup_seconds": time.monotonic() - launched,
                             "host": host_snapshot(worker.process.pid)})
 
-            def observe(name, length, warmup=False):
+            def observe(name, length, warmup=False, *, scope=None, reused=0, probe=False):
                 ids = matrix[name, length]
+                if scope is None and args.midpoint:
+                    scope = secrets.token_hex(16)
                 before = host_snapshot(worker.process.pid)
                 started = time.monotonic()
                 reply = generate(worker, ids, context=CONTEXT, max_new=BUDGET, sampling=SAMPLING,
-                                 seed=SEED, mtp_drafts=DRAFTS)
+                                 seed=SEED, mtp_drafts=DRAFTS, scope=scope)
                 elapsed = time.monotonic() - started
                 after = host_snapshot(worker.process.pid)
-                details = validate(reply, length, BUDGET, DRAFTS, 0, VERIFIER)
+                details = validate(reply, length, BUDGET, DRAFTS, reused, VERIFIER)
                 counts = details["mtp_counts"]
                 require(0 < counts["proposed"] <= DRAFTS * counts["rounds"]
                         and counts["verified_rows"] == counts["rounds"] + counts["proposed"], "wrong_mtp_work")
-                record(output, {"type": "request", "block": block, "pair": pair, "grid": grid,
+                row = {"type": "probe_request" if probe else "request", **arm,
                                 "prompt": name, "input_tokens": length, "warmup": warmup,
                                 "input_sha256": digest_ids(ids), "cached_tokens": reply["reused_input_tokens"],
+                                "expected_cached_tokens": reused,
                                 "max_new_tokens": BUDGET, "requested_drafts": DRAFTS,
-                                "wall_seconds": elapsed, "host_before": before, "host_after": after, **details})
+                                "wall_seconds": elapsed, "host_before": before, "host_after": after, **details}
+                record(output, row)
                 print(f"Block {block}, grid {grid}, {name}, {length} tokens: {details['prefill_seconds']:.3f} s"
                       + (" (warmup)" if warmup else ""), flush=True)
+                return work_signature(row)
 
-            observe(names[0], max(LENGTHS), warmup=True)
+            if not args.probe_only:
+                observe(names[0], max(LENGTHS), warmup=True)
             for name, length in jobs if pair == 1 else reversed(jobs):
-                observe(name, length)
+                scope = secrets.token_hex(16) if args.probe_only else None
+                work = observe(name, length, scope=scope, probe=args.probe_only)
+                if args.probe_only:
+                    expected = (length - 1) // grid * grid
+                    resumed = observe(name, length, scope=scope, reused=expected, probe=True)
+                    record(output, {"type": "capture_proof", **arm, "prompt": name, "input_tokens": length,
+                                    "confirmed_cached_tokens": expected, "exact_work": work == resumed})
+                    require(work == resumed, "resumed_work_mismatch")
+                    probe_reports += 1
+                match_key = pair, name, length
+                if match_key in observed:
+                    work_comparisons += 1
+                    exact_work += work == observed[match_key]
+                else:
+                    observed[match_key] = work
 
     require(snapshot_artifact(args.model) == artifact, "model_files_changed")
-    record(output, {"type": "complete", "artifact_identity_unchanged": True, "host": host_snapshot()})
+    record(output, {"type": "complete", "artifact_identity_unchanged": True, "host": host_snapshot(),
+                    "paired_requests": work_comparisons, "exact_work_pairs": exact_work,
+                    "capture_proofs": probe_reports})
 
 
 def main():
@@ -127,7 +173,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("worker", "model", "output"):
         parser.add_argument("--" + option, required=True, type=Path)
+    parser.add_argument("--midpoint", action="store_true", help="Keep both arms at physical 4096; test interior capture")
+    parser.add_argument("--order", choices=("abba", "baab"), default="abba")
+    parser.add_argument("--probe-only", action="store_true", help="Prove capture and exact warm replay; skip scoring")
     args = parser.parse_args()
+    if args.probe_only and not args.midpoint:
+        parser.error("--probe-only requires --midpoint")
     os.umask(0o077)
     args.worker, args.model = args.worker.resolve(strict=True), args.model.resolve(strict=True)
     with args.output.open("x", encoding="utf-8") as output:
