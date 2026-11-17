@@ -271,13 +271,8 @@ def macho_files(bundle: Path) -> list[Path]:
     }
     names = {path.relative_to(bundle).as_posix() for path in result}
     require(required <= names, "required_mach_o_missing")
-    require(
-        any(
-            path.name.startswith("libpython3.13") and path.suffix == ".dylib"
-            for path in result
-        ),
-        "python_library_missing",
-    )
+    # The pinned interpreter embeds Python; the builder prunes unused libpython
+    # and verifies that remaining native images do not link to removed libraries.
     return result
 
 
