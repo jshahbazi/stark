@@ -3520,17 +3520,25 @@ struct ModelsView: View {
     private func savedModelRow(_ model: ModelsInventory.Model, family: String?) -> some View {
         let variantLabel = model.variantLabel
         return HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(model.displayName).font(.callout.weight(.medium)).lineLimit(2).truncationMode(.tail)
-                if let variantLabel {
-                    Text(variantLabel).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            Group {
+                if model.id == engine.modelControlID {
+                    savedModelName(model, variantLabel: variantLabel)
+                } else {
+                    Button {
+                        onRun(model.id)
+                    } label: {
+                        savedModelName(model, variantLabel: variantLabel)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(engine.busy)
+                    .accessibilityLabel("Run " + model.displayName)
+                    .help("Run " + model.displayName)
                 }
                 if model.artifactMode == .decision {
                     Text("Decision and images").font(.caption).foregroundStyle(.secondary)
                 }
             }
             .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
-            .accessibilityHidden(true)
             Text(model.quantization ?? "—").font(.caption).foregroundStyle(.secondary)
                 .lineLimit(1).minimumScaleFactor(0.8).frame(width: 68, alignment: .leading)
             Text(model.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
@@ -3554,6 +3562,15 @@ struct ModelsView: View {
             .help(savedModelHelp(model, family: family))
             .accessibilityElement(children: .contain)
             .accessibilityLabel(variantLabel.map { model.displayName + ", " + $0 } ?? model.displayName)
+    }
+
+    private func savedModelName(_ model: ModelsInventory.Model, variantLabel: String?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(model.displayName).font(.callout.weight(.medium)).lineLimit(2).truncationMode(.tail)
+            if let variantLabel {
+                Text(variantLabel).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
     }
 
     private func savedModelHelp(_ model: ModelsInventory.Model, family: String?) -> String {
