@@ -700,15 +700,19 @@ kernel void conv_window_rollback_bf16(device const bfloat* win_in  [[buffer(0)]]
 // Tiled conv1d prefill uses separate input/output windows to avoid races.
 #define CONV_TILE 64  // must match CONV1D_PREFILL_TILE in kernels/gdn.rs
 
-kernel void conv1d_prefill_bf16(device const bfloat* win_in  [[buffer(0)]],  // [C, KD-1]
-                                device bfloat*       win_out [[buffer(1)]],  // [C, KD-1]
-                                device const bfloat* x       [[buffer(2)]],  // [M, C]
-                                device const bfloat* w       [[buffer(3)]],  // [KD, C]
-                                device bfloat*       out     [[buffer(4)]],  // [M, C]
-                                constant uint&       C       [[buffer(5)]],
-                                constant uint&       KD      [[buffer(6)]],
-                                constant uint&       M       [[buffer(7)]],
-                                uint2 gid [[thread_position_in_grid]]) {
+template<bool CAPTURE>
+static inline void conv1d_prefill_bf16_body(
+        device const bfloat* win_in,
+        device bfloat*       win_out,
+        device const bfloat* x,
+        device const bfloat* w,
+        device bfloat*       out,
+        device bfloat*       snapshot,
+        uint C,
+        uint KD,
+        uint M,
+        uint capture_after,
+        uint2 gid) {
     uint c = gid.x;
     uint m0 = gid.y * CONV_TILE;
     uint m1 = min(m0 + CONV_TILE, M);
@@ -733,12 +737,46 @@ kernel void conv1d_prefill_bf16(device const bfloat* win_in  [[buffer(0)]],  // 
         }
         win[taps - 1] = xc;
     }
+    if (CAPTURE && m1 == capture_after) {
+        for (uint t = 0; t < taps; ++t) {
+            snapshot[c * taps + t] = bfloat(win[t]);
+        }
+    }
     // The final tile writes the post-chunk window.
     if (m1 == M) {
         for (uint t = 0; t < taps; ++t) {
             win_out[c * taps + t] = bfloat(win[t]);
         }
     }
+}
+
+kernel void conv1d_prefill_bf16(device const bfloat* win_in  [[buffer(0)]],  // [C, KD-1]
+                                device bfloat*       win_out [[buffer(1)]],  // [C, KD-1]
+                                device const bfloat* x       [[buffer(2)]],  // [M, C]
+                                device const bfloat* w       [[buffer(3)]],  // [KD, C]
+                                device bfloat*       out     [[buffer(4)]],  // [M, C]
+                                constant uint&       C       [[buffer(5)]],
+                                constant uint&       KD      [[buffer(6)]],
+                                constant uint&       M       [[buffer(7)]],
+                                uint2 gid [[thread_position_in_grid]]) {
+    conv1d_prefill_bf16_body<false>(
+        win_in, win_out, x, w, out, nullptr, C, KD, M, 0, gid);
+}
+
+kernel void stark_conv1d_prefill_bf16_capture(
+        device const bfloat* win_in       [[buffer(0)]],
+        device bfloat*       win_out      [[buffer(1)]],
+        device const bfloat* x            [[buffer(2)]],
+        device const bfloat* w            [[buffer(3)]],
+        device bfloat*       out          [[buffer(4)]],
+        device bfloat*       snapshot     [[buffer(5)]],
+        constant uint&       C            [[buffer(6)]],
+        constant uint&       KD           [[buffer(7)]],
+        constant uint&       M            [[buffer(8)]],
+        constant uint&       capture_after[[buffer(9)]],
+        uint2 gid [[thread_position_in_grid]]) {
+    conv1d_prefill_bf16_body<true>(
+        win_in, win_out, x, w, out, snapshot, C, KD, M, capture_after, gid);
 }
 
 // Gated RMSNorm, one threadgroup per row.

@@ -92,17 +92,21 @@ kernel void ple_gate_value_bf16(device const bfloat* key   [[buffer(0)]],  // [r
 // Dilated causal depthwise conv over x[M, C] (kernel KD, dilation DIL), then
 // hyper[m, c] += base[m, c] + silu(conv). The window holds the S = (KD-1)*DIL
 // inputs before the chunk, oldest first; win_out receives the post-chunk window.
-kernel void ple_conv1d_prefill_bf16(device const bfloat* win_in  [[buffer(0)]],  // [C, S]
-                                    device bfloat*       win_out [[buffer(1)]],  // [C, S]
-                                    device const bfloat* x       [[buffer(2)]],  // [M, C]
-                                    device const bfloat* w       [[buffer(3)]],  // [KD, C]
-                                    device const bfloat* base    [[buffer(4)]],  // [M, C]
-                                    device bfloat*       hyper   [[buffer(5)]],  // [M, C]
-                                    constant uint&       C       [[buffer(6)]],
-                                    constant uint&       KD      [[buffer(7)]],
-                                    constant uint&       DIL     [[buffer(8)]],
-                                    constant uint&       M       [[buffer(9)]],
-                                    uint c [[thread_position_in_grid]]) {
+template<bool CAPTURE>
+static inline void ple_conv1d_prefill_bf16_body(
+        device const bfloat* win_in,
+        device bfloat*       win_out,
+        device const bfloat* x,
+        device const bfloat* w,
+        device const bfloat* base,
+        device bfloat*       hyper,
+        device bfloat*       snapshot,
+        uint C,
+        uint KD,
+        uint DIL,
+        uint M,
+        uint capture_after,
+        uint c) {
     const uint S = (KD - 1) * DIL;
     float win[PLE_MAX_CONTEXT];
     for (uint s = 0; s < S; ++s) {
@@ -123,10 +127,48 @@ kernel void ple_conv1d_prefill_bf16(device const bfloat* win_in  [[buffer(0)]], 
             win[s] = win[s + 1];
         }
         win[S - 1] = xc;
+        if (CAPTURE && m + 1 == capture_after) {
+            for (uint s = 0; s < S; ++s) {
+                snapshot[c * S + s] = bfloat(win[s]);
+            }
+        }
     }
     for (uint s = 0; s < S; ++s) {
         win_out[c * S + s] = bfloat(win[s]);
     }
+}
+
+kernel void ple_conv1d_prefill_bf16(device const bfloat* win_in  [[buffer(0)]],  // [C, S]
+                                    device bfloat*       win_out [[buffer(1)]],  // [C, S]
+                                    device const bfloat* x       [[buffer(2)]],  // [M, C]
+                                    device const bfloat* w       [[buffer(3)]],  // [KD, C]
+                                    device const bfloat* base    [[buffer(4)]],  // [M, C]
+                                    device bfloat*       hyper   [[buffer(5)]],  // [M, C]
+                                    constant uint&       C       [[buffer(6)]],
+                                    constant uint&       KD      [[buffer(7)]],
+                                    constant uint&       DIL     [[buffer(8)]],
+                                    constant uint&       M       [[buffer(9)]],
+                                    uint c [[thread_position_in_grid]]) {
+    ple_conv1d_prefill_bf16_body<false>(
+        win_in, win_out, x, w, base, hyper, nullptr, C, KD, DIL, M, 0, c);
+}
+
+kernel void stark_ple_conv1d_prefill_bf16_capture(
+        device const bfloat* win_in       [[buffer(0)]],
+        device bfloat*       win_out      [[buffer(1)]],
+        device const bfloat* x            [[buffer(2)]],
+        device const bfloat* w            [[buffer(3)]],
+        device const bfloat* base         [[buffer(4)]],
+        device bfloat*       hyper        [[buffer(5)]],
+        device bfloat*       snapshot     [[buffer(6)]],
+        constant uint&       C            [[buffer(7)]],
+        constant uint&       KD           [[buffer(8)]],
+        constant uint&       DIL          [[buffer(9)]],
+        constant uint&       M            [[buffer(10)]],
+        constant uint&       capture_after[[buffer(11)]],
+        uint c [[thread_position_in_grid]]) {
+    ple_conv1d_prefill_bf16_body<true>(
+        win_in, win_out, x, w, base, hyper, snapshot, C, KD, DIL, M, capture_after, c);
 }
 
 // Single-token variant of the above; the window is shifted in place.

@@ -30,7 +30,7 @@ mod uzu;
 mod weight_metal;
 pub mod weights;
 
-use std::{fs::File, io::Read, path::Path, sync::Arc};
+use std::{ffi::OsStr, fs::File, io::Read, path::Path, sync::Arc};
 
 use serde_json::Value;
 use thiserror::Error;
@@ -51,6 +51,10 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+fn lily_midpoint_enabled(control: Option<&OsStr>) -> bool {
+    control != Some(OsStr::new("0"))
+}
 
 /// Backend-owned recurrent state at a prompt prefix boundary. It remains
 /// private to one loaded model instance (see [`Model::restore_prefix`]).
@@ -416,14 +420,15 @@ impl Model {
                     model.validate_image_tokenizer(&tokenizer)?;
                 }
                 // Only the pinned image-loaded Lily Q4-XL generation artifact
-                // enters this experiment. Other mixed-affine layouts and the
-                // scoring loader retain their physical prefix boundaries.
+                // uses midpoint boundaries by default. Other mixed-affine
+                // layouts and the scoring loader retain physical boundaries.
+                let midpoint_control = std::env::var_os("STARK_LILY_PREFIX_MIDPOINT");
                 if image_artifact.as_ref().is_some_and(|artifact| {
                     artifact.source == "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl"
                         && artifact.revision == "0f94842e3682b49acace4daeb4cf2e65a6f94f83"
                         && artifact.identity.artifact_sha256
                             == "18c7bcc1e97d1fefdd361472c2daa59d81d89fcd6f3a61983d995a032b44bfb4"
-                }) && std::env::var_os("STARK_LILY_PREFIX_MIDPOINT").is_some_and(|value| value == "1")
+                }) && lily_midpoint_enabled(midpoint_control.as_deref())
                 {
                     model.enable_prefix_midpoint();
                 }
@@ -1302,6 +1307,14 @@ mod tests {
     use stark_engine_macros::stark_test;
 
     use super::*;
+
+    #[stark_test]
+    fn lily_midpoint_defaults_on_with_zero_as_kill_switch() {
+        assert!(lily_midpoint_enabled(None));
+        assert!(lily_midpoint_enabled(Some(OsStr::new("1"))));
+        assert!(!lily_midpoint_enabled(Some(OsStr::new("0"))));
+        assert!(lily_midpoint_enabled(Some(OsStr::new("unexpected"))));
+    }
 
     #[stark_test]
     fn glm_exl3_selection_requires_the_explicit_streaming_pack_contract() {

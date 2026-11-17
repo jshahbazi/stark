@@ -1,6 +1,8 @@
 # Model change and experiment ledger
 
-- [20261117-FLASHSPEED-11–14 · Lily midpoint integration](2026-11-17-lily-midpoint-integration.md) isolates the optional midpoint runtime and tests. The pinned Lily Q4-XL benchmark matched logits and two-draft MTP work. Median Pi turn time was 15.3% lower across eight matched pairs. The owner accepted the observed 12K tradeoff for the integration decision.
+- [20261117-FLASHSPEED-11–16 · Lily midpoint speed and release](2026-11-17-lily-midpoint-speed-and-release.md): the exact pinned retained-vision Lily Q4-XL artifact enables midpoint reuse by default with an environment kill switch. At 12K, normal append-only follow-ups were 40–46% faster to first token and fresh-plus-follow-up cycles improved 19.4%; full-model, Metal and all four lifecycle checks passed.
+
+- [20261117-FLASHSPEED-11–14 · Lily midpoint integration](2026-11-17-lily-midpoint-integration.md) isolates the default-on, pinned-artifact midpoint runtime and tests. The pinned Lily Q4-XL benchmark matched logits and two-draft MTP work. Median Pi turn time was 15.3% lower across eight matched pairs. The owner accepted the observed 12K tradeoff for the integration decision.
 
 - [20261117-LILYSTART-01–03: Lily startup mode and memory admission](2026-11-17-lily-startup-mode-memory.md): default non-Decider starts select Chat; expected startup failures retain recovery guidance; exact pinned Lily separates selected-residency headroom from its unchanged full planning estimate. Native readiness and fresh automatic image checks pass; no new native precision or performance qualification.
 

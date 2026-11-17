@@ -49,6 +49,18 @@ impl Tensor {
         Ok(Self { buf, shape: shape.to_vec(), dtype, offset: 0 })
     }
 
+    /// Output storage whose complete payload is guaranteed to be overwritten
+    /// before any read. Not appropriate for ordinary model state.
+    pub(crate) fn uninitialized(
+        ctx: &MetalContext,
+        shape: &[usize],
+        dtype: DType,
+    ) -> Result<Self> {
+        let numel: usize = shape.iter().product();
+        let buf = ctx.new_buffer_uninitialized(numel * dtype.size())?;
+        Ok(Self { buf, shape: shape.to_vec(), dtype, offset: 0 })
+    }
+
     /// Wraps an existing buffer (e.g. one filled directly from a checkpoint
     /// read) as a tensor.
     pub fn from_buffer(buf: Buffer, shape: &[usize], dtype: DType) -> Result<Self> {

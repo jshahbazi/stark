@@ -857,6 +857,48 @@ pub fn conv1d_prefill_with_rounding(
     out: &Tensor,
     official: bool,
 ) -> Result<()> {
+    conv1d_prefill_with_checkpoint(
+        ctx, pass, window_in, window_out, x, w, out, official, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn conv1d_prefill_capture(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    window_in: &Tensor,
+    window_out: &Tensor,
+    x: &Tensor,
+    w: &Tensor,
+    out: &Tensor,
+    capture_after: usize,
+    snapshot: &Tensor,
+) -> Result<()> {
+    conv1d_prefill_with_checkpoint(
+        ctx,
+        pass,
+        window_in,
+        window_out,
+        x,
+        w,
+        out,
+        false,
+        Some((capture_after, snapshot)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn conv1d_prefill_with_checkpoint(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    window_in: &Tensor,
+    window_out: &Tensor,
+    x: &Tensor,
+    w: &Tensor,
+    out: &Tensor,
+    official: bool,
+    checkpoint: Option<(usize, &Tensor)>,
+) -> Result<()> {
     if official {
         ensure!(
             [window_in, window_out, x, w, out].iter().all(|t| t.dtype() == DType::BF16),
@@ -879,24 +921,66 @@ pub fn conv1d_prefill_with_rounding(
         "window buffers must be distinct (double-buffered)"
     );
     ensure!(out.numel() == m * c, "out numel {} != M*C", out.numel());
-    let pipeline = ctx.pipeline(
-        if official { "conv1d_prefill_bf16_mlx" } else { "conv1d_prefill_bf16" },
-        SOURCE,
-        MslVersion::V3_1,
-    )?;
+    if let Some((after, snapshot)) = checkpoint {
+        let snapshot_buf = snapshot.buffer();
+        ensure!(
+            !official
+                && after > 0
+                && after < m
+                && after.is_multiple_of(CONV1D_PREFILL_TILE)
+                && snapshot.shape() == [c, kd - 1]
+                && snapshot.dtype() == DType::BF16
+                && [
+                    window_in.buffer(),
+                    window_out.buffer(),
+                    x.buffer(),
+                    w.buffer(),
+                    out.buffer(),
+                ]
+                .into_iter()
+                .all(|buffer| !std::ptr::eq(snapshot_buf, buffer)),
+            "GDN conv checkpoint requires a separate BF16 tile boundary window"
+        );
+    }
     let tiles = m.div_ceil(CONV1D_PREFILL_TILE).max(1);
-    pass.dispatch_at(
-        &pipeline,
-        &[
-            window_in.binding(),
-            window_out.binding(),
-            x.binding(),
-            w.binding(),
-            out.binding(),
-        ],
-        &[&u32_bytes(c), &u32_bytes(kd), &u32_bytes(m)],
-        Grid::Threads { grid: (c, tiles, 1), threadgroup: (256.min(c), 1, 1) },
-    )
+    if let Some((after, snapshot)) = checkpoint {
+        let pipeline = ctx.pipeline(
+            "stark_conv1d_prefill_bf16_capture",
+            SOURCE,
+            MslVersion::V3_1,
+        )?;
+        pass.dispatch_at(
+            &pipeline,
+            &[
+                window_in.binding(),
+                window_out.binding(),
+                x.binding(),
+                w.binding(),
+                out.binding(),
+                snapshot.binding(),
+            ],
+            &[&u32_bytes(c), &u32_bytes(kd), &u32_bytes(m), &u32_bytes(after)],
+            Grid::Threads { grid: (c, tiles, 1), threadgroup: (256.min(c), 1, 1) },
+        )
+    } else {
+        let pipeline = ctx.pipeline(
+            if official { "conv1d_prefill_bf16_mlx" } else { "conv1d_prefill_bf16" },
+            SOURCE,
+            MslVersion::V3_1,
+        )?;
+        pass.dispatch_at(
+            &pipeline,
+            &[
+                window_in.binding(),
+                window_out.binding(),
+                x.binding(),
+                w.binding(),
+                out.binding(),
+            ],
+            &[&u32_bytes(c), &u32_bytes(kd), &u32_bytes(m)],
+            Grid::Threads { grid: (c, tiles, 1), threadgroup: (256.min(c), 1, 1) },
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1919,6 +2003,69 @@ pub fn gdn_prefill_mid_with_layout(
         ],
         &[&u32_bytes(m), &u32_bytes(48), &u32_bytes(3), &u32_bytes(mid_count)],
         Grid::Threadgroups { groups: (48, 8, 1), threadgroup: (32, 4, 1) },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gdn_prefill_mid_with_layout_midpoint_resume(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qkv: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    staging: &GdnRegscanStaging<'_>,
+    state: &Tensor,
+    out: &Tensor,
+    scale: f32,
+    num_k_heads: usize,
+    mid: Option<&Tensor>,
+    official: bool,
+    layout: GdnStateLayout,
+    midpoint_resume: bool,
+) -> Result<()> {
+    let rows = a.numel() / a_log.numel().max(1);
+    if midpoint_resume
+        && !official
+        && layout == GdnStateLayout::KeyValue
+        && (GDN_CHUNK..GDN_CHUNK_MIN_ROWS).contains(&rows)
+    {
+        return gdn_prefill_scan_named_with_rounding(
+            ctx,
+            pass,
+            qkv,
+            a,
+            b,
+            a_log,
+            dt_bias,
+            staging,
+            state,
+            out,
+            scale,
+            num_k_heads,
+            mid,
+            GDN_CHUNK_SCAN,
+            false,
+            None,
+        );
+    }
+    gdn_prefill_mid_with_layout(
+        ctx,
+        pass,
+        qkv,
+        a,
+        b,
+        a_log,
+        dt_bias,
+        staging,
+        state,
+        out,
+        scale,
+        num_k_heads,
+        mid,
+        official,
+        layout,
     )
 }
 

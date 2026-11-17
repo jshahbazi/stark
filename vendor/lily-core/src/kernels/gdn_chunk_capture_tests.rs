@@ -29,9 +29,11 @@ fn selected_gdn_chunk_capture_matches_standalone_prefix() -> Result<()> {
     let new_state = || Tensor::from_f32(&ctx, &initial, &state_shape);
     let mut compared_bytes = 0;
 
-    // A selected block at the end of the WY scan with one serial token,
-    // a selected block before more WY work and a tail, and a full 4K pass.
-    for rows in [CUT + 1, CUT + 65, 2 * CUT] {
+    // Cover serial tails, the forced one-chunk resume path, ragged tails and
+    // the ordinary full 4K chunked path.
+    for rows in
+        [CUT + 1, CUT + 17, CUT + 63, CUT + 64, CUT + 65, CUT + 127, CUT + 128, 2 * CUT]
+    {
         let width = (2 * HK + H) * DIM;
         let qkv = Tensor::from_f32_as_bf16(
             &ctx,
@@ -201,7 +203,103 @@ fn selected_gdn_chunk_capture_matches_standalone_prefix() -> Result<()> {
             + snapshot.byte_len();
     }
     println!(
-        "{{\"gdn_selected_capture_exact_cases\":3,\"compared_bytes\":{compared_bytes}}}"
+        "{{\"gdn_selected_capture_exact_cases\":8,\"compared_bytes\":{compared_bytes}}}"
     );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires an Apple GPU with Metal 4 tensor operations"]
+fn fused_midpoint_conv_windows_match_rollback() -> Result<()> {
+    let ctx = MetalContext::new()?;
+    let (m, c, kd, cut) = (257, 192, 4, 64);
+    let x_values: Vec<f32> =
+        (0..m * c).map(|i| ((i % 101) as f32 - 50.0) / 128.0).collect();
+    let weights: Vec<f32> =
+        (0..kd * c).map(|i| [-0.5, 0.25, 0.75, -0.375][i / c]).collect();
+    let window_values: Vec<f32> =
+        (0..c * (kd - 1)).map(|i| ((i % 47) as f32 - 23.0) / 64.0).collect();
+    let window_in = Tensor::from_f32_as_bf16(&ctx, &window_values, &[c, kd - 1])?;
+    let x = Tensor::from_f32_as_bf16(&ctx, &x_values, &[m, c])?;
+    let w = Tensor::from_f32_as_bf16(&ctx, &weights, &[kd, c])?;
+    let ordinary_out = Tensor::zeros(&ctx, &[m, c], DType::BF16)?;
+    let captured_out = Tensor::zeros(&ctx, &[m, c], DType::BF16)?;
+    let ordinary_window = Tensor::zeros(&ctx, &[c, kd - 1], DType::BF16)?;
+    let captured_window = Tensor::zeros(&ctx, &[c, kd - 1], DType::BF16)?;
+    let expected = Tensor::zeros(&ctx, &[c, kd - 1], DType::BF16)?;
+    let captured = Tensor::zeros(&ctx, &[c, kd - 1], DType::BF16)?;
+    let pass = ctx.begin_concurrent()?;
+    conv1d_prefill_with_rounding(
+        &ctx,
+        &pass,
+        &window_in,
+        &ordinary_window,
+        &x,
+        &w,
+        &ordinary_out,
+        false,
+    )?;
+    conv1d_prefill_capture(
+        &ctx,
+        &pass,
+        &window_in,
+        &captured_window,
+        &x,
+        &w,
+        &captured_out,
+        cut,
+        &captured,
+    )?;
+    conv_window_rollback(&ctx, &pass, &window_in, &x, &expected, cut)?;
+    pass.end()?.commit()?.wait()?;
+    ensure!(captured_out.raw_bytes() == ordinary_out.raw_bytes());
+    ensure!(captured_window.raw_bytes() == ordinary_window.raw_bytes());
+    ensure!(captured.raw_bytes() == expected.raw_bytes());
+
+    let (pm, pc, pkd, pdilation, pcut) = (257, 32, 4, 3, 128);
+    let pstate = (pkd - 1) * pdilation;
+    let pwindow_in =
+        Tensor::from_f32_as_bf16(&ctx, &vec![0.125; pc * pstate], &[pc, pstate])?;
+    let px = Tensor::from_f32_as_bf16(&ctx, &x_values[..pm * pc], &[pm, pc])?;
+    let pw = Tensor::from_f32_as_bf16(&ctx, &weights[..pkd * pc], &[pkd, pc])?;
+    let base = Tensor::from_f32_as_bf16(&ctx, &vec![0.0; pm * pc], &[pm, pc])?;
+    let initial = vec![0.25; pm * pc];
+    let original_hyper = Tensor::from_f32_as_bf16(&ctx, &initial, &[pm, pc])?;
+    let captured_hyper = Tensor::from_f32_as_bf16(&ctx, &initial, &[pm, pc])?;
+    let original_window = Tensor::zeros(&ctx, &[pc, pstate], DType::BF16)?;
+    let captured_window = Tensor::zeros(&ctx, &[pc, pstate], DType::BF16)?;
+    let expected = Tensor::zeros(&ctx, &[pc, pstate], DType::BF16)?;
+    let captured = Tensor::zeros(&ctx, &[pc, pstate], DType::BF16)?;
+    let pass = ctx.begin_concurrent()?;
+    crate::kernels::ple::ple_conv1d_prefill_with_rounding(
+        &ctx,
+        &pass,
+        &pwindow_in,
+        &original_window,
+        &px,
+        &pw,
+        &base,
+        &original_hyper,
+        pdilation,
+        false,
+    )?;
+    crate::kernels::ple::ple_conv1d_prefill_capture(
+        &ctx,
+        &pass,
+        &pwindow_in,
+        &captured_window,
+        &px,
+        &pw,
+        &base,
+        &captured_hyper,
+        pdilation,
+        pcut,
+        &captured,
+    )?;
+    conv_window_rollback(&ctx, &pass, &pwindow_in, &px, &expected, pcut)?;
+    pass.end()?.commit()?.wait()?;
+    ensure!(captured_hyper.raw_bytes() == original_hyper.raw_bytes());
+    ensure!(captured_window.raw_bytes() == original_window.raw_bytes());
+    ensure!(captured.raw_bytes() == expected.raw_bytes());
     Ok(())
 }
