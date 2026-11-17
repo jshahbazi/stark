@@ -1270,7 +1270,7 @@ kernel void gdn_chunk_wy3(device bfloat*       qkv     [[buffer(0)]],           
 // with a chunk's rows on the left share one descriptor (dynamic K,
 // accumulate), so the output's two terms land in one accumulator with the
 // exp(G_t) row scale applied between them.
-template <int NB, int SG, typename ST>
+template <int NB, int SG, typename ST, bool CAPTURE>
 static inline void gdn_chunk_scan_body(device bfloat* qk,
                                        device bfloat* w,
                                        device bfloat* u,
@@ -1284,7 +1284,9 @@ static inline void gdn_chunk_scan_body(device bfloat* qk,
                                        threadgroup ST* Sb,   // [DIM, NB]
                                        threadgroup ST* Ut,   // [C, NB]
                                        threadgroup ST* Ut2,  // [C, NB]
-                                       uint2 tg) {
+                                       uint2 tg,
+                                       device float* snapshot,
+                                       uint capture_after) {
     using namespace mpp::tensor_ops;
     constexpr int C = GDN_CHUNK;
 
@@ -1405,6 +1407,11 @@ static inline void gdn_chunk_scan_body(device bfloat* qk,
             if (S.is_valid_element(i)) {
                 const auto ix = S.get_multidimensional_index(i);
                 Sb[uint(ix[1]) * NB + uint(ix[0])] = ST(S[i]);
+                if (CAPTURE && t0 + n == capture_after) {
+                    // Store the F32 state another scan would load at this
+                    // boundary, before the BF16 staging used for its dot.
+                    snapshot[((ulong)h * DIM + uint(ix[1])) * DIM + col0 + uint(ix[0])] = S[i];
+                }
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1433,8 +1440,8 @@ kernel void NAME(device bfloat*       qk    [[buffer(0)]],  /* [M, 2*HK*DIM] */ 
     threadgroup ST Sb[DIM * GDN_CHUNK_NB];                                         \
     threadgroup ST Ut[GDN_CHUNK * GDN_CHUNK_NB];                                   \
     threadgroup ST Ut2[GDN_CHUNK * GDN_CHUNK_NB];                                  \
-    gdn_chunk_scan_body<GDN_CHUNK_NB, GDN_CHUNK_SG, ST>(qk, w, u, p, g, state, out, M, H, \
-                                                        vpk, Sb, Ut, Ut2, tg);     \
+    gdn_chunk_scan_body<GDN_CHUNK_NB, GDN_CHUNK_SG, ST, false>(qk, w, u, p, g, state, out, M, H, \
+                                                               vpk, Sb, Ut, Ut2, tg, nullptr, 0); \
 }
 // The state and pseudo-value copies are bf16: fp16 copies measured the
 // same speed with the state's error against the CPU reference 0.0011
@@ -1442,6 +1449,27 @@ kernel void NAME(device bfloat*       qk    [[buffer(0)]],  /* [M, 2*HK*DIM] */ 
 // and would cap the state's range at 65 504.
 GDN_CHUNK_SCAN_KERNEL(gdn_chunk_scan, bfloat)
 #undef GDN_CHUNK_SCAN_KERNEL
+
+kernel void stark_gdn_chunk_scan_capture(
+        device bfloat* qk           [[buffer(0)]],
+        device bfloat* w            [[buffer(1)]],
+        device bfloat* u            [[buffer(2)]],
+        device bfloat* p            [[buffer(3)]],
+        device const float* g       [[buffer(4)]],
+        device float* state         [[buffer(5)]],
+        device bfloat* out          [[buffer(6)]],
+        device float* snapshot      [[buffer(7)]],
+        constant uint& M            [[buffer(8)]],
+        constant uint& H            [[buffer(9)]],
+        constant uint& vpk          [[buffer(10)]],
+        constant uint& capture_after [[buffer(11)]],
+        uint2 tg [[threadgroup_position_in_grid]]) {
+    threadgroup bfloat Sb[DIM * GDN_CHUNK_NB];
+    threadgroup bfloat Ut[GDN_CHUNK * GDN_CHUNK_NB];
+    threadgroup bfloat Ut2[GDN_CHUNK * GDN_CHUNK_NB];
+    gdn_chunk_scan_body<GDN_CHUNK_NB, GDN_CHUNK_SG, bfloat, true>(
+        qk, w, u, p, g, state, out, M, H, vpk, Sb, Ut, Ut2, tg, snapshot, capture_after);
+}
 #endif  // __METAL_VERSION__ >= 400
 
 

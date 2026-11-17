@@ -260,6 +260,7 @@ pub struct LilyModel {
     last_full_readout: Option<usize>,
     mtp_enabled: bool,
     mtp_stats: MtpStats,
+    prefix_midpoint: bool,
     capture_at: Option<usize>,
     captured: Option<PrefixSnapshot>,
     image_owner: Arc<()>,
@@ -368,6 +369,7 @@ impl LilyModel {
             last_full_readout: None,
             mtp_enabled: false,
             mtp_stats: MtpStats::default(),
+            prefix_midpoint: false,
             capture_at: None,
             captured: None,
             image_owner: Arc::new(()),
@@ -708,21 +710,44 @@ impl LilyModel {
         }
     }
 
-    /// Prompt tokens per batched prefill pass. Passes are counted from the
-    /// position a prefill starts at, so prefix snapshots use multiples of it.
+    /// Prompt tokens per physical batched prefill pass.
     pub fn prefill_chunk_tokens(&self) -> usize {
         self.model.prefill_chunk()
     }
 
+    pub(super) fn enable_prefix_midpoint(&mut self) {
+        self.prefix_midpoint = self.prefill_chunk_tokens() == 4096 && !self.model.config.official_mlx_rounding();
+    }
+
+    /// Prefix snapshot grid. The midpoint experiment keeps the 4,096-row
+    /// physical pass and adds one eligible interior boundary to that grid.
+    pub(super) fn prefix_chunk_tokens(&self) -> usize {
+        let physical = self.prefill_chunk_tokens();
+        if self.prefix_midpoint {
+            physical / 2
+        } else {
+            physical
+        }
+    }
+
+    pub(super) fn prefix_suffix_compatible(
+        &self,
+        position: usize,
+        suffix_len: usize,
+    ) -> bool {
+        !self.prefix_midpoint || self.model.midpoint_suffix_compatible(position, suffix_len)
+    }
+
     /// Capture the recurrent state when this request's prefill reaches
-    /// `position`, a multiple of the prefill chunk beyond the current
-    /// position. The prefill is split there, which leaves every pass's tokens,
-    /// offsets and draw unchanged. Cleared by `reset`.
+    /// `position`, an eligible boundary beyond the current position. The
+    /// ordinary path splits at a completed pass. The midpoint path can
+    /// capture an interior boundary without splitting that pass. Cleared by
+    /// `reset`.
     pub fn capture_prefix_at(
         &mut self,
         position: usize,
     ) -> Result<()> {
-        let chunk = self.prefill_chunk_tokens();
+        let chunk = self.prefix_chunk_tokens();
         if self.image_active
             || self.is_fenced()
             || !self.pending.is_empty()
@@ -753,7 +778,7 @@ impl LilyModel {
         snapshot: &PrefixSnapshot,
     ) -> Result<()> {
         let position = snapshot.position();
-        let chunk = self.prefill_chunk_tokens();
+        let chunk = self.prefix_chunk_tokens();
         if self.image_active
             || self.is_fenced()
             || self.state.pos != 0
@@ -1111,12 +1136,16 @@ impl LilyModel {
     ) -> Result<()> {
         let gpu_busy_before = gpu_busy_snapshot();
         let chunk = self.prefill_chunk_tokens();
-        let split = self.capture_at.and_then(|position| position.checked_sub(self.state.pos)).filter(|&split| {
-            (split < end || (split == end && draw.is_none()))
-                && chunk != 0
-                && split.is_multiple_of(chunk)
-                && self.state.pos.is_multiple_of(chunk)
-        });
+        let split = self
+            .capture_at
+            .filter(|_| !self.prefix_midpoint)
+            .and_then(|position| position.checked_sub(self.state.pos))
+            .filter(|&split| {
+                (split < end || (split == end && draw.is_none()))
+                    && chunk != 0
+                    && split.is_multiple_of(chunk)
+                    && self.state.pos.is_multiple_of(chunk)
+            });
         let Some(split) = split else {
             let result = self.prefill_span_controlled(0, end, draw, before_pass);
             record_gpu_busy_delta("qwen.mixed.prefill.gpu_busy", gpu_busy_before);
@@ -1153,10 +1182,29 @@ impl LilyModel {
             },
         };
         let tokens = &self.pending[start..end];
-        let fed = self
-            .model
-            .prefill_with_vision_until(&self.context, &mut self.state, &mut self.scratch, tokens, draw, None, &stop)
-            .map_err(|_| Error::Invalid("mixed precision prefill failed"))?;
+        let checkpoint = self.capture_at.filter(|&position| {
+            self.prefix_midpoint
+                && position
+                    .checked_sub(self.state.pos)
+                    .is_some_and(|offset| offset < tokens.len() || (offset == tokens.len() && draw.is_none()))
+        });
+        let (fed, snapshot) = if self.prefix_midpoint {
+            self.model.prefill_with_vision_until_checkpoint(
+                &self.context,
+                &mut self.state,
+                &mut self.scratch,
+                tokens,
+                draw,
+                None,
+                &stop,
+                checkpoint,
+            )
+        } else {
+            self.model
+                .prefill_with_vision_until(&self.context, &mut self.state, &mut self.scratch, tokens, draw, None, &stop)
+                .map(|fed| (fed, None))
+        }
+        .map_err(|_| Error::Invalid("mixed precision prefill failed"))?;
         // A cancelled pass has completed and the context remains healthy.
         // Let the public step reset request state without fencing the model.
         if let Some(error) = control_error.into_inner() {
@@ -1170,6 +1218,18 @@ impl LilyModel {
         if let Err(error) = (control.borrow_mut())() {
             self.usable = true;
             return Err(error);
+        }
+        if checkpoint.is_some() {
+            self.capture_at = None;
+        }
+        if let Some(snapshot) = snapshot {
+            if Some(snapshot.pos()) != checkpoint {
+                return Err(Error::Invalid("mixed precision prefix snapshot position"));
+            }
+            self.captured = Some(PrefixSnapshot {
+                snapshot,
+                mtp_enabled: self.mtp_enabled,
+            });
         }
         Ok(())
     }
@@ -1778,6 +1838,10 @@ where
         self.drain();
     }
 }
+
+#[cfg(test)]
+#[path = "lily_midpoint_tests.rs"]
+mod midpoint_tests;
 
 #[cfg(test)]
 mod tests {

@@ -411,9 +411,21 @@ impl Model {
         } else if mixed_precision_checkpoint(&outer) {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             {
-                let model = lily::LilyModel::load_with_options(path, with_mtp, with_images)?;
+                let mut model = lily::LilyModel::load_with_options(path, with_mtp, with_images)?;
                 if with_images {
                     model.validate_image_tokenizer(&tokenizer)?;
+                }
+                // Only the pinned image-loaded Lily Q4-XL generation artifact
+                // enters this experiment. Other mixed-affine layouts and the
+                // scoring loader retain their physical prefix boundaries.
+                if image_artifact.as_ref().is_some_and(|artifact| {
+                    artifact.source == "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl"
+                        && artifact.revision == "0f94842e3682b49acace4daeb4cf2e65a6f94f83"
+                        && artifact.identity.artifact_sha256
+                            == "18c7bcc1e97d1fefdd361472c2daa59d81d89fcd6f3a61983d995a032b44bfb4"
+                }) && std::env::var_os("STARK_LILY_PREFIX_MIDPOINT").is_some_and(|value| value == "1")
+                {
+                    model.enable_prefix_midpoint();
                 }
                 if model.vocab_size() != vocab_size || model.position() != 0 {
                     return Err(Error::Invalid("mixed precision metadata mismatch"));
@@ -1172,7 +1184,7 @@ impl Model {
         Ok(())
     }
 
-    /// The prefill chunk length when this backend can snapshot and resume a
+    /// The boundary spacing when this backend can snapshot and resume a
     /// prompt prefix, which then happens only at multiples of it.
     pub fn prefix_chunk_tokens(&self) -> Option<usize> {
         #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
@@ -1184,9 +1196,23 @@ impl Model {
         }
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if let Forward::Lily(model) = &self.forward {
-            return Some(model.prefill_chunk_tokens());
+            return Some(model.prefix_chunk_tokens());
         }
         None
+    }
+
+    /// Whether a compatible retained prefix leaves a supported suffix shape.
+    pub fn prefix_suffix_compatible(
+        &self,
+        position: usize,
+        suffix_len: usize,
+    ) -> bool {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return model.prefix_suffix_compatible(position, suffix_len);
+        }
+        let _ = (position, suffix_len);
+        true
     }
 
     /// Capture the recurrent state when the next prefill reaches `position`.

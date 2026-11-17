@@ -2,10 +2,9 @@
 //!
 //! One in-memory entry holds the native state of the previous successful text
 //! generation, keyed by the loaded model instance, `context_tokens` and an
-//! opaque host scope. Only rows produced by full, non-final prefill chunks are
-//! reused, and only up to a chunk boundary, so the rest of a prompt is
-//! prefilled exactly as on a fresh state. The entry is never persisted, logged
-//! or included in replies.
+//! opaque host scope. Reuse stops at an exact backend-supported prefill
+//! boundary. Recurrent snapshots also require a compatible continuation.
+//! The entry is never persisted, logged or included in replies.
 use std::{
     io::{self, BufRead, BufReader, Cursor, Read},
     time::Duration,
