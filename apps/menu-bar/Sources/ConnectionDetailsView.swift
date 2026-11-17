@@ -85,6 +85,7 @@ struct ConnectionDetailsView: View {
         .onAppear { portText = String(engine.apiPort) }
         .onChange(of: engine.apiPort) { _, port in portText = String(port) }
         .onChange(of: engine.apiKey) { _, _ in revealKey = false }
+        .onChange(of: engine.loadedID) { _, _ in inspectedModelID = "" }
         .onChange(of: section) { _, _ in revealKey = false; copied = "" }
         .onDisappear { revealKey = false }
     }
@@ -206,7 +207,10 @@ struct ConnectionDetailsView: View {
                 Spacer()
                 if apiModels.count > 1 {
                     Picker("Model", selection: Binding(get: { inspectedLibraryID }, set: { inspectedModelID = $0 })) {
-                        ForEach(apiModels) { Text($0.apiID).tag($0.id) }
+                        ForEach(apiModels) { model in
+                            Text(model.displayName + (model.id == engine.loadedID ? " (Loaded)" : ""))
+                                .tag(model.id)
+                        }
                     }
                     .pickerStyle(.menu).labelsHidden().frame(maxWidth: 200).accessibilityLabel("Model to view ID")
                 }
