@@ -270,9 +270,10 @@ if __name__ == "__main__":
         f"        self.assertEqual({name}({arg}), {expected!r})\n",
         encoding="utf-8",
     )
-    suffix = ("\n\nImplement the change in service.py in this workspace. Keep the existing CLI working. "
-              "Use the available file tools. An independent grader will run the tests. "
-              "Summarize the result after saving the implementation.")
+    suffix = ("\n\nRead service.py once and update it in place, preserving the existing CLI. "
+              "Aim for two file tool calls: one read and one edit or write. "
+              "The independent grader will run the tests. "
+              "After saving your implementation, reply with a one-sentence summary and finish the turn.")
     return tuple(" ".join(textwrap.dedent(spec).split()) + suffix for spec in phases)
 
 

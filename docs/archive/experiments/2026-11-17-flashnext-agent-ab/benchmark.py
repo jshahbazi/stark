@@ -27,7 +27,8 @@ MODEL = "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl"
 CONTEXT = 40960
 MAX_OUTPUT = 2048
 SAMPLING = {"temperature": 0.6, "top_k": 20, "top_p": 0.95, "seed": 42}
-TOOLS = ("read", "edit", "write", "grep", "find", "ls")
+TOOLS = ("read", "edit", "write")
+TOOL_LIMIT = 8
 # Every task runs twice per grid, with the two opposite worker-launch orders.
 FIRST_TASKS, SECOND_TASKS = tuple(TASKS)[:2], tuple(TASKS)[2:]
 SCHEDULE = [(grid, batch) for order in ((4096, 2048, 2048, 4096), (2048, 4096, 4096, 2048))
@@ -103,7 +104,6 @@ class NativeTrace:
         if payload.get("operation") != "generate":
             return self.original(payload, *args, **kwargs)
         self.count += 1
-        require(self.count <= 20, "request_limit")
         tokens = tuple(payload["input_token_ids"])
         context = payload["context_tokens"]
         scope = payload.get("cache_scope")
@@ -224,9 +224,10 @@ class Pi:
         tool_totals = {}
         first_text = None
         assistant = []
+        aborted_at_limit = False
 
         def observe(event):
-            nonlocal first_text
+            nonlocal first_text, aborted_at_limit
             kind = event.get("type")
             if kind == "response" and event.get("id") == ident:
                 require(event.get("success") is True, "pi_prompt_rejected")
@@ -239,6 +240,9 @@ class Pi:
                 totals = tool_totals.setdefault(name if name in TOOLS else "other", {"calls": 0, "errors": 0})
                 totals["calls"] += 1
                 totals["errors"] += int(event.get("isError") is True)
+                if tools["calls"] >= TOOL_LIMIT and not aborted_at_limit:
+                    aborted_at_limit = True
+                    self.send("abort")
             message = event.get("message", {})
             if kind == "message_end" and message.get("role") == "assistant":
                 reason = message.get("stopReason")
@@ -250,6 +254,8 @@ class Pi:
 
         self.wait(lambda row: row.get("type") == "agent_settled", started + timeout, observe)
         reason, category = assistant[-1] if assistant else ("missing", None)
+        if aborted_at_limit:
+            reason = "tool_limit"
         return {**tools, "wall_seconds": time.monotonic() - started, "first_text_seconds": first_text,
                 "assistant_messages": len(assistant), "client_finish": reason, "client_error": category,
                 "tool_totals": tool_totals}
@@ -385,7 +391,8 @@ def main():
                     worker_sha256=digest(args.worker), runner_sha256=digest(Path(__file__)),
                     fixtures_sha256=digest(Path(__file__).with_name("fixtures.py")),
                     model_manifest_sha256=digest(args.model / "stark-image-artifact.json"), guard_sha256=digest(args.guard),
-                    context_tokens=CONTEXT, max_output=MAX_OUTPUT, tools=TOOLS, sampling=SAMPLING, schedule=SCHEDULE)
+                    context_tokens=CONTEXT, max_output=MAX_OUTPUT, tools=TOOLS, tool_limit=TOOL_LIMIT,
+                    sampling=SAMPLING, schedule=SCHEDULE)
         for block, (grid, tasks) in enumerate(SCHEDULE, 1):
             if args.block and block not in args.block:
                 continue
