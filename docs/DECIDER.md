@@ -58,6 +58,11 @@ the model loaded; cancellation during a running request closes the worker, so
 choose Run again before the next decision. See the [local API contract](LOCAL_API.md#decisions)
 for the JSON schema, authentication and curl example.
 
+The [HTTP latency profile](benchmarks/2026-11-16-decider-http-latency.md)
+records the signed local installation and bounded text/image transport controls.
+Native full-sequence forward dominates measured request time; longer inputs
+remain slow. These observations do not establish performance for other workloads.
+
 The application bundles `stark-generate`, `stark-score`, `stark-template` and
 `stark-decide`. Build `stark-decide` separately with default features; see the
 [app build instructions](../apps/menu-bar/README.md#build-and-install).

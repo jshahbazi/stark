@@ -3,6 +3,8 @@
 The caller supplies an already prepared native Decider artifact and installed
 worker executables. Request text, token IDs, logits, probabilities, API keys,
 and exception details are never written to the output file.
+When using an installed app's interpreter, invoke Python with -I -B to keep
+diagnostic imports from writing bytecode inside the signed bundle.
 """
 
 from __future__ import annotations

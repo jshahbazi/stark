@@ -6,9 +6,9 @@
 | --- | --- |
 | Registered date / owner | 2026-11-16 / Codex |
 | Kind | Compatibility, lifecycle and performance diagnosis |
-| State | Implemented on branch; full checks, actual-artifact execution and installation pending |
+| State | Completed; adopted on branch and installed as a signed local development build |
 | Acceptance | Authenticated buffered decisions use the existing single-worker FIFO; no request content in logs; image and cancellation lifecycle preserved |
-| Evidence scope | Model-free HTTP/controller checks; live profiling pending |
+| Evidence scope | Model-free HTTP/controller checks, three-length actual-artifact timing, PNG transport and installed-package controls |
 | Promotion | HTTP transport adopted on branch; no native arithmetic or performance promotion |
 | Related work | [Decider native qualification](2026-11-16-decider-flash-v13.md), [app integration](2026-11-16-decider-flash-app.md) |
 | Implementation branch | `codex/decider-http-latency`; no PR requested |
@@ -71,6 +71,24 @@ transfer between builds.
 | Focused new HTTP/Decider checks | 44 passed | Synthetic worker HTTP, schema, image staging and cancellation evidence |
 | Existing HTTP/client/media checks | 68 passed | Existing auth, stream and image admission regression evidence |
 
-Repository policy, targeted Ruff and diff checks passed. Full converter checks,
-actual-artifact profiling, packaged execution and installation remain pending.
-Record those outcomes and any failures in the dated run linked below.
+## Completed run and disposition
+
+The [dated profile and installation record](../benchmarks/2026-11-16-decider-http-latency.md)
+binds exact source/build/artifact identities, aggregate timing, private receipt
+hashes and all subsequent setup failures. The complete converter suite passed
+7,909 tests with 95 skips. Later focused cancellation controls passed 36 tests;
+signing and app-builder controls passed 24 and 48 tests. Five profiler tests,
+repository policy, Ruff and diff checks passed.
+
+Text HTTP medians were 1.106 s at 80 input positions, 4.939 s at 400 and 19.299 s
+at 1,360. Native full-sequence forward dominated; encoding remained roughly
+13–15 ms. One default-image PNG request passed. The installed signed package
+passed separate text and image HTTP controls using its own frontend/worker,
+followed by deep strict signature verification. No numerical or native speedup
+promotion is claimed. The normal app was reopened with its port-8000 listener;
+the user can Run Decider and use its existing API credential.
+
+Two host-screen rejections, a malformed profiler image control, a packaging
+inventory conflict and a diagnostic bytecode/signature failure are retained in
+the dated record. The restored sealed bundle passed the final control. Native
+operator optimization and broader artifact/quality qualification remain separate.

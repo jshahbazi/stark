@@ -1,6 +1,6 @@
 # Model change and experiment ledger
 
-- [20261116-DFHTTP-01: Decider HTTP and latency diagnosis](2026-11-16-decider-http-latency.md): authenticated native decisions, shared request scheduling and aggregate-only profiling; live execution and installation pending.
+- [20261116-DFHTTP-01: Decider HTTP and latency diagnosis](2026-11-16-decider-http-latency.md): authenticated native decisions and signed local installation passed text/image HTTP controls. Three-length profiling identifies native forward time as the main cost; no native speedup claim.
 
 - [20261116-DF13APP-01–02: Decider Flash app integration](2026-11-16-decider-flash-app.md): Decision-only setup and one-image workflow; signed relocated bundles match 5/5 reference choices, including three image cases. Installed GUI image decision/removal/Stop passed after fixing Add from Source defaults; performance remains separate.
 
