@@ -1,5 +1,7 @@
 # Model change and experiment ledger
 
+- [20261117-FLASHSPEED-06 · Flash Next grid on Pi](2026-11-17-flashnext-coding-agent-grid.md) records 16 actual Pi sessions with exact two-draft MTP on Lily Q4-XL. All 76 native request pairs match output and verifier work. The 2,048 grid is faster on all 38 requests that gain reuse. The cold-prompt and full-session acceptance evidence leaves 4,096 as the default.
+
 - [20261117-FLASHSPEED-02–05 · Flash Next runtime experiments](2026-11-17-flashnext-speed-experiments.md) records three opt-in prototypes and GDN round profiling. A 2,048-token grid saves 2,048 tokens on two growing prompts with matching emitted outputs. Both kernel component controls are exact. Cold MoE timing varies by length, and host drift prevents estimating the end-to-end HC gain from the decode comparison.
 
 - [20261117-FLASHSPEED-01 · Flash Next prefill and decode review](../benchmarks/2026-11-17-flashnext-speed-review.md) records 41 installed Lily Q4-XL HTTP requests, prefix displacement across interleaved workloads, equal-length MTP controls and proposed kernel experiments.

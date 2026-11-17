@@ -13,7 +13,7 @@ WORK_KEYS = ("finish", "input_tokens", "output_tokens", "sampled_tokens", "outpu
 MTP_KEYS = ("rounds", "proposed", "accepted", "verified_rows")
 HOST_KEYS = ("Pageins", "Pageouts", "Swapins", "Swapouts")
 TOOLS = {"read", "edit", "write", "grep", "find", "ls", "other"}
-PI_FINISH = {"stop", "length", "toolUse", "aborted", "error", "missing", "unknown"}
+PI_FINISH = {"stop", "length", "toolUse", "tool_limit", "aborted", "error", "missing", "unknown"}
 CLIENT_ERRORS = {"missing_usage", "missing_finish_reason", "missing_done", "invalid_usage", "upstream_error",
                  "transport_failed", "invalid_request_route"}
 API_ERRORS = {"invalid_request", "model_not_found", "model_not_loaded", "model_busy", "invalid_model_output", "tool_parse_failed",
@@ -217,6 +217,45 @@ def exact_pairs(base, candidate):
             yield row, by_work[work_key(row)].popleft()
 
 
+def phase_work(session, turn):
+    phase = turn["phase"]
+    grid = session["start"]["grid"]
+    requests = [row for row in session["requests"] if row.get("phase") == phase]
+    if (not requests or len(requests) != turn.get("native_requests")
+            or [row.get("request") for row in requests] != list(range(1, len(requests) + 1))
+            or not all(request_integrity(row, grid) for row in requests)):
+        return None
+    return [work_key(row) for row in requests]
+
+
+def paired_user_turns(base, candidate):
+    confirmed = []
+    candidate_turns = {row.get("phase"): row for row in candidate["turns"]}
+    for left in base["turns"]:
+        phase = left.get("phase")
+        right = candidate_turns.get(phase)
+        if (phase not in (1, 2, 3) or right is None or not quality(left) or not quality(right)
+                or left.get("client_finish") != "stop" or right.get("client_finish") != "stop"
+                or left["grade"]["total"] != right["grade"]["total"]
+                or not number(left.get("wall_seconds")) or left["wall_seconds"] == 0
+                or not number(right.get("wall_seconds"))):
+            continue
+        left_work = phase_work(base, left)
+        right_work = phase_work(candidate, right)
+        confirmed.append({"phase": phase, "4096_seconds": left["wall_seconds"],
+                          "2048_seconds": right["wall_seconds"],
+                          "identical_full_native_work": left_work is not None and left_work == right_work})
+    return confirmed
+
+
+def turn_comparison(records):
+    return {
+        "all_grade_and_pi_accepted": relative([(row["4096_seconds"], row["2048_seconds"]) for row in records]),
+        "identical_full_native_work": relative([(row["4096_seconds"], row["2048_seconds"]) for row in records
+                                                if row["identical_full_native_work"]]),
+    }
+
+
 def input_observations(base, candidate, exact):
     def key(row):
         return row.get("phase"), row.get("input_sha256"), row.get("input_tokens")
@@ -289,6 +328,7 @@ def summarize(rows, partial_lines):
         }
     pairs = []
     paired_turns, paired_sessions = [], []
+    user_turn_rows = []
     matched = defaultdict(list)
     matched_sessions = defaultdict(list)
     inputs_total = Counter()
@@ -303,9 +343,12 @@ def summarize(rows, partial_lines):
             base, candidate = status.get(base_label), status.get(candidate_label)
             equal = False
             native_pairs = []
+            user_turns = []
             inputs = None
             if base and candidate:
                 base_session, candidate_session = sessions[base_label], sessions[candidate_label]
+                user_turns = paired_user_turns(base_session, candidate_session)
+                user_turn_rows.extend(user_turns)
                 equal = (base["accepted"] and candidate["accepted"]
                          and [(turn["phase"], turn["grade"]["total"]) for turn in base_session["turns"]]
                          == [(turn["phase"], turn["grade"]["total"]) for turn in candidate_session["turns"]])
@@ -331,6 +374,8 @@ def summarize(rows, partial_lines):
                 "task": task, "order": [left[0], right[0]], "blocks": blocks, "equal_accepted_work": equal,
                 "exact_matched_native_requests": len(native_pairs), "4096": base, "2048": candidate,
                 "same_input_observations": inputs,
+                "accepted_user_turn_pairs": user_turns,
+                "accepted_user_turn_summary": turn_comparison(user_turns),
             })
 
     groups = {}
@@ -361,8 +406,14 @@ def summarize(rows, partial_lines):
         "equal_accepted_session_wall_seconds": relative(paired_sessions),
         "exact_native_matches": groups,
         "same_input_observations": dict(inputs_total),
+        "paired_user_turn_seconds": {
+            "overall": turn_comparison(user_turn_rows),
+            "by_phase": {phase: turn_comparison([row for row in user_turn_rows if row["phase"] == phase])
+                         for phase in (1, 2, 3)},
+        },
         "limits": [
             "Session-level pairs require both sessions to pass the same grade phases and check counts.",
+            "Descriptive user-turn pairs require both turns to pass grading and finish normally in Pi, even when their sessions fail. The exact subset also matches all native requests in order; user-turn pairs within one session are dependent.",
             "Exact native matches require the same input and generated-token hashes, finish, output budget, token counts and MTP work within a paired task and phase. Unmatched requests remain in arm totals.",
             "Native phase timings are dependent observations within sessions. The paired session ratios are descriptive and launch order and host paging may affect them.",
             "Session wall time includes Pi lifecycle and grading. Pi turn time includes client, tool and request time. First-text totals count only observations that had text.",
