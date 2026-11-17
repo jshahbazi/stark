@@ -2,7 +2,6 @@
 """Record source-matched native Flash Next measurements, one loaded worker at a time."""
 
 import argparse
-from collections import Counter
 import hashlib
 import json
 import math
@@ -153,8 +152,11 @@ def run(args, output, profile):
             os.environ.pop(name)
     os.environ.update(opts)
 
-    tracked = [path for path in args.model.iterdir() if path.is_file() and
-               (path.suffix in (".json", ".safetensors") or path.name == "ngram_table.bin")]
+    # Image startup refreshes its disposable digest cache by atomic rename.
+    # The source manifest, tokenizer and every weight remain in the guard.
+    tracked = [path for path in args.model.iterdir() if path.is_file()
+               and path.name != ".stark-image-validation.json"
+               and (path.suffix in (".json", ".safetensors") or path.name == "ngram_table.bin")]
     identities = {path: file_identity(path) for path in sorted(tracked)}
     weights = [path for path in tracked if path.suffix == ".safetensors"]
     if len(weights) != 55 or sum(path.stat().st_size for path in weights) != 106905155192:
