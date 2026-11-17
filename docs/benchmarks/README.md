@@ -12,6 +12,8 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Flash Next prefill and decode review (2026-11-17).** The [installed Lily Q4-XL study](2026-11-17-flashnext-speed-review.md) measures cache reuse across growing and interleaved requests and compares MTP on/off for 96-token sampled and greedy outputs. The report identifies separate cold-prefill and exact-verifier kernel experiments.
+
 **Decider HTTP latency diagnosis (2026-11-16).** The
 [source-bound profile](2026-11-16-decider-http-latency.md) measures native Decision
 HTTP medians of 1.106, 4.939 and 19.299 seconds at 80, 400 and 1,360 input
