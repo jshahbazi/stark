@@ -1,0 +1,872 @@
+{
+  "artifact_sha256": "18c7bcc1e97d1fefdd361472c2daa59d81d89fcd6f3a61983d995a032b44bfb4",
+  "distinct_scoped_requests": 24,
+  "exact_cross_arm_pairs": 12,
+  "exact_scope_pairs": {
+    "2048": 12,
+    "4096": 12
+  },
+  "excluded_warmups": 4,
+  "measured_requests": 48,
+  "model_revision": "0f94842e3682b49acace4daeb4cf2e65a6f94f83",
+  "mtp_drafts": 2,
+  "paired_incremental_allocation_seconds": {
+    "max": 0.006868916000000003,
+    "median": 0.0005459585000000006,
+    "min": -0.0023615419999999977,
+    "pairs": 12,
+    "positive": 9
+  },
+  "physical_chunk_tokens": 4096,
+  "prefix_grid_schedule": [
+    4096,
+    2048,
+    2048,
+    4096
+  ],
+  "prompt_tokens": 12288,
+  "receipt_sha256": "b4306e2a0c6b4fc3d39a0f44645f7701dae2bac2064ab651407462e234ed4190",
+  "reused_tokens": 0,
+  "schema": 1,
+  "seconds": {
+    "midpoint_minus_aligned_capture_delta": {
+      "aligned_blit_gpu_seconds": {
+        "median": -0.0010588124860078096,
+        "negative": 12,
+        "pairs": 12,
+        "positive": 0,
+        "range": [
+          -0.00141887494828552,
+          -0.0007918333867564797
+        ]
+      },
+      "aligned_blit_host_wall_seconds": {
+        "median": -0.006468103999999999,
+        "negative": 12,
+        "pairs": 12,
+        "positive": 0,
+        "range": [
+          -0.010798,
+          -0.005140834
+        ]
+      },
+      "aligned_cpu_allocate_zero_seconds": {
+        "median": -0.0071805,
+        "negative": 12,
+        "pairs": 12,
+        "positive": 0,
+        "range": [
+          -0.008829041999999999,
+          -0.005629625
+        ]
+      },
+      "final_physical_chunk_gpu_seconds": {
+        "median": -0.09655558317899704,
+        "negative": 8,
+        "pairs": 12,
+        "positive": 4,
+        "range": [
+          -0.6391959999455139,
+          0.389331208425574
+        ]
+      },
+      "first_sample_wall_seconds": {
+        "median": -0.13727110450000035,
+        "negative": 7,
+        "pairs": 12,
+        "positive": 5,
+        "range": [
+          -1.7594715820000006,
+          2.388610458999999
+        ]
+      },
+      "midpoint_cpu_allocate_zero_seconds": {
+        "median": 0.007631625,
+        "negative": 0,
+        "pairs": 12,
+        "positive": 12,
+        "range": [
+          0.0061960830000000015,
+          0.014706708000000002
+        ]
+      },
+      "midpoint_cpu_history_seconds": {
+        "median": 8.399999999999998e-08,
+        "negative": 0,
+        "pairs": 12,
+        "positive": 11,
+        "range": [
+          0.0,
+          2.9099999999999995e-07
+        ]
+      },
+      "prefill_phase_allocate_seconds": {
+        "median": -4.795000001500682e-07,
+        "negative": 10,
+        "pairs": 12,
+        "positive": 2,
+        "range": [
+          -8.750000000112834e-07,
+          4.199999975584845e-08
+        ]
+      },
+      "prefill_phase_encode_seconds": {
+        "median": 0.00042758250000000074,
+        "negative": 5,
+        "pairs": 12,
+        "positive": 7,
+        "range": [
+          -0.0024549570000000007,
+          0.005645334000000016
+        ]
+      },
+      "prefill_phase_gpu_busy_seconds": {
+        "median": 0.055284375000000274,
+        "negative": 6,
+        "pairs": 12,
+        "positive": 6,
+        "range": [
+          -1.7446887490000007,
+          2.3858517909999986
+        ]
+      },
+      "prefill_phase_gpu_seconds": {
+        "median": 0.05636885418789461,
+        "negative": 6,
+        "pairs": 12,
+        "positive": 6,
+        "range": [
+          -1.7438332915771753,
+          2.386778291198425
+        ]
+      },
+      "prefill_phase_ngram_stage_seconds": {
+        "median": -0.007930582999999998,
+        "negative": 11,
+        "pairs": 12,
+        "positive": 1,
+        "range": [
+          -0.581343,
+          0.0010937499999999767
+        ]
+      },
+      "prefill_phase_wait_seconds": {
+        "median": 0.002917500356804492,
+        "negative": 1,
+        "pairs": 12,
+        "positive": 11,
+        "range": [
+          -0.002276627619937077,
+          0.01572870880157451
+        ]
+      },
+      "untouched_physical_chunks_gpu_seconds": {
+        "median": -0.027993062569294125,
+        "negative": 6,
+        "pairs": 12,
+        "positive": 6,
+        "range": [
+          -1.258229083265178,
+          2.057737083057873
+        ]
+      }
+    },
+    "scoped_minus_unscoped_by_prefix_grid": {
+      "2048": {
+        "aligned_blit_gpu_seconds": {
+          "median": 0.0,
+          "negative": 0,
+          "pairs": 12,
+          "positive": 0,
+          "range": [
+            0,
+            0
+          ]
+        },
+        "aligned_blit_host_wall_seconds": {
+          "median": 0.0,
+          "negative": 0,
+          "pairs": 12,
+          "positive": 0,
+          "range": [
+            0,
+            0
+          ]
+        },
+        "aligned_cpu_allocate_zero_seconds": {
+          "median": 0.0,
+          "negative": 0,
+          "pairs": 12,
+          "positive": 0,
+          "range": [
+            0,
+            0
+          ]
+        },
+        "final_physical_chunk_gpu_seconds": {
+          "median": -0.09623668744461611,
+          "negative": 7,
+          "pairs": 12,
+          "positive": 5,
+          "range": [
+            -0.46278070844709873,
+            0.359606166719459
+          ]
+        },
+        "first_sample_wall_seconds": {
+          "median": -0.092495,
+          "negative": 7,
+          "pairs": 12,
+          "positive": 5,
+          "range": [
+            -1.6404721249999996,
+            1.857244584
+          ]
+        },
+        "midpoint_cpu_allocate_zero_seconds": {
+          "median": 0.007631625,
+          "negative": 0,
+          "pairs": 12,
+          "positive": 12,
+          "range": [
+            0.0061960830000000015,
+            0.014706708000000002
+          ]
+        },
+        "midpoint_cpu_history_seconds": {
+          "median": 8.399999999999998e-08,
+          "negative": 0,
+          "pairs": 12,
+          "positive": 11,
+          "range": [
+            0.0,
+            2.9099999999999995e-07
+          ]
+        },
+        "prefill_phase_allocate_seconds": {
+          "median": 4.19999999223819e-08,
+          "negative": 4,
+          "pairs": 12,
+          "positive": 8,
+          "range": [
+            -3.3300000090719095e-07,
+            3.760000009123132e-07
+          ]
+        },
+        "prefill_phase_encode_seconds": {
+          "median": 0.00030385350000000123,
+          "negative": 5,
+          "pairs": 12,
+          "positive": 7,
+          "range": [
+            -0.0004835409999999901,
+            0.004951084000000008
+          ]
+        },
+        "prefill_phase_gpu_busy_seconds": {
+          "median": -0.11286133349999972,
+          "negative": 7,
+          "pairs": 12,
+          "positive": 5,
+          "range": [
+            -1.6452582920000003,
+            1.8380470409999994
+          ]
+        },
+        "prefill_phase_gpu_seconds": {
+          "median": -0.1128613332984969,
+          "negative": 7,
+          "pairs": 12,
+          "positive": 5,
+          "range": [
+            -1.6452582917409018,
+            1.8380470417905599
+          ]
+        },
+        "prefill_phase_ngram_stage_seconds": {
+          "median": -0.0002149784999999904,
+          "negative": 7,
+          "pairs": 12,
+          "positive": 5,
+          "range": [
+            -0.015349874999999999,
+            0.01986829199999999
+          ]
+        },
+        "prefill_phase_wait_seconds": {
+          "median": 0.0017460629286045748,
+          "negative": 0,
+          "pairs": 12,
+          "positive": 12,
+          "range": [
+            0.0003562497409022036,
+            0.013618457589993138
+          ]
+        },
+        "untouched_physical_chunks_gpu_seconds": {
+          "median": -0.1011715208296664,
+          "negative": 7,
+          "pairs": 12,
+          "positive": 5,
+          "range": [
+            -1.182477583293803,
+            1.478440875071101
+          ]
+        }
+      },
+      "4096": {
+        "aligned_blit_gpu_seconds": {
+          "median": 0.0010588124860078096,
+          "negative": 0,
+          "pairs": 12,
+          "positive": 12,
+          "range": [
+            0.0007918333867564797,
+            0.00141887494828552
+          ]
+        },
+        "aligned_blit_host_wall_seconds": {
+          "median": 0.006468103999999999,
+          "negative": 0,
+          "pairs": 12,
+          "positive": 12,
+          "range": [
+            0.005140834,
+            0.010798
+          ]
+        },
+        "aligned_cpu_allocate_zero_seconds": {
+          "median": 0.0071805,
+          "negative": 0,
+          "pairs": 12,
+          "positive": 12,
+          "range": [
+            0.005629625,
+            0.008829041999999999
+          ]
+        },
+        "final_physical_chunk_gpu_seconds": {
+          "median": 0.04220566659932956,
+          "negative": 5,
+          "pairs": 12,
+          "positive": 7,
+          "range": [
+            -0.47833920817356557,
+            0.7742152083665133
+          ]
+        },
+        "first_sample_wall_seconds": {
+          "median": -0.04844479199999974,
+          "negative": 7,
+          "pairs": 12,
+          "positive": 5,
+          "range": [
+            -1.717464958999999,
+            1.0247262089999989
+          ]
+        },
+        "midpoint_cpu_allocate_zero_seconds": {
+          "median": 0.0,
+          "negative": 0,
+          "pairs": 12,
+          "positive": 0,
+          "range": [
+            0,
+            0
+          ]
+        },
+        "midpoint_cpu_history_seconds": {
+          "median": 0.0,
+          "negative": 0,
+          "pairs": 12,
+          "positive": 0,
+          "range": [
+            0,
+            0
+          ]
+        },
+        "prefill_phase_allocate_seconds": {
+          "median": 4.5849999988356593e-07,
+          "negative": 1,
+          "pairs": 12,
+          "positive": 11,
+          "range": [
+            -2.079999999737847e-07,
+            1.000000000139778e-06
+          ]
+        },
+        "prefill_phase_encode_seconds": {
+          "median": 7.697850000000506e-05,
+          "negative": 3,
+          "pairs": 12,
+          "positive": 9,
+          "range": [
+            -0.0006942500000000074,
+            0.0023319160000000033
+          ]
+        },
+        "prefill_phase_gpu_busy_seconds": {
+          "median": -0.12155022949999994,
+          "negative": 7,
+          "pairs": 12,
+          "positive": 5,
+          "range": [
+            -1.738355124,
+            1.0225944580000004
+          ]
+        },
+        "prefill_phase_gpu_seconds": {
+          "median": -0.12270045833429322,
+          "negative": 7,
+          "pairs": 12,
+          "positive": 5,
+          "range": [
+            -1.7392816247884184,
+            1.021450125030242
+          ]
+        },
+        "prefill_phase_ngram_stage_seconds": {
+          "median": 0.008265145999999987,
+          "negative": 2,
+          "pairs": 12,
+          "positive": 10,
+          "range": [
+            -0.009528332999999986,
+            0.601211292
+          ]
+        },
+        "prefill_phase_wait_seconds": {
+          "median": -0.0009318340360642274,
+          "negative": 9,
+          "pairs": 12,
+          "positive": 3,
+          "range": [
+            -0.002345707344712622,
+            0.0037503770160856043
+          ]
+        },
+        "untouched_physical_chunks_gpu_seconds": {
+          "median": -0.1330535624292679,
+          "negative": 7,
+          "pairs": 12,
+          "positive": 5,
+          "range": [
+            -1.2609424166148528,
+            0.5133090832969174
+          ]
+        }
+      }
+    }
+  },
+  "seconds_by_launch_order": {
+    "1": {
+      "first_grid": 4096,
+      "midpoint_minus_aligned_scope_effect": {
+        "final_prefill_gpu": {
+          "median": -0.20616714580683038,
+          "negative": 4,
+          "pairs": 6,
+          "positive": 2,
+          "range": [
+            -0.5364545832853764,
+            0.389331208425574
+          ]
+        },
+        "first_token": {
+          "median": 0.17182485449999874,
+          "negative": 2,
+          "pairs": 6,
+          "positive": 4,
+          "range": [
+            -1.5734955829999997,
+            2.388610458999999
+          ]
+        },
+        "ngram_stage": {
+          "median": -0.05547900000000013,
+          "negative": 5,
+          "pairs": 6,
+          "positive": 1,
+          "range": [
+            -0.581343,
+            0.0010937499999999767
+          ]
+        },
+        "total_prefill_gpu": {
+          "median": 0.39215631259139627,
+          "negative": 1,
+          "pairs": 6,
+          "positive": 5,
+          "range": [
+            -1.4777281249407679,
+            2.386778291198425
+          ]
+        }
+      },
+      "paired_incremental_allocation_seconds": {
+        "max": 0.006868916000000003,
+        "median": 0.0005459585000000006,
+        "min": -0.0023615419999999977,
+        "pairs": 6,
+        "positive": 5
+      },
+      "scope_first": true,
+      "scoped_minus_unscoped": {
+        "2048": {
+          "final_prefill_gpu": {
+            "median": -0.2290525208809413,
+            "negative": 5,
+            "pairs": 6,
+            "positive": 1,
+            "range": [
+              -0.46278070844709873,
+              0.359606166719459
+            ]
+          },
+          "first_token": {
+            "median": 0.042661625000000036,
+            "negative": 3,
+            "pairs": 6,
+            "positive": 3,
+            "range": [
+              -1.6404721249999996,
+              1.857244584
+            ]
+          },
+          "first_two_gpu": {
+            "max": 1.478440875071101,
+            "median": 0.25729952089022845,
+            "min": -1.182477583293803,
+            "pairs": 6,
+            "positive": 4
+          },
+          "ngram_stage": {
+            "median": 0.006497708499999984,
+            "negative": 2,
+            "pairs": 6,
+            "positive": 4,
+            "range": [
+              -0.01007904200000001,
+              0.01986829199999999
+            ]
+          },
+          "total_prefill_gpu": {
+            "median": 0.017486187629401684,
+            "negative": 3,
+            "pairs": 6,
+            "positive": 3,
+            "range": [
+              -1.6452582917409018,
+              1.8380470417905599
+            ]
+          }
+        },
+        "4096": {
+          "final_prefill_gpu": {
+            "median": 0.002139166637789458,
+            "negative": 3,
+            "pairs": 6,
+            "positive": 3,
+            "range": [
+              -0.47833920817356557,
+              0.22764754155650735
+            ]
+          },
+          "first_token": {
+            "median": -0.07283677099999997,
+            "negative": 5,
+            "pairs": 6,
+            "positive": 1,
+            "range": [
+              -1.717464958999999,
+              0.08691183400000035
+            ]
+          },
+          "first_two_gpu": {
+            "max": 0.09723470848985016,
+            "median": -0.3808191250427626,
+            "min": -1.2609424166148528,
+            "pairs": 6,
+            "positive": 1
+          },
+          "ngram_stage": {
+            "median": 0.04927727100000012,
+            "negative": 0,
+            "pairs": 6,
+            "positive": 6,
+            "range": [
+              0.003115749000000223,
+              0.601211292
+            ]
+          },
+          "total_prefill_gpu": {
+            "median": -0.40626302087912336,
+            "negative": 5,
+            "pairs": 6,
+            "positive": 1,
+            "range": [
+              -1.7392816247884184,
+              0.06750966678373516
+            ]
+          }
+        }
+      }
+    },
+    "2": {
+      "first_grid": 2048,
+      "midpoint_minus_aligned_scope_effect": {
+        "final_prefill_gpu": {
+          "median": -0.01894124987302348,
+          "negative": 4,
+          "pairs": 6,
+          "positive": 2,
+          "range": [
+            -0.6391959999455139,
+            0.1795617917086929
+          ]
+        },
+        "first_token": {
+          "median": -0.23001468699999927,
+          "negative": 5,
+          "pairs": 6,
+          "positive": 1,
+          "range": [
+            -1.7594715820000006,
+            0.22843779299999944
+          ]
+        },
+        "ngram_stage": {
+          "median": -0.007280499999999995,
+          "negative": 6,
+          "pairs": 6,
+          "positive": 0,
+          "range": [
+            -0.008896415999999963,
+            -0.002647336000000028
+          ]
+        },
+        "total_prefill_gpu": {
+          "median": -0.21788099990226328,
+          "negative": 5,
+          "pairs": 6,
+          "positive": 1,
+          "range": [
+            -1.7438332915771753,
+            0.233314499957487
+          ]
+        }
+      },
+      "paired_incremental_allocation_seconds": {
+        "max": 0.0039517910000000005,
+        "median": 0.0005106240000000008,
+        "min": -0.0013616670000000004,
+        "pairs": 6,
+        "positive": 4
+      },
+      "scope_first": false,
+      "scoped_minus_unscoped": {
+        "2048": {
+          "final_prefill_gpu": {
+            "median": 0.11275172920431942,
+            "negative": 2,
+            "pairs": 6,
+            "positive": 4,
+            "range": [
+              -0.3660184582695365,
+              0.3267661251593381
+            ]
+          },
+          "first_token": {
+            "median": -0.17363841699999982,
+            "negative": 4,
+            "pairs": 6,
+            "positive": 2,
+            "range": [
+              -1.1039840410000004,
+              0.47589416700000076
+            ]
+          },
+          "first_two_gpu": {
+            "max": 0.14153908344451338,
+            "median": -0.20083760417765006,
+            "min": -0.7449199999682605,
+            "pairs": 6,
+            "positive": 1
+          },
+          "ngram_stage": {
+            "median": -0.0002857074999999959,
+            "negative": 5,
+            "pairs": 6,
+            "positive": 1,
+            "range": [
+              -0.015349874999999999,
+              0.00016945799999998346
+            ]
+          },
+          "total_prefill_gpu": {
+            "median": -0.1769057290512137,
+            "negative": 4,
+            "pairs": 6,
+            "positive": 2,
+            "range": [
+              -1.110938458237797,
+              0.4683052086038515
+            ]
+          }
+        },
+        "4096": {
+          "final_prefill_gpu": {
+            "median": 0.08976810419699177,
+            "negative": 2,
+            "pairs": 6,
+            "positive": 4,
+            "range": [
+              -0.08907754172105342,
+              0.7742152083665133
+            ]
+          },
+          "first_token": {
+            "median": 0.3874763960000003,
+            "negative": 2,
+            "pairs": 6,
+            "positive": 4,
+            "range": [
+              -0.16991320899999973,
+              1.0247262089999989
+            ]
+          },
+          "first_two_gpu": {
+            "max": 0.5133090832969174,
+            "median": 0.21887031249934807,
+            "min": -0.20100700005423278,
+            "pairs": 6,
+            "positive": 4
+          },
+          "ngram_stage": {
+            "median": 0.005156751500000008,
+            "negative": 2,
+            "pairs": 6,
+            "positive": 4,
+            "range": [
+              -0.009528332999999986,
+              0.008595791999999963
+            ]
+          },
+          "total_prefill_gpu": {
+            "median": 0.36716149997664616,
+            "negative": 2,
+            "pairs": 6,
+            "positive": 4,
+            "range": [
+              -0.17131370829883963,
+              1.021450125030242
+            ]
+          }
+        }
+      }
+    }
+  },
+  "snapshot_payload_bytes": 115662848,
+  "source_commit": "14475c65d5aa0d2d2b3e2b84c546afdced16580e",
+  "system_host_paging": {
+    "2048": {
+      "scoped": {
+        "Pageins": {
+          "observations": 0,
+          "positive_observations": 0,
+          "total_delta_pages": 0
+        },
+        "Pageouts": {
+          "observations": 12,
+          "positive_observations": 6,
+          "total_delta_pages": 293
+        },
+        "Swapins": {
+          "observations": 12,
+          "positive_observations": 3,
+          "total_delta_pages": 28
+        },
+        "Swapouts": {
+          "observations": 12,
+          "positive_observations": 0,
+          "total_delta_pages": 0
+        },
+        "snapshots_marked_incomplete": 0
+      },
+      "unscoped": {
+        "Pageins": {
+          "observations": 0,
+          "positive_observations": 0,
+          "total_delta_pages": 0
+        },
+        "Pageouts": {
+          "observations": 12,
+          "positive_observations": 7,
+          "total_delta_pages": 345
+        },
+        "Swapins": {
+          "observations": 12,
+          "positive_observations": 5,
+          "total_delta_pages": 88
+        },
+        "Swapouts": {
+          "observations": 12,
+          "positive_observations": 0,
+          "total_delta_pages": 0
+        },
+        "snapshots_marked_incomplete": 0
+      }
+    },
+    "4096": {
+      "scoped": {
+        "Pageins": {
+          "observations": 0,
+          "positive_observations": 0,
+          "total_delta_pages": 0
+        },
+        "Pageouts": {
+          "observations": 12,
+          "positive_observations": 9,
+          "total_delta_pages": 1211
+        },
+        "Swapins": {
+          "observations": 12,
+          "positive_observations": 2,
+          "total_delta_pages": 64
+        },
+        "Swapouts": {
+          "observations": 12,
+          "positive_observations": 0,
+          "total_delta_pages": 0
+        },
+        "snapshots_marked_incomplete": 0
+      },
+      "unscoped": {
+        "Pageins": {
+          "observations": 0,
+          "positive_observations": 0,
+          "total_delta_pages": 0
+        },
+        "Pageouts": {
+          "observations": 12,
+          "positive_observations": 11,
+          "total_delta_pages": 727
+        },
+        "Swapins": {
+          "observations": 12,
+          "positive_observations": 4,
+          "total_delta_pages": 748
+        },
+        "Swapouts": {
+          "observations": 12,
+          "positive_observations": 0,
+          "total_delta_pages": 0
+        },
+        "snapshots_marked_incomplete": 0
+      }
+    }
+  },
+  "timed_prefill_gpu_spans": 144,
+  "timed_stock_blits": 12,
+  "worker_sha256": "1bb3f519aa890473d32c8974481074cca28b7cf16840b6cf07db50d2da5c6dc5"
+}

@@ -1,5 +1,7 @@
 # Model change and experiment ledger
 
+- [20261117-FLASHSPEED-14 · Flash Next 12K capture attribution](2026-11-17-flashnext-midpoint-attribution.md) alternates scoped and unscoped exact-MTP2 requests on both physical-4,096 workers with zero reuse. Midpoint allocation adds 0.55 ms over stock at the paired median. The capture-bearing GPU pass reverses direction between launch orders and unchanged passes also vary, leaving the earlier cold gap unattributed.
+
 - [20261117-FLASHSPEED-11–13 · Flash Next single midpoint snapshot](2026-11-17-flashnext-midpoint.md) implements and verifies one optional checkpoint between 4,096-token physical boundaries. The full-model logits and MTP gate passes. Median fresh first-token time rises by 2.6%, 5.5% and 5.0% at 8K, 12K and 32K. Across 16 matched Pi sessions, 50 native request pairs gain reuse and reach the first token 55.3% sooner at the median. Keep the selector opt-in.
 
 - [20261117-FLASHSPEED-08–10 · Flash Next midpoint feasibility and kernel screening](2026-11-17-flashnext-kernel-and-prefix-follow-up.md) finds that one 2,048 midpoint covers all 38 incremental reuse hits in the Pi trace. Midpoint execution remains untested. Fixed-4,096 MTP2 screens preserve all outputs and work across both selectors. The grouped SwiGLU and Q8 HC down timing effects miss their preset gates.

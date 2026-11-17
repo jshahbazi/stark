@@ -12,6 +12,8 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Flash Next 12K capture attribution (2026-11-17).** The [scoped/unscoped profile](../model-experiments/2026-11-17-flashnext-midpoint-attribution.md) holds physical chunk width at 4,096, with two MTP drafts and zero reuse. Compared with the stock snapshot, midpoint allocation adds 0.55 ms at the paired median. Final-pass GPU time changes direction with launch order and unchanged passes vary substantially.
+
 **Flash Next single midpoint snapshot (2026-11-17).** The [fixed-4,096 midpoint A/B](../model-experiments/2026-11-17-flashnext-midpoint.md) passes full-logit and MTP comparisons. Fresh first-token latency increases by 2.6%, 5.5% and 5.0% at 8K, 12K and 32K. Median paired Pi turn time is 15.3% lower across eight identical-work session pairs, with eight wins. Cold and full-session acceptance limits keep the selector opt-in.
 
 **Flash Next kernel and prefix follow-up (2026-11-17).** The [fixed-grid MTP2 screens](../model-experiments/2026-11-17-flashnext-kernel-and-prefix-follow-up.md) compare grouped SwiGLU fusion and Q8 HC down reuse on fresh 8K, 12K and 32K prompts. All 12 pairs match output and MTP work. Neither selector meets its timing gate. The prior Pi trace supports evaluating one 2,048 midpoint snapshot while keeping 4,096 physical chunks.

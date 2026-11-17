@@ -54,4 +54,6 @@ The 50 requests that gained reuse each skipped another 2,048 tokens and all reac
 
 Keep the midpoint selector opt-in. It passes the bounded exactness checks and produces a repeatable coding-session gain without changing the physical grid. The 12K fresh median exceeds the 5% promotion limit and the four fully accepted Pi pairs fall below the six-pair minimum. Qualification also remains specific to the pinned retained-vision Lily artifact. The installed production worker returned to Ready after the campaign. Authenticated health, model listing and an MTP-enabled local completion all succeeded.
 
+The subsequent [12K attribution profile](2026-11-17-flashnext-midpoint-attribution.md) measured an incremental allocation cost of 0.55 ms. The capture-bearing GPU pass and the untouched passes both varied across the controls.
+
 [Fresh runner](../archive/experiments/2026-11-17-flashnext-speed/fresh_coding.py) · [Pi runner](../archive/experiments/2026-11-17-flashnext-agent-ab/benchmark.py) · [Aggregate results](../benchmarks/data/flashnext-midpoint-2026-11-17.json)
