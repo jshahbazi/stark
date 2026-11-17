@@ -111,6 +111,93 @@ pub fn prefill_snapshot() -> Prefill {
     COUNTERS.with(|cell| cell.get().prefill)
 }
 
+/// Opt-in cumulative counters on the calling engine thread. Take a before
+/// value across the whole request, including any aligned prefix snapshot.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SnapshotAttribution {
+    pub midpoint_attempts: u64,
+    pub midpoint_captures: u64,
+    pub midpoint_bytes: u64,
+    /// Host allocation and zeroing of midpoint tensor storage.
+    pub midpoint_alloc_secs: f64,
+    pub midpoint_history_secs: f64,
+    pub aligned_captures: u64,
+    pub aligned_bytes: u64,
+    pub aligned_alloc_secs: f64,
+    /// Host elapsed from start of blit encoding through fence completion.
+    pub aligned_blit_secs: f64,
+    pub aligned_blit_gpu_secs: f64,
+    pub aligned_blit_missing_timestamps: u64,
+    pub capture_chunks: u64,
+    pub capture_gpu_secs: f64,
+    pub other_chunks: u64,
+    pub other_gpu_secs: f64,
+    pub missing_gpu_timestamps: u64,
+    /// GPU span and completed chunk count by absolute start / physical grid.
+    /// Command spans include any GPU stalls. Counts include missing timings.
+    pub chunk_index_gpu_secs: [f64; 32],
+    pub chunk_index_counts: [u64; 32],
+    pub unindexed_chunks: u64,
+}
+
+impl SnapshotAttribution {
+    /// Returns the interval between two observations on one engine thread.
+    pub fn since(self, before: Self) -> Self {
+        Self {
+            midpoint_attempts: self.midpoint_attempts - before.midpoint_attempts,
+            midpoint_captures: self.midpoint_captures - before.midpoint_captures,
+            midpoint_bytes: self.midpoint_bytes - before.midpoint_bytes,
+            midpoint_alloc_secs: self.midpoint_alloc_secs - before.midpoint_alloc_secs,
+            midpoint_history_secs: self.midpoint_history_secs
+                - before.midpoint_history_secs,
+            aligned_captures: self.aligned_captures - before.aligned_captures,
+            aligned_bytes: self.aligned_bytes - before.aligned_bytes,
+            aligned_alloc_secs: self.aligned_alloc_secs - before.aligned_alloc_secs,
+            aligned_blit_secs: self.aligned_blit_secs - before.aligned_blit_secs,
+            aligned_blit_gpu_secs: self.aligned_blit_gpu_secs
+                - before.aligned_blit_gpu_secs,
+            aligned_blit_missing_timestamps: self.aligned_blit_missing_timestamps
+                - before.aligned_blit_missing_timestamps,
+            capture_chunks: self.capture_chunks - before.capture_chunks,
+            capture_gpu_secs: self.capture_gpu_secs - before.capture_gpu_secs,
+            other_chunks: self.other_chunks - before.other_chunks,
+            other_gpu_secs: self.other_gpu_secs - before.other_gpu_secs,
+            missing_gpu_timestamps: self.missing_gpu_timestamps
+                - before.missing_gpu_timestamps,
+            chunk_index_gpu_secs: std::array::from_fn(|i| {
+                self.chunk_index_gpu_secs[i] - before.chunk_index_gpu_secs[i]
+            }),
+            chunk_index_counts: std::array::from_fn(|i| {
+                self.chunk_index_counts[i] - before.chunk_index_counts[i]
+            }),
+            unindexed_chunks: self.unindexed_chunks - before.unindexed_chunks,
+        }
+    }
+}
+
+thread_local! {
+    static ATTRIBUTION_ENABLED: Cell<bool> = const { Cell::new(false) };
+    static ATTRIBUTION: Cell<SnapshotAttribution> = Cell::new(SnapshotAttribution::default());
+}
+
+pub fn set_snapshot_attribution_enabled(enabled: bool) {
+    ATTRIBUTION_ENABLED.set(enabled);
+}
+
+pub fn snapshot_attribution() -> SnapshotAttribution {
+    ATTRIBUTION.get()
+}
+
+pub(crate) fn snapshot_attribution_enabled() -> bool {
+    ATTRIBUTION_ENABLED.get()
+}
+
+pub(crate) fn record_snapshot_attribution(f: impl FnOnce(&mut SnapshotAttribution)) {
+    let mut counters = ATTRIBUTION.get();
+    f(&mut counters);
+    ATTRIBUTION.set(counters);
+}
+
 /// Adds to this thread's counters.
 pub fn record(f: impl FnOnce(&mut Counters)) {
     COUNTERS.with(|cell| {

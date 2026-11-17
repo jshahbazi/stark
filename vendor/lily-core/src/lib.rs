@@ -3,9 +3,9 @@
 //! Modified by Stark: the crate exposes no server, CLI, persistence or probes.
 //! See UPSTREAM.md for source revision, scope and patch provenance.
 pub mod config;
-pub mod finite_guard;
 #[cfg(target_os = "macos")]
 pub mod engine;
+pub mod finite_guard;
 #[cfg(target_os = "macos")]
 pub mod kernels;
 #[cfg(target_os = "macos")]
@@ -19,7 +19,10 @@ pub mod sha256;
 #[cfg(target_os = "macos")]
 mod stats;
 #[cfg(target_os = "macos")]
-pub use stats::{Prefill as PrefillStats, prefill_snapshot};
+pub use stats::{
+    Prefill as PrefillStats, SnapshotAttribution, prefill_snapshot,
+    set_snapshot_attribution_enabled, snapshot_attribution,
+};
 #[cfg(target_os = "macos")]
 pub mod tensor;
 #[cfg(target_os = "macos")]

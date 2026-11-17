@@ -484,6 +484,9 @@ impl Snapshot {
         state: &DecodeState,
         tokens: &[u32],
     ) -> Result<Self> {
+        let start =
+            crate::stats::snapshot_attribution_enabled().then(std::time::Instant::now);
+        let mut history_secs = 0.0;
         let storage =
             |tensor: &Tensor| Tensor::zeros(ctx, tensor.shape(), tensor.dtype());
         let mut gdn = Vec::new();
@@ -500,10 +503,22 @@ impl Snapshot {
             .ple
             .as_ref()
             .map(|p| -> Result<_> {
-                Ok((NgramHasher::advance(p.hist, tokens), storage(&p.conv_windows[0])?))
+                let history_start = start.map(|_| std::time::Instant::now());
+                let history = NgramHasher::advance(p.hist, tokens);
+                if let Some(history_start) = history_start {
+                    history_secs = history_start.elapsed().as_secs_f64();
+                }
+                Ok((history, storage(&p.conv_windows[0])?))
             })
             .transpose()?;
         let mtp_hidden = state.mtp.as_ref().map(|m| storage(&m.hidden)).transpose()?;
+        if let Some(start) = start {
+            let alloc_secs = (start.elapsed().as_secs_f64() - history_secs).max(0.0);
+            crate::stats::record_snapshot_attribution(|s| {
+                s.midpoint_alloc_secs += alloc_secs;
+                s.midpoint_history_secs += history_secs;
+            });
+        }
         Ok(Self { pos: state.pos + tokens.len(), gdn, ple, mtp_hidden })
     }
 }
@@ -534,10 +549,13 @@ fn block_key_rows(capacity: usize, ratio: usize) -> usize {
 /// most of which is `Tensor::zeros`' allocation and first touch (about
 /// 5 ms).
 fn clone_tensors(ctx: &MetalContext, sources: &[&Tensor]) -> Result<Vec<Tensor>> {
+    let start =
+        crate::stats::snapshot_attribution_enabled().then(std::time::Instant::now);
     let copies = sources
         .iter()
         .map(|t| Tensor::zeros(ctx, t.shape(), t.dtype()))
         .collect::<Result<Vec<_>>>()?;
+    let alloc_secs = start.map(|start| start.elapsed().as_secs_f64());
     let blits: Vec<BlitCopy<'_>> = sources
         .iter()
         .zip(&copies)
@@ -549,7 +567,20 @@ fn clone_tensors(ctx: &MetalContext, sources: &[&Tensor]) -> Result<Vec<Tensor>>
             len: src.byte_len(),
         })
         .collect();
-    ctx.blit_copy(&blits)?;
+    if let Some(alloc_secs) = alloc_secs {
+        let (blit_secs, gpu_secs) = ctx.blit_copy_timed(&blits)?;
+        crate::stats::record_snapshot_attribution(|s| {
+            s.aligned_captures += 1;
+            s.aligned_bytes += blits.iter().map(|b| b.len as u64).sum::<u64>();
+            s.aligned_alloc_secs += alloc_secs;
+            s.aligned_blit_secs += blit_secs;
+            s.aligned_blit_gpu_secs += gpu_secs.unwrap_or_default();
+            s.aligned_blit_missing_timestamps +=
+                u64::from(gpu_secs.is_none() && !blits.is_empty());
+        });
+    } else {
+        ctx.blit_copy(&blits)?;
+    }
     Ok(copies)
 }
 
@@ -2242,6 +2273,7 @@ impl Qwen4ExpModel {
         let ple_w = self.weights.layers.iter().find_map(|l| l.ple.as_deref());
         let ratio = self.config.indexer.compress_ratio;
         let mut remaining = tokens.len();
+        let attribute_snapshot = crate::stats::snapshot_attribution_enabled();
         let profile = false;
         let first_len = if plan.is_some() {
             (self.prefill_chunk - state.pos % self.prefill_chunk).min(tokens.len())
@@ -2309,6 +2341,11 @@ impl Qwen4ExpModel {
                     after == PREFILL_MIDPOINT,
                     "checkpoint must be halfway through a physical chunk"
                 );
+                if attribute_snapshot {
+                    crate::stats::record_snapshot_attribution(|s| {
+                        s.midpoint_attempts += 1
+                    });
+                }
                 match Snapshot::for_prefill_midpoint(ctx, state, &chunk[..after]) {
                     Ok(snapshot) => Some(snapshot),
                     Err(_) if ctx.fault().is_none() => None,
@@ -2371,6 +2408,27 @@ impl Qwen4ExpModel {
                 c.prefill.wait_secs +=
                     (submitted_secs - gpu_secs - ahead_exposed).max(0.0);
             });
+            if attribute_snapshot {
+                let index = state.pos / self.prefill_chunk;
+                crate::stats::record_snapshot_attribution(|s| {
+                    if let Some(snapshot) = &midpoint {
+                        s.midpoint_captures += 1;
+                        s.midpoint_bytes += snapshot.bytes() as u64;
+                        s.capture_chunks += 1;
+                        s.capture_gpu_secs += gpu_secs;
+                    } else {
+                        s.other_chunks += 1;
+                        s.other_gpu_secs += gpu_secs;
+                    }
+                    s.missing_gpu_timestamps += u64::from(timing.is_none());
+                    if index < s.chunk_index_counts.len() {
+                        s.chunk_index_counts[index] += 1;
+                        s.chunk_index_gpu_secs[index] += gpu_secs;
+                    } else {
+                        s.unindexed_chunks += 1;
+                    }
+                });
+            }
             if profile {
                 {}
             }

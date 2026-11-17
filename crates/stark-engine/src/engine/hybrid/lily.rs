@@ -156,6 +156,114 @@ fn gpu_busy_snapshot() -> Option<u64> {
     profile::enabled().then(gpu_busy_ns)
 }
 
+struct PrefillAttribution(stark_lily_core::SnapshotAttribution);
+
+impl PrefillAttribution {
+    fn begin() -> Option<Self> {
+        if !profile::enabled() || std::env::var_os("STARK_NATIVE_PROFILE_OUTPUT").is_none() {
+            return None;
+        }
+        stark_lily_core::set_snapshot_attribution_enabled(true);
+        Some(Self(stark_lily_core::snapshot_attribution()))
+    }
+}
+
+impl Drop for PrefillAttribution {
+    fn drop(&mut self) {
+        const CHUNK_GPU: [&str; 32] = [
+            "qwen.mixed.prefill.chunk.00.gpu",
+            "qwen.mixed.prefill.chunk.01.gpu",
+            "qwen.mixed.prefill.chunk.02.gpu",
+            "qwen.mixed.prefill.chunk.03.gpu",
+            "qwen.mixed.prefill.chunk.04.gpu",
+            "qwen.mixed.prefill.chunk.05.gpu",
+            "qwen.mixed.prefill.chunk.06.gpu",
+            "qwen.mixed.prefill.chunk.07.gpu",
+            "qwen.mixed.prefill.chunk.08.gpu",
+            "qwen.mixed.prefill.chunk.09.gpu",
+            "qwen.mixed.prefill.chunk.10.gpu",
+            "qwen.mixed.prefill.chunk.11.gpu",
+            "qwen.mixed.prefill.chunk.12.gpu",
+            "qwen.mixed.prefill.chunk.13.gpu",
+            "qwen.mixed.prefill.chunk.14.gpu",
+            "qwen.mixed.prefill.chunk.15.gpu",
+            "qwen.mixed.prefill.chunk.16.gpu",
+            "qwen.mixed.prefill.chunk.17.gpu",
+            "qwen.mixed.prefill.chunk.18.gpu",
+            "qwen.mixed.prefill.chunk.19.gpu",
+            "qwen.mixed.prefill.chunk.20.gpu",
+            "qwen.mixed.prefill.chunk.21.gpu",
+            "qwen.mixed.prefill.chunk.22.gpu",
+            "qwen.mixed.prefill.chunk.23.gpu",
+            "qwen.mixed.prefill.chunk.24.gpu",
+            "qwen.mixed.prefill.chunk.25.gpu",
+            "qwen.mixed.prefill.chunk.26.gpu",
+            "qwen.mixed.prefill.chunk.27.gpu",
+            "qwen.mixed.prefill.chunk.28.gpu",
+            "qwen.mixed.prefill.chunk.29.gpu",
+            "qwen.mixed.prefill.chunk.30.gpu",
+            "qwen.mixed.prefill.chunk.31.gpu",
+        ];
+
+        let stats = stark_lily_core::snapshot_attribution().since(self.0);
+        stark_lily_core::set_snapshot_attribution_enabled(false);
+        profile::record("qwen.mixed.prefill.snapshot.attribution", 0.0, 0);
+        let record = |name, calls, seconds, bytes| {
+            if calls > 0 {
+                profile::record(name, seconds, bytes);
+                for _ in 1..calls {
+                    profile::record(name, 0.0, 0);
+                }
+            }
+        };
+        record(
+            "qwen.mixed.prefill.snapshot.midpoint.allocate_zero",
+            stats.midpoint_attempts,
+            stats.midpoint_alloc_secs,
+            0,
+        );
+        record("qwen.mixed.prefill.snapshot.midpoint.history", stats.midpoint_captures, stats.midpoint_history_secs, 0);
+        record(
+            "qwen.mixed.prefill.snapshot.midpoint.capture",
+            stats.midpoint_captures,
+            0.0,
+            stats.midpoint_bytes as usize,
+        );
+        record(
+            "qwen.mixed.prefill.snapshot.aligned.allocate_zero",
+            stats.aligned_captures,
+            stats.aligned_alloc_secs,
+            0,
+        );
+        record("qwen.mixed.prefill.snapshot.aligned.blit_wall", stats.aligned_captures, stats.aligned_blit_secs, 0);
+        record(
+            "qwen.mixed.prefill.snapshot.aligned.blit_gpu",
+            stats.aligned_captures.saturating_sub(stats.aligned_blit_missing_timestamps),
+            stats.aligned_blit_gpu_secs,
+            0,
+        );
+        record(
+            "qwen.mixed.prefill.snapshot.aligned.blit_missing_timestamps",
+            stats.aligned_blit_missing_timestamps,
+            0.0,
+            0,
+        );
+        record(
+            "qwen.mixed.prefill.snapshot.aligned.capture",
+            stats.aligned_captures,
+            0.0,
+            stats.aligned_bytes as usize,
+        );
+        record("qwen.mixed.prefill.snapshot.capture_chunk_gpu", stats.capture_chunks, stats.capture_gpu_secs, 0);
+        record("qwen.mixed.prefill.snapshot.other_chunk_gpu", stats.other_chunks, stats.other_gpu_secs, 0);
+        record("qwen.mixed.prefill.snapshot.missing_gpu_timestamps", stats.missing_gpu_timestamps, 0.0, 0);
+        record("qwen.mixed.prefill.snapshot.unindexed_chunks", stats.unindexed_chunks, 0.0, 0);
+        for (index, name) in CHUNK_GPU.into_iter().enumerate() {
+            record(name, stats.chunk_index_counts[index], stats.chunk_index_gpu_secs[index], 0);
+        }
+    }
+}
+
 fn record_gpu_busy_delta(
     name: &'static str,
     before: Option<u64>,
@@ -1144,6 +1252,7 @@ impl LilyModel {
         draw: Option<Draw<'_>>,
         before_pass: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
+        let _attribution = PrefillAttribution::begin();
         let gpu_busy_before = gpu_busy_snapshot();
         let chunk = self.prefill_chunk_tokens();
         let split = self

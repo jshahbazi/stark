@@ -781,6 +781,29 @@ impl MetalContext {
         if copies.is_empty() {
             return Ok(());
         }
+        self.encode_blit_copies(copies)?.commit_wait()
+    }
+
+    /// Same blit with its host wall and existing commit-feedback GPU span.
+    /// The host interval ends at the fence, before querying feedback.
+    pub(crate) fn blit_copy_timed(
+        &self,
+        copies: &[BlitCopy<'_>],
+    ) -> Result<(f64, Option<f64>)> {
+        if copies.is_empty() {
+            return Ok((0.0, None));
+        }
+        let start = std::time::Instant::now();
+        let completed = self.encode_blit_copies(copies)?.commit()?.wait_retain()?;
+        let wall = start.elapsed().as_secs_f64();
+        let gpu = completed
+            .timing()
+            .ok()
+            .map(|timing| timing.gpu_end_secs - timing.gpu_start_secs);
+        Ok((wall, gpu))
+    }
+
+    fn encode_blit_copies(&self, copies: &[BlitCopy<'_>]) -> Result<ComputePass<'_>> {
         let pass = self.begin()?;
         for copy in copies {
             ensure!(
@@ -801,7 +824,7 @@ impl MetalContext {
                 copy.len,
             )?;
         }
-        pass.commit_wait()
+        Ok(pass)
     }
 
     /// Submits a pass's program in order and signals the fence after it.
