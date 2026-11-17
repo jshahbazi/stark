@@ -49,4 +49,6 @@ All eight counterbalanced pairs completed, for 16 actual Pi sessions, 48 user tu
 
 The ledger, schedule and inventory tasks missed the same late requirements on both grids. Passing catalog twice provides two accepted pairs, short of the required six. The strongest finding is faster repeated prefill under identical coding-agent work. The default decision needs longer cold controls, additional independently accepted task families, and the artifact-scoped lifecycle checks described above.
 
+The later [fresh 8K/12K/32K follow-up](2026-11-17-flashnext-fresh-coding-grid.md) filled the long-cold timing gap for those exact lengths. With identical outputs and MTP work, 2,048 was slower on all 18 pairs and exceeded the 5% cold criterion at all three lengths.
+
 [Benchmark runner](../archive/experiments/2026-11-17-flashnext-agent-ab/benchmark.py) · [Fixture and independent grader](../archive/experiments/2026-11-17-flashnext-agent-ab/fixtures.py) · [Aggregate results and source hashes](../benchmarks/data/flashnext-coding-agent-grid-2026-11-17.json)
