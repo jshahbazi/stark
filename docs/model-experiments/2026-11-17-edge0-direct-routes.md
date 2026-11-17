@@ -160,4 +160,8 @@ group, routing on the device, and cross-token expert batching.
 
 ## Follow-up history
 
-None.
+- 2026-11-17: [attempt 22](2026-11-17-edge0-token-rows.md) builds on this
+  schedule and changes six of the nine files above. The hashes in this record
+  bind the attempt 21 source state, committed as
+  `6192a4e5e42c3422cfe7e7585f45cca49247aa0a`. The `1` and `verify` selector
+  values keep their behavior.

@@ -166,9 +166,11 @@ impl AttentionControls {
         g: &Geometry,
         position: usize,
     ) -> Result<DeviceVector> {
-        self.encode_projected(graph, weights, attention, input, g, position, None)
+        self.encode_projected(graph, weights, attention, input, g, position, None, true)
     }
 
+    /// `project_output: false` returns the attention row before `o_proj`,
+    /// for a caller that applies the output projection to a token batch.
     #[expect(clippy::too_many_arguments, reason = "explicit causal position and optional preprojected token row")]
     fn encode_projected(
         &mut self,
@@ -179,6 +181,7 @@ impl AttentionControls {
         g: &Geometry,
         position: usize,
         projected: Option<&[DeviceVector; 4]>,
+        project_output: bool,
     ) -> Result<DeviceVector> {
         self.ensure_cache(graph, g, position)?;
         let count = position + 1;
@@ -371,6 +374,9 @@ impl AttentionControls {
                 g.heads * g.head_dim,
                 256,
             )?;
+        }
+        if !project_output {
+            return Ok(output);
         }
         weights.encode_matvec(graph, &format!("{}.o_proj.weight", attention.prefix), &output)
     }
@@ -943,6 +949,12 @@ impl State {
             })
             .collect::<Result<Vec<_>>>()?;
         let mut graph = edge0_metal::new_graph()?;
+        // A token batch shares its hyper-connection and mixer output
+        // projections under the token schedule. One token keeps every
+        // one-token dispatch, so decode is unchanged.
+        let schedule = DecodeGraph::edge0_schedule();
+        let shared = count > 1 && schedule.token_stages();
+        let verify = shared && schedule.verify();
         for (layer_index, layer) in model.layers.iter_mut().enumerate() {
             let controls = &mut self.layers[layer_index];
             let mut mixer_inputs = Vec::with_capacity(count);
@@ -955,6 +967,9 @@ impl State {
                     hidden[token] = graph.add(&hidden[token], &extra)?;
                     graph.edge0_stage("edge0.stage.ple", 1)?;
                 }
+                if shared {
+                    continue;
+                }
                 let (input, gates) = mix(
                     &mut graph,
                     &model.weights,
@@ -965,6 +980,21 @@ impl State {
                 )?;
                 mixer_inputs.push(input);
                 attention_gates.push(gates);
+                graph.edge0_stage("edge0.stage.mixer_mix", 1)?;
+            }
+            if shared {
+                for (input, gates) in mix_tokens(
+                    &mut graph,
+                    &model.weights,
+                    &layer.attn_hyper,
+                    &controls.attention_hyper.norm,
+                    &hidden,
+                    g,
+                    verify,
+                )? {
+                    mixer_inputs.push(input);
+                    attention_gates.push(gates);
+                }
                 graph.edge0_stage("edge0.stage.mixer_mix", 1)?;
             }
             let packed_inputs = edge0_metal::concatenate(&mut graph, &mixer_inputs)?;
@@ -998,6 +1028,14 @@ impl State {
             )?;
             let mut ffn_inputs = Vec::with_capacity(count);
             let mut ffn_gates = Vec::with_capacity(count);
+            let output_name = match &layer.mixer {
+                Mixer::Delta(mixer) => format!("{}.out_proj.weight", mixer.prefix),
+                Mixer::Attention(attention) => format!("{}.o_proj.weight", attention.prefix),
+            };
+            // Shared: every token's mixer row before its output projection
+            // and, under verification, the one-token projection of that row.
+            let mut deferred: Option<DeviceVector> = None;
+            let mut references = Vec::new();
             for token in 0..count {
                 let projections: [DeviceVector; 4] = projected
                     .iter()
@@ -1030,12 +1068,12 @@ impl State {
                                 &mixer.norm,
                             )?);
                         }
-                        graph.qwen_gdn_projected(
-                            &model.weights,
-                            &mixer.prefix,
-                            mixer.metal.as_mut().ok_or(Error::Invalid("Edge0 graph GDN state"))?,
-                            &projections,
-                        )?
+                        let state = mixer.metal.as_mut().ok_or(Error::Invalid("Edge0 graph GDN state"))?;
+                        if shared {
+                            graph.qwen_gdn_projected_state(state, &projections)?
+                        } else {
+                            graph.qwen_gdn_projected(&model.weights, &mixer.prefix, state, &projections)?
+                        }
                     },
                     Mixer::Attention(attention) => controls
                         .attention
@@ -1049,8 +1087,21 @@ impl State {
                             g,
                             start + token,
                             Some(&projections),
+                            !shared,
                         )?,
                 };
+                if shared {
+                    // The GDN row is persistent state the next causal token
+                    // overwrites, so each row is copied before that happens.
+                    let rows = match &deferred {
+                        Some(rows) => rows.clone(),
+                        None => deferred.insert(graph.scratch(count * output.len)?).clone(),
+                    };
+                    graph.copy_into(&output, &rows.slice(token * output.len, output.len)?)?;
+                    if verify {
+                        references.push(model.weights.encode_matvec(&mut graph, &output_name, &output)?);
+                    }
+                }
                 graph.edge0_stage(
                     match &layer.mixer {
                         Mixer::Delta(_) => "edge0.stage.gdn_state",
@@ -1058,11 +1109,46 @@ impl State {
                     },
                     1,
                 )?;
+                if shared {
+                    continue;
+                }
                 hidden[token] = inject(&mut graph, &hidden[token], &output, &attention_gates[token], g)?;
                 let (input, gates) =
                     mix(&mut graph, &model.weights, &layer.mlp_hyper, &controls.mlp_hyper.norm, &hidden[token], g)?;
                 ffn_inputs.push(input);
                 ffn_gates.push(gates);
+                graph.edge0_stage("edge0.stage.ffn_mix", 1)?;
+            }
+            if let Some(rows) = deferred {
+                let outputs = model.weights.encode_edge0_matvec_tokens(&mut graph, &output_name, &rows, count)?;
+                if outputs.len != count * g.dim {
+                    return Err(Error::Invalid("Edge0 graph mixer output batch"));
+                }
+                for (token, reference) in references.iter().enumerate() {
+                    graph.edge0_require_identical(&outputs.slice(token * g.dim, g.dim)?, reference)?;
+                }
+                graph.edge0_stage("edge0.stage.mixer_out", 1)?;
+                for token in 0..count {
+                    hidden[token] = inject(
+                        &mut graph,
+                        &hidden[token],
+                        &outputs.slice(token * g.dim, g.dim)?,
+                        &attention_gates[token],
+                        g,
+                    )?;
+                }
+                for (input, gates) in mix_tokens(
+                    &mut graph,
+                    &model.weights,
+                    &layer.mlp_hyper,
+                    &controls.mlp_hyper.norm,
+                    &hidden,
+                    g,
+                    verify,
+                )? {
+                    ffn_inputs.push(input);
+                    ffn_gates.push(gates);
+                }
                 graph.edge0_stage("edge0.stage.ffn_mix", 1)?;
             }
             let input = edge0_metal::concatenate(&mut graph, &ffn_inputs)?;
@@ -1145,6 +1231,110 @@ fn mix(
         &normalized,
         g.streams,
     )
+}
+
+/// Token-batched `mix`. The down, up and injection projections each run once
+/// for the token batch, decoding their weights once. Normalization, the
+/// activation and the final combination stay one dispatch per token, so every
+/// token repeats `qwen_hyperconnection`'s arithmetic. `verify` also encodes
+/// the one-token mixes and requires identical bits.
+fn mix_tokens(
+    graph: &mut DecodeGraph,
+    weights: &Weights,
+    hyper: &HyperConnection,
+    norm: &DeviceVector,
+    inputs: &[DeviceVector],
+    g: &Geometry,
+    verify: bool,
+) -> Result<Vec<(DeviceVector, DeviceVector)>> {
+    let count = inputs.len();
+    let width = g.streams * g.dim;
+    if g.streams == 0 || g.streams > 16 || inputs.iter().any(|input| input.len != width) {
+        return Err(Error::Invalid("Edge0 token hyperconnection geometry"));
+    }
+    let rows = inputs.iter().map(|input| graph.rms_norm(input, norm, g.dim, g.eps)).collect::<Result<Vec<_>>>()?;
+    let normalized = edge0_metal::concatenate(graph, &rows)?;
+    let reduced = weights.encode_edge0_matvec_tokens(
+        graph,
+        &format!("{}.input_mix_weight_down.weight", hyper.prefix),
+        &normalized,
+        count,
+    )?;
+    let rank = reduced.len / count;
+    for token in 0..count {
+        graph.kernel(
+            "hybrid_graph_qwen_hc_activate",
+            &[&reduced.slice(token * rank, rank)?],
+            &[rank as u32, g.streams as u32],
+            rank,
+            256,
+        )?;
+    }
+    let gates = weights.encode_edge0_matvec_tokens(
+        graph,
+        &format!("{}.input_mix_weight_up.weight", hyper.prefix),
+        &reduced,
+        count,
+    )?;
+    if gates.len != normalized.len {
+        return Err(Error::Invalid("Edge0 token hyperconnection output shape"));
+    }
+    let injections = if hyper.combine {
+        let injections = weights.encode_edge0_matvec_tokens(
+            graph,
+            &format!("{}.block_inject_weight.weight", hyper.prefix),
+            &normalized,
+            count,
+        )?;
+        if injections.len != count * g.streams {
+            return Err(Error::Invalid("Edge0 token hyperconnection injection shape"));
+        }
+        Some(injections)
+    } else {
+        None
+    };
+    let mut mixed = Vec::with_capacity(count);
+    for token in 0..count {
+        // The final hyperconnection has no injection users; it keeps the same
+        // one-element placeholder as the one-token mix.
+        let injection = match &injections {
+            Some(injections) => injections.slice(token * g.streams, g.streams)?,
+            None => DecodeGraph::zeros(1)?,
+        };
+        let output = graph.scratch(
+            g.dim
+                + if hyper.combine {
+                    g.streams
+                } else {
+                    0
+                },
+        )?;
+        graph.kernel(
+            "hybrid_graph_qwen_hc_mix",
+            &[&gates.slice(token * width, width)?, &normalized.slice(token * width, width)?, &injection, &output],
+            &[g.dim as u32, g.streams as u32, u32::from(hyper.combine)],
+            g.dim.max(g.streams),
+            256,
+        )?;
+        mixed.push((
+            output.slice(0, g.dim)?,
+            if hyper.combine {
+                output.slice(g.dim, g.streams)?
+            } else {
+                injection
+            },
+        ));
+    }
+    if verify {
+        for (input, (batched, batched_gates)) in inputs.iter().zip(&mixed) {
+            let (reference, reference_gates) = mix(graph, weights, hyper, norm, input, g)?;
+            graph.edge0_require_identical(batched, &reference)?;
+            if hyper.combine {
+                graph.edge0_require_identical(batched_gates, &reference_gates)?;
+            }
+        }
+    }
+    Ok(mixed)
 }
 
 fn inject(

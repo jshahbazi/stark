@@ -10,6 +10,9 @@ mod tests;
 #[path = "decode_graph_edge0_direct_tests.rs"]
 mod direct_tests;
 
+#[path = "decode_graph_edge0_tokens.rs"]
+mod tokens;
+
 fn specialize_single() -> bool {
     // Native workers fix their selectors before model loading. Cache once per
     // process rather than reading the environment for every selected expert.
@@ -33,11 +36,36 @@ fn stage_level() -> u8 {
 /// selector. `STARK_EDGE0_DIRECT_ROUTES=1` selects one-token kernels that
 /// write route rows in place. `verify` encodes both schedules and rejects
 /// the request unless every compared F32 value has identical bits.
+///
+/// `token-routes` is the direct schedule with token rows of one route or
+/// trunk matrix sharing a dispatch. `tokens` also shares the hyper-connection
+/// and mixer output projections across a token batch. `verify-tokens`
+/// encodes `tokens` beside the one-token forms and compares them likewise.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Edge0Schedule {
     Grouped,
     Direct,
     Verify,
+    TokenRoutes,
+    Tokens,
+    VerifyTokens,
+}
+
+impl Edge0Schedule {
+    /// Token rows of one route or trunk matrix share dispatches.
+    pub(crate) fn token_rows(self) -> bool {
+        matches!(self, Self::TokenRoutes | Self::Tokens | Self::VerifyTokens)
+    }
+
+    /// Hyper-connection and mixer output projections share dispatches too.
+    pub(crate) fn token_stages(self) -> bool {
+        matches!(self, Self::Tokens | Self::VerifyTokens)
+    }
+
+    /// The reference form is encoded as well and compared on the device.
+    pub(crate) fn verify(self) -> bool {
+        matches!(self, Self::Verify | Self::VerifyTokens)
+    }
 }
 
 fn schedule() -> Edge0Schedule {
@@ -45,6 +73,9 @@ fn schedule() -> Edge0Schedule {
     *SCHEDULE.get_or_init(|| match std::env::var("STARK_EDGE0_DIRECT_ROUTES").as_deref() {
         Ok("1") => Edge0Schedule::Direct,
         Ok("verify") => Edge0Schedule::Verify,
+        Ok("token-routes") => Edge0Schedule::TokenRoutes,
+        Ok("tokens") => Edge0Schedule::Tokens,
+        Ok("verify-tokens") => Edge0Schedule::VerifyTokens,
         _ => Edge0Schedule::Grouped,
     })
 }

@@ -1460,6 +1460,18 @@ impl DecodeGraph {
         state: &mut QwenGdnState,
         projections: &[DeviceVector; 4],
     ) -> Result<DeviceVector> {
+        let result = self.qwen_gdn_projected_state(state, projections)?;
+        weights.encode_matvec(self, &format!("{prefix}.out_proj.weight"), &result)
+    }
+
+    /// The recurrence of `qwen_gdn_projected` without its output projection.
+    /// The returned view is the persistent result row, which the next causal
+    /// token overwrites; a caller that defers the projection copies it first.
+    pub fn qwen_gdn_projected_state(
+        &mut self,
+        state: &mut QwenGdnState,
+        projections: &[DeviceVector; 4],
+    ) -> Result<DeviceVector> {
         if self.unretained {
             return Err(Error::Invalid("unretained graph supports audited GLM bindings only"));
         }
@@ -1559,12 +1571,11 @@ impl DecodeGraph {
                 depth: 1,
             },
         );
-        let result = DeviceVector {
+        Ok(DeviceVector {
             buffer: state.result.clone(),
             offset: 0,
             len: g.value_heads * g.value_dim,
-        };
-        weights.encode_matvec(self, &format!("{prefix}.out_proj.weight"), &result)
+        })
     }
 
     /// Diagnostic only. Encoder timing labels stage samples in one command;

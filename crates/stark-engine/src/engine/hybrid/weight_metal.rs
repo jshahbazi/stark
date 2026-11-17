@@ -709,6 +709,7 @@ fn executor() -> Result<&'static Executor> {
             source.push_str(include_str!("feed_forward.metal"));
             source.push_str(include_str!("edge0_graph.metal"));
             source.push_str(include_str!("edge0_direct.metal"));
+            source.push_str(include_str!("edge0_tokens.metal"));
             source.push_str(include_str!("edge0_mtp_graph.metal"));
             source.push_str(include_str!("qwen_gdn.metal"));
             source.push_str(include_str!("decode_graph.metal"));

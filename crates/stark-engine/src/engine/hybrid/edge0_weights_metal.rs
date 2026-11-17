@@ -422,6 +422,77 @@ impl Weights {
         graph.edge0_gate_up_swiglu_single(&gate, &up, tensor.shape[0], tensor.shape[1], input, false)
     }
 
+    /// Token rows of one Edge0 matrix in shared dispatches. Row indices count
+    /// whole rows of `input` and `output`; the caller owns the finite
+    /// obligation of `input`, as for the one-token rows above.
+    #[expect(clippy::too_many_arguments, reason = "explicit checked operands for token rows of one matrix")]
+    pub(in crate::engine::hybrid) fn encode_edge0_matvec_tokens_into(
+        &self,
+        graph: &mut DecodeGraph,
+        matrix: Edge0Matrix,
+        input: &DeviceVector,
+        input_rows: &[usize],
+        output: &DeviceVector,
+        output_rows: &[usize],
+        scale: Option<&DeviceVector>,
+    ) -> Result<()> {
+        let (mapped, tensor) = self.edge0_graph_matrix(matrix)?;
+        graph.edge0_packed_tokens_into(
+            &mapped,
+            MatrixFormat::Packed(tensor.kind),
+            tensor.shape[0],
+            tensor.shape[1],
+            input,
+            input_rows,
+            output,
+            output_rows,
+            scale,
+        )
+    }
+
+    /// Fused gate/up rows of one selected expert for the given input rows.
+    pub(in crate::engine::hybrid) fn encode_edge0_gate_up_swiglu_tokens(
+        &self,
+        graph: &mut DecodeGraph,
+        layer: usize,
+        expert: usize,
+        input: &DeviceVector,
+        input_rows: &[usize],
+    ) -> Result<DeviceVector> {
+        let (gate, tensor) = self.edge0_graph_matrix(Edge0Matrix::ExpertGate {
+            layer,
+            expert,
+        })?;
+        let (up, right) = self.edge0_graph_matrix(Edge0Matrix::ExpertUp {
+            layer,
+            expert,
+        })?;
+        if tensor.kind != 11 || right.kind != 11 || tensor.shape != right.shape {
+            return Err(Error::Invalid("Edge0 fused gate/up format"));
+        }
+        graph.edge0_gate_up_swiglu_tokens(&gate, &up, tensor.shape[0], tensor.shape[1], input, input_rows)
+    }
+
+    /// Token-batched form of `encode_matvec` for a contiguous token batch of
+    /// one named matrix: the hyper-connection and mixer output projections.
+    pub(in crate::engine::hybrid) fn encode_edge0_matvec_tokens(
+        &self,
+        graph: &mut DecodeGraph,
+        name: &str,
+        input: &DeviceVector,
+        tokens: usize,
+    ) -> Result<DeviceVector> {
+        if !self.is_edge0() {
+            return Err(Error::Invalid("Edge0 token rows require Edge0 layout"));
+        }
+        let tensor = self.tensor(name)?;
+        if tensor.shape.len() != 2 || tensor.affine.is_some() {
+            return Err(Error::Invalid("Edge0 token row matrix shape"));
+        }
+        let mapped = self.mapped_matrix(tensor, 0, tensor.shape[0], tensor.shape[1], true)?;
+        graph.edge0_matvec_tokens(&mapped, self.matrix_format(tensor)?, tensor.shape[0], tensor.shape[1], input, tokens)
+    }
+
     pub(in crate::engine::hybrid) fn encode_edge0_named_batch(
         &self,
         graph: &mut DecodeGraph,
@@ -439,17 +510,20 @@ impl Weights {
         let mapped = self.mapped_matrix(tensor, 0, tensor.shape[0], tensor.shape[1], true)?;
         let format = self.matrix_format(tensor)?;
         let (rows, columns) = (tensor.shape[0], tensor.shape[1]);
-        let output = match DecodeGraph::edge0_schedule() {
-            Edge0Schedule::Grouped => graph.edge0_packed_batch(&mapped, format, rows, columns, input, tokens)?,
-            Edge0Schedule::Direct => graph.edge0_packed_split(&mapped, format, rows, columns, input, tokens)?,
-            Edge0Schedule::Verify => {
-                let output = graph.edge0_packed_split(&mapped, format, rows, columns, input, tokens)?;
-                if tokens > 1 {
-                    let grouped = graph.edge0_packed_batch(&mapped, format, rows, columns, input, tokens)?;
-                    graph.edge0_require_identical(&output, &grouped)?;
-                }
-                output
-            },
+        let schedule = DecodeGraph::edge0_schedule();
+        let output = if schedule == Edge0Schedule::Grouped {
+            graph.edge0_packed_batch(&mapped, format, rows, columns, input, tokens)?
+        } else {
+            let output = if schedule.token_rows() {
+                graph.edge0_packed_tokens(&mapped, format, rows, columns, input, tokens)?
+            } else {
+                graph.edge0_packed_split(&mapped, format, rows, columns, input, tokens)?
+            };
+            if schedule.verify() && tokens > 1 {
+                let grouped = graph.edge0_packed_batch(&mapped, format, rows, columns, input, tokens)?;
+                graph.edge0_require_identical(&output, &grouped)?;
+            }
+            output
         };
         self.edge0_count_batch(tokens, tensor.kind, false);
         Ok(output)

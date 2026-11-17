@@ -167,16 +167,17 @@ pub(super) fn encode(
     let (selected, probabilities) = routes(graph, weights, scores, tokens, g.experts, g.active_experts)?;
 
     let plan = plan_routes(&selected, g.active_experts, g.experts, |expert| weights.edge0_group(layer, expert))?;
-    let (_, expanded) = match DecodeGraph::edge0_schedule() {
-        Edge0Schedule::Grouped => expand_grouped(graph, weights, layer, inputs, g, controls, tokens, plan)?,
-        Edge0Schedule::Direct => expand_direct(graph, weights, layer, inputs, g, controls, tokens, &plan)?,
-        Edge0Schedule::Verify => {
-            let direct = expand_direct(graph, weights, layer, inputs, g, controls, tokens, &plan)?;
+    let schedule = DecodeGraph::edge0_schedule();
+    let (_, expanded) = if schedule == Edge0Schedule::Grouped {
+        expand_grouped(graph, weights, layer, inputs, g, controls, tokens, plan)?
+    } else {
+        let direct = expand_direct(graph, weights, layer, inputs, g, controls, tokens, &plan, schedule.token_rows())?;
+        if schedule.verify() {
             let grouped = expand_grouped(graph, weights, layer, inputs, g, controls, tokens, plan)?;
             graph.edge0_require_identical(&direct.0, &grouped.0)?;
             graph.edge0_require_identical(&direct.1, &grouped.1)?;
-            direct
-        },
+        }
+        direct
     };
     let shared_values = graph.swiglu(&shared_values, &shared_up, None)?;
     let shared_down = weights.encode_edge0_named_batch(
@@ -211,6 +212,10 @@ pub(super) fn encode(
 /// failure for every value it writes, and a nonfinite input makes every row
 /// result nonfinite. `inputs` was scanned by the router projection level,
 /// whose command completed before routing.
+///
+/// `shared` selects the token-batched form of the same schedule: token rows
+/// of one D, expert or U matrix share dispatches that decode each weight
+/// once. Every row keeps its slot and its one-token F32 reduction.
 #[expect(clippy::too_many_arguments, reason = "separate checked model, layer, device operands and batch geometry")]
 fn expand_direct(
     graph: &mut DecodeGraph,
@@ -221,6 +226,7 @@ fn expand_direct(
     controls: &Controls,
     tokens: usize,
     plan: &RoutePlan,
+    shared: bool,
 ) -> Result<(DeviceVector, DeviceVector)> {
     let latent_width = LATENT_WIDTH as usize;
     let route_rows = tokens.checked_mul(g.active_experts).ok_or(Error::Invalid("Edge0 route count overflow"))?;
@@ -231,20 +237,33 @@ fn expand_direct(
         // Token rows no route of this group selects stay unwritten and unread.
         let projected = graph.scratch(tokens * latent_width)?;
         let mut written = [false; MAX_BATCH];
-        for &(token, _) in jobs {
-            if std::mem::replace(&mut written[token], true) {
-                continue;
-            }
-            weights.encode_edge0_matvec_single_into(
+        let rows = jobs.iter().map(|&(token, _)| token).filter(|&token| !std::mem::replace(&mut written[token], true));
+        let matrix = Edge0Matrix::ProjectionDown {
+            layer,
+            group,
+        };
+        if shared {
+            // The same token rows share dispatches that decode D once.
+            let rows = rows.collect::<Vec<_>>();
+            weights.encode_edge0_matvec_tokens_into(
                 graph,
-                Edge0Matrix::ProjectionDown {
-                    layer,
-                    group,
-                },
-                &inputs.slice(token * g.dim, g.dim)?,
-                &projected.slice(token * latent_width, latent_width)?,
+                matrix,
+                inputs,
+                &rows,
+                &projected,
+                &rows,
                 Some(&controls.stored_s),
             )?;
+        } else {
+            for token in rows {
+                weights.encode_edge0_matvec_single_into(
+                    graph,
+                    matrix,
+                    &inputs.slice(token * g.dim, g.dim)?,
+                    &projected.slice(token * latent_width, latent_width)?,
+                    Some(&controls.stored_s),
+                )?;
+            }
         }
         group_inputs[group] = Some(projected);
     }
@@ -254,6 +273,29 @@ fn expand_direct(
     for (&expert, jobs) in &plan.expert_jobs {
         let group = weights.edge0_group(layer, expert)?;
         let source = group_inputs[group].as_ref().ok_or(Error::Invalid("Edge0 group activation missing"))?;
+        if shared {
+            // One expert's token rows share its gate/up and down dispatches.
+            let rows = jobs.iter().map(|&(token, _)| token).collect::<Vec<_>>();
+            let slots = jobs.iter().map(|&(token, route)| token * g.active_experts + route).collect::<Vec<_>>();
+            let ordered = (0..jobs.len()).collect::<Vec<_>>();
+            let hidden = weights.encode_edge0_gate_up_swiglu_tokens(graph, layer, expert, source, &rows)?;
+            graph.edge0_stage("edge0.stage.experts.gate_up", 2)?;
+            weights.encode_edge0_matvec_tokens_into(
+                graph,
+                Edge0Matrix::ExpertDown {
+                    layer,
+                    expert,
+                },
+                &hidden,
+                &ordered,
+                &expert_outputs,
+                &slots,
+                None,
+            )?;
+            graph.edge0_stage("edge0.stage.experts.down", 2)?;
+            graph.resource_boundary()?;
+            continue;
+        }
         for &(token, route) in jobs {
             let hidden = weights.encode_edge0_gate_up_swiglu_single(
                 graph,
@@ -282,6 +324,23 @@ fn expand_direct(
     // Every group's U lies in the layer's dense bank, as its D rows above do.
     graph.begin_projection_level()?;
     for (&group, jobs) in &plan.group_jobs {
+        if shared {
+            // Each route still receives U independently, in its own slot.
+            let slots = jobs.iter().map(|&(token, route)| token * g.active_experts + route).collect::<Vec<_>>();
+            weights.encode_edge0_matvec_tokens_into(
+                graph,
+                Edge0Matrix::ProjectionUp {
+                    layer,
+                    group,
+                },
+                &expert_outputs,
+                &slots,
+                &expanded,
+                &slots,
+                None,
+            )?;
+            continue;
+        }
         for &(token, route) in jobs {
             let slot = token * g.active_experts + route;
             // Each original route still receives U independently.

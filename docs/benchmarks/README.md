@@ -1,5 +1,12 @@
 # Benchmarks
 
+[Edge0 token-batched prefill rows, 2026-11-17](2026-11-17-edge0-token-rows.md):
+an opt-in schedule shares one weight decode across the token rows of a matrix
+with unchanged per-token F32 reductions; same-binary observed prefill 19.43 to
+39.30 tok/s and decode 13.97 to 14.90 tok/s against the direct schedule, with
+matching outputs. Default off, local non-commercial evaluation; strict timing
+qualification remains open.
+
 [Edge0 stage attribution and direct-route schedule, 2026-11-17](2026-11-17-edge0-direct-routes.md):
 per-stage GPU timing of the MTP-off path, then an opt-in bit-identical dispatch
 schedule; same-binary observed prefill 15.16 to 20.56 tok/s and decode 11.95 to

@@ -49,6 +49,13 @@ kernels on each route's own rows; `verify` encodes both schedules and rejects
 any differing bit. Same-binary observations improve prefill from 15.16 to 20.56
 tok/s and decode from 11.95 to 13.92 tok/s with MTP off. The selector defaults
 off on both loading routes, and the strict qualification gates are unchanged.
+The [token-batched schedule](benchmarks/2026-11-17-edge0-token-rows.md) extends
+it for prefill. `STARK_EDGE0_DIRECT_ROUTES=tokens` lets the token rows of one
+matrix share a dispatch that decodes each weight once, for route, trunk,
+hyper-connection and mixer output projections; `token-routes` covers route and
+trunk rows only, and `verify-tokens` rejects any differing bit. Same-binary
+observations improve prefill from 19.43 to 39.30 tok/s and decode from 13.97 to
+14.90 tok/s against the direct schedule. These values default off as well.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
 records the intake and prerequisites. The
