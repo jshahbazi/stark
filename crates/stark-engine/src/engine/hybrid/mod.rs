@@ -1202,7 +1202,11 @@ impl Model {
     }
 
     /// Whether a compatible retained prefix leaves a supported suffix shape.
-    pub fn prefix_suffix_compatible(&self, position: usize, suffix_len: usize) -> bool {
+    pub fn prefix_suffix_compatible(
+        &self,
+        position: usize,
+        suffix_len: usize,
+    ) -> bool {
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if let Forward::Lily(model) = &self.forward {
             return model.prefix_suffix_compatible(position, suffix_len);

@@ -733,10 +733,18 @@ impl LilyModel {
     /// physical pass and adds one eligible interior boundary to that grid.
     pub(super) fn prefix_chunk_tokens(&self) -> usize {
         let physical = self.prefill_chunk_tokens();
-        if self.prefix_midpoint { physical / 2 } else { physical }
+        if self.prefix_midpoint {
+            physical / 2
+        } else {
+            physical
+        }
     }
 
-    pub(super) fn prefix_suffix_compatible(&self, position: usize, suffix_len: usize) -> bool {
+    pub(super) fn prefix_suffix_compatible(
+        &self,
+        position: usize,
+        suffix_len: usize,
+    ) -> bool {
         !self.prefix_midpoint || self.model.midpoint_suffix_compatible(position, suffix_len)
     }
 
@@ -1187,13 +1195,20 @@ impl LilyModel {
         let before = profile::enabled().then(stark_lily_core::prefill_snapshot);
         let checkpoint = self.capture_at.filter(|&position| {
             self.prefix_midpoint
-                && position.checked_sub(self.state.pos).is_some_and(|offset| {
-                    offset < tokens.len() || (offset == tokens.len() && draw.is_none())
-                })
+                && position
+                    .checked_sub(self.state.pos)
+                    .is_some_and(|offset| offset < tokens.len() || (offset == tokens.len() && draw.is_none()))
         });
         let (fed, snapshot) = if self.prefix_midpoint {
             self.model.prefill_with_vision_until_checkpoint(
-                &self.context, &mut self.state, &mut self.scratch, tokens, draw, None, &stop, checkpoint,
+                &self.context,
+                &mut self.state,
+                &mut self.scratch,
+                tokens,
+                draw,
+                None,
+                &stop,
+                checkpoint,
             )
         } else {
             self.model
@@ -1234,7 +1249,10 @@ impl LilyModel {
             if Some(snapshot.pos()) != checkpoint {
                 return Err(Error::Invalid("mixed precision prefix snapshot position"));
             }
-            self.captured = Some(PrefixSnapshot { snapshot, mtp_enabled: self.mtp_enabled });
+            self.captured = Some(PrefixSnapshot {
+                snapshot,
+                mtp_enabled: self.mtp_enabled,
+            });
         }
         Ok(())
     }

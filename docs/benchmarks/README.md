@@ -12,6 +12,8 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Flash Next single midpoint snapshot (2026-11-17).** The [fixed-4,096 midpoint A/B](../model-experiments/2026-11-17-flashnext-midpoint.md) passes full-logit and MTP comparisons. Fresh first-token latency increases by 2.6%, 5.5% and 5.0% at 8K, 12K and 32K. Median paired Pi turn time is 15.3% lower across eight identical-work session pairs, with eight wins. Cold and full-session acceptance limits keep the selector opt-in.
+
 **Flash Next kernel and prefix follow-up (2026-11-17).** The [fixed-grid MTP2 screens](../model-experiments/2026-11-17-flashnext-kernel-and-prefix-follow-up.md) compare grouped SwiGLU fusion and Q8 HC down reuse on fresh 8K, 12K and 32K prompts. All 12 pairs match output and MTP work. Neither selector meets its timing gate. The prior Pi trace supports evaluating one 2,048 midpoint snapshot while keeping 4,096 physical chunks.
 
 **Flash Next grid on fresh coding prompts (2026-11-17).** The [counterbalanced native A/B](../model-experiments/2026-11-17-flashnext-fresh-coding-grid.md) matches output and MTP2 work in all 18 pairs at 8K, 12K and 32K. The 2,048 grid adds 12.0%, 14.1% and 15.9% median first-token time. This closes the cold comparison at those lengths and supports retaining 4,096 as the default. The Pi warm-prefix evidence retains its separate scope.

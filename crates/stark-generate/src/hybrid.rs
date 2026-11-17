@@ -1011,7 +1011,11 @@ impl GenerationBackend for HybridBackend {
         match &self.prefix_cache {
             Some(entry) if !self.model.is_fenced() && entry.state.mtp_enabled() == (options.mtp_drafts > 0) => {
                 let position = entry.reusable(input, options.context_tokens, options.cache_scope.as_ref());
-                if self.model.prefix_suffix_compatible(position, input.len() - position) { position } else { 0 }
+                if self.model.prefix_suffix_compatible(position, input.len() - position) {
+                    position
+                } else {
+                    0
+                }
             },
             _ => 0,
         }
