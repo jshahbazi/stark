@@ -6,6 +6,10 @@ use super::*;
 #[path = "decode_graph_edge0_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "decode_graph_edge0_direct_tests.rs"]
+mod direct_tests;
+
 fn specialize_single() -> bool {
     // Native workers fix their selectors before model loading. Cache once per
     // process rather than reading the environment for every selected expert.
@@ -14,6 +18,62 @@ fn specialize_single() -> bool {
         crate::engine::hybrid::edge0_config::local_evaluation_enabled()
             || std::env::var_os("STARK_EDGE0_SPECIALIZE_SINGLE").is_some_and(|value| value == "1")
     })
+}
+
+/// Diagnostic only. 1 labels the existing Edge0 stages; 2 also splits each
+/// selected expert and U job into gather, matvec and scatter encoders.
+fn stage_level() -> u8 {
+    static LEVEL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *LEVEL.get_or_init(|| {
+        std::env::var("STARK_EDGE0_STAGE_TIMING").ok().and_then(|value| value.parse().ok()).unwrap_or(0)
+    })
+}
+
+/// Opt-in Edge0 route schedule, fixed once per process like the singleton
+/// selector. `STARK_EDGE0_DIRECT_ROUTES=1` selects one-token kernels that
+/// write route rows in place. `verify` encodes both schedules and rejects
+/// the request unless every compared F32 value has identical bits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Edge0Schedule {
+    Grouped,
+    Direct,
+    Verify,
+}
+
+fn schedule() -> Edge0Schedule {
+    static SCHEDULE: std::sync::OnceLock<Edge0Schedule> = std::sync::OnceLock::new();
+    *SCHEDULE.get_or_init(|| match std::env::var("STARK_EDGE0_DIRECT_ROUTES").as_deref() {
+        Ok("1") => Edge0Schedule::Direct,
+        Ok("verify") => Edge0Schedule::Verify,
+        _ => Edge0Schedule::Grouped,
+    })
+}
+
+fn single_kernel(kind: u32) -> Option<&'static str> {
+    match kind {
+        8 => Some("edge0_graph_q8_single"),
+        11 => Some("edge0_graph_q3_single"),
+        20 => Some("edge0_graph_iq4_single"),
+        _ => None,
+    }
+}
+
+fn scaled_single_kernel(kind: u32) -> Option<&'static str> {
+    match kind {
+        8 => Some("edge0_direct_q8_scaled_single"),
+        11 => Some("edge0_direct_q3_scaled_single"),
+        20 => Some("edge0_direct_iq4_scaled_single"),
+        _ => None,
+    }
+}
+
+fn overlaps(
+    left: &DeviceVector,
+    right: &DeviceVector,
+) -> bool {
+    std::ptr::eq(&*left.buffer, &*right.buffer)
+        && left.offset < right.offset + right.len * 4
+        && right.offset < left.offset + left.len * 4
 }
 
 fn geometry(
@@ -51,19 +111,36 @@ fn codes(
 }
 
 impl DecodeGraph {
+    /// Diagnostic only. Labels the encoders completed since the previous
+    /// label when encoder timing is selected; otherwise encodes nothing.
+    pub fn edge0_stage(
+        &mut self,
+        name: &'static str,
+        level: u8,
+    ) -> Result<()> {
+        if self.encoder_timing.is_none() || stage_level() < level {
+            return Ok(());
+        }
+        self.diagnostic_checkpoint(name)
+    }
+
     fn edge0_dispatch(
         &mut self,
         name: &'static str,
         matrices: &[&MappedMatrix],
-        input: &DeviceVector,
-        output: &DeviceVector,
+        vectors: &[&DeviceVector],
         parameters: &[u32],
         rows: usize,
+        scan_input: bool,
     ) -> Result<()> {
-        if self.unretained || matrices.is_empty() || matrices.len() > 2 {
+        // Vectors are input, output and at most one further read-only operand.
+        if self.unretained || matrices.is_empty() || matrices.len() > 2 || !(2..=3).contains(&vectors.len()) {
             return Err(Error::Unsupported("Edge0 packed batch transport"));
         }
-        self.check_finite(input)?;
+        let (input, output) = (vectors[0], vectors[1]);
+        if scan_input {
+            self.check_finite(input)?;
+        }
         self.flush_finite_before_write(output)?;
         let executor = executor()?;
         let pipeline = {
@@ -89,7 +166,7 @@ impl DecodeGraph {
             self.encoding.set_buffer(Some(&matrix.codes.buffer), matrix.codes.offset, index);
             self.resources.push(matrix.codes.buffer.clone());
         }
-        for (index, vector) in [input, output].iter().enumerate() {
+        for (index, vector) in vectors.iter().enumerate() {
             vector.validate()?;
             self.encoding.set_buffer(Some(&vector.buffer), vector.offset, matrices.len() + index);
             self.resources.push(vector.buffer.clone());
@@ -97,7 +174,7 @@ impl DecodeGraph {
         self.encoding.set_bytes(
             NonNull::new(parameters.as_ptr().cast_mut()).unwrap().cast(),
             std::mem::size_of_val(parameters),
-            matrices.len() + 2,
+            matrices.len() + vectors.len(),
         );
         self.encoding.set_buffer(Some(&self.failure.buffer), self.failure.offset, 30);
         self.order_dispatch();
@@ -126,6 +203,166 @@ impl DecodeGraph {
         tokens: usize,
     ) -> Result<DeviceVector> {
         self.edge0_packed_batch_selected(matrix, format, rows, columns, input, tokens, specialize_single())
+    }
+
+    pub fn edge0_schedule() -> Edge0Schedule {
+        schedule()
+    }
+
+    /// Diagnostic verification for the route schedule selector. Both views
+    /// must hold identical F32 bits, or the command's sticky failure status
+    /// rejects the request. A projection level defers the comparison to
+    /// `edge0_flush_verification`.
+    pub fn edge0_require_identical(
+        &mut self,
+        left: &DeviceVector,
+        right: &DeviceVector,
+    ) -> Result<()> {
+        left.validate()?;
+        right.validate()?;
+        if left.len != right.len || left.len > 8_000_000 {
+            return Err(Error::Invalid("Edge0 schedule verification shape"));
+        }
+        if self.projection_level {
+            self.edge0_verification.push((left.clone(), right.clone()));
+            return Ok(());
+        }
+        profile::record("native.edge0.schedule.compared_values", 0.0, left.len);
+        self.kernel("edge0_direct_require_identical", &[left, right], &[left.len as u32], left.len, 256)
+    }
+
+    pub fn edge0_flush_verification(&mut self) -> Result<()> {
+        if self.projection_level {
+            return Err(Error::Invalid("Edge0 schedule verification inside projection level"));
+        }
+        for (left, right) in std::mem::take(&mut self.edge0_verification) {
+            self.edge0_require_identical(&left, &right)?;
+        }
+        Ok(())
+    }
+
+    /// Direct-route schedule for a token batch: one single-token dispatch per
+    /// token row, each with the batched kernel's per-token F32 reduction.
+    /// Formats without a format-constant kernel keep the batched kernel.
+    pub fn edge0_packed_split(
+        &mut self,
+        matrix: &MappedMatrix,
+        format: MatrixFormat,
+        rows: usize,
+        columns: usize,
+        input: &DeviceVector,
+        tokens: usize,
+    ) -> Result<DeviceVector> {
+        let MatrixFormat::Packed(8 | 11 | 20) = format else {
+            return self.edge0_packed_batch_selected(matrix, format, rows, columns, input, tokens, true);
+        };
+        geometry(rows, columns, tokens, input)?;
+        let output = self.scratch(rows * tokens)?;
+        // One scan covers every token row of this caller-supplied batch.
+        self.check_finite(input)?;
+        for token in 0..tokens {
+            self.edge0_packed_single_into(
+                matrix,
+                format,
+                rows,
+                columns,
+                &input.slice(token * columns, columns)?,
+                &output.slice(token * rows, rows)?,
+                None,
+                false,
+            )?;
+        }
+        Ok(output)
+    }
+
+    /// One-token packed projection into a caller-owned row. A stored scale
+    /// selects the fused column-scale quotient. Every written value is checked
+    /// in the kernel, and a nonfinite input makes every row result nonfinite;
+    /// callers pass `scan_input: false` for rows already scanned or written
+    /// by such a kernel.
+    #[expect(clippy::too_many_arguments, reason = "explicit checked operands for one route row")]
+    pub fn edge0_packed_single_into(
+        &mut self,
+        matrix: &MappedMatrix,
+        format: MatrixFormat,
+        rows: usize,
+        columns: usize,
+        input: &DeviceVector,
+        output: &DeviceVector,
+        scale: Option<&DeviceVector>,
+        scan_input: bool,
+    ) -> Result<()> {
+        geometry(rows, columns, 1, input)?;
+        output.validate()?;
+        if output.len != rows || overlaps(input, output) || scale.is_some_and(|scale| scale.len != rows) {
+            return Err(Error::Invalid("Edge0 direct row shape"));
+        }
+        let MatrixFormat::Packed(kind @ (8 | 11 | 20)) = format else {
+            return Err(Error::Unsupported("Edge0 direct row format"));
+        };
+        let (block, bytes) = weights::block_layout(kind)?;
+        if !columns.is_multiple_of(block) {
+            return Err(Error::Invalid("Edge0 packed batch block alignment"));
+        }
+        let length = rows
+            .checked_mul(columns / block)
+            .and_then(|n| n.checked_mul(bytes))
+            .ok_or(Error::Invalid("Edge0 packed batch byte overflow"))?;
+        codes(matrix, length)?;
+        let parameters = [rows as u32, columns as u32, kind, block as u32, bytes as u32, 1];
+        let unsupported = Error::Unsupported("Edge0 direct row format");
+        if let Some(scale) = scale {
+            scale.validate()?;
+            self.edge0_dispatch(
+                scaled_single_kernel(kind).ok_or(unsupported)?,
+                &[matrix],
+                &[input, output, scale],
+                &parameters,
+                rows,
+                scan_input,
+            )
+        } else {
+            self.edge0_dispatch(
+                single_kernel(kind).ok_or(unsupported)?,
+                &[matrix],
+                &[input, output],
+                &parameters,
+                rows,
+                scan_input,
+            )
+        }
+    }
+
+    /// One-token fused Q3_K gate/up row for a direct route.
+    pub fn edge0_gate_up_swiglu_single(
+        &mut self,
+        gate: &MappedMatrix,
+        up: &MappedMatrix,
+        rows: usize,
+        columns: usize,
+        input: &DeviceVector,
+        scan_input: bool,
+    ) -> Result<DeviceVector> {
+        geometry(rows, columns, 1, input)?;
+        if !columns.is_multiple_of(256) {
+            return Err(Error::Invalid("Edge0 fused Q3_K alignment"));
+        }
+        let bytes = rows
+            .checked_mul(columns / 256)
+            .and_then(|n| n.checked_mul(110))
+            .ok_or(Error::Invalid("Edge0 fused Q3_K byte overflow"))?;
+        codes(gate, bytes)?;
+        codes(up, bytes)?;
+        let output = self.scratch(rows)?;
+        self.edge0_dispatch(
+            "edge0_graph_gate_up_swiglu_single",
+            &[gate, up],
+            &[input, &output],
+            &[rows as u32, columns as u32, 1],
+            rows,
+            scan_input,
+        )?;
+        Ok(output)
     }
 
     #[expect(clippy::too_many_arguments, reason = "explicit experimental selector for model-free parity tests")]
@@ -161,10 +398,10 @@ impl DecodeGraph {
                 _ => "edge0_graph_packed_batch",
             },
             &[matrix],
-            input,
-            &output,
+            &[input, &output],
             &[rows as u32, columns as u32, kind, block as u32, bytes as u32, tokens as u32],
             rows,
+            true,
         )?;
         Ok(output)
     }
@@ -210,10 +447,10 @@ impl DecodeGraph {
                 "edge0_graph_gate_up_swiglu_batch"
             },
             &[gate, up],
-            input,
-            &output,
+            &[input, &output],
             &[rows as u32, columns as u32, tokens as u32],
             rows,
+            true,
         )?;
         Ok(output)
     }

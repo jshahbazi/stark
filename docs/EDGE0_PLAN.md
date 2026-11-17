@@ -42,6 +42,13 @@ The final focused build repeats the improvement with MTP off: 12.78 to 14.71
 prefill tok/s and 7.35 to 12.09 decode tok/s, three measured requests per mode.
 The [upstream executor review](archive/runs/2026-11-13-edge0-reference-performance-ideas.md)
 records source-specific ideas for further prefill and decode work.
+The [direct-route schedule](benchmarks/2026-11-17-edge0-direct-routes.md) adds
+per-stage GPU attribution and an opt-in dispatch schedule with unchanged F32
+reductions. `STARK_EDGE0_DIRECT_ROUTES=1` before worker startup runs singleton
+kernels on each route's own rows; `verify` encodes both schedules and rejects
+any differing bit. Same-binary observations improve prefill from 15.16 to 20.56
+tok/s and decode from 11.95 to 13.92 tok/s with MTP off. The selector defaults
+off on both loading routes, and the strict qualification gates are unchanged.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
 records the intake and prerequisites. The

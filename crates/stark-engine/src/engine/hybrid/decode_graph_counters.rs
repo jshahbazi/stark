@@ -19,7 +19,7 @@ struct Interval {
     start: usize,
     end: usize,
     category: &'static str,
-    active: std::cell::Cell<bool>,
+    dispatches: std::cell::Cell<u32>,
 }
 
 pub(super) struct EncoderTiming {
@@ -83,14 +83,14 @@ impl EncoderTiming {
             start,
             end: start + 1,
             category: OTHER,
-            active: std::cell::Cell::new(false),
+            dispatches: std::cell::Cell::new(0),
         });
         Ok(encoder)
     }
 
     pub fn mark_dispatch(&self) {
         if let Some(interval) = self.intervals.last() {
-            interval.active.set(true);
+            interval.dispatches.set(interval.dispatches.get().saturating_add(1));
         }
     }
 
@@ -135,7 +135,7 @@ impl EncoderTiming {
         for interval in &self.intervals {
             // An end-of-phase checkpoint can open an otherwise empty encoder.
             // Metal may omit its samples; it contributes no dispatched work.
-            if !interval.active.get() {
+            if interval.dispatches.get() == 0 {
                 continue;
             }
             let start = values[interval.start];
@@ -150,15 +150,16 @@ impl EncoderTiming {
             }
             let seconds = (end - start) as f64 * seconds_per_tick;
             total += seconds;
-            durations.push((interval.category, seconds));
+            durations.push((interval.category, seconds, interval.dispatches.get() as usize));
         }
         // Encoder stages share this one command's GPU interval. Allow 1% or
         // one microsecond for clock calibration and counter granularity.
         if !total.is_finite() || total > command_seconds + (command_seconds * 0.01).max(1e-6) {
             return Err(Error::Invalid("encoder timestamps exceed command interval"));
         }
-        for (category, seconds) in durations {
-            profile::record(category, seconds, 0);
+        // Diagnostic: bytes carries the dispatch count of each timed encoder.
+        for (category, seconds, dispatches) in durations {
+            profile::record(category, seconds, dispatches);
         }
         profile::record("native.metal.encoder.gpu", total, bytes.len());
         profile::record("native.metal.encoder.command_gap", (command_seconds - total).max(0.0), 0);

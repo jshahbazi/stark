@@ -953,6 +953,7 @@ impl State {
                 {
                     let extra = ple_controls.encode(&mut graph, &model.weights, ple, embedding, &hidden[token], g)?;
                     hidden[token] = graph.add(&hidden[token], &extra)?;
+                    graph.edge0_stage("edge0.stage.ple", 1)?;
                 }
                 let (input, gates) = mix(
                     &mut graph,
@@ -964,8 +965,10 @@ impl State {
                 )?;
                 mixer_inputs.push(input);
                 attention_gates.push(gates);
+                graph.edge0_stage("edge0.stage.mixer_mix", 1)?;
             }
             let packed_inputs = edge0_metal::concatenate(&mut graph, &mixer_inputs)?;
+            graph.edge0_stage("edge0.stage.mixer_gather", 1)?;
             let (prefix, names) = match &layer.mixer {
                 Mixer::Delta(mixer) => (&mixer.prefix, ["in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b"]),
                 Mixer::Attention(attention) => {
@@ -985,6 +988,14 @@ impl State {
                 })
                 .collect::<Result<Vec<_>>>()?;
             graph.end_projection_level()?;
+            graph.edge0_flush_verification()?;
+            graph.edge0_stage(
+                match &layer.mixer {
+                    Mixer::Delta(_) => "edge0.stage.gdn_proj",
+                    Mixer::Attention(_) => "edge0.stage.attention_proj",
+                },
+                1,
+            )?;
             let mut ffn_inputs = Vec::with_capacity(count);
             let mut ffn_gates = Vec::with_capacity(count);
             for token in 0..count {
@@ -1040,13 +1051,22 @@ impl State {
                             Some(&projections),
                         )?,
                 };
+                graph.edge0_stage(
+                    match &layer.mixer {
+                        Mixer::Delta(_) => "edge0.stage.gdn_state",
+                        Mixer::Attention(_) => "edge0.stage.attention_state",
+                    },
+                    1,
+                )?;
                 hidden[token] = inject(&mut graph, &hidden[token], &output, &attention_gates[token], g)?;
                 let (input, gates) =
                     mix(&mut graph, &model.weights, &layer.mlp_hyper, &controls.mlp_hyper.norm, &hidden[token], g)?;
                 ffn_inputs.push(input);
                 ffn_gates.push(gates);
+                graph.edge0_stage("edge0.stage.ffn_mix", 1)?;
             }
             let input = edge0_metal::concatenate(&mut graph, &ffn_inputs)?;
+            graph.edge0_stage("edge0.stage.ffn_gather", 1)?;
             let output = edge0_metal::encode(
                 &mut graph,
                 &model.weights,
@@ -1061,10 +1081,12 @@ impl State {
                 hidden[token] =
                     inject(&mut graph, &hidden[token], &output.slice(token * g.dim, g.dim)?, &ffn_gates[token], g)?;
             }
+            graph.edge0_stage("edge0.stage.ffn_inject", 1)?;
         }
         for values in &hidden {
             graph.check_finite(values)?;
         }
+        graph.edge0_stage("edge0.stage.final_checks", 1)?;
         // The ordinary target path encodes no extra allocation or copy.
         // Copies follow all target arithmetic and preserve its batch schedule.
         let saved_wide = if let Some(elements) = wide_elements {
@@ -1079,7 +1101,9 @@ impl State {
         };
         let outputs = if readout {
             let (input, _) = mix(&mut graph, &model.weights, &model.final_mix, &self.final_norm, &hidden[0], g)?;
+            graph.edge0_stage("edge0.stage.readout_mix", 1)?;
             let logits = model.weights.encode_edge0_named_batch(&mut graph, &model.readout, &input, 1)?;
+            graph.edge0_stage("edge0.stage.readout", 1)?;
             model.weights.edge0_record_graph_scratch(graph.scratch_backing_bytes());
             graph.finish(&[logits])?
         } else {

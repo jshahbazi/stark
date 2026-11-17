@@ -4,7 +4,7 @@
 //! own these original-byte windows. The n-gram table is never registered here.
 
 use super::*;
-use crate::engine::hybrid::weight_metal::{DecodeGraph, DeviceVector, MappedMatrix, MatrixFormat};
+use crate::engine::hybrid::weight_metal::{DecodeGraph, DeviceVector, Edge0Schedule, MappedMatrix, MatrixFormat};
 
 const BANK_CAP: usize = 56 * 1024 * 1024 * 1024;
 const EXPERT_RECORD_BYTES: usize = 1_630_720;
@@ -377,6 +377,51 @@ impl Weights {
         Ok(output)
     }
 
+    /// Direct-route one-token projection into a caller-owned row. The caller
+    /// owns the finite obligation of `input`; see `edge0_metal::expand_direct`.
+    pub(in crate::engine::hybrid) fn encode_edge0_matvec_single_into(
+        &self,
+        graph: &mut DecodeGraph,
+        matrix: Edge0Matrix,
+        input: &DeviceVector,
+        output: &DeviceVector,
+        scale: Option<&DeviceVector>,
+    ) -> Result<()> {
+        let (mapped, tensor) = self.edge0_graph_matrix(matrix)?;
+        graph.edge0_packed_single_into(
+            &mapped,
+            MatrixFormat::Packed(tensor.kind),
+            tensor.shape[0],
+            tensor.shape[1],
+            input,
+            output,
+            scale,
+            false,
+        )
+    }
+
+    /// Direct-route one-token fused gate/up row for one selected expert.
+    pub(in crate::engine::hybrid) fn encode_edge0_gate_up_swiglu_single(
+        &self,
+        graph: &mut DecodeGraph,
+        layer: usize,
+        expert: usize,
+        input: &DeviceVector,
+    ) -> Result<DeviceVector> {
+        let (gate, tensor) = self.edge0_graph_matrix(Edge0Matrix::ExpertGate {
+            layer,
+            expert,
+        })?;
+        let (up, right) = self.edge0_graph_matrix(Edge0Matrix::ExpertUp {
+            layer,
+            expert,
+        })?;
+        if tensor.kind != 11 || right.kind != 11 || tensor.shape != right.shape {
+            return Err(Error::Invalid("Edge0 fused gate/up format"));
+        }
+        graph.edge0_gate_up_swiglu_single(&gate, &up, tensor.shape[0], tensor.shape[1], input, false)
+    }
+
     pub(in crate::engine::hybrid) fn encode_edge0_named_batch(
         &self,
         graph: &mut DecodeGraph,
@@ -392,14 +437,20 @@ impl Weights {
             return Err(Error::Invalid("Edge0 named batch shape"));
         }
         let mapped = self.mapped_matrix(tensor, 0, tensor.shape[0], tensor.shape[1], true)?;
-        let output = graph.edge0_packed_batch(
-            &mapped,
-            self.matrix_format(tensor)?,
-            tensor.shape[0],
-            tensor.shape[1],
-            input,
-            tokens,
-        )?;
+        let format = self.matrix_format(tensor)?;
+        let (rows, columns) = (tensor.shape[0], tensor.shape[1]);
+        let output = match DecodeGraph::edge0_schedule() {
+            Edge0Schedule::Grouped => graph.edge0_packed_batch(&mapped, format, rows, columns, input, tokens)?,
+            Edge0Schedule::Direct => graph.edge0_packed_split(&mapped, format, rows, columns, input, tokens)?,
+            Edge0Schedule::Verify => {
+                let output = graph.edge0_packed_split(&mapped, format, rows, columns, input, tokens)?;
+                if tokens > 1 {
+                    let grouped = graph.edge0_packed_batch(&mapped, format, rows, columns, input, tokens)?;
+                    graph.edge0_require_identical(&output, &grouped)?;
+                }
+                output
+            },
+        };
         self.edge0_count_batch(tokens, tensor.kind, false);
         Ok(output)
     }

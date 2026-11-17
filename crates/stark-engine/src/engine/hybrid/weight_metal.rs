@@ -23,7 +23,9 @@ type PipelineCache = Mutex<HashMap<MatrixFormat, PipelineState>>;
 
 #[path = "decode_graph.rs"]
 mod decode_graph;
-pub(super) use decode_graph::{DecodeGraph, DeviceVector, GroupedExpertRoutes, PendingDecodeGraph, ScratchHeap};
+pub(super) use decode_graph::{
+    DecodeGraph, DeviceVector, Edge0Schedule, GroupedExpertRoutes, PendingDecodeGraph, ScratchHeap,
+};
 
 #[cfg(test)]
 #[path = "weight_metal_storage_tests.rs"]
@@ -706,6 +708,7 @@ fn executor() -> Result<&'static Executor> {
             source.push_str(include_str!("packed_mla_prefill.metal"));
             source.push_str(include_str!("feed_forward.metal"));
             source.push_str(include_str!("edge0_graph.metal"));
+            source.push_str(include_str!("edge0_direct.metal"));
             source.push_str(include_str!("edge0_mtp_graph.metal"));
             source.push_str(include_str!("qwen_gdn.metal"));
             source.push_str(include_str!("decode_graph.metal"));

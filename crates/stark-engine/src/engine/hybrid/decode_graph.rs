@@ -21,6 +21,7 @@ mod batch;
 
 #[path = "decode_graph_edge0.rs"]
 mod edge0;
+pub(crate) use edge0::Edge0Schedule;
 
 #[path = "decode_graph_edge0_mtp.rs"]
 mod edge0_mtp;
@@ -147,6 +148,8 @@ pub(crate) struct DecodeGraph {
     parallel_rms: bool,
     rms_prefetch: bool,
     phase_timing: bool,
+    // Edge0 direct-route verification pairs deferred by a projection level.
+    edge0_verification: Vec<(DeviceVector, DeviceVector)>,
 }
 
 impl DecodeGraph {
@@ -304,6 +307,7 @@ impl DecodeGraph {
                 parallel_rms: std::env::var_os("STARK_GLM53_PARALLEL_RMS").is_some_and(|value| value == "1"),
                 rms_prefetch: std::env::var_os("STARK_GLM53_RMS_PREFETCH").is_some_and(|value| value == "1"),
                 phase_timing,
+                edge0_verification: Vec::new(),
             })
         })
     }
@@ -1623,6 +1627,9 @@ impl DecodeGraph {
     ) -> Result<PendingDecodeGraph> {
         if self.projection_level {
             return Err(Error::Invalid("unfinished decode projection level"));
+        }
+        if !self.edge0_verification.is_empty() {
+            return Err(Error::Invalid("unflushed Edge0 schedule verification"));
         }
         for output in outputs {
             output.validate()?;

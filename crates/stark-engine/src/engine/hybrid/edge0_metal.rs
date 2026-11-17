@@ -10,6 +10,7 @@ use crate::engine::hybrid::{
     Error, Result,
     edge0_source::{LATENT_WIDTH, PROJECTION_GROUPS},
     profile,
+    weight_metal::Edge0Schedule,
     weights::Edge0Matrix,
 };
 
@@ -42,6 +43,7 @@ impl Controls {
     }
 }
 
+#[derive(Clone)]
 struct RoutePlan {
     expert_jobs: BTreeMap<usize, Vec<(usize, usize)>>,
     group_jobs: BTreeMap<usize, Vec<(usize, usize)>>,
@@ -148,7 +150,6 @@ pub(super) fn encode(
     controls: &Controls,
     tokens: usize,
 ) -> Result<DeviceVector> {
-    let latent_width = LATENT_WIDTH as usize;
     if !g.edge0 || !(1..=MAX_BATCH).contains(&tokens) || inputs.len != tokens * g.dim {
         return Err(Error::Invalid("Edge0 graph latent batch"));
     }
@@ -161,10 +162,161 @@ pub(super) fn encode(
     let shared_up =
         weights.encode_edge0_named_batch(graph, &format!("{prefix}.shared_expert.up_proj.weight"), inputs, tokens)?;
     graph.end_projection_level()?;
+    graph.edge0_flush_verification()?;
+    graph.edge0_stage("edge0.stage.router_proj", 1)?;
     let (selected, probabilities) = routes(graph, weights, scores, tokens, g.experts, g.active_experts)?;
 
     let plan = plan_routes(&selected, g.active_experts, g.experts, |expert| weights.edge0_group(layer, expert))?;
+    let (_, expanded) = match DecodeGraph::edge0_schedule() {
+        Edge0Schedule::Grouped => expand_grouped(graph, weights, layer, inputs, g, controls, tokens, plan)?,
+        Edge0Schedule::Direct => expand_direct(graph, weights, layer, inputs, g, controls, tokens, &plan)?,
+        Edge0Schedule::Verify => {
+            let direct = expand_direct(graph, weights, layer, inputs, g, controls, tokens, &plan)?;
+            let grouped = expand_grouped(graph, weights, layer, inputs, g, controls, tokens, plan)?;
+            graph.edge0_require_identical(&direct.0, &grouped.0)?;
+            graph.edge0_require_identical(&direct.1, &grouped.1)?;
+            direct
+        },
+    };
+    let shared_values = graph.swiglu(&shared_values, &shared_up, None)?;
+    let shared_down = weights.encode_edge0_named_batch(
+        graph,
+        &format!("{prefix}.shared_expert.down_proj.weight"),
+        &shared_values,
+        tokens,
+    )?;
+    graph.edge0_stage("edge0.stage.shared", 1)?;
+    let result = graph.edge0_weighted_sum(
+        &expanded,
+        &probabilities,
+        &shared_down,
+        &shared_gate,
+        g.dim,
+        g.active_experts,
+        tokens,
+    )?;
+    graph.check_finite(&result)?;
+    graph.edge0_stage("edge0.stage.combine", 1)?;
+    profile::record("native.edge0.latent.batch_tokens", 0.0, tokens);
+    Ok(result)
+}
 
+/// Direct-route schedule. Every (token, route) row runs one-token kernels on
+/// its own slots: no latent row is copied, D runs only for the (group, token)
+/// pairs some route uses, and D writes its stored column-scale quotient in
+/// the same dispatch. Route slots, per-route U and every F32 reduction match
+/// the grouped schedule. Returns the latent expert rows and the expanded rows.
+///
+/// Chained rows carry no separate finite scan. Each kernel records sticky
+/// failure for every value it writes, and a nonfinite input makes every row
+/// result nonfinite. `inputs` was scanned by the router projection level,
+/// whose command completed before routing.
+#[expect(clippy::too_many_arguments, reason = "separate checked model, layer, device operands and batch geometry")]
+fn expand_direct(
+    graph: &mut DecodeGraph,
+    weights: &Weights,
+    layer: usize,
+    inputs: &DeviceVector,
+    g: &Geometry,
+    controls: &Controls,
+    tokens: usize,
+    plan: &RoutePlan,
+) -> Result<(DeviceVector, DeviceVector)> {
+    let latent_width = LATENT_WIDTH as usize;
+    let route_rows = tokens.checked_mul(g.active_experts).ok_or(Error::Invalid("Edge0 route count overflow"))?;
+    let mut group_inputs: Vec<Option<DeviceVector>> = vec![None; PROJECTION_GROUPS];
+    // D rows read only `inputs` and write disjoint rows: one projection level.
+    graph.begin_projection_level()?;
+    for (&group, jobs) in &plan.group_jobs {
+        // Token rows no route of this group selects stay unwritten and unread.
+        let projected = graph.scratch(tokens * latent_width)?;
+        let mut written = [false; MAX_BATCH];
+        for &(token, _) in jobs {
+            if std::mem::replace(&mut written[token], true) {
+                continue;
+            }
+            weights.encode_edge0_matvec_single_into(
+                graph,
+                Edge0Matrix::ProjectionDown {
+                    layer,
+                    group,
+                },
+                &inputs.slice(token * g.dim, g.dim)?,
+                &projected.slice(token * latent_width, latent_width)?,
+                Some(&controls.stored_s),
+            )?;
+        }
+        group_inputs[group] = Some(projected);
+    }
+    graph.end_projection_level()?;
+    graph.edge0_stage("edge0.stage.proj_down", 1)?;
+    let expert_outputs = graph.scratch(route_rows * latent_width)?;
+    for (&expert, jobs) in &plan.expert_jobs {
+        let group = weights.edge0_group(layer, expert)?;
+        let source = group_inputs[group].as_ref().ok_or(Error::Invalid("Edge0 group activation missing"))?;
+        for &(token, route) in jobs {
+            let hidden = weights.encode_edge0_gate_up_swiglu_single(
+                graph,
+                layer,
+                expert,
+                &source.slice(token * latent_width, latent_width)?,
+            )?;
+            graph.edge0_stage("edge0.stage.experts.gate_up", 2)?;
+            weights.encode_edge0_matvec_single_into(
+                graph,
+                Edge0Matrix::ExpertDown {
+                    layer,
+                    expert,
+                },
+                &hidden,
+                &expert_outputs.slice((token * g.active_experts + route) * latent_width, latent_width)?,
+                None,
+            )?;
+            graph.edge0_stage("edge0.stage.experts.down", 2)?;
+        }
+        graph.resource_boundary()?;
+    }
+    graph.edge0_stage("edge0.stage.experts", 1)?;
+    let expanded = graph.scratch(route_rows * g.dim)?;
+    // U rows read completed expert rows and write disjoint rows: one level.
+    // Every group's U lies in the layer's dense bank, as its D rows above do.
+    graph.begin_projection_level()?;
+    for (&group, jobs) in &plan.group_jobs {
+        for &(token, route) in jobs {
+            let slot = token * g.active_experts + route;
+            // Each original route still receives U independently.
+            weights.encode_edge0_matvec_single_into(
+                graph,
+                Edge0Matrix::ProjectionUp {
+                    layer,
+                    group,
+                },
+                &expert_outputs.slice(slot * latent_width, latent_width)?,
+                &expanded.slice(slot * g.dim, g.dim)?,
+                None,
+            )?;
+        }
+    }
+    graph.end_projection_level()?;
+    graph.resource_boundary()?;
+    graph.edge0_stage("edge0.stage.proj_up", 1)?;
+    Ok((expert_outputs, expanded))
+}
+
+/// Grouped schedule: batched D per selected group, expert jobs grouped by
+/// expert and U jobs grouped by projection group, with copied latent rows.
+#[expect(clippy::too_many_arguments, reason = "separate checked model, layer, device operands and batch geometry")]
+fn expand_grouped(
+    graph: &mut DecodeGraph,
+    weights: &Weights,
+    layer: usize,
+    inputs: &DeviceVector,
+    g: &Geometry,
+    controls: &Controls,
+    tokens: usize,
+    plan: RoutePlan,
+) -> Result<(DeviceVector, DeviceVector)> {
+    let latent_width = LATENT_WIDTH as usize;
     let mut group_inputs: Vec<Option<DeviceVector>> = vec![None; PROJECTION_GROUPS];
     for group in plan.groups {
         let projected = weights.encode_edge0_matvec_batch(
@@ -176,8 +328,11 @@ pub(super) fn encode(
             inputs,
             tokens,
         )?;
+        graph.edge0_stage("edge0.stage.proj_down.matvec", 2)?;
         group_inputs[group] = Some(graph.edge0_column_scale(&projected, &controls.stored_s, latent_width, tokens)?);
+        graph.edge0_stage("edge0.stage.proj_down.scale", 2)?;
     }
+    graph.edge0_stage("edge0.stage.proj_down", 1)?;
     let route_rows = tokens.checked_mul(g.active_experts).ok_or(Error::Invalid("Edge0 route count overflow"))?;
     let expert_outputs = graph.scratch(route_rows * latent_width)?;
     for (expert, jobs) in plan.expert_jobs {
@@ -193,7 +348,9 @@ pub(super) fn encode(
             .map(|&(token, _)| source.slice(token * latent_width, latent_width))
             .collect::<Result<Vec<_>>>()?;
         let input = concatenate(graph, &rows)?;
+        graph.edge0_stage("edge0.stage.experts.gather", 2)?;
         let hidden = weights.encode_edge0_gate_up_swiglu_batch(graph, layer, expert, &input, jobs.len())?;
+        graph.edge0_stage("edge0.stage.experts.gate_up", 2)?;
         let down = weights.encode_edge0_matvec_batch(
             graph,
             Edge0Matrix::ExpertDown {
@@ -203,14 +360,17 @@ pub(super) fn encode(
             &hidden,
             jobs.len(),
         )?;
+        graph.edge0_stage("edge0.stage.experts.down", 2)?;
         for (index, &(token, route)) in jobs.iter().enumerate() {
             graph.copy_into(
                 &down.slice(index * latent_width, latent_width)?,
                 &expert_outputs.slice((token * g.active_experts + route) * latent_width, latent_width)?,
             )?;
         }
+        graph.edge0_stage("edge0.stage.experts.scatter", 2)?;
         graph.resource_boundary()?;
     }
+    graph.edge0_stage("edge0.stage.experts", 1)?;
 
     let expanded = graph.scratch(route_rows * g.dim)?;
     for (group, jobs) in plan.group_jobs {
@@ -222,6 +382,7 @@ pub(super) fn encode(
                 })
                 .collect::<Result<Vec<_>>>()?;
             let input = concatenate(graph, &rows)?;
+            graph.edge0_stage("edge0.stage.proj_up.gather", 2)?;
             // Each original route receives U independently. Batching reuses
             // its bytes; it never sums latent rows before U.
             let output = weights.encode_edge0_matvec_batch(
@@ -233,34 +394,26 @@ pub(super) fn encode(
                 &input,
                 batch.len(),
             )?;
+            graph.edge0_stage(
+                if batch.len() == 1 {
+                    "edge0.stage.proj_up.matvec_single"
+                } else {
+                    "edge0.stage.proj_up.matvec_batch"
+                },
+                2,
+            )?;
             for (index, &(token, route)) in batch.iter().enumerate() {
                 graph.copy_into(
                     &output.slice(index * g.dim, g.dim)?,
                     &expanded.slice((token * g.active_experts + route) * g.dim, g.dim)?,
                 )?;
             }
+            graph.edge0_stage("edge0.stage.proj_up.scatter", 2)?;
         }
         graph.resource_boundary()?;
     }
-    let shared_values = graph.swiglu(&shared_values, &shared_up, None)?;
-    let shared_down = weights.encode_edge0_named_batch(
-        graph,
-        &format!("{prefix}.shared_expert.down_proj.weight"),
-        &shared_values,
-        tokens,
-    )?;
-    let result = graph.edge0_weighted_sum(
-        &expanded,
-        &probabilities,
-        &shared_down,
-        &shared_gate,
-        g.dim,
-        g.active_experts,
-        tokens,
-    )?;
-    graph.check_finite(&result)?;
-    profile::record("native.edge0.latent.batch_tokens", 0.0, tokens);
-    Ok(result)
+    graph.edge0_stage("edge0.stage.proj_up", 1)?;
+    Ok((expert_outputs, expanded))
 }
 
 #[cfg(test)]

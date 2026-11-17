@@ -1,5 +1,11 @@
 # Benchmarks
 
+[Edge0 stage attribution and direct-route schedule, 2026-11-17](2026-11-17-edge0-direct-routes.md):
+per-stage GPU timing of the MTP-off path, then an opt-in bit-identical dispatch
+schedule; same-binary observed prefill 15.16 to 20.56 tok/s and decode 11.95 to
+13.92 tok/s with matching outputs. Default off, local non-commercial
+evaluation; strict timing qualification remains open.
+
 [Edge0 local loading and 8K context, 2026-11-16](2026-11-16-edge0-context-loading.md):
 normal model-path and rendered-chat loading under one local-evaluation gate;
 8,176 input plus 16 output passes with MTP off, at observed 13.74 prefill /
