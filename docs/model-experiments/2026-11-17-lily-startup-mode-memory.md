@@ -94,4 +94,21 @@ arbitrary competing memory use.
 
 ## Final signed installation
 
-Pending final source-matched bundle verification and installed GUI startup.
+Installed Developer ID signed development build `20261117152352983526` into
+`~/Applications/Stark.app`. Its source manifest records clean implementation
+commit `6e15e34de89316ac13f24a18ecf6a6c6154efc5a`. The installed host files match
+the implementation source, and deep/strict code-signature verification passed.
+Packaging re-signs the reused native executables; the final generator SHA-256 is
+`b120c1ab4a3a3678859e6262cd63894133c691e40b22e039fc1665021779fdd8`.
+The installed app manifest SHA-256 is
+`e10c8d4e560ce36ba33de0b7cb7487be7ed61f627b52f2b3c19d94ea71791f83`.
+
+The final packaged Python/controller and re-signed generator passed another
+isolated full Desktop startup with an empty temporary receipt directory:
+Chat readiness, images enabled, fresh checks (`image_check_cached=false`) and
+Ready status. That worker and its temporary directory were closed afterward.
+
+Installed GUI control then loaded Decider to Ready with Decision selected,
+selected Lily through Manage Models, and observed automatic Chat selection
+followed by Ready with image attachment enabled. Lily remained running in Chat.
+No user conversation or generated content was used or recorded.
