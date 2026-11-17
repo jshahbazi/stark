@@ -19,6 +19,8 @@ skippable() {
     docs/*|website/*|apps/*|provenance/*) return 0 ;;
     install.sh|LICENSE|LICENSE.*) return 0 ;;
     scripts/ci/*|scripts/test_generation_process.py) return 1 ;;
+    # The Edge0 MTP engine test hashes its fixture generator and oracle test.
+    scripts/edge0_mtp_fixture.py|scripts/test_edge0_mtp_fixture.py) return 1 ;;
     scripts/*) return 0 ;;
     tools/*.py|tools/*.md|tools/*uv.lock|tools/*pyproject.toml) return 0 ;;
     */*) return 1 ;;
