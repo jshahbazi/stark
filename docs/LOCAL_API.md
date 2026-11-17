@@ -2,9 +2,13 @@
 
 The menu bar application's bridge serves a loopback-only, OpenAI-style HTTP API so that other applications on the same Mac can chat with the loaded model. It supports buffered or streamed text completions and one-image requests through one loaded model. Images require passing host evidence for the [supported Qwen3.5 family](VISION_FAMILY_CONTRACT.md). The API binds to `127.0.0.1`, requires bearer authentication, and rejects browser-origin requests. Clients may use the persistent Keychain bearer key or, for the managed OpenWork and OpenCode Desktop integrations below, a short-lived per-client capability.
 
+Connected apps work with either Playground mode. Authenticated model discovery and chat-completion requests prepare the generation worker automatically for the running model. The Playground selection stays unchanged; its next decision loads the scoring worker automatically. Stark keeps one worker loaded at a time, so changing the required operation can add model-loading latency and clears native caches. Consecutive generation requests retain the same worker and existing prefix-reuse rules.
+
+A decision already in progress is never interrupted for a client request: preparation returns HTTP 429 with `model_busy`; retry after the operation finishes. A failed preparation returns HTTP 503 with `runtime_load_failed`; run the model again or choose another model. Stop and model replacement fence pending preparation. Discovery can now load a worker and can return these errors. A client discovery timeout can expire during loading; wait for Ready and retry.
+
 ## Connection and authentication
 
-Open **Connections** in Stark. **Apps** groups OpenWork and OpenCode Desktop with independent **Connect** buttons and status; **Manage** reveals each configured app's **Reconnect** and **Disconnect** actions. OpenCode's per-engine **Allow** and **Deny** prompt stays separate. The shared model header identifies the model currently running in Chat mode. API startup and credential-recovery messages remain visible when setup needs attention.
+Open **Connections** in Stark. **Apps** groups OpenWork and OpenCode Desktop with independent **Connect** buttons and status; **Manage** reveals each configured app's **Reconnect** and **Disconnect** actions. OpenCode's per-engine **Allow** and **Deny** prompt stays separate. The shared model header identifies the running model, independently of the Playground mode. API startup and credential-recovery messages remain visible when setup needs attention.
 
 The Advanced Connections **Apps** tab also includes **Pi**, with **Set Up Pi**
 and **Copy Key & Open Pi…**. This manual Pi 1.5.2 flow creates an isolated guarded
@@ -48,7 +52,7 @@ Responses carry `Cache-Control: no-store` and an `X-Request-Id` header, except t
 | --- | --- |
 | `GET /v1/health`, `GET /health` | Application status: whether a model is loaded, whether a request is running, queue depth and limits, the model list, and capability flags |
 | `GET /v1/capabilities` | The same status document |
-| `GET /v1/models` | The running model as a one-item list, or an empty list when no model is running in Chat mode |
+| `GET /v1/models` | The running model as a one-item list, or an empty list when no model is running; prepares generation automatically when idle |
 | `GET /v1/models/{id}` | The matching running model, or 404 |
 | `POST /v1/chat/completions` | One completion, buffered or streamed; one inline PNG/JPEG image when `capabilities.images` is true |
 
@@ -331,9 +335,10 @@ Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is
 | 413 | `image_too_large` | Decoded image exceeds the 4 MiB service limit |
 | 415 | `unsupported_media_type` | `Content-Type` other than `application/json` |
 | 429 | `server_busy`, `queue_full`, `queue_timeout`, `body_budget_full` | Connection limit, queue limit, queue wait expired, or shared pending raw-body budget reached |
+| 429 | `model_busy` | Another operation is using the model, or the required worker is loading; retry after it finishes |
 | 429 | `memory_pressure` | Available RAM is too low to admit a large body before reading or parsing it; a smaller request can be retried |
 | 499 | `request_cancelled` | Client disconnected |
-| 503 | `model_not_loaded`, `model_changed`, `server_stopped`, `server_shutdown`, `request_stopped`, `streaming_unavailable`, `stop_sequences_unavailable`, `generation_failed` | No model in Chat mode, model stopped or changed, Stark quitting, worker lacks a capability, or native generation failed |
+| 503 | `model_not_loaded`, `model_changed`, `server_stopped`, `server_shutdown`, `request_stopped`, `streaming_unavailable`, `stop_sequences_unavailable`, `generation_failed`, `runtime_load_failed` | No model running, model stopped or changed, Stark quitting, worker lacks a capability, or native generation failed |
 | 504 | `request_timeout` | No execution progress for 300 seconds |
 | 500 | `internal_error`, `http_error` | Unexpected failure |
 
@@ -341,7 +346,7 @@ Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is
 
 On macOS, open **Connections → Apps** and choose **Connect** on the OpenWork row. Open OpenWork with a local workspace first. Stark installs its bundled OpenCode V2 connector into the native global `opencode.jsonc` selected by the verified OpenWork engine's `OPENCODE_CONFIG_DIR`. It adds only the connector's local package URL, private Unix-socket path, public expected API URL and Stark ownership marker. **Manage → Reconnect** repairs a recognized Stark-owned entry after its app location or credential namespace changes, including a switch between signed installed and ad-hoc development builds. It updates only those public fields; credentials and unrelated settings are preserved. Unknown formats, conflicting ownership and duplicate Stark entries are rejected.
 
-If configuration changes, **quit OpenWork completely and reopen it**, then select **Stark** and the running model in its model picker. Closing the OpenWork window does not restart its engine. No copied API key, manual JSON, terminal command or credential helper is required. OpenWork lists the model running in Stark's Chat mode; the Model ID menu under **Connections → Connect your own app** only inspects saved models and does not run them. After a normal model switch, the connector refreshes the running model within a few seconds. A previously saved selection can show unavailable until the new running model is selected.
+If configuration changes, **quit OpenWork completely and reopen it**, then select **Stark** and the running model in its model picker. Closing the OpenWork window does not restart its engine. No copied API key, manual JSON, terminal command or credential helper is required. OpenWork lists the model running in Stark; the Model ID menu under **Connections → Connect your own app** only inspects saved models and does not run them. After a normal model switch, the connector refreshes the running model within a few seconds. A previously saved selection can show unavailable until the new running model is selected.
 
 If OpenWork settings already define a manual provider with ID `stark`, remove only that provider entry before connecting and keep your other provider entries. The managed connection does not migrate existing client credentials.
 

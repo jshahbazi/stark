@@ -70,6 +70,33 @@ def bind_receipt(receipt):
     receipt["source_manifest_sha256"] = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
+def decider_artifact(tmp_path):
+    model = artifact(tmp_path)
+    source = {
+        "repo": inventory._DECIDER_REPO,
+        "revision": inventory._DECIDER_REVISION,
+        "metadata_sha256": {name: "1" * 64 for name in inventory._DECIDER_METADATA_FILES},
+        "weight_files": {"model.safetensors": {"size": 4, "sha256": "2" * 64}},
+    }
+    config = {
+        "type": "DeciderModelConfig",
+        "source": source,
+        "decision_config": {"protocol_version": 4, "num_options": 255},
+        "capabilities": {"decision": True, "images": True, "max_images": 1},
+    }
+    config_bytes = json.dumps(config).encode()
+    (tmp_path / "config.json").write_bytes(config_bytes)
+    receipt = {
+        "source": source,
+        "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+        "output_bytes": (tmp_path / "model.safetensors").stat().st_size,
+        "output_sha256": hashlib.sha256((tmp_path / "model.safetensors").read_bytes()).hexdigest(),
+    }
+    (tmp_path / "conversion.json").write_text(json.dumps(receipt))
+    model["name"] = "Local import"
+    return model
+
+
 def partitioned_artifact(path, *, segments=((3, 4, 64), (2, 6, 64)), malformed=None, uniform_widths=()):
     model = artifact(path)
     weights_path = path / "model.safetensors"
@@ -204,6 +231,47 @@ def test_native_text_config_overrides_stale_image_registry_mode(tmp_path):
     model = artifact(tmp_path / "model")
     model["artifact_mode"] = "vision-language"
     assert inventory.model_display(model)["artifact_mode"] == "text"
+
+
+def test_prepared_decider_has_typed_decision_only_image_display(tmp_path):
+    result = inventory.model_display(decider_artifact(tmp_path))
+    assert result["upstream_repo"] == "perplexity-ai/pplx-decider-flash-v1.3"
+    assert result["artifact_mode"] == "decision"
+    assert result["decision_only"] is True
+    assert result["supported_modes"] == ["decision"]
+    assert result["supports_images"] is True
+    assert result["group_id"] == "repo:" + inventory._DECIDER_REPO
+    assert result["group_name"] == "Decider Flash v1.3"
+    assert result["source_revision"] == inventory._DECIDER_REVISION
+    assert result["quantization"] == "BF16"
+
+
+@pytest.mark.parametrize("field", ["config_sha256", "output_bytes", "source"])
+def test_decider_display_falls_back_when_provenance_binding_is_invalid(tmp_path, field):
+    model = decider_artifact(tmp_path)
+    receipt_path = tmp_path / "conversion.json"
+    receipt = json.loads(receipt_path.read_bytes())
+    if field == "source":
+        receipt[field]["revision"] = "a" * 40
+    elif field == "output_bytes":
+        receipt[field] += 1
+    else:
+        receipt[field] = "0" * 64
+    receipt_path.write_text(json.dumps(receipt))
+    result = inventory.model_display(model)
+    assert result["artifact_mode"] == "decision"
+    assert result["group_id"] == "installed:saved-model"
+    assert result["source_revision"] is None
+    assert result["upstream_repo"] == "perplexity-ai/pplx-decider-flash-v1.3"
+
+
+def test_generic_qwen35_remains_a_text_artifact(tmp_path):
+    model = artifact(tmp_path)
+    (tmp_path / "config.json").write_text('{"type":"LanguageModelConfig","decoder_config":{}}')
+    result = inventory.model_display(model)
+    assert result["artifact_mode"] == "text"
+    assert result.get("decision_only") is None
+    assert result.get("supports_images") is None
 
 
 def test_floating_convolutions_without_matrix_specs_do_not_hide_bf16(tmp_path):

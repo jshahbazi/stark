@@ -20,23 +20,27 @@ struct ConnectionDetailsView: View {
 
     private var canConnect: Bool { !engine.apiBaseURL.isEmpty && !engine.apiKey.isEmpty }
     private var hasKey: Bool { !engine.apiKey.isEmpty }
+    private var apiModels: [InstalledModel] {
+        engine.models.filter { !$0.decisionOnly && !(engine.decisionModel && $0.id == engine.loadedID) }
+    }
     private var modelID: String {
-        // Unrelated library work can be busy while the same chat worker stays loaded.
-        engine.loadedMode == .chat && !["idle", "error", "loading", "stopping"].contains(engine.state) ? engine.loadedID : ""
+        // Chat-capable models serve apps independently of the Playground mode.
+        !engine.decisionModel && apiModels.contains(where: { $0.id == engine.loadedID }) &&
+            !["idle", "error", "loading", "stopping"].contains(engine.state) ? engine.loadedID : ""
     }
     private var inspectedLibraryID: String {
-        if engine.models.contains(where: { $0.id == inspectedModelID }) { return inspectedModelID }
-        if engine.models.contains(where: { $0.id == engine.loadedID }) { return engine.loadedID }
-        if engine.models.contains(where: { $0.id == engine.selectedID }) { return engine.selectedID }
-        return engine.models.first?.id ?? ""
+        if apiModels.contains(where: { $0.id == inspectedModelID }) { return inspectedModelID }
+        if apiModels.contains(where: { $0.id == engine.loadedID }) { return engine.loadedID }
+        if apiModels.contains(where: { $0.id == engine.selectedID }) { return engine.selectedID }
+        return apiModels.first?.id ?? ""
     }
     private var displayedModelID: String {
-        engine.models.first { $0.id == inspectedLibraryID }?.apiID ?? ""
+        apiModels.first { $0.id == inspectedLibraryID }?.apiID ?? ""
     }
     private var connectionInfo: ConnectionInfo {
         ConnectionInfo(
             baseURL: engine.apiBaseURL, apiKey: engine.apiKey, modelID: displayedModelID,
-            runningModelID: engine.models.first { $0.id == modelID }?.apiID ?? "",
+            runningModelID: apiModels.first { $0.id == modelID }?.apiID ?? "",
             selectedModelIsRunning: !modelID.isEmpty && inspectedLibraryID == modelID,
             status: engine.state, contextTokens: engine.apiContextTokens, maxNewTokens: engine.apiMaxNewTokens,
             contextCapacityKnown: engine.contextCapacityKnown,
@@ -95,7 +99,7 @@ struct ConnectionDetailsView: View {
                     if !modelID.isEmpty {
                         Text(engine.activeName)
                             .font(.headline).fixedSize(horizontal: false, vertical: true)
-                        Text(engine.supportsTools ? "Chat mode · Tool use available" : "Chat mode · Text chat available")
+                        Text(engine.supportsTools ? "Tool use available" : "Text chat available")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
                         HStack(alignment: .center, spacing: 8) {
@@ -201,9 +205,9 @@ struct ConnectionDetailsView: View {
             HStack {
                 Text("Model ID").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                if engine.models.count > 1 {
+                if apiModels.count > 1 {
                     Picker("Model", selection: Binding(get: { inspectedLibraryID }, set: { inspectedModelID = $0 })) {
-                        ForEach(engine.models) { model in
+                        ForEach(apiModels) { model in
                             Text(model.displayName + (model.id == engine.loadedID ? " (Loaded)" : ""))
                                 .tag(model.id)
                         }
@@ -221,7 +225,7 @@ struct ConnectionDetailsView: View {
             Text(displayedModelID.isEmpty ? "Install a model in Manage Models to get its connection ID."
                  : !modelID.isEmpty && inspectedLibraryID == modelID
                  ? "This is the model currently served to your apps."
-                 : "Preview only. This model is not running in Chat mode. Choose Chat mode and Run in Stark before using it.")
+                 : "Preview only. Use Run in Stark to serve this model before using it.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -319,7 +323,7 @@ private struct PiConnectionView: View {
             }
             Text(connection.message).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if !available {
-                Text("Start a Chat model with tool support to set up Pi.")
+                Text("Run a model with tool support to set up Pi. Either Playground mode works.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else if connection.profile != nil && !current {
                 Text("The running model or API address changed. Update setup before opening Pi.")
@@ -414,7 +418,7 @@ private struct OpenWorkConnectionView: View {
             name: "OpenWork", symbol: "macwindow", approved: connection.approved,
             busy: connection.busy, disconnectPending: connection.disconnectPending,
             message: connection.message == "OpenWork is not connected." ? "" : connection.message,
-            detail: "Select Stark in OpenWork’s model picker. It uses the model currently running in Chat mode in Stark.",
+            detail: "Select Stark in OpenWork’s model picker. It uses the running model, in either Playground mode.",
             connect: connection.connect, disconnect: connection.disconnect
         )
     }

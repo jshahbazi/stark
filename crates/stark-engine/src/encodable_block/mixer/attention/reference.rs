@@ -22,6 +22,62 @@ pub(crate) struct ReferenceBF16Attention<B: Backend> {
     groups: u32,
     head_dim: u32,
     scale: f32,
+    is_causal: bool,
+}
+
+#[cfg(test)]
+mod decider_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::*;
+    use crate::{
+        backends::common::{CommandBufferExecutable, CommandBufferPending, Context},
+        tests::helpers::{buffer_to_vec, create_buffer_with_data, create_context, for_each_backend},
+    };
+
+    fn output<B: Backend>(
+        causal: bool,
+        future: f32,
+    ) -> Vec<half::bf16> {
+        let context = create_context::<B>();
+        let config: AttentionConfig = serde_json::from_value(serde_json::json!({
+            "type":"AttentionConfig", "qkvg_projection_config":{}, "out_projection_config":{},
+            "query_norm_config":null, "key_norm_config":null, "num_heads":1, "num_groups":1,
+            "head_dim":64, "is_causal":causal, "scale":1.0, "sliding_window_size":null,
+            "logit_soft_cap":null, "has_sinks":false, "has_qkvg_biases":false,
+            "has_out_biases":false, "has_gate":false, "normalize_values":false,
+            "is_kv_sharing":false, "reference_bf16":true
+        }))
+        .unwrap();
+        let attention = ReferenceBF16Attention::<B>::new(&context, &config).unwrap();
+        let zeros = vec![half::bf16::ZERO; 128];
+        let q = create_buffer_with_data::<B, _>(&context, &zeros);
+        let k = create_buffer_with_data::<B, _>(&context, &zeros);
+        let mut values = vec![half::bf16::ZERO; 64];
+        values.extend(std::iter::repeat_n(half::bf16::from_f32(future), 64));
+        let v = create_buffer_with_data::<B, _>(&context, &values);
+        let mut command = context.create_command_buffer(None, None).unwrap();
+        let result = attention.encode(&q, &k, &v, 2, 0, &mut command).unwrap();
+        let mut readback = context.create_buffer(256).unwrap();
+        command.encode_copy(&result, &mut readback);
+        command.end_encoding().submit().wait_until_completed().unwrap();
+        buffer_to_vec::<B, half::bf16>(&readback)
+    }
+
+    fn check<B: Backend>() {
+        for future in [2.0, 4.0] {
+            let causal = output::<B>(true, future);
+            let bidirectional = output::<B>(false, future);
+            assert!(causal[..64].iter().all(|value| value.to_f32() == 0.0));
+            assert!(causal[64..].iter().all(|value| value.to_f32() == future / 2.0));
+            assert!(bidirectional.iter().all(|value| value.to_f32() == future / 2.0));
+        }
+    }
+
+    #[stark_test]
+    fn decider_noncausal_attention_reads_future_rows_and_causal_attention_does_not() {
+        for_each_backend!(|B| check::<B>());
+    }
 }
 
 impl<B: Backend> ReferenceBF16Attention<B> {
@@ -29,13 +85,12 @@ impl<B: Backend> ReferenceBF16Attention<B> {
         context: &B::Context,
         config: &AttentionConfig,
     ) -> Result<Self, B::Error> {
-        if !config.is_causal
-            || config.is_kv_sharing
+        if config.is_kv_sharing
             || config.sliding_window_size.is_some()
             || config.has_sinks
             || config.logit_soft_cap.is_some()
         {
-            return Err(InvalidInput("reference BF16 attention requires owned full causal cache").into());
+            return Err(InvalidInput("reference BF16 attention requires owned full cache").into());
         }
         Self::kernels(context, config)
     }
@@ -73,6 +128,7 @@ impl<B: Backend> ReferenceBF16Attention<B> {
             groups: config.num_groups,
             head_dim: config.head_dim,
             scale: config.scale.unwrap_or(1.0 / (config.head_dim as f32).sqrt()),
+            is_causal: config.is_causal,
         })
     }
 
@@ -129,7 +185,14 @@ impl<B: Backend> ReferenceBF16Attention<B> {
                 32,
                 commands,
             );
-            self.score.encode(&dot, &mut probabilities, key_count, rows, prefix_len, self.scale, commands);
+            // The eager score kernel masks columns beyond prefix + query row.
+            // A full key-count prefix admits every column for noncausal input.
+            let mask_prefix = if self.is_causal {
+                prefix_len
+            } else {
+                key_count
+            };
+            self.score.encode(&dot, &mut probabilities, key_count, rows, mask_prefix, self.scale, commands);
             self.softmax.encode(&mut probabilities, key_count, rows, commands);
             self.dot.encode(
                 &probabilities,

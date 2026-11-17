@@ -162,7 +162,7 @@ fn qwen_inventory(
     config: &VisionTowerConfig,
 ) -> Option<Inventory> {
     if rows == 0
-        || rows > 4096
+        || rows > 6400
         || config.depth == 0
         || config.num_heads == 0
         || !config.hidden_size.is_multiple_of(config.num_heads)

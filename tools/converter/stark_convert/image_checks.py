@@ -56,11 +56,11 @@ def _insufficient_memory(required: int, available: int) -> ImageCheckError:
     reason = (
         "Not enough available memory (RAM) to run the image model check. "
         f"Estimated RAM needed: {required / 1e9:.1f} GB; available now: {available / 1e9:.1f} GB. "
-        if type(available) is int else "Cannot determine available RAM to run the image model check. "
+        if type(available) is int
+        else "Cannot determine available RAM to run the image model check. "
     )
     return ImageCheckError(
-        reason
-        + "The check loads the model from its current folder without making another disk copy. "
+        reason + "The check loads the model from its current folder without making another disk copy. "
         "Stop other models or close memory-heavy apps, then retry."
     )
 

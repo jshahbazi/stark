@@ -283,6 +283,7 @@ def build_native(bundle: Path, cargo: str, environment: dict[str, str]) -> None:
         ("stark-score", ["--features", "optimized"]),
         ("stark-generate", []),
         ("stark-template", []),
+        ("stark-decide", []),
     ):
         print(f"Building {name} with locked dependencies", flush=True)
         # Keep these invocations separate: Cargo feature unification must not
@@ -295,7 +296,7 @@ def build_native(bundle: Path, cargo: str, environment: dict[str, str]) -> None:
                 "--release",
                 "--locked",
                 "-p",
-                name,
+                "stark-score" if name == "stark-decide" else name,
                 "--bin",
                 name,
                 *features,
@@ -901,7 +902,7 @@ def verify_relocation(bundle: Path, environment: dict[str, str]) -> None:
             or help_reply.stderr
         ):
             raise BuildError("relocated_launcher_converter_help_identity")
-        for name in ("stark-score", "stark-generate", "stark-template"):
+        for name in ("stark-score", "stark-generate", "stark-template", "stark-decide"):
             verify_native(relocated / "libexec" / name, environment)
         if (relocated / "app" / "Stark.app").exists():
             verify_application(relocated / "app" / "Stark.app", environment)
@@ -979,6 +980,8 @@ def build_application(
             str(bundle / "libexec/stark-generate"),
             "--score-worker",
             str(bundle / "libexec/stark-score"),
+            "--decide-worker",
+            str(bundle / "libexec/stark-decide"),
             "--template-worker",
             str(bundle / "libexec/stark-template"),
             "--output",

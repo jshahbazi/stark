@@ -1,4 +1,4 @@
-"""Read the frozen llmbench-derived coding snapshot without network access.
+"""Read the maintainer-curated whatmodel.sh snapshot without network access.
 
 Parent-model scores are references. The site's memory plans, quantizations and
 cross-machine speed figures never authorize a Stark artifact or measure it.
@@ -15,7 +15,7 @@ from pathlib import Path
 GIB = 1024**3
 MODEL_ID = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
-# Editorial cutoffs on the cached relative coding index, not accuracy
+# Product cutoffs on the two separate cached score scales, not accuracy
 # percentages or measured quality guarantees for quantized Stark artifacts.
 SPEED_MINIMUM_SCORE = {"general": 40, "coding": 35}
 SPEED_WEIGHT_BUDGET_DIVISOR = 4
@@ -54,11 +54,6 @@ def _alternatives(ordered, records, model_id):
 
 
 class LeaderboardSnapshot:
-    source_name = "whatmodel.sh"
-
-    def source_url(self, row):
-        return "https://whatmodel.sh/model/" + row["id"]
-
     def __init__(self, raw):
         if raw.get("schema_version") != 1:
             raise ValueError("Unsupported leaderboard snapshot")
@@ -174,88 +169,16 @@ class LeaderboardSnapshot:
         return [evidence], details
 
 
-class CodingSnapshot(LeaderboardSnapshot):
-    """Frozen model-level coding indexes derived from llmbench's compilation.
-
-    Both guide tasks use coding evidence. Resource admission belongs to Stark;
-    no upstream RAM list or family average determines a model's score.
-    """
-
-    source_name = "llmbench.site coding"
-    ranking_task = "coding"
-
-    def __init__(self, raw):
-        self.captured = raw["snapshot"][:10]
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", self.captured):
-            raise ValueError("Invalid coding capture date")
-        repositories = raw["model_repositories"]
-        if not isinstance(repositories, dict) or not isinstance(raw["models"], list) or len(raw["models"]) > 4096:
-            raise ValueError("Invalid coding models")
-        self.records = {}
-        for row in raw["models"]:
-            repo = repositories[row["id"]]
-            if (
-                not isinstance(repo, str)
-                or not MODEL_ID.fullmatch(repo)
-                or repo in self.records
-                or not _number(row["index"])
-            ):
-                raise ValueError("Invalid coding model")
-            if not -1000 <= row["index"] <= 1000:
-                raise ValueError("Invalid coding index")
-            self.records[repo] = {"id": row["id"], "score": row["index"]}
-        self.bucket = {"url": "https://llmbench.site/data/", "sha256": raw["aggregate_sha256"], "ram_gb": None}
-        if not HEX64.fullmatch(self.bucket["sha256"]):
-            raise ValueError("Invalid coding provenance")
-        self.buckets = {("coding", 0): (self.bucket, self.records)} if self.records else {}
-
-    def for_host(self, task, physical_bytes):
-        return (self.bucket, self.records) if self.records and task in {"general", "coding"} else (None, {})
-
-    def source_url(self, row):
-        return "https://llmbench.site/data/"
-
-    def rank(self, ordered, task, preference, physical_bytes, model_id):
-        return super().rank(
-            ordered, "coding" if task in {"general", "coding"} else task, preference, physical_bytes, model_id
-        )
-
-    def evidence(self, recipe, parent, task, bucket, records, used):
-        if bucket is None or parent not in records:
-            return [], []
-        row = records[parent]
-        evidence = {
-            "benchmark": "llmbench_coding",
-            "score": str(row["score"]),
-            "model_id": parent,
-            "candidate_repo": recipe.repo,
-            "candidate_revision": recipe.revision,
-            "evidence_kind": "upstream_reference",
-            "used_for_ranking": recipe.id in used,
-            "captured": self.captured,
-            "source": {"url": bucket["url"], "sha256": bucket["sha256"], "sha256_kind": "stark_derived_aggregate"},
-            "source_url": self.source_url(row),
-            "relationship": "parent_model_reference_only",
-            "quantization_quality_evaluated": False,
-        }
-        return [evidence], [
-            f"llmbench.site-derived coding index: {row['score']:.1f}; cached {self.captured}. "
-            "Flash Next = 100; this is a relative index, not a pass percentage. "
-            + ("General-use selection uses coding as a proxy. " if task == "general" else "")
-            + "This export, quantization and Stark workflow were not benchmarked.",
-        ]
-
-
 @lru_cache(maxsize=1)
 def load_snapshot():
     try:
-        path = Path(__file__).with_name("llmbench_coding.json")
+        path = Path(__file__).with_name("recommendation_leaderboard.json")
         if path.stat().st_size > 8 * 1024 * 1024:
             raise ValueError("Oversized leaderboard snapshot")
-        return CodingSnapshot(json.loads(path.read_bytes()))
+        return LeaderboardSnapshot(json.loads(path.read_bytes()))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         # Optional reference corruption must not bypass resource checks or
         # cause a runtime website request. Existing evidence is the fallback.
-        return CodingSnapshot(
-            {"snapshot": "2026-11-14", "model_repositories": {}, "models": [], "aggregate_sha256": "0" * 64}
+        return LeaderboardSnapshot(
+            {"schema_version": 1, "captured": "2026-11-11", "model_repositories": {}, "buckets": []}
         )
