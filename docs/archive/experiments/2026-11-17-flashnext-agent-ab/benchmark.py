@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 from queue import Empty, Queue
+import re
 import secrets
 import signal
 import struct
@@ -18,12 +19,13 @@ from urllib.request import Request, urlopen
 
 from fixtures import TASKS, grade, prepare
 from stark_convert.desktop import Desktop
+from stark_convert.local_api import APIError
 
 
 ROOT = Path(__file__).resolve().parents[4]
 MODEL = "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl"
 CONTEXT = 40960
-MAX_OUTPUT = 1024
+MAX_OUTPUT = 2048
 SAMPLING = {"temperature": 0.6, "top_k": 20, "top_p": 0.95, "seed": 42}
 TOOLS = ("read", "edit", "write", "grep", "find", "ls")
 # Every task runs twice per grid, with the two opposite worker-launch orders.
@@ -82,7 +84,11 @@ class AgentDesktop(Desktop):
     def api_complete(self, payload, on_delta=None, cancelled=None):
         # Engineering controls shared across arms. Actual tools, prompts and
         # histories come from Pi and pass through the normal Stark renderer.
-        return super().api_complete({**payload, **SAMPLING, "mtp": True}, on_delta, cancelled)
+        try:
+            return super().api_complete({**payload, **SAMPLING, "mtp": True}, on_delta, cancelled)
+        except APIError as error:
+            self.report.emit("api_error", status=error.status, code=error.code)
+            raise
 
 
 class NativeTrace:
@@ -230,12 +236,17 @@ class Pi:
                 tools["errors"] += int(event.get("isError") is True)
             message = event.get("message", {})
             if kind == "message_end" and message.get("role") == "assistant":
-                assistant.append(message.get("stopReason"))
+                reason = message.get("stopReason")
+                reason = reason if reason in {"stop", "length", "toolUse", "aborted", "error"} else "unknown"
+                match = re.search(r"stark_http_\d{3}|missing_usage|missing_finish_reason|missing_done|invalid_usage|"
+                                  r"upstream_error|transport_failed|invalid_request_route",
+                                  message.get("errorMessage") or "")
+                assistant.append((reason, match.group(0) if match else None))
 
         self.wait(lambda row: row.get("type") == "agent_settled", started + timeout, observe)
-        require(assistant and assistant[-1] == "stop", "pi_completion_failed")
+        reason, category = assistant[-1] if assistant else ("missing", None)
         return {**tools, "wall_seconds": time.monotonic() - started, "first_text_seconds": first_text,
-                "assistant_messages": len(assistant)}
+                "assistant_messages": len(assistant), "client_finish": reason, "client_error": category}
 
     def close(self):
         self.process.stdin.close()
@@ -296,10 +307,10 @@ def session(args, desktop, tasks, grid, block, report, base, key, models):
                     result = pi.prompt(prompt, args.turn_timeout)
                     mark = grade(task, workspace, phase)
                     turn_passed = mark["status"] == "ok" and mark["passed"] == mark["total"] and mark["total"] > 0
-                    passed = passed and turn_passed
+                    passed = passed and turn_passed and result["client_finish"] == "stop"
                     report.emit("turn", **result, grade=mark, native_requests=trace.count)
-                    print(f"block {block} grid {grid} task {task} turn {phase}: {mark['passed']}/{mark['total']}",
-                          flush=True)
+                    print(f"block {block} grid {grid} task {task} turn {phase}: {mark['passed']}/{mark['total']} "
+                          f"({result['client_finish']})", flush=True)
             report.phase = None
             report.emit("session_end", passed=passed, wall_seconds=time.monotonic() - started,
                         host=host_snapshot(worker.process.pid))
@@ -315,6 +326,7 @@ def arm(args, report, block, grid, tasks):
     library = args.output / "library"
     with open(os.devnull, "w") as sink:
         desktop = AgentDesktop(args.worker, library, output=sink)
+        desktop.report = report
         try:
             desktop.models = [{"id": "lily", "name": "Qwen3.8 Flash Next", "path": str(args.model),
                                "source": f"huggingface:{MODEL}", "mtp_enabled": True}]
@@ -341,6 +353,10 @@ def arm(args, report, block, grid, tasks):
 
 
 def main():
+    def interrupted(_number, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("worker", "model", "pi", "node", "guard", "output"):
         parser.add_argument("--" + option, required=True, type=Path)
