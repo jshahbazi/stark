@@ -10,6 +10,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Menu bar app](../apps/menu-bar/README.md) | Building, updating and using the app, Connections, where the app keeps state |
 | [Converter guide](../tools/converter/README.md) | `stark convert` usage, every option and limit, supported models, MLX and GGUF routes, offline replay, errors |
 | [Model-family support](MODEL_SUPPORT.md) | Family downloads, saved-model removal, mode/format coverage and installation checks |
+| [Decider Flash v1.3](DECIDER.md) | Dedicated native decision scoring with images, preparation, limits and reference validation |
 | [Model image status](MODEL_IMAGE_STATUS.md) | All registered families and pinned checkpoint entries, image implementation/validation status, text optimization gaps and remaining work |
 | [Default-image text parity worklist](IMAGE_DEFAULT_PARITY_PLAN.md) | Prioritized family/artifact work and mandatory future-model gates for cache correctness, text performance and supported text MTP with images loaded |
 | [Tool-calling coverage](TOOL_CALLING.md) | Supported tool formats, checkpoint evidence, import status and remaining parser work |
@@ -43,6 +44,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | Page | What it covers |
 | --- | --- |
 | [Contributing](../CONTRIBUTING.md) | Toolchains, local checks, test layout, running a model-bound smoke test, where validation records go |
+| [Manual desktop user simulation](USER_SIMULATION.md) | Explicitly invoked OpenWork, OpenCode Desktop and Pi project-building workflow, independent acceptance checks and aggregate reporting |
 | [Adding model support](MODEL_ONBOARDING.md) | Required tool-calling assessment, prefix reuse, artifact qualification and lifecycle checks for each new inference path |
 | [Model changes and experiments](model-experiments/README.md) | Attempt ledger, image-support retrospective, failed approaches, promotion decisions and a template for future correctness/performance work |
 | [Technical guide](TECHNICAL_OVERVIEW.md) | Components, engine module layout, feature flags, Python package layout, the app control protocol |

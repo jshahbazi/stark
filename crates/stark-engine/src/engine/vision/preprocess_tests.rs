@@ -67,6 +67,40 @@ fn image_dimensions_match_pinned_smart_resize_and_admission() {
 }
 
 #[stark_test]
+fn decider_resize_uses_checkpoint_pixel_policy_before_admission() {
+    let bounds = PreprocessLimits {
+        processor_max_pixels: 1_638_400,
+        max_processed_pixels: 1_638_400,
+        max_encoder_patches: 6400,
+        ..limits()
+    };
+    assert_eq!(resized_dimensions(4096, 4096, &bounds).unwrap(), (1280, 1280));
+    assert_eq!(resized_dimensions(2048, 1024, &bounds).unwrap(), (1792, 896));
+    assert_eq!(resized_dimensions(256, 256, &bounds).unwrap(), (256, 256));
+    assert_eq!(resized_dimensions(3, 5, &bounds).unwrap(), (224, 352));
+    let admission_only = PreprocessLimits {
+        processor_max_pixels: MAX_PIXELS,
+        ..bounds
+    };
+    assert!(resized_dimensions(4096, 4096, &admission_only).is_err());
+}
+
+#[stark_test]
+fn decider_rgb_conversion_discards_alpha_and_preserves_encoded_orientation() {
+    let transparent = png(1, 1, ExtendedColorType::Rgba8, &[120, 30, 50, 0]);
+    let decoded = decode_decider_image(&transparent, &limits()).unwrap();
+    assert_eq!(decoded.pixels(), &[120, 30, 50]);
+    assert_eq!(decode_image(&transparent, &limits()).unwrap().pixels(), &[255, 255, 255]);
+    let mut oriented = png(2, 1, ExtendedColorType::Rgb8, &[10, 20, 30, 40, 50, 60]);
+    insert_png_chunk(&mut oriented, b"eXIf", &exif(6));
+    let decoded = decode_decider_image(&oriented, &limits()).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (2, 1));
+    assert_eq!(decoded.pixels(), &[10, 20, 30, 40, 50, 60]);
+    let regular = decode_image(&oriented, &limits()).unwrap();
+    assert_eq!((regular.width(), regular.height()), (1, 2));
+}
+
+#[stark_test]
 fn retained_image_dimensions_preserve_source_processor_maximum() {
     let bounds = PreprocessLimits {
         max_processed_pixels: 16_777_216,

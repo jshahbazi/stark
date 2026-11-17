@@ -639,7 +639,7 @@ class Worker:
 
         if cancelled is not None and cancelled.is_set():
             raise ChatCancelled("Request cancelled.")
-        cancellable_operation = payload.get("operation") in {"generate", "prepare_image", "generate_image"}
+        cancellable_operation = payload.get("operation") in {"generate", "prepare_image", "generate_image", "decide"}
         request_id = 0 if cancellable_operation else None
         if cancellable_operation and getattr(self, "cancellation", False):
             self.request_sequence += 1

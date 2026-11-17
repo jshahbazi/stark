@@ -7,6 +7,54 @@ const encode = new TextEncoder();
 const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const count = (v) => Number.isSafeInteger(v) && v >= 0;
 
+// Fixed messages only: upstream messages can contain private or arbitrary data.
+const API_ERRORS = {
+  model_not_loaded: [503, 'Run a model in Stark, then retry. Either Playground mode works.'],
+  model_changed: [503, 'The model changed or stopped. Select the running Stark model and retry.'],
+  runtime_load_failed: [503, 'Stark could not prepare the model for this request. Run it again or choose another model.'],
+  model_busy: [429, 'Stark is using the model. Wait for the current operation, then retry.'],
+  model_not_found: [404, 'This model is not running in Stark. Run it or update Pi setup to use the running model.'],
+  context_length_exceeded: [400, 'This conversation exceeds the model context. Start a new Pi session or shorten it.'],
+  tools_unsupported: [400, 'This Stark model cannot use tools. Run a model with tool support and update Pi setup.'],
+  unsupported_parameter: [400, 'Stark does not support an option in this request. Update Pi setup in Stark Connections.'],
+  invalid_request: [400, 'Stark rejected the request options. Check token limits or update Pi setup in Stark Connections.'],
+  generation_failed: [503, 'Stark generation failed. Run the model again in Stark, then retry.'],
+  queue_full: [429, 'Stark’s request queue is full. Wait for the current requests, then retry.'],
+  queue_timeout: [429, 'The request waited too long for Stark. Wait for the current operation, then retry.'],
+};
+
+async function safeAPIError(response) {
+  const reader = response.body?.getReader();
+  if (!reader) return null;
+  let timer;
+  try {
+    const read = async () => {
+      const chunks = [];
+      let size = 0;
+      while (true) {
+        const item = await reader.read();
+        if (item.done) break;
+        size += item.value.byteLength;
+        if (size > 8192) return null;
+        chunks.push(item.value);
+      }
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      const code = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))?.error?.code;
+      if (typeof code !== 'string' || !Object.hasOwn(API_ERRORS, code)) return null;
+      const [status, message] = API_ERRORS[code];
+      return status === response.status ? { code, message } : null;
+    };
+    return await Promise.race([read(), new Promise((resolve) => { timer = setTimeout(() => resolve(null), 1000); })]);
+  } catch { return null; }
+  finally {
+    clearTimeout(timer);
+    // Do not let a stalled upstream body delay the bounded diagnostic path.
+    void reader.cancel().catch(() => {});
+  }
+}
+
 export class StreamContractError extends Error {
   constructor(code) { super(`Stark stream contract: ${code}`); this.name = 'StreamContractError'; }
 }
@@ -154,13 +202,13 @@ export function createGuardedFetch({ baseUrl, modelId, fetchImpl = directFetch }
       throw error instanceof StreamContractError ? error : new StreamContractError('transport_failed');
     }
     if (!response.ok) {
-      try { await response.body?.cancel(); } catch { /* Scrub raw upstream failures. */ }
+      const detail = await safeAPIError(response);
       const status = response.status >= 400 && response.status <= 599 ? response.status : 502;
       const headers = new Headers({ 'content-type': 'application/json' });
       const retry = response.headers.get('retry-after');
       if (/^\d{1,2}$/.test(retry ?? '') && Number(retry) <= 60) headers.set('retry-after', retry);
       return new Response(JSON.stringify({ error: {
-        message: 'Stark request failed.', type: 'stark_api_error', code: `stark_http_${status}`,
+        message: detail?.message ?? 'Stark request failed.', type: 'stark_api_error', code: detail?.code ?? `stark_http_${status}`,
       } }), { status, headers });
     }
     if (!/^text\/event-stream(?:;|$)/i.test(response.headers.get('content-type') ?? '')) {

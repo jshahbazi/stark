@@ -1113,7 +1113,7 @@ extension EngineController {
                   TopModelRanking.matching("qwen").map(\.rank) == [1, 3, 4, 5],
                   TopModelRanking.matching("no-such-family").isEmpty,
                   TopModelRanking.matching("").map(\.rank) == Array(1...10) else { return false }
-            return rows.map(\.name) == ["Flint", "Gemma 2", "Gemma 3", "Gemma 3 images", "Gemma 4", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
+            return rows.map(\.name) == ["Decider Flash v1.3", "Flint", "Gemma 2", "Gemma 3", "Gemma 3 images", "Gemma 4", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
                 "Mistral", "OLMo 3", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.5 MoE", "Qwen3.8 Flash Next", "Ripple-65B Preview", "SmolLM3"] &&
                 !rows.contains(where: { $0.id == "modernbert" })
         case "models-display-event":
@@ -1255,12 +1255,12 @@ extension EngineController {
             guard engine.runModel(id: "model-b") else { return false }
             let request = command()
             guard request["command"] as? String == "run", request["model_id"] as? String == "model-b",
-                  request["mode"] as? String == "decision", engine.selectedID == "model-b",
+                  request["mode"] as? String == "chat", engine.selectedID == "model-b",
                   UserDefaults.standard.string(forKey: "selectedModel") == "model-b",
                   engine.state == "loading", !engine.modelReady else { return false }
-            engine.apply(["event": "ready", "mode": "decision", "model_id": "model-a"])
+            engine.apply(["event": "ready", "mode": "chat", "model_id": "model-a"])
             guard !engine.modelReady else { return false }
-            engine.apply(["event": "ready", "mode": "decision", "model_id": "model-b"])
+            engine.apply(["event": "ready", "mode": "chat", "model_id": "model-b"])
             return engine.modelReady && engine.loadedID == "model-b"
         case "saved-row-run-guards":
             engine.models = [
@@ -1295,6 +1295,102 @@ extension EngineController {
             let request = command()
             return request["model_id"] as? String == "fixture-model" && request["mode"] as? String == "chat" &&
                 engine.state == "loading" && !engine.modelReady && engine.messages.isEmpty
+        case "vision-run-normalizes-saved-decision":
+            engine.models = [InstalledModel(id: "lily", name: "Lily", path: "/private/lily", apiID: "owner/lily",
+                                            artifactMode: .visionLanguage)]
+            engine.selectedID = "lily"
+            engine.mode = .decision
+            UserDefaults.standard.set("decision", forKey: "playgroundMode")
+            guard engine.run() else { return false }
+            let request = command()
+            return request["command"] as? String == "run" && request["model_id"] as? String == "lily" &&
+                request["mode"] as? String == "chat" && engine.mode == .chat &&
+                UserDefaults.standard.string(forKey: "playgroundMode") == "chat" && engine.state == "loading"
+        case "vision-row-switch-from-decision-model":
+            engine.models = [
+                InstalledModel(id: "decider", name: "Decider", path: "/private/decider", apiID: "owner/decider",
+                               decisionOnly: true),
+                InstalledModel(id: "lily", name: "Lily", path: "/private/lily", apiID: "owner/lily",
+                               artifactMode: .visionLanguage)
+            ]
+            engine.loadedID = "decider"; engine.loadedMode = .decision; engine.selectedID = "decider"
+            engine.mode = .decision; engine.state = "ready"
+            guard engine.runModel(id: "lily") else { return false }
+            let request = command()
+            return request["command"] as? String == "run" && request["model_id"] as? String == "lily" &&
+                request["mode"] as? String == "chat" && engine.selectedID == "lily" && engine.mode == .chat &&
+                UserDefaults.standard.string(forKey: "playgroundMode") == "chat"
+        case "text-row-switch-from-decision-model-defaults-chat":
+            engine.models = [
+                InstalledModel(id: "decider", name: "Decider", path: "/private/decider", apiID: "owner/decider",
+                               decisionOnly: true),
+                InstalledModel(id: "text", name: "Text", path: "/private/text", apiID: "owner/text")
+            ]
+            engine.loadedID = "decider"; engine.loadedMode = .decision; engine.selectedID = "decider"
+            engine.mode = .decision; engine.state = "ready"
+            guard engine.runModel(id: "text") else { return false }
+            let request = command()
+            return request["command"] as? String == "run" && request["model_id"] as? String == "text" &&
+                request["mode"] as? String == "chat" && engine.mode == .chat &&
+                UserDefaults.standard.string(forKey: "playgroundMode") == "chat"
+        case "vision-start-retry-after-failure":
+            engine.models = [InstalledModel(id: "lily", name: "Lily", path: "/private/lily", apiID: "owner/lily",
+                                            artifactMode: .visionLanguage)]
+            engine.selectedID = "lily"; engine.mode = .decision; engine.loadedID = ""; engine.loadedMode = nil
+            engine.state = "idle"
+            UserDefaults.standard.set("decision", forKey: "playgroundMode")
+            guard engine.canStartModel else { return false }
+            engine.startModel()
+            let first = command()
+            guard first["model_id"] as? String == "lily", first["mode"] as? String == "chat",
+                  UserDefaults.standard.string(forKey: "playgroundMode") == "chat" else { return false }
+            engine.apply(["event": "status", "state": "error", "message": "Synthetic startup failure"])
+            guard engine.canStartModel, engine.mode == .chat else { return false }
+            engine.startModel()
+            let retry = command()
+            return retry["command"] as? String == "run" && retry["model_id"] as? String == "lily" &&
+                retry["mode"] as? String == "chat" && engine.state == "loading"
+        case "vision-mode-change-block-preserves-chat":
+            engine.models = [InstalledModel(id: "lily", name: "Lily", path: "/private/lily", apiID: "owner/lily",
+                                            artifactMode: .visionLanguage)]
+            engine.selectedID = "lily"; engine.mode = .chat; engine.state = "ready"
+            engine.messages = [ChatMessage(text: "synthetic retained turn", isUser: true)]
+            engine.changeMode(.decision)
+            return !engine.canUseDecisionMode && engine.mode == .chat && engine.messages.count == 1 &&
+                engine.messages[0].text == "synthetic retained turn" && noCommandSent()
+        case "text-run-normalizes-saved-decision":
+            engine.models = [InstalledModel(id: "text", name: "Text", path: "/private/text", apiID: "owner/text")]
+            engine.selectedID = "text"; engine.mode = .decision
+            UserDefaults.standard.set("decision", forKey: "playgroundMode")
+            guard engine.runModel(id: "text") else { return false }
+            let request = command()
+            return request["model_id"] as? String == "text" && request["mode"] as? String == "chat" &&
+                engine.mode == .chat && UserDefaults.standard.string(forKey: "playgroundMode") == "chat"
+        case "text-explicit-decision-selection":
+            engine.models = [InstalledModel(id: "text", name: "Text", path: "/private/text", apiID: "owner/text")]
+            engine.selectedID = "text"; engine.loadedID = "text"; engine.loadedMode = .chat
+            engine.mode = .chat; engine.state = "ready"
+            engine.messages = [ChatMessage(text: "synthetic previous turn", isUser: true)]
+            engine.changeMode(.decision)
+            let request = command()
+            return request["command"] as? String == "run" && request["model_id"] as? String == "text" &&
+                request["mode"] as? String == "decision" && engine.mode == .decision && engine.messages.isEmpty &&
+                UserDefaults.standard.string(forKey: "playgroundMode") == "decision"
+        case "decision-only-model-stays-decision":
+            engine.models = [InstalledModel(id: "decision", name: "Decision", path: "/private/decision",
+                                            apiID: "owner/decision", decisionOnly: true)]
+            engine.selectedID = "decision"; engine.mode = .chat
+            guard engine.run() else { return false }
+            let request = command()
+            return request["model_id"] as? String == "decision" && request["mode"] as? String == "decision" &&
+                engine.mode == .decision && UserDefaults.standard.string(forKey: "playgroundMode") == "decision"
+        case "decision-images-remain-eligible-for-decision-mode":
+            engine.models = [InstalledModel(id: "decider", name: "Decider", path: "/private/decider", apiID: "owner/decider")]
+            engine.selectedID = "decider"; engine.loadedID = "decider"; engine.mode = .decision
+            engine.apply(["event": "ready", "mode": "decision", "model_id": "decider",
+                          "decision_model": true, "decision_images": true, "images": true,
+                          "image_attachment_transport": "private-file-v1", "max_image_bytes": 4 * 1024 * 1024])
+            return engine.decisionModel && engine.supportsImages && engine.canUseDecisionMode
         case "saved-row-run-unavailable-runtime":
             engine.models = [InstalledModel(id: "other", name: "Other", path: "/private/other", apiID: "other")]
             engine.input = nil
@@ -1308,11 +1404,12 @@ extension EngineController {
                   !engine.canStopModel(id: "other"), engine.runModel(id: "other") else { return false }
             let request = command()
             guard request["command"] as? String == "run", request["model_id"] as? String == "other",
+                  request["mode"] as? String == "chat",
                   engine.modelControlID == "other", engine.canStopModel(id: "other"),
                   !engine.canStopModel(id: "fixture-model"), engine.busy else { return false }
-            engine.apply(["event": "ready", "mode": "decision", "model_id": "fixture-model"])
+            engine.apply(["event": "ready", "mode": "chat", "model_id": "fixture-model"])
             guard engine.state == "loading", engine.modelControlID == "other" else { return false }
-            engine.apply(["event": "ready", "mode": "decision", "model_id": "other"])
+            engine.apply(["event": "ready", "mode": "chat", "model_id": "other"])
             guard engine.modelReady, engine.modelControlID == "other", engine.canStopModel(id: "other"),
                   !engine.canStopModel(id: "fixture-model") else { return false }
             engine.stopModel(id: "other")
@@ -1331,7 +1428,7 @@ extension EngineController {
             guard command()["command"] as? String == "stop", engine.state == "stopping",
                   engine.modelControlID == "other", !engine.canStopModel(id: "other") else { return false }
             engine.stopModel(id: "other")
-            engine.apply(["event": "ready", "mode": "decision", "model_id": "other"])
+            engine.apply(["event": "ready", "mode": "chat", "model_id": "other"])
             guard engine.state == "stopping", !engine.modelReady, engine.modelControlID == "other",
                   noCommandSent() else { return false }
             engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
@@ -1379,6 +1476,37 @@ extension EngineController {
             return restart["command"] as? String == "run" && restart["model_id"] as? String == current.id &&
                 restart["mode"] as? String == "decision" && engine.selectedID == current.id &&
                 engine.mode == .decision && engine.state == "loading"
+        case "resume-text-decision-with-stale-vision-selection":
+            let text = InstalledModel(id: "text", name: "Text", path: "/private/text", apiID: "owner/text")
+            let vision = InstalledModel(id: "lily", name: "Lily", path: "/private/lily", apiID: "owner/lily",
+                                        artifactMode: .visionLanguage)
+            engine.models = [text, vision]
+            engine.mode = .decision; engine.loadedMode = .decision; engine.loadedID = text.id
+            engine.selectedID = vision.id; engine.state = "ready"
+            engine.stopModel(id: text.id)
+            guard command()["command"] as? String == "stop" else { return false }
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            guard engine.startableModel?.id == text.id, engine.canStartModel else { return false }
+            engine.startModel()
+            let restart = command()
+            return restart["command"] as? String == "run" && restart["model_id"] as? String == text.id &&
+                restart["mode"] as? String == "decision" && engine.selectedID == text.id && engine.mode == .decision
+        case "resume-text-chat-with-stale-decider-selection":
+            let text = InstalledModel(id: "text", name: "Text", path: "/private/text", apiID: "owner/text")
+            let decider = InstalledModel(id: "decider", name: "Decider", path: "/private/decider", apiID: "owner/decider",
+                                         decisionOnly: true)
+            engine.models = [text, decider]
+            engine.mode = .chat; engine.loadedMode = .chat; engine.loadedID = text.id
+            engine.selectedID = decider.id; engine.state = "ready"
+            engine.stopModel(id: text.id)
+            guard command()["command"] as? String == "stop" else { return false }
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            engine.mode = .decision
+            guard engine.startableModel?.id == text.id, engine.canStartModel else { return false }
+            engine.startModel()
+            let restart = command()
+            return restart["command"] as? String == "run" && restart["model_id"] as? String == text.id &&
+                restart["mode"] as? String == "chat" && engine.selectedID == text.id && engine.mode == .chat
         case "restart-controls-explicit-target-after-failed-start":
             let stopped = variant("fixture-model", name: "Stopped A", display: nil)
             let selected = variant("other-model", name: "Selected B", display: nil)
@@ -1436,7 +1564,7 @@ extension EngineController {
             engine.startModel()
             let fallback = command()
             return fallback["command"] as? String == "run" && fallback["model_id"] as? String == "other-model" &&
-                fallback["mode"] as? String == "decision" && engine.state == "loading"
+                fallback["mode"] as? String == "chat" && engine.state == "loading"
         case "saved-row-control-unrelated-operation":
             engine.models = [
                 InstalledModel(id: "fixture-model", name: "Current", path: "/private/current", apiID: "current"),
@@ -1945,7 +2073,7 @@ extension EngineController {
                     item["reference_score"] = [
                         "model_id": "parent/" + id, "relationship": relationship,
                         "general": general as Any? ?? NSNull(), "coding": coding as Any? ?? NSNull(),
-                        "source_url": "https://llmbench.site/data/", "captured": "2026-11-11"]
+                        "source_url": "https://whatmodel.sh/model/" + id, "captured": "2026-11-11"]
                 }
                 if !downloadable { item["downloadable"] = false; item["unavailable_reason"] = "Fixture reason" }
                 return item
@@ -1966,18 +2094,18 @@ extension EngineController {
             }
             // Fits and downloadable first by score, the smaller download breaking a tie; unscored rows follow,
             // then models too large for this Mac, then rows that cannot be downloaded.
-            // The legacy general sort aliases the coding index.
-            guard rows(.ratingGeneral, memory) == ["coder", "mid", "best-small", "best-full", "unscored", "huge", "blocked"],
+            // A coding-only score does not rank on the general scale.
+            guard rows(.ratingGeneral, memory) == ["best-small", "best-full", "mid", "unscored", "coder", "huge", "blocked"],
                   rows(.ratingCoding, memory) == ["coder", "mid", "best-small", "best-full", "unscored", "huge", "blocked"],
-                  rows(.ratingGeneral, nil) == ["coder", "mid", "best-small", "best-full", "unscored", "huge", "blocked"],
+                  rows(.ratingGeneral, nil) == ["huge", "best-small", "best-full", "mid", "unscored", "coder", "blocked"],
                   rows(.ratingGeneral, UInt64(8) * 1024 * 1024 * 1024) ==
-                      ["coder", "mid", "unscored", "best-small", "best-full", "huge", "blocked"],
+                      ["mid", "unscored", "coder", "huge", "best-small", "best-full", "blocked"],
                   rows(.sizeAscending, memory).count == 7 else { return false }
             guard let export = catalog.items.first(where: { $0.id == "best-small" })?.referenceScore,
                   let coder = catalog.items.first(where: { $0.id == "coder" })?.referenceScore,
                   export.relationship == .namedQuantization, export.modelID == "parent/best-small",
-                  export.score(for: .ratingGeneral)?.value == 40, export.score(for: .ratingCoding)?.value == 40,
-                  coder.score(for: .ratingGeneral)?.value == 80, coder.score(for: .sizeAscending)?.value == 80,
+                  export.score(for: .ratingGeneral)?.value == 70, export.score(for: .ratingCoding)?.value == 40,
+                  coder.score(for: .ratingGeneral) == nil, coder.score(for: .sizeAscending)?.value == 80,
                   coder.score(for: .sizeAscending)?.task == "coding",
                   catalog.items.first(where: { $0.id == "unscored" })?.referenceScore == nil,
                   catalog.items.first(where: { $0.id == "huge" })?.fits(physicalMemory: memory) == false,
@@ -2151,8 +2279,7 @@ extension EngineController {
             guard ModelBrowserPreferences.load(.saved, defaults: preferences) == .nameAscending,
                   !ModelBrowserScope.saved.sorts.contains(where: \.isRating),
                   !ModelBrowserScope.families.sorts.contains(where: \.isRating),
-                  ModelBrowserScope.catalog.sorts.first == .ratingCoding,
-                  !ModelBrowserScope.catalog.sorts.contains(.ratingGeneral) else { return false }
+                  ModelBrowserScope.catalog.sorts.prefix(2) == [.ratingGeneral, .ratingCoding] else { return false }
             ModelBrowserPreferences.save(.sizeDescending, for: .saved, defaults: preferences)
             ModelBrowserPreferences.save(.nameDescending, for: .families, defaults: preferences)
             ModelBrowserPreferences.save(.nameAscending, for: .catalog, defaults: preferences)
@@ -2900,6 +3027,16 @@ extension EngineController {
             engine.state = "stopping"
             engine.apply(["event": "ready", "mode": "decision", "model_id": "fixture-model"])
             return engine.state == "stopping" && !engine.modelReady
+        case "automatic-runtime-preserves-playground":
+            engine.decisionText = "synthetic input"
+            engine.apply(["event": "status", "state": "loading", "message": "Preparing model"])
+            engine.apply(["event": "runtime_ready", "mode": "chat", "model_id": "fixture-model",
+                          "tools": true, "tool_parser": "fixture", "context_capacity_known": true,
+                          "max_context_tokens": 8192, "api_context_tokens": 8192, "api_max_output_tokens": 1024])
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            return engine.mode == .decision && engine.loadedMode == .decision && engine.modelReady &&
+                engine.decisionText == "synthetic input" && engine.supportsTools && engine.apiContextTokens == 8192 &&
+                engine.apiMaxNewTokens == 1024
         case "wrong-mode-decision":
             engine.mode = .chat
             engine.loadedMode = .chat
@@ -3132,6 +3269,7 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_ready_requires_requested_model_and_mode(self):
         self.exercise("ready-mode-guard")
+        self.exercise("automatic-runtime-preserves-playground")
 
     def test_chat_mode_ignores_decision_event(self):
         self.exercise("wrong-mode-decision")
@@ -3253,6 +3391,33 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_saved_row_run_reloads_when_the_loaded_mode_differs(self):
         self.exercise("saved-row-run-mode-mismatch")
 
+    def test_vision_run_normalizes_a_saved_decision_preference_to_chat(self):
+        self.exercise("vision-run-normalizes-saved-decision")
+
+    def test_switching_from_a_decision_model_starts_vision_model_in_chat(self):
+        self.exercise("vision-row-switch-from-decision-model")
+
+    def test_switching_from_a_decision_model_starts_text_model_in_chat(self):
+        self.exercise("text-row-switch-from-decision-model-defaults-chat")
+
+    def test_vision_start_and_retry_after_failure_use_chat(self):
+        self.exercise("vision-start-retry-after-failure")
+
+    def test_vision_mode_change_to_decision_is_blocked_without_clearing_chat(self):
+        self.exercise("vision-mode-change-block-preserves-chat")
+
+    def test_text_run_normalizes_a_saved_decision_preference_to_chat(self):
+        self.exercise("text-run-normalizes-saved-decision")
+
+    def test_explicit_playground_decision_selection_still_runs_text_scoring(self):
+        self.exercise("text-explicit-decision-selection")
+
+    def test_native_decision_only_model_stays_in_decision_mode(self):
+        self.exercise("decision-only-model-stays-decision")
+
+    def test_decision_image_capability_does_not_block_decision_mode(self):
+        self.exercise("decision-images-remain-eligible-for-decision-mode")
+
     def test_saved_row_run_reports_send_failure_without_becoming_ready(self):
         self.exercise("saved-row-run-unavailable-runtime")
 
@@ -3270,6 +3435,12 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_restart_controls_stop_exact_model_and_restart_in_stopped_mode(self):
         self.exercise("restart-controls-stop-and-start")
+
+    def test_resume_decision_text_model_with_stale_vision_selection(self):
+        self.exercise("resume-text-decision-with-stale-vision-selection")
+
+    def test_resume_chat_text_model_with_stale_decider_selection(self):
+        self.exercise("resume-text-chat-with-stale-decider-selection")
 
     def test_explicit_failed_start_retries_selected_model_without_clearing_on_busy_run(
         self,

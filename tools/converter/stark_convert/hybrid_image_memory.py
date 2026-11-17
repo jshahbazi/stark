@@ -46,7 +46,10 @@ _LILY_MTP = 1_842_067_616
 # by an additional 128 MiB. Decoder dequant staging peaks at 62,914,560 bytes.
 # Rounded buckets cover
 # those typed tensors plus CPU patches, staging and temporary copies. The
-# additional 8 GiB covers compiler/driver/allocator and available-memory drift.
+# additional 8 GiB is a planning allowance for compiler/driver/allocator and
+# available-memory drift. Exact Lily retains the full estimate as an installed-
+# RAM floor and compares selected weights and typed workspace with available
+# RAM. Neither threshold reserves a free buffer or guarantees an allocation.
 _LILY_RESERVES = {
     "initial_state": 512 * _MIB,
     "decoder_scratch": 768 * _MIB,
@@ -57,14 +60,7 @@ _LILY_RESERVES = {
 }
 
 
-def retained_check_memory(identity: dict, *, directory: Path | None = None, config: dict | None = None) -> int:
-    """Estimate selected residency from validated headers or frozen evidence.
-
-    ``identity`` comes from the bounded retained-artifact metadata recognizer.
-    The optional generic path reads headers and bounded metadata only; it never
-    maps weights, hashes their payloads, allocates model state or reserves RAM.
-    Calls without a model keep the original conservative observation fallback.
-    """
+def _retained_inventory(identity):
     files = identity.get("weight_files")
     if not isinstance(files, dict) or not 1 <= len(files) <= 256:
         raise ValueError("invalid retained image memory inventory")
@@ -74,10 +70,43 @@ def retained_check_memory(identity: dict, *, directory: Path | None = None, conf
     total = sum(sizes)
     if total > 256 * _GIB:
         raise ValueError("invalid retained image memory inventory")
-    exact = all(
-        type(identity.get(key)) is type(value) and identity[key] == value for key, value in _LILY_IDENTITY.items()
+    return files, total
+
+
+def _exact_lily_inventory(identity, files, total):
+    return (
+        len(files) == 55
+        and total == _LILY_TOTAL
+        and all(
+            type(identity.get(key)) is type(value) and identity[key] == value for key, value in _LILY_IDENTITY.items()
+        )
     )
-    if exact and len(files) == 55 and total == _LILY_TOTAL:
+
+
+def retained_check_headroom(identity: dict, required: int) -> int:
+    """Separate exact Lily's selected-residency threshold from its planning margin.
+
+    ``required`` is the full planning estimate from ``retained_check_memory``.
+    Every other identity retains that complete observed-headroom requirement.
+    The caller must still check physical capacity against the full estimate
+    whenever this function returns a lower observed-headroom threshold.
+    """
+    files, total = _retained_inventory(identity)
+    if _exact_lily_inventory(identity, files, total):
+        return required - _LILY_RESERVES["driver_allocator_and_host_margin"]
+    return required
+
+
+def retained_check_memory(identity: dict, *, directory: Path | None = None, config: dict | None = None) -> int:
+    """Estimate selected residency from validated headers or frozen evidence.
+
+    ``identity`` comes from the bounded retained-artifact metadata recognizer.
+    The optional generic path reads headers and bounded metadata only; it never
+    maps weights, hashes their payloads, allocates model state or reserves RAM.
+    Calls without a model keep the original conservative observation fallback.
+    """
+    files, total = _retained_inventory(identity)
+    if _exact_lily_inventory(identity, files, total):
         return _LILY_RESIDENT + _LILY_MTP + sum(_LILY_RESERVES.values())
     if directory is None and config is None:
         return total + 2 * _GIB

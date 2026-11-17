@@ -294,8 +294,9 @@ class SnapshotDownloadProgress:
     Reconstruction bytes are capped by the caller's independently pinned
     maximum. Transfer bytes count positive received-byte updates, including
     retransmissions, and have no source-size cap or denominator.
-    With a completed-files reader, its count replaces reconstruction progress
-    and the pinned maximum becomes the fixed completion denominator.
+    With a completed-files reader, cached files plus live transfers estimate
+    progress against the pinned maximum. Completed files establish a lower
+    bound; transfer estimates stay below completion until files are ready.
     """
 
     BAR_NAME = "huggingface_hub.snapshot_download"
@@ -308,6 +309,7 @@ class SnapshotDownloadProgress:
         self.max_bytes = max_bytes
         self.completed_files = completed_files
         self.completed_file_bytes = 0
+        self.initial_completed_bytes = min(max_bytes, max(0, completed_files())) if completed_files is not None else 0
         self.completed_bytes = 0
         self._reconstruction_raw_bytes = 0
         self.transferred_bytes = 0
@@ -335,7 +337,9 @@ class SnapshotDownloadProgress:
         with self.lock:
             if self.completed_files is not None:
                 self.completed_file_bytes = min(self.max_bytes, max(self.completed_file_bytes, self.completed_files()))
-                self.completed_bytes = self.completed_file_bytes
+                remaining = self.max_bytes - self.initial_completed_bytes
+                estimate = self.initial_completed_bytes + min(self.transferred_bytes, remaining * 99 // 100)
+                self.completed_bytes = max(self.completed_file_bytes, estimate)
             self.progress.emit(
                 "download",
                 "running",

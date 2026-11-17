@@ -3,8 +3,8 @@
 Beginner asks for **General Work** or **Coding**, followed by **Speed** or
 **Quality** with Quality selected by default. General Work continues into the
 OpenWork guide; Coding continues into OpenCode. Recommendations first check
-resource fit, then use the offline coding-index policy below. The index does
-not measure Stark exports, tool workflows or general-work quality.
+resource fit, then use the offline evidence policy below. Parent-model scores
+do not measure Stark exports or tool workflows.
 
 ## Current native and recurrent coverage
 
@@ -82,38 +82,26 @@ reports remaining setup space and rereads this credit before installation.
 Text recipes do not enable image input or add a backend. Existing native prefix
 reuse and its artifact-specific qualification remain unchanged.
 
-## Frozen coding indexes
+## Offline leaderboard references
 
-The Catalog and guided Quality/Speed flows use the 28 connected model-level
-coding indexes in `llmbench_coding.json`, derived from the frozen November 14,
-2026 input snapshot in
-[`docs/benchmarks/data/catalog-coding-ranking-2026-11-14.json`](benchmarks/data/catalog-coding-ranking-2026-11-14.json).
-These are individual model indexes, not family averages. The catalog offers
-**Top rated (coding)**. General Work guided setup uses the coding index as a
-proxy and does not claim to rank general-work quality.
-The Top Models tab remains its separate family-level calculation and is
-unchanged.
+`recommendation_leaderboard.json` bundles a dated [whatmodel.sh](https://whatmodel.sh/) snapshot with separate [General Work](https://whatmodel.sh/?gpu=apple&max=0) and [Coding](https://whatmodel.sh/?gpu=apple&max=0&task=coding) rankings. General Work uses the requested all-task configuration. Both lists select Apple Silicon and local models only. Full lists cover 8, 16, 24, 32, 48, 64, 96, 128, 192, 256 and 512 GB RAM. Exact query URLs, response SHA-256 values, update times, source revision and model-catalogue hash remain in the snapshot. The [November capture](archive/runs/2026-11-11-whatmodel-recommendations.md) records the top three models per RAM/task list, including models Stark cannot run.
 
-This is an offline reference. Hardware checks and supported-model discovery
-remain fresh; the recommendation path makes no website leaderboard requests.
-Unknown models remain unscored and retain the documented fallback order.
-Indexes are relative coding references, not percentages, Stark artifact
-measurements or proof of general-work ability. Source, revision, attribution,
-license and calculation details are retained in the aggregate record and the
-[dated method report](benchmarks/2026-11-14-catalog-coding-ranking.md).
+For benchmark information behind these rankings, start with whatmodel’s [About this repo](https://github.com/jakemanger/whatmodel#about-this-repo) section, which links to its scoring methodology and benchmark sources. The bundled snapshot retains the source revision used for Stark’s recommendations.
+
+The recommendation path never requests whatmodel.sh. Hardware checks and supported-model discovery remain fresh; existing Hugging Face metadata lookups are separate. Clicking a source link intentionally opens the browser.
 
 ### Selection policy
 
-1. Exclude candidates without a complete supported conversion/native route, usable chat template, tool parser, 32K context and adequate installed RAM, GPU budget and disk. Current available memory affects startup readiness, never recommendation eligibility or rank. Index rank never grants compatibility.
-2. Use the fixed coding-index snapshot; it has no RAM buckets. Missing model identities remain unscored.
-3. Apply only explicit model identity bindings for the pinned snapshot. Quantization names, family averages or fuzzy matching do not create a model score. A changed source identity requires another review.
-4. **Quality** selects descending coding index after admission for either task. For General Work this is an explicitly disclosed coding proxy. Alternatives must be within **10 index points** of the best admitted model and represent distinct models. Equal indexes retain deterministic fallback order. Unknown models never fill alternatives behind indexed choices. With no indexed models, offer one explicitly unknown benchmark/resource fallback. The 10-point distance is an editorial threshold; the relative index is not a percentage or a measure of artifact or general-work quality.
-5. **Speed** admits only models with a coding index of at least **35 points** and exact export weights no larger than **25% of physical RAM**. Installed RAM, GPU and disk checks still apply. Within that pool, select descending coding index; ties prefer a smaller runtime plan, then smaller weight payload, then deterministic fallback order. Alternatives use the same **10-point distance** and distinct-model rule as Quality, measured against the best candidate inside Speed's eligible pool. Unknown models, candidates below the floor and exports over the budget are excluded from Speed alternatives. These are editorial thresholds, not measured response speed or quantized task quality.
-6. Offer one primary recommendation with up to two alternatives behind a disclosure; fewer are shown when the policy admits fewer. Quality cards identify the coding index and its reference model. Historical benchmark results remain reference information when the coding index determines ordering.
+1. Exclude candidates without a complete supported conversion/native route, usable chat template, tool parser, 32K context and adequate installed RAM, GPU budget and disk. Current available memory affects startup readiness, never recommendation eligibility or rank. Leaderboard rank never grants compatibility.
+2. Select the largest cached RAM bucket no greater than this Mac's physical RAM in GiB. Below the smallest bucket, cached coverage is unavailable; above the largest, use the largest bucket with actual resource checks.
+3. Match exact parent repositories from the pinned source catalogue. Reviewed export-to-parent bindings also require the exact export repository and revision. No fuzzy names, quantization labels or mutable commands establish identity. Ambiguous parents have no automatic score. A changed export revision requires another review.
+4. **Quality** selects descending task score after admission. Alternatives must have a cached score within **10 points** of the best admitted model on the same task scale, and each offer must represent a distinct parent model. Equal scores retain deterministic fallback order. Unknown scores never fill alternatives behind a scored choice. With no cached scores, offer one explicitly unknown benchmark/resource fallback. The 10-point distance is an editorial product threshold, reviewed with snapshot refreshes; it does not establish comparable measured artifact quality. Signed relative scores are not percentages or native artifact accuracy measurements. Parent scores do not establish export equivalence.
+5. **Speed** admits only candidates with a cached parent-model task score of at least **40 for General Work** or **35 for Coding**, and exact export weights no larger than **25% of physical RAM**. Installed RAM, GPU and disk checks still apply. Within that pool, select descending task score; ties prefer a smaller runtime plan, then smaller weight payload, then deterministic fallback order. Alternatives use the same **10-point distance** and **distinct-parent** rule as Quality, measured against the best candidate inside Speed's eligible pool. The increasing payload allowance lets larger Macs select stronger models without always choosing the smallest eligible checkpoint. Unknown scores, candidates below the floor and exports over the budget are excluded from all Speed alternatives. These are editorial product thresholds on separate relative score scales; review them when refreshing the leaderboard. They do not certify quantized task quality or measured response speed. Source speeds retain their provenance but do not rank these candidates.
+6. Offer one primary recommendation with up to two alternatives behind a disclosure; fewer are shown when the policy admits fewer. Each cached Quality offer shows its score and the parent-model/unevaluated-quantization limitation directly on its card. Historical benchmark results remain reference information when the cached leaderboard determines ordering.
 
-The index applies only to its recorded model identities. A connected reference does not qualify a differently quantized Stark artifact, export, backend or tool workflow. Speed's budget uses actual export weight bytes. It does not measure response speed or establish that an export preserves coding quality. Snapshot inclusion adds no backend, conversion route or native qualification.
+The site's memory/variant estimates use an 8K conversation allowance. Stark's 32K model-specific plan remains authoritative, including actual export weights and state. The captured site's ranking applies the same parent score across quantized variants; it does not benchmark each quantization separately. Speed's budget uses actual export weight bytes, so a quantized export may fit while its BF16 counterpart does not. Its parent score does not establish that the export preserves quality. The guide labels this limitation, and structured evidence explicitly marks quantization quality as unevaluated by this ranking. No generic bit-width quality penalty is invented. Site quantizations remain provenance and are not automatically installed. Snapshot inclusion adds no backend, conversion route or native qualification.
 
-If the index snapshot is unavailable or covers none of the eligible models, **Quality** retains its resource fallback with quality marked unknown. **Speed** reports no qualifying recommendation, with a direct **Choose Quality** action and Advanced browsing; it never waives the score floor or weight budget. Historical `recommendation_leaderboard.json` and `recommendation_benchmarks.json` remain bundled for older behavior and historical evidence; the new Catalog and guided Quality/Speed paths use the coding index. New guides send `general`/`coding` and `quality`/`speed`.
+If the snapshot is unavailable, malformed or covers none of the eligible models, **Quality** retains its offline benchmark/resource fallback. **Speed** reports no qualifying recommendation, with a direct **Choose Quality** action and Advanced browsing; it never waives the score floor or weight budget. `recommendation_benchmarks.json` retains its source-bound IFEval, BFCL and LiveCodeBench records separately. General Work's Quality fallback uses instruction-following references; Coding uses the published coding cohort. Former task/preference API values retain their legacy behavior for older clients. New guides send `general`/`coding` and `quality`/`speed`.
 
 ### Guided discovery coverage
 
@@ -149,7 +137,7 @@ The [RAM-scaled Speed check](archive/runs/2026-11-11-speed-recommendation-policy
 
 ### Catalogue ordering
 
-**Model Catalog** uses the frozen coding-index snapshot to order a family's rows. This is a
+**Model Catalog** uses the same snapshot to order a family's rows. This is a
 browsing aid, separate from the Beginner selection policy above: it never
 selects, installs or admits a model, and every row still passes the catalogue's
 own compatibility checks. `catalog_ranking.py` attaches a reference score to a
@@ -158,31 +146,32 @@ row only through one of these relationships, which the row records:
 | Relationship | Rule |
 | --- | --- |
 | `benchmarked_model` | The row's repository is the scored repository. |
-| `reviewed_export` | A reviewed export-to-model binding matches the row's exact repository and revision. |
-| `declared_quantization` | The row is a quantized format and its Hub tags declare exactly one `base_model:quantized:` parent, which has a coding index. |
+| `reviewed_export` | A reviewed export-to-parent binding matches the row's exact repository and revision. |
+| `declared_quantization` | The row is a quantized format and its Hub tags declare exactly one `base_model:quantized:` parent, which is scored. |
 | `named_quantization` | The row is a quantized format whose name is a scored model's name plus a quantization suffix that agrees with the checked format. The scored model must share the row's publisher, or be the only scored model with that name. |
 
-The direct model row receives its model-level index. Declared/named
-quantization rows and reviewed exports may inherit the referenced model's
-index under the relationships above; those relationships rest on source
-metadata or review and do not show that the export was benchmarked. Other
-fine-tunes, merges and re-uploads remain unscored. Unindexed rows sort after
-indexed rows. Model Catalog exposes **Top rated (coding)** only. The Top Models
-tab separately displays family-level aggregates and is unchanged.
+Full-precision rows other than the scored repository itself never inherit a
+score: a fine-tune, merge or re-upload has its own weights. The last two
+relationships rest on what the export's publisher states, not on a review, so
+they order rows and nothing more. The app labels every inherited score as the
+parent model's and says that the quantized version was not benchmarked. General
+and coding scores are on separate scales; each rating order uses only its own
+score and treats a missing one as unknown, after scored rows. A parent with more
+than one snapshot entry is ambiguous and has no score, as in the Beginner
+policy. One score per parent is used for every RAM list that contains it; the
+RAM list this Mac can use only decides which scored sources are inspected first.
 
-The November 14 coding-index snapshot is frozen. Its inputs, source revisions,
-hashes, attribution, licenses and calculation are documented in the linked
-benchmark report and aggregate JSON. Refreshes require a separately reviewed
-calculation and explicit score-identity updates; do not infer scores for new
-models or families.
+### Manual refresh
 
-`tools/converter/scripts/bundle_llmbench_coding.py` packages a reviewed aggregate
-with explicit repository identities from a saved llmbench index. It preserves
-the aggregate's scores and source hashes and records the identity index's date
-and hash separately. Run it with `--aggregate`, `--index` and `--output`; it does
-not fetch data or recompute scores. The shipped identity mapping uses the index
-generated at `2026-11-15T02:21:26Z`; score inputs remain frozen at
-`2026-11-14T18:14:50Z`.
+There is no scheduled refresh. A maintainer reviews and commits a snapshot about monthly. The utility accesses the network only with explicit `--fetch`. Start from a reviewed upstream source checkout and record its commit. From the Stark repository root:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 python tools/converter/scripts/refresh_recommendation_leaderboard.py --fetch --raw-dir /tmp/whatmodel-new-capture --source-dir /path/to/whatmodel --source-revision REVIEWED_COMMIT --captured-date YYYY-MM-DD --report docs/archive/runs/YYYY-MM-DD-whatmodel-recommendations.md
+```
+
+The utility requests both configurations for each RAM bucket, with `format=json&n=1000` to avoid default truncation. Omit `--fetch` to rebuild from saved responses and their hash manifest. Review changed identities, scores, coverage and notices; retain earlier dated reports. Run recommendation, native setup and packaging checks before pushing. Leaderboard changes do not qualify a model or supersede earlier native validation.
+
+The numerical compilation and derived scores retain whatmodel.sh / Merlinsbeard Pty Ltd's CC BY-SA 4.0 terms. Changes here select fields and RAM/task lists and map explicit parent repositories. Source-specific attributions and full notices ship in `stark_convert/_third_party/whatmodel/`. Those data terms do not relicense Stark application code, model weights or trademarks. Sources do not endorse Stark.
 
 ## Score admission policy
 

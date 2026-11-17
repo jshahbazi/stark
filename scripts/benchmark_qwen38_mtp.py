@@ -333,11 +333,13 @@ def _profile_env_removed():
 def run(
     args: argparse.Namespace, worker_factory=Worker, *, rng=None,
     monitor_factory=None, paging_reader=None, admission_fn=None, screen_fn=None,
+    corpus_bytes: bytes | None = None,
 ) -> dict:
     validate_args(args)
     if args.output.exists():
         raise ValueError("output_exists")
-    corpus_bytes = args.corpus.read_bytes()
+    if corpus_bytes is None:
+        corpus_bytes = args.corpus.read_bytes()
     try:
         corpus_text = corpus_bytes.decode("utf-8")
     except UnicodeDecodeError:

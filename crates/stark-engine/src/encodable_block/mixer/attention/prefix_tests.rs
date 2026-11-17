@@ -14,6 +14,7 @@ fn state<B: Backend>(
         data_type: DataType::F32,
         cache: KVCacheState::ring(capacity),
         capacity_elements: rows,
+        suffix_capacity: ATTENTION_SUFFIX_CAPACITY,
         is_sparse: false,
         keys: Box::new(context.create_buffer(rows as usize * 16).unwrap()),
         values: Box::new(context.create_buffer(rows as usize * 16).unwrap()),
@@ -123,6 +124,7 @@ fn committed_external_view<B: Backend>() {
                 KVCacheState::full()
             },
             capacity_elements: rows,
+            suffix_capacity: ATTENTION_SUFFIX_CAPACITY,
             is_sparse: false,
             keys: Box::new(context.create_buffer(rows as usize * 256).unwrap()),
             values: Box::new(context.create_buffer(rows as usize * 256).unwrap()),
@@ -283,6 +285,7 @@ fn committed_bf16_eager_view<B: Backend>() {
                 KVCacheState::full()
             },
             capacity_elements: capacity,
+            suffix_capacity: ATTENTION_SUFFIX_CAPACITY,
             is_sparse: false,
             keys: Box::new(context.create_buffer(capacity as usize * 128).unwrap()),
             values: Box::new(context.create_buffer(capacity as usize * 128).unwrap()),
@@ -360,6 +363,7 @@ fn assistant_preaccept_handoff<B: Backend>() {
                 data_type: DataType::BF16,
                 cache: KVCacheState::ring(512),
                 capacity_elements: capacity,
+                suffix_capacity: ATTENTION_SUFFIX_CAPACITY,
                 is_sparse: false,
                 keys: Box::new(context.create_buffer(capacity as usize * 128).unwrap()),
                 values: Box::new(context.create_buffer(capacity as usize * 128).unwrap()),

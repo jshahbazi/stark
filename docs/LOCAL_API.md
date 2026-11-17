@@ -1,10 +1,14 @@
 # Stark local API
 
-The menu bar application's bridge serves a loopback-only, OpenAI-style HTTP API so that other applications on the same Mac can chat with the loaded model. It supports buffered or streamed text completions and one-image requests through one loaded model. Images require passing host evidence for the [supported Qwen3.5 family](VISION_FAMILY_CONTRACT.md). The API binds to `127.0.0.1`, requires bearer authentication, and rejects browser-origin requests. Clients may use the persistent Keychain bearer key or, for the managed OpenWork and OpenCode Desktop integrations below, a short-lived per-client capability.
+The menu bar application's bridge serves a loopback-only HTTP API for applications on the same Mac. With a chat-capable model it supports OpenAI-style buffered or streamed completions. With native Decider Flash loaded it supports ordered decision requests at `/v1/decisions` and its `/v1/systemone` compatibility alias. Only one model is loaded at a time; the operation must match that loaded model. Chat images require passing host evidence for the [supported Qwen3.5 family](VISION_FAMILY_CONTRACT.md); Decider images use the separately qualified Decider path. The API binds to `127.0.0.1`, requires bearer authentication, and rejects browser-origin requests. Clients may use the persistent Keychain bearer key or, for the managed OpenWork and OpenCode Desktop integrations below, a short-lived per-client capability.
+
+Chat-completion requests can prepare the generation worker for the running chat model, regardless of Playground selection. Decision requests require a native Decision model that is already loaded; they do not switch models or modes. The `/v1/models` entry for a loaded Decision model has `capabilities.decisions: true`, image capability, and `max_output_tokens: 0`. Chat model discovery remains generation oriented. The endpoint operation and loaded model must match.
+
+Decision requests share the GUI and chat FIFO worker queue. Invalid requests and cancellation while waiting leave the loaded model available. Cancelling or timing out an active native Decision request terminates and reaps its worker; run the model again before another decision. Stop and model replacement fence queued and active requests.
 
 ## Connection and authentication
 
-Open **Connections** in Stark. **Apps** groups OpenWork and OpenCode Desktop with independent **Connect** buttons and status; **Manage** reveals each configured app's **Reconnect** and **Disconnect** actions. OpenCode's per-engine **Allow** and **Deny** prompt stays separate. The shared model header identifies the model currently running in Chat mode. API startup and credential-recovery messages remain visible when setup needs attention.
+Open **Connections** in Stark. **Apps** groups OpenWork and OpenCode Desktop with independent **Connect** buttons and status; **Manage** reveals each configured app's **Reconnect** and **Disconnect** actions. OpenCode's per-engine **Allow** and **Deny** prompt stays separate. The shared model header identifies the running model, independently of the Playground mode. API startup and credential-recovery messages remain visible when setup needs attention.
 
 The Advanced Connections **Apps** tab also includes **Pi**, with **Set Up Pi**
 and **Copy Key & Open Pi…**. This manual Pi 1.5.2 flow creates an isolated guarded
@@ -48,11 +52,13 @@ Responses carry `Cache-Control: no-store` and an `X-Request-Id` header, except t
 | --- | --- |
 | `GET /v1/health`, `GET /health` | Application status: whether a model is loaded, whether a request is running, queue depth and limits, the model list, and capability flags |
 | `GET /v1/capabilities` | The same status document |
-| `GET /v1/models` | The running model as a one-item list, or an empty list when no model is running in Chat mode |
+| `GET /v1/models` | The running model as a one-item list, or an empty list when no model is running; chat-model discovery may prepare generation when idle |
 | `GET /v1/models/{id}` | The matching running model, or 404 |
 | `POST /v1/chat/completions` | One completion, buffered or streamed; one inline PNG/JPEG image when `capabilities.images` is true |
+| `POST /v1/decisions` | One buffered native Decision request; available only while a native Decider model is loaded |
+| `POST /v1/systemone` | Compatibility alias for `/v1/decisions` |
 
-Each model entry has `id`, `object`, `created`, `owned_by`, `name`, `context_length`, `context_capacity_known`, `max_output_tokens`, `tool_calling`, `capabilities.mtp` and `defaults.mtp`. Embeddings, the Responses API, structured output and batching are not available. Function tools require the supported template/parser below.
+Chat model entries include `id`, `object`, `created`, `owned_by`, `name`, `context_length`, `context_capacity_known`, `max_output_tokens`, `tool_calling`, `capabilities.mtp` and `defaults.mtp`. A loaded native Decider entry advertises `capabilities.decisions: true`, `capabilities.images`, its input context, and `max_output_tokens: 0`. Embeddings, the Responses API, structured output and batching are not available. Function tools require the supported template/parser below.
 
 Managed OpenWork and OpenCode discovery uses the same API-specific output cap.
 For a model with a 262,144-token native capacity running with the guide's
@@ -65,11 +71,55 @@ guide's model-discovery check.
 
 When a supported template/parser produces function calls, Stark validates and returns them in the completion response. The API does not execute the named functions. The client decides whether to execute a returned call, applies its own approval policy, and sends any result back as conversation history. Treat returned calls and arguments as model output, not as trusted instructions.
 
-Public model IDs use the full Hugging Face repository ID (`owner/model`) for models installed from Hugging Face, or the installed model name for local folders. The connection modal, model listing, completion responses and streamed chunks use these readable IDs. Model detail routes accept percent-encoded IDs, including encoded slashes and spaces. Private library IDs and managed model paths remain stable; existing installations require no registry migration. Only the running model is exposed, so installations sharing a public name refer to whichever copy is running.
+Public model IDs use the full Hugging Face repository ID (`owner/model`) for models installed from Hugging Face, or the installed model name for local folders. The connection modal, model listing, completion and decision responses, and streamed chunks use these readable IDs. Model detail routes accept percent-encoded IDs, including encoded slashes and spaces. Private library IDs and managed model paths remain stable; existing installations require no registry migration. Only the running model is exposed, so installations sharing a public name refer to whichever copy is running.
 
-## Image qualification
+### Decisions
 
-`capabilities.images` becomes true after the live worker passes one of two host evidence paths. The status document's `image_verification` identifies the result:
+Decision requests accept only `model`, `state`, `questions` and optional
+`images`. `model` may be omitted or identify the currently loaded model using
+its public ID, installed name or private library ID. A decision model is
+discoverable through `/v1/models` with `capabilities.decisions: true` and
+`max_output_tokens: 0`; it does not appear as chat-capable.
+
+`state` is the JSON decision context. `questions` is an ordered object containing 1
+to 32 named questions. Each question has a `type` of `noul`, `choice` or
+`score`, and may have string `instructions`. `noul` is a binary true/false
+question with at most the `false` and `true` criteria. `choice` uses a map of
+option names to optional descriptions. `score` uses an ordered list of level
+descriptions. Each question can have at most 255 options; the checkpoint's
+saved temperature produces normalized probabilities over those options.
+
+The service evaluates each question separately, with the complete state, then
+returns its answer under the same question key and order. `usage` reports the
+sum of input tokens across questions, zero output tokens, and the number of
+question sequences. No generation settings are accepted: `stream`, MTP,
+temperature overrides, sampling, chat messages, and unknown fields are
+rejected. Decision responses are always buffered. The worker uses the
+checkpoint's saved temperature.
+
+One optional image is supplied as `images: [{"url": "data:image/png;base64,...", "detail": "auto"}]`;
+JPEG is also accepted and `detail` may be omitted or set to `auto`. Remote URLs
+are rejected. The decoded image is limited to 4 MiB and is staged privately for
+the request. The native processor applies its source-dimension, pixel, patch
+and image-token limits.
+
+```sh
+curl --fail-with-body --silent --show-error \
+  -H "Authorization: Bearer ${STARK_API_KEY}" \
+  -H 'Content-Type: application/json' \
+  --data '{"state":"The service is responding slowly.","questions":{"urgency":{"type":"choice","instructions":"Select the appropriate action.","criteria":{"wait":"Wait and monitor","escalate":"Escalate now"}},"confidence":{"type":"score","criteria":["low","medium","high"]}}}' \
+  http://127.0.0.1:8000/v1/decisions
+```
+
+Set `STARK_API_KEY` in the calling shell from the key shown in Connections;
+do not place the key in the command text or saved scripts. The `/v1/systemone`
+alias accepts the same contract. These endpoints require the master API key.
+Managed OpenWork and OpenCode Desktop bearer capabilities remain scoped to
+chat routes and cannot call either decision endpoint.
+
+## Chat image qualification
+
+For chat completions, `capabilities.images` becomes true after the live worker passes one of two host evidence paths. The status document's `image_verification` identifies the result. A native Decider model reports its separately admitted image capability; see [Decider Flash](DECIDER.md) for that path.
 
 | Value | Meaning |
 | --- | --- |
@@ -261,10 +311,10 @@ tool calls private until that validation completes.
 ## Limits, queueing and cancellation
 
 - The server accepts at most 16 concurrent connections. Excess connections receive a bare 429 with `Retry-After: 1` and no `X-Request-Id` header.
-- One completion runs at a time. Up to eight more wait in FIFO order; a ninth receives 429 `queue_full`, and a queued request that waits more than 30 seconds receives 429 `queue_timeout`.
-- After its body has been read and parsed, each completion has a 300-second inactivity deadline covering queueing and execution. Validated native generation progress renews it, including progress during prefill; an active request can run longer than five minutes. A stalled request returns 504 `request_timeout`.
-- The handler polls the client connection every 50 ms while a request runs. A closed connection cancels the native generation at the next safe boundary and, when a response can still be written, returns 499 `request_cancelled`. Closing only the write side of the socket counts as a disconnect.
-- Stopping or changing the model in Stark fails waiting and running requests with 503 `model_changed`; cancellation and deadlines keep the model loaded.
+- One worker request runs at a time. Up to eight more chat or Decision requests wait in FIFO order; a ninth receives 429 `queue_full`, and a queued request that waits more than 30 seconds receives 429 `queue_timeout`.
+- After its body has been read and parsed, each request has a 300-second inactivity deadline covering queueing and execution. Validated native chat progress renews it, including progress during prefill; an active chat request can run longer than five minutes. A stalled request returns 504 `request_timeout`.
+- The handler polls the client connection every 50 ms while a request runs. A disconnected or timed-out queued request is removed and leaves the loaded model available. Cancelling or timing out a running chat request follows the chat worker's cancellation behavior. Cancelling or timing out a running Decision request terminates and reaps the native Decider worker; the model must be run again before another decision. When a response can still be written, cancellation returns 499 `request_cancelled`.
+- Stopping or changing the model in Stark fences waiting and running requests with 503 `model_changed`.
 - Body admission, logical content and rendered worker framing each apply the [automatic shared policy](WORKER_PROTOCOLS.md#resource-budget). Normal app use requires no configuration; `STARK_REQUEST_BUDGET_MIB` is a developer/operator override accepting positive integers whose derived allowances fit the platform's allocation address space. Worker requests include the rendered prompt (system prompt, template framing and all messages) or token IDs, JSON encoding and the terminating newline. A request that exceeds the effective encoded line limit returns 400 `request_too_large` before being written to the worker. The model stays loaded, and a smaller request can be retried.
 - The server reserves declared raw body bytes against an aggregate budget of two maximum image bodies before reading. It holds that reservation through completion and releases it on success, parse failure, disconnect or cancellation. This bounds concurrent request bodies, not total process RSS: JSON parsing and decoded image bytes add memory beyond the raw-body reservation. Structural admission also bounds compact arrays and objects before parsing.
 - Bodies larger than 1 MiB also reserve estimated parsing headroom of twelve times the raw size against current available memory. This admission is serialized across concurrent readers and released after parsing; resident queued bodies remain reflected in available-memory telemetry. The estimate covers temporary Unicode and JSON expansion, and is not an RSS guarantee. Insufficient headroom returns recoverable 429 `memory_pressure` before reading.
@@ -273,7 +323,7 @@ tool calls private until that validation completes.
 
 ### Prefix reuse
 
-Each request is tokenized in full. For eligible text models, the worker can then reuse the state of the prompt prefix that the request shares with the immediately preceding request, and process only the remainder:
+Each chat request is tokenized in full. For eligible text models, the worker can then reuse the state of the prompt prefix that the request shares with the immediately preceding request, and process only the remainder. Native Decider questions use full attention and do not reuse prefixes between questions or requests; see [Decider execution limits](DECIDER.md#execution-and-limits).
 
 - Full-attention models such as Qwen3 dense rewind their attention cache on a 1,024-token grid. A later step of an agent conversation waits only for its new messages plus at most about 1,024 tokens.
 - Native GLM-5.3 resumes from a snapshot at the start of the previous prompt's final 1,024-token reuse chunk. It restores recurrent/convolution state and the incomplete MLA/indexer pool while keeping completed attention rows in the loaded model.
@@ -310,12 +360,13 @@ Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is
 
 | Status | Code | Cause |
 | --- | --- | --- |
-| 400 | `invalid_request` | Duplicate headers, missing or invalid `Content-Length`, incomplete or non-object body, invalid field values |
+| 400 | `invalid_request` | Duplicate headers, missing or invalid `Content-Length`, incomplete or non-object body, invalid field values, or invalid decision input |
 | 400 | `length_required` | `Content-Length` missing (411 with the same code when `Transfer-Encoding` is present) |
 | 400 | `invalid_json` | Malformed JSON, duplicate keys, `NaN`, infinity or excessive JSON structure |
-| 400 | `unsupported_parameter` | Penalties, log probabilities or response formats the API does not implement |
+| 400 | `unsupported_parameter` | Unknown fields, decision streaming or generation settings, or chat parameters the API does not implement |
 | 400 | `mtp_not_supported` | Explicit MTP enable request on an unsupported model/worker or an image request |
 | 400 | `invalid_messages` | The chat template rejected the messages |
+| 400 | `mode_not_supported` | The loaded model is not a native Decision model for a decision request |
 | 400 | `images_unsupported`, `too_many_images`, `invalid_image_url`, `invalid_image_detail`, `invalid_image` | No active passing image evidence, multiple images, remote or malformed data URL, unsupported detail, invalid or mismatched image bytes |
 | 400 | `context_length_exceeded` | Prompt plus output limit exceeds the context budget |
 | 400 | `context_capacity_unknown` | Image inference requires a model with a declared finite context capacity |
@@ -331,9 +382,10 @@ Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is
 | 413 | `image_too_large` | Decoded image exceeds the 4 MiB service limit |
 | 415 | `unsupported_media_type` | `Content-Type` other than `application/json` |
 | 429 | `server_busy`, `queue_full`, `queue_timeout`, `body_budget_full` | Connection limit, queue limit, queue wait expired, or shared pending raw-body budget reached |
+| 429 | `model_busy` | Another operation is using the model, or the required worker is loading; retry after it finishes |
 | 429 | `memory_pressure` | Available RAM is too low to admit a large body before reading or parsing it; a smaller request can be retried |
 | 499 | `request_cancelled` | Client disconnected |
-| 503 | `model_not_loaded`, `model_changed`, `server_stopped`, `server_shutdown`, `request_stopped`, `streaming_unavailable`, `stop_sequences_unavailable`, `generation_failed` | No model in Chat mode, model stopped or changed, Stark quitting, worker lacks a capability, or native generation failed |
+| 503 | `model_not_loaded`, `model_changed`, `server_stopped`, `server_shutdown`, `request_stopped`, `streaming_unavailable`, `stop_sequences_unavailable`, `generation_failed`, `decision_failed`, `runtime_load_failed` | No compatible model running, model stopped or changed, Stark quitting, worker lacks a capability, or native inference failed |
 | 504 | `request_timeout` | No execution progress for 300 seconds |
 | 500 | `internal_error`, `http_error` | Unexpected failure |
 
@@ -341,7 +393,7 @@ Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is
 
 On macOS, open **Connections → Apps** and choose **Connect** on the OpenWork row. Open OpenWork with a local workspace first. Stark installs its bundled OpenCode V2 connector into the native global `opencode.jsonc` selected by the verified OpenWork engine's `OPENCODE_CONFIG_DIR`. It adds only the connector's local package URL, private Unix-socket path, public expected API URL and Stark ownership marker. **Manage → Reconnect** repairs a recognized Stark-owned entry after its app location or credential namespace changes, including a switch between signed installed and ad-hoc development builds. It updates only those public fields; credentials and unrelated settings are preserved. Unknown formats, conflicting ownership and duplicate Stark entries are rejected.
 
-If configuration changes, **quit OpenWork completely and reopen it**, then select **Stark** and the running model in its model picker. Closing the OpenWork window does not restart its engine. No copied API key, manual JSON, terminal command or credential helper is required. OpenWork lists the model running in Stark's Chat mode; the Model ID menu under **Connections → Connect your own app** only inspects saved models and does not run them. After a normal model switch, the connector refreshes the running model within a few seconds. A previously saved selection can show unavailable until the new running model is selected.
+If configuration changes, **quit OpenWork completely and reopen it**, then select **Stark** and the running model in its model picker. Closing the OpenWork window does not restart its engine. No copied API key, manual JSON, terminal command or credential helper is required. OpenWork lists the model running in Stark; the Model ID menu under **Connections → Connect your own app** only inspects saved models and does not run them. After a normal model switch, the connector refreshes the running model within a few seconds. A previously saved selection can show unavailable until the new running model is selected.
 
 If OpenWork settings already define a manual provider with ID `stark`, remove only that provider entry before connecting and keep your other provider entries. The managed connection does not migrate existing client credentials.
 

@@ -234,12 +234,9 @@ descending. Unknown numeric values sort last
 in either direction. Choose a family to browse compatible models, sizes and
 quantizations and download a choice directly.
 
-Family detail opens on **Top rated (coding)**. It uses bundled llmbench
-model-level coding indexes. Quantized rows may inherit a scored model's index
-through the declared/named quantization rules or a reviewed export binding;
-the UI identifies the model the index belongs to. Top Models remains a
-separate family-level summary.
-See [Beginner recommendation evidence](MODEL_RECOMMENDATIONS.md#catalogue-ordering).
+Family detail opens on **Top rated (coding)**, with **Top rated (general)**
+beside it. Both use the bundled whatmodel.sh reference scores described in
+[Beginner recommendation evidence](MODEL_RECOMMENDATIONS.md#catalogue-ordering).
 Rows that can be downloaded and whose weights fit this Mac's memory budget come
 first, then the higher score, then the smaller download; unscored rows follow
 scored ones, then models likely too large for this Mac, then unavailable rows.
@@ -493,7 +490,7 @@ for this display. Family labels must also agree with the bound generic profile
 or source catalog adapter. The actually loaded
 model is marked as running. Browsing does not select or load models or grant
 runtime capabilities. The full registry and its operation constraints remain
-available through the CLI; the app does not label families as decision models.
+available through the CLI. Decider is listed as a dedicated Decision family.
 
 Each saved version has a removal action with a confirmation. An exclusively
 owned managed folder offers **Move to Trash**. Imported, shared or otherwise
@@ -505,18 +502,31 @@ the active worker. Local qualification receipts retain their separate identity.
 
 ## Modes and support states
 
+Perplexity Decider Flash v1.3 has a dedicated BF16 native route through
+`stark-decide`, available in the app's Decision workflow and the Decider CLI.
+Its typed artifact retains the vision tower, noncausal full attention and a
+separate decision readout. The registry records `artifact_mode: decision` and
+`decision_only: true`; Run selects Decision mode. The dedicated catalogue entry
+and source/local installation paths use the pinned Flash v1.3 profile. See
+[Decider](DECIDER.md) for one-image/4,096-token limits, unsupported Chat/tools/API
+and Locate capabilities, and the artifact-bound native qualification record.
+Packaged-app qualification remains pending.
+
 The registry uses these mode identifiers:
 
 | Mode | Intended use |
 | --- | --- |
 | `text` | Text chat through a converted language artifact and the generation worker. |
-| `decision` | Generic answer-choice scoring through a text artifact, compatible template/tokenizer and scoring worker. |
+| `decision` | Generic answer-choice scoring through a text artifact and scoring worker, or the dedicated native Decider artifact with its own decision head and image inputs. |
 | `vision-language` | Image chat through supported full vision artifacts and model-specific host checks. Current paths include the Qwen3.5 schemas and Gemma 4 E2B BF16 schema 4. |
 
-Decision scoring uses temperature 1 and produces a comparative distribution over
-the supplied choices. A compatible family does not establish calibration or
+Generic language-model Decision scoring uses temperature 1 and produces a
+comparative distribution over the supplied choices. A compatible family does
+not establish calibration or
 inherit a model's published decision qualification. Template generation-prefix,
 reasoning-state and unique single-token answer-letter checks still apply.
+Decider uses its checkpoint's saved temperature and preserves the supplied
+answer order; the app accepts 2–16 distinct labels and one PNG/JPEG image.
 Vision-language artifacts remain Chat-only; a raw source may separately support
 conversion to text and vision artifacts.
 
@@ -652,8 +662,10 @@ uv run --project tools/converter --locked stark-convert owner/model \
 ```
 
 `--support-mode` selects the intended use and metadata path for inspection.
-Decision preflight checks future use of a text artifact; it does not create a
-separate decision artifact. Normal conversion still selects its output through
+For ordinary language models, Decision preflight checks future use of a text
+artifact; it does not create a separate decision artifact. Pinned Decider
+installation uses its dedicated native Decision preparation path. Normal
+conversion still selects its output through
 `--artifact-mode`; supplying `--support-mode` also rechecks that intended native
 use before weights. Without that optional mode, the CLI retains its separate
 conversion-only paths. Explicit classifier conversion and F16/F32 export remain

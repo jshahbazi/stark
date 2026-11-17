@@ -25,6 +25,19 @@ _REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0
 _FLOATS = {"BF16": "BF16", "F16": "FP16", "F32": "FP32"}
 _QUANT_BITS = {2, 3, 4, 5, 6, 8}
 _MAX_ROW_SEGMENTS = 128
+_DECIDER_REPO = "perplexity-ai/pplx-decider-flash-v1.3"
+_DECIDER_REVISION = "d06fb3f2d97e0a52325a0d463c450cf0338f44fe"
+_DECIDER_METADATA_FILES = {
+    "config.json",
+    "decision_config.json",
+    "joint_config.json",
+    "processor_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "chat_template.jinja",
+    "LICENSE",
+    "NOTICE",
+}
 
 
 def _quantized_tensor(header, name, size, *, expected_rows=None):
@@ -361,6 +374,45 @@ def model_tool_support(root):
         return tool_support_for(None)
 
 
+def _decider_bound(parsed, config_bytes, receipt, weight_bytes):
+    """Check display provenance for the typed Decider artifact without reading tensor payloads."""
+    try:
+        source = parsed["source"]
+        if (
+            parsed.get("type") != "DeciderModelConfig"
+            or not isinstance(source, dict)
+            or source.get("repo") != _DECIDER_REPO
+            or source.get("revision") != _DECIDER_REVISION
+            or not isinstance(source.get("metadata_sha256"), dict)
+            or set(source["metadata_sha256"]) != _DECIDER_METADATA_FILES
+            or any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in source["metadata_sha256"].values())
+            or not isinstance(source.get("weight_files"), dict)
+            or not source["weight_files"]
+            or not isinstance(receipt, dict)
+            or receipt.get("source") != source
+            or receipt.get("config_sha256") != hashlib.sha256(config_bytes).hexdigest()
+            or receipt.get("output_bytes") != weight_bytes
+            or not isinstance(receipt.get("output_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", receipt["output_sha256"]) is None
+        ):
+            return None
+        decision = parsed.get("decision_config")
+        capabilities = parsed.get("capabilities")
+        if (
+            not isinstance(decision, dict)
+            or decision.get("protocol_version") != 4
+            or decision.get("num_options") != 255
+            or not isinstance(capabilities, dict)
+            or capabilities.get("decision") is not True
+            or capabilities.get("images") is not True
+            or capabilities.get("max_images") != 1
+        ):
+            return None
+        return source["revision"]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def model_display(model):
     """Describe saved versions; missing metadata never changes runtime admission."""
     if not _text(model.get("id"), 128) or not _text(model.get("name")):
@@ -378,6 +430,38 @@ def model_display(model):
         "tool_support": model_tool_support(model["path"]),
     }
     root = Path(os.path.abspath(model["path"]))
+    try:
+        config_bytes = _small_file(root, "config.json")
+        parsed = _json(config_bytes)
+        if isinstance(parsed, dict) and parsed.get("type") == "DeciderModelConfig":
+            result.update(
+                group_name="Decider Flash v1.3",
+                artifact_mode="decision",
+                decision_only=True,
+                supported_modes=["decision"],
+                supports_images=True,
+                # An upstream link describes the model family; artifact-bound
+                # revision/grouping still requires the complete receipt below.
+                upstream_repo=_DECIDER_REPO,
+                tool_support=tool_support_for(None),
+            )
+            try:
+                result["weight_bytes"], result["quantization"] = _weights(root)
+            except Exception:
+                pass
+            try:
+                receipt = _json(_small_file(root, "conversion.json"))
+                result["source_revision"] = _decider_bound(parsed, config_bytes, receipt, result["weight_bytes"])
+            except Exception:
+                pass
+            if result["source_revision"] is not None:
+                result.update(
+                    group_id="repo:" + _DECIDER_REPO,
+                    source_revision=_DECIDER_REVISION,
+                )
+            return result
+    except Exception:
+        pass
     hybrid = prepared_identity(root)
     if hybrid is not None:
         repo = hybrid["repo"]
