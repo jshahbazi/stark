@@ -107,6 +107,10 @@ thread_local! {
     static COUNTERS: Cell<Counters> = const { Cell::new(ZERO) };
 }
 
+pub fn prefill_snapshot() -> Prefill {
+    COUNTERS.with(|cell| cell.get().prefill)
+}
+
 /// Adds to this thread's counters.
 pub fn record(f: impl FnOnce(&mut Counters)) {
     COUNTERS.with(|cell| {

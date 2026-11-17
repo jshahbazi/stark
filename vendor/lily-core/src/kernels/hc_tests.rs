@@ -148,6 +148,89 @@ fn verifier_cached_rows_match_ordinary_hc_bytes() -> Result<()> {
     Ok(())
 }
 
+#[test]
+#[ignore = "physical Apple Silicon; alternating component timings only"]
+fn verifier_down_reuse_streaming_timing() -> Result<()> {
+    let ctx = MetalContext::new()?;
+    let mut seed = 0x4843_5633;
+    let (h, g, r, gs, reads) = (2560, 4, 320, 64, 24);
+    let k = h * g;
+    let weights: Vec<_> = (0..reads)
+        .map(|_| {
+            let norm = Tensor::from_f32_as_bf16(
+                &ctx, &random_values(&mut seed, k, 1.0, -0.5), &[k],
+            )?;
+            let down = q8_weight(&ctx, &mut seed, r, k, gs)?;
+            let inject = q8_weight(&ctx, &mut seed, g, k, gs)?;
+            Ok((norm, down, inject))
+        })
+        .collect::<Result<_>>()?;
+    let weight_bytes: usize = weights.iter().map(|(norm, down, inject)| {
+        norm.byte_len() + [down, inject].into_iter().map(|w| {
+            w.codes.byte_len() + w.scales.byte_len() + w.biases.byte_len()
+        }).sum::<usize>()
+    }).sum();
+    for rows in 2..=HC_FUSED_MAX_ROWS {
+        let hyper = Tensor::from_f32_as_bf16(
+            &ctx, &random_values(&mut seed, rows * k, 6.0, -3.0), &[rows, k],
+        )?;
+        let allocate = || -> Result<[Tensor; 4]> {
+            Ok([
+                Tensor::zeros(&ctx, &[rows, r], DType::BF16)?,
+                Tensor::zeros(&ctx, &[rows, g], DType::BF16)?,
+                Tensor::zeros(&ctx, &[rows, g], DType::F32)?,
+                Tensor::zeros(&ctx, &[rows, r], DType::BF16)?,
+            ])
+        };
+        let outputs = [allocate()?, allocate()?];
+        let mut paired_speedups = Vec::new();
+        let mut samples = [Vec::new(), Vec::new()];
+        // Warm both pipelines, then alternate AB/BA on unchanged tensors.
+        for round in 0..18 {
+            let mut seconds = [0.0; 2];
+            for order in 0..2 {
+                let variant = (round + order) % 2;
+                let (kernel, row_axis_rows) = if variant == 0 {
+                    ("stark_hc_down_decode_rows", rows)
+                } else {
+                    (HC_DOWN_ROWS_KERNELS[rows - 1], 0)
+                };
+                let [down_out, inj_out, inv_rms, act] = &outputs[variant];
+                let pass = ctx.begin_concurrent()?;
+                for (norm, down, inject) in &weights {
+                    dispatch_read_down(
+                        &ctx, &pass, kernel, &hyper, norm, down, Some(inject),
+                        down_out, inj_out, inv_rms, Some(act), (r, g), h, g,
+                        1e-6, 1.0, row_axis_rows,
+                    )?;
+                    pass.level_barrier(&[down_out, inj_out, inv_rms, act])?;
+                }
+                let timing = pass.commit()?.wait_retain()?.timing()?;
+                seconds[variant] = timing.gpu_end_secs - timing.gpu_start_secs;
+            }
+            for (reference, candidate) in outputs[0].iter().zip(&outputs[1]) {
+                ensure!(reference.raw_bytes() == candidate.raw_bytes(), "timed HC output differs");
+            }
+            if round >= 2 {
+                paired_speedups.push(seconds[0] / seconds[1]);
+                for (times, seconds) in samples.iter_mut().zip(seconds) {
+                    times.push(seconds * 1e6 / reads as f64);
+                }
+            }
+        }
+        let wins = paired_speedups.iter().filter(|&&speedup| speedup > 1.0).count();
+        let median = |values: &mut Vec<f64>| {
+            values.sort_unstable_by(f64::total_cmp);
+            (values[7] + values[8]) / 2.0
+        };
+        println!(
+            "HC verifier down rows={rows} reads={reads} weight_bytes={weight_bytes} pairs=16 wins={wins} reference_us={:.6} reuse_us={:.6} paired_speedup={:.6}",
+            median(&mut samples[0]), median(&mut samples[1]), median(&mut paired_speedups),
+        );
+    }
+    Ok(())
+}
+
 fn next_word(state: &mut u32) -> u32 {
     *state ^= *state << 13;
     *state ^= *state >> 17;

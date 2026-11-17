@@ -19,6 +19,8 @@ pub mod sha256;
 #[cfg(target_os = "macos")]
 mod stats;
 #[cfg(target_os = "macos")]
+pub use stats::{Prefill as PrefillStats, prefill_snapshot};
+#[cfg(target_os = "macos")]
 pub mod tensor;
 #[cfg(target_os = "macos")]
 pub mod weights;

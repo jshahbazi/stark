@@ -4,6 +4,8 @@
 //! (router → top-k → counting sort → grouped GEMMs → combine), plus the
 //! scratch buffers both paths own.
 
+use std::sync::OnceLock;
+
 use anyhow::{Result, ensure};
 
 use crate::kernels::elementwise::{
@@ -665,40 +667,62 @@ pub(crate) fn prefill_moe(
 
     let nb_gu = ms.tile_capacity * (inter / 64);
     let nb_dn = ms.tile_capacity * (h / 64);
-    quant::gemm_q4_grouped_nt(
-        ctx,
-        pass,
-        &ms.gx,
-        &moe_w.expert_gate,
-        &ms.eg,
-        &ms.blocks_gu,
-        nb_gu,
-        tile,
-    )?;
-    quant::gemm_q4_grouped_nt(
-        ctx,
-        pass,
-        &ms.gx,
-        &moe_w.expert_up,
-        &ms.eu,
-        &ms.blocks_gu,
-        nb_gu,
-        tile,
-    )?;
-    pass.level_barrier(&[&ms.eg, &ms.eu])?;
-    if dims.official_mlx_rounding {
-        moe::official_moe_silu_mul(
+    static FUSED_GROUPED_SWIGLU: OnceLock<bool> = OnceLock::new();
+    let fused_grouped_swiglu = !dims.official_mlx_rounding
+        && (e, top_k, h, inter) == (512, 10, 2560, 640)
+        && moe_w.slot_of.is_none()
+        && *FUSED_GROUPED_SWIGLU.get_or_init(|| {
+            std::env::var("STARK_FLASHNEXT_PREFILL_GROUPED_SWIGLU")
+                .is_ok_and(|v| v == "1")
+        });
+    if fused_grouped_swiglu {
+        quant::gemm_q4_grouped_swiglu(
             ctx,
             pass,
-            &ms.eg,
-            &ms.eu,
-            ms.sigmoid_table
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("missing official sigmoid table"))?,
+            &ms.gx,
+            &moe_w.expert_gate,
+            &moe_w.expert_up,
             &ms.ea,
+            &ms.blocks_gu,
+            nb_gu,
+            tile,
         )?;
     } else {
-        silu_mul_bf16(ctx, pass, &ms.eg, &ms.eu, &ms.ea)?;
+        quant::gemm_q4_grouped_nt(
+            ctx,
+            pass,
+            &ms.gx,
+            &moe_w.expert_gate,
+            &ms.eg,
+            &ms.blocks_gu,
+            nb_gu,
+            tile,
+        )?;
+        quant::gemm_q4_grouped_nt(
+            ctx,
+            pass,
+            &ms.gx,
+            &moe_w.expert_up,
+            &ms.eu,
+            &ms.blocks_gu,
+            nb_gu,
+            tile,
+        )?;
+        pass.level_barrier(&[&ms.eg, &ms.eu])?;
+        if dims.official_mlx_rounding {
+            moe::official_moe_silu_mul(
+                ctx,
+                pass,
+                &ms.eg,
+                &ms.eu,
+                ms.sigmoid_table
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("missing official sigmoid table"))?,
+                &ms.ea,
+            )?;
+        } else {
+            silu_mul_bf16(ctx, pass, &ms.eg, &ms.eu, &ms.ea)?;
+        }
     }
     pass.level_barrier(&[&ms.ea])?;
     quant::gemm_q4_grouped_nt(

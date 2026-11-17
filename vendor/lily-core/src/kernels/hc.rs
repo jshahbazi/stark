@@ -26,6 +26,12 @@ const HC_UP_COLS: usize = 8;
 /// ([`hc_read_down_q8_rows`], [`hc_read_up_mix_q8_rows`]) are instantiated
 /// for (`HC_MAX_MB`): the verify pass and the draft head's catch-up rows.
 pub const HC_FUSED_MAX_ROWS: usize = 4;
+const HC_DOWN_ROWS_KERNELS: [&str; HC_FUSED_MAX_ROWS] = [
+    "hc_read_down_q8_m1",
+    "hc_read_down_q8_m2",
+    "hc_read_down_q8_m3",
+    "hc_read_down_q8_m4",
+];
 
 fn bf16_rows(t: &Tensor, cols: usize, what: &str) -> Result<usize> {
     ensure!(t.dtype() == DType::BF16, "{what} must be BF16");
@@ -595,13 +601,10 @@ pub fn hc_read_down_q8_rows(
         hyper.shape()
     );
     let rows = hyper.shape()[0];
-    let name: &'static str = match rows {
-        1 => "hc_read_down_q8_m1",
-        2 => "hc_read_down_q8_m2",
-        3 => "hc_read_down_q8_m3",
-        4 => "hc_read_down_q8_m4",
-        _ => anyhow::bail!("rows {rows} outside 1..={HC_FUSED_MAX_ROWS}"),
-    };
+    ensure!(
+        (1..=HC_FUSED_MAX_ROWS).contains(&rows),
+        "rows {rows} outside 1..={HC_FUSED_MAX_ROWS}"
+    );
     let dims = check_read_down(
         hyper, w, down, inject, down_out, inj_out, inv_rms, h, groups, rows,
     )?;
@@ -613,7 +616,7 @@ pub fn hc_read_down_q8_rows(
     dispatch_read_down(
         ctx,
         pass,
-        name,
+        HC_DOWN_ROWS_KERNELS[rows - 1],
         hyper,
         w,
         down,
@@ -631,7 +634,9 @@ pub fn hc_read_down_q8_rows(
     )
 }
 
-/// Row-axis execution of the ordinary MB=1 down/injection/activation body.
+/// Exact verifier down/injection/activation. The reference runs the ordinary
+/// one-row body along a row axis. The opt-in Lily candidate shares packed
+/// loads using the existing short-batch shader, with independent reductions.
 #[allow(clippy::too_many_arguments)]
 pub fn hc_read_down_q8_decode_rows(
     ctx: &MetalContext,
@@ -659,10 +664,21 @@ pub fn hc_read_down_q8_decode_rows(
         act_out.numel() == down_out.numel() && act_out.dtype() == DType::BF16,
         "HC activation shape"
     );
+    static REUSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let reuse = rows > 1
+        && (h, groups, dims.0, down.group_size) == (2560, 4, 320, 64)
+        && *REUSE.get_or_init(|| {
+            std::env::var_os("STARK_LILY_VERIFY_HC_DOWN_REUSE").is_some_and(|value| value == "1")
+        });
+    let (name, row_axis_rows) = if reuse {
+        (HC_DOWN_ROWS_KERNELS[rows - 1], 0)
+    } else {
+        ("stark_hc_down_decode_rows", rows)
+    };
     dispatch_read_down(
         ctx,
         pass,
-        "stark_hc_down_decode_rows",
+        name,
         hyper,
         w,
         down,
@@ -676,7 +692,7 @@ pub fn hc_read_down_q8_decode_rows(
         groups,
         eps,
         w_bias,
-        rows,
+        row_axis_rows,
     )
 }
 

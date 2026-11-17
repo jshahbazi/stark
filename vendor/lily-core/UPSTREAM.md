@@ -575,3 +575,18 @@ scan at most four positions with F32 physical state captures after each
 rollback prefix, retaining the ordinary BF16 activation boundaries. Each
 path has component comparisons against ordinary decode. Full-model
 readout/rollback and sampled performance records are maintained separately.
+
+The opt-in Flash Next grouped prefill experiment in
+`src/kernels/metal/stark_grouped_swiglu.metal` derives its tensor descriptor,
+dequantization step and tail geometry from the pinned Lily `quant.metal`
+grouped projection. It uses the existing `elementwise.metal` SwiGLU expression
+with both projection outputs rounded to BF16 before activation. The original
+shaders and default dispatch are unchanged. Lily's Apache-2.0 attribution
+applies. Component parity and checkpoint performance are tracked separately.
+
+The opt-in Lily exact verifier experiment in `src/kernels/hc.rs` reuses the
+vendored two-, three- and four-row HC down shaders at the Q4-XL model geometry.
+The row-axis shader is the reference for the component comparisons. Stark
+also exposes existing thread-local prefill timings to its private aggregate
+profile and can select a smaller physical prefill chunk at model load for
+matched cache experiments.

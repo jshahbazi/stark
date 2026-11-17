@@ -294,7 +294,14 @@ impl LilyModel {
                 .is_some();
         let context =
             MetalContext::new().map_err(|_| Error::Unsupported("mixed precision Metal context unavailable"))?;
-        let model = Qwen4ExpModel::load_with(
+        let prefill_chunk = match std::env::var("STARK_LILY_PREFILL_CHUNK").as_deref() {
+            Err(std::env::VarError::NotPresent) => None,
+            Ok("1024") => Some(1024),
+            Ok("2048") => Some(2048),
+            Ok("4096") => Some(4096),
+            _ => return Err(Error::Invalid("Lily experimental prefill chunk")),
+        };
+        let mut model = Qwen4ExpModel::load_with(
             &context,
             path,
             NgramStorage::Paged,
@@ -312,6 +319,9 @@ impl LilyModel {
             None,
         )
         .map_err(|_| Error::Unsupported("mixed precision checkpoint admission failed"))?;
+        if let Some(chunk) = prefill_chunk {
+            model.set_prefill_chunk(chunk).map_err(|_| Error::Invalid("Lily experimental prefill chunk"))?;
+        }
         if images && !model.has_vision() {
             return Err(Error::Unsupported("checkpoint does not retain an admitted vision tower"));
         }
@@ -1153,10 +1163,23 @@ impl LilyModel {
             },
         };
         let tokens = &self.pending[start..end];
+        let before = profile::enabled().then(stark_lily_core::prefill_snapshot);
         let fed = self
             .model
             .prefill_with_vision_until(&self.context, &mut self.state, &mut self.scratch, tokens, draw, None, &stop)
             .map_err(|_| Error::Invalid("mixed precision prefill failed"))?;
+        if let Some(before) = before {
+            let after = stark_lily_core::prefill_snapshot();
+            for (name, seconds) in [
+                ("qwen.mixed.prefill.allocate", after.alloc_secs - before.alloc_secs),
+                ("qwen.mixed.prefill.ngram_stage", after.ngram_secs - before.ngram_secs),
+                ("qwen.mixed.prefill.encode", after.encode_secs - before.encode_secs),
+                ("qwen.mixed.prefill.gpu", after.gpu_secs - before.gpu_secs),
+                ("qwen.mixed.prefill.wait", after.wait_secs - before.wait_secs),
+            ] {
+                profile::record(name, seconds, 0);
+            }
+        }
         // A cancelled pass has completed and the context remains healthy.
         // Let the public step reset request state without fencing the model.
         if let Some(error) = control_error.into_inner() {
@@ -1333,6 +1356,15 @@ impl MtpDecode<'_> {
         let elapsed = started.elapsed().as_secs_f64();
         self.stats.rollback_seconds += elapsed;
         profile::record("qwen.mtp.finish", elapsed, 0);
+        if profile::enabled() {
+            let category = match (accepted, proposals.len()) {
+                (_, 0) => "qwen.mtp.finish.no_draft",
+                (0, _) => "qwen.mtp.finish.rejected",
+                (accepted, proposed) if accepted == proposed => "qwen.mtp.finish.full",
+                _ => "qwen.mtp.finish.partial",
+            };
+            profile::record(category, elapsed, 0);
+        }
         self.stats.rounds += 1;
         self.stats.proposed += proposals.len();
         self.stats.accepted += accepted;
@@ -1384,7 +1416,9 @@ impl Drop for MtpDecode<'_> {
                     .model
                     .finish_host_verify(self.context, self.state, self.scratch, verified, self.delivered - 1)
                     .is_ok();
-            self.stats.rollback_seconds += started.elapsed().as_secs_f64();
+            let elapsed = started.elapsed().as_secs_f64();
+            self.stats.rollback_seconds += elapsed;
+            profile::record("qwen.mtp.finish.interrupted", elapsed, 0);
         }
     }
 }

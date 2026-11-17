@@ -658,6 +658,77 @@ pub fn gemm_q4_grouped_nt(
     )
 }
 
+const GROUPED_SWIGLU_SOURCE: &str = concat!(
+    include_str!("metal/quant.metal"),
+    "\n",
+    include_str!("metal/stark_grouped_swiglu.metal"),
+);
+
+#[cfg(test)]
+#[path = "stark_grouped_swiglu_tests.rs"]
+mod stark_grouped_swiglu_tests;
+
+/// Grouped gate and up projections with a BF16-rounded SwiGLU epilogue.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gemm_q4_grouped_swiglu(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    x: &Tensor,
+    gate: &QuantWeights,
+    up: &QuantWeights,
+    out: &Tensor,
+    blocks: &Tensor,
+    n_blocks: usize,
+    tile: MoeTile,
+) -> Result<()> {
+    let shape @ (_, k) = check_quant(gate)?;
+    ensure!(
+        check_quant(up)? == shape
+            && [gate, up].iter().all(|w| w.bits == 4
+                && w.group_size == 64
+                && w.scales.dtype() == DType::BF16
+                && w.biases.dtype() == DType::BF16),
+        "grouped SwiGLU needs matching Q4 group-64 BF16 expert banks"
+    );
+    let [rows, n] = out.shape() else { anyhow::bail!("grouped SwiGLU output rank") };
+    ensure!(
+        x.shape() == [*rows, k]
+            && x.dtype() == DType::BF16
+            && out.dtype() == DType::BF16
+            && k.is_multiple_of(64)
+            && n.is_multiple_of(64),
+        "grouped SwiGLU activation geometry"
+    );
+    ensure!(
+        blocks.dtype() == DType::U32 && n_blocks > 0 && blocks.numel() >= n_blocks * 4,
+        "grouped SwiGLU block map"
+    );
+    let name = match tile {
+        MoeTile::T32Sg4 => "stark_q4_grouped_swiglu_t32",
+        MoeTile::T64Sg4 => "stark_q4_grouped_swiglu_t64",
+    };
+    let pipeline = ctx.pipeline(name, GROUPED_SWIGLU_SOURCE, MslVersion::V4_0)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            gate.codes.binding(),
+            gate.scales.binding(),
+            gate.biases.binding(),
+            up.codes.binding(),
+            up.scales.binding(),
+            up.biases.binding(),
+            x.binding(),
+            out.binding(),
+            blocks.binding(),
+        ],
+        &[&u32_bytes(k), &u32_bytes(*n), &u32_bytes(gate.group_size)],
+        Grid::Threadgroups {
+            groups: (n_blocks, 1, 1),
+            threadgroup: (32 * tile.simdgroups(), 1, 1),
+        },
+    )
+}
+
 /// `out[M, K]` = dequantized embedding rows for `ids` (batched prefill
 /// gather), from a 4-bit table or an 8-bit one (`--q8-embed`).
 pub fn gather_rows_quant(
