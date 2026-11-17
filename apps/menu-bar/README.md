@@ -221,7 +221,8 @@ leaderboard data at runtime. See the [calculation and provenance](../../docs/ben
 for model coverage, attribution and the relative index's limitations.
 
 **Installed** shows compact rows with a readable model name, quantization, file size,
-repo link, **Run** or **Stop**, and removal button. Names may wrap. Recognized
+repo link, **Run** or **Stop**, and removal button. The name of an inactive saved
+model is also a button that runs that exact version. Names may wrap. Recognized
 variants such as **Lily q4** and **MLX-Serve** appear below the name.
 Recognized generated revision suffixes and packaging labels are omitted from the displayed
 name; known precision remains in its own column. Verified source names are used
