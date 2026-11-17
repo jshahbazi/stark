@@ -44,9 +44,19 @@ calibration remains unqualified.
 Images use private, temporary attachment files that are removed after each
 request. The selected image remains in memory for another question until it is
 removed, reset, stopped, replaced or cleared after an error. Cancelling a
-decision stops its worker. Chat history is separate. Decider is unavailable in
-Chat, Connections and the HTTP API; function tools and Locate extraction are
-unsupported.
+playground decision stops its worker. Chat history is separate. Decider is not
+a chat model and does not support function tools, generation or Locate
+extraction.
+
+When a native Decider model is loaded, the local HTTP API exposes buffered
+decision requests at `POST /v1/decisions` and the compatibility alias
+`POST /v1/systemone`. Requests can contain up to 32 separately evaluated
+questions, with up to 255 options per question, and one optional inline
+PNG/JPEG image up to 4 MiB. The API uses the checkpoint's saved temperature.
+It shares the app's single worker queue. Cancellation before execution leaves
+the model loaded; cancellation during a running request closes the worker, so
+choose Run again before the next decision. See the [local API contract](LOCAL_API.md#decisions)
+for the JSON schema, authentication and curl example.
 
 The application bundles `stark-generate`, `stark-score`, `stark-template` and
 `stark-decide`. Build `stark-decide` separately with default features; see the
@@ -114,7 +124,8 @@ construct the checkpoint's exact protocol; ordinary chat prompts are invalid.
 - Every forward pass has fresh KV, convolution and recurrent state. Prefix
   reuse is disabled because earlier full-attention representations depend on
   later question tokens. No completed result cache is retained. Images, errors
-  and reset therefore cannot inherit previous request state.
+  and reset therefore cannot inherit previous request state. The HTTP API uses
+  this same full-attention path and does not reuse prefixes across requests.
 - Generation, function tools and MTP are unavailable for this decision-only
   checkpoint. The inherited MTP configuration does not provide executable
   predictor tensors or a generative vocabulary readout in this export.

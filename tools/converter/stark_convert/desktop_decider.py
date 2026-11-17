@@ -15,12 +15,12 @@ from pathlib import Path
 
 from tokenizers import Tokenizer
 
-from .chat import ChatError, Worker, _popen_with_gpu_memory, read_model_config
-from .decider_protocol import DeciderError, Encoder, probabilities
+from .chat import ChatCancelled, ChatError, Worker, _popen_with_gpu_memory, read_model_config
+from .decider_protocol import DeciderError, Encoder, answer, probabilities
 from .decision import DecisionInputError, DecisionProtocolError, validate_inputs
 from .media import PrivateMediaStore
 from .resource_budget import REQUEST_BUDGET_MIB
-from .template_runtime import IsolatedTemplate
+from .template_runtime import IsolatedTemplate, TemplateCancelled
 
 IMAGE_LIMITS = {
     "max_source_pixels": 32_000_000,
@@ -179,73 +179,105 @@ class DesktopDeciderWorker(Worker):
         self._decision_cancelled.set()
         super().close()
 
+    def cancel(self, request_id):
+        # Decider has no native cancellation pipe. Reaping the worker fences
+        # its unfinished reply and releases every request's transient state.
+        self.close()
+        raise ChatCancelled("Request cancelled; the decision worker was closed.")
+
     def decide(self, text, question, answers, image=None):
         labels = validate_desktop_inputs(text, question, answers, image=image is not None)
-        # One complete decision, including image staging and encoding, owns the
-        # worker until its final reply. Stop may still kill the process directly.
-        with self._decision_lock:
-            request = {
+        result = self.decide_request(
+            {
                 "state": text,
                 "questions": {
                     "decision": {"type": "choice", "instructions": question, "criteria": dict.fromkeys(labels)}
                 },
-            }
+            },
+            image=image,
+        )
+        values = list(result["answers"]["decision"]["probabilities"].values())
+        return {
+            "choice_index": max(range(len(labels)), key=values.__getitem__),
+            "answers": labels,
+            "probabilities": values,
+            "input_tokens": result["usage"]["input_tokens"],
+            "calibration": "checkpoint_temperature",
+            "temperature": self.temperature,
+            "backend": self.backend,
+        }
+
+    def decide_request(self, request, *, image=None, cancelled=None):
+        """Run all separate-layout questions as one serialized worker transaction."""
+        # One complete decision, including image staging and encoding, owns the
+        # worker until its final reply. Stop may still kill the process directly.
+        with self._decision_lock:
+            if cancelled is not None and cancelled.is_set():
+                raise ChatCancelled("Request cancelled.")
+            request = dict(request)
             if image is not None:
                 if not self.images:
                     raise DecisionInputError("Image decisions are unavailable for this worker.")
                 request["images"] = ["private attachment"]  # Encoder uses only the image count.
+            self.encoder.template.cancelled = cancelled if cancelled is not None else self._decision_cancelled
             try:
-                plan = self.encoder.plan(request, self.max_input_tokens)
-            except DeciderError:
-                raise DecisionInputError(
-                    "The decision exceeds its input limits. Use shorter text or fewer answers."
-                ) from None
-            encoded = plan[0]
+                try:
+                    plan = self.encoder.plan(request, self.max_input_tokens)
+                except TemplateCancelled:
+                    raise ChatCancelled("Request cancelled.") from None
+                except DeciderError:
+                    raise DecisionInputError(
+                        "The decision is invalid or exceeds its input limits. Use shorter text or fewer answers."
+                    ) from None
+            finally:
+                self.encoder.template.cancelled = self._decision_cancelled
             lease = self.media.stage(image) if image is not None else nullcontext(None)
             with lease as reference:
-                reply = self.request(
-                    {
-                        "operation": "decide",
-                        "input_token_ids": list(encoded.input_ids),
-                        "readout_positions": [len(encoded.input_ids) - 1],
-                        "option_counts": [encoded.option_count],
-                        "context_tokens": self.max_input_tokens,
-                        "images": [str(self.media.root / reference["id"])] if reference is not None else [],
-                    }
-                )
-            if reply.get("ok") is not True:
-                if reply.get("error") in {"invalid_decision_request", "decider_context_overflow"}:
-                    raise DecisionInputError(
-                        "The decision and image exceed the 4096-token limit. Use a smaller input."
-                    )
-                if reply.get("error") == "decider_image_preparation_failed":
-                    raise DecisionInputError("The image could not be prepared. Choose a supported PNG or JPEG image.")
-                if reply.get("error") == "decider_resource_limit":
-                    raise DecisionInputError("The decision exceeds its context or memory limit. Use a smaller input.")
-                raise DecisionProtocolError
-            rows, count = reply.get("logits"), reply.get("input_tokens")
-            if (
-                not isinstance(rows, list)
-                or len(rows) != 1
-                or not isinstance(rows[0], list)
-                or len(rows[0]) != len(labels)
-                or type(count) is not int
-                or not len(encoded.input_ids) <= count <= self.max_input_tokens
-                or image is None
-                and count != len(encoded.input_ids)
-                or reply.get("cache_hit") is not False
-            ):
-                raise DecisionProtocolError
-            try:
-                values = probabilities(rows[0], self.temperature)
-            except DeciderError:
-                raise DecisionProtocolError from None
+                answers, input_tokens = {}, 0
+                for encoded in plan:
+                    values, count = self._decide_question(encoded, reference, image is not None, cancelled)
+                    answers[encoded.key] = answer(request["questions"][encoded.key], values)
+                    input_tokens += count
             return {
-                "choice_index": max(range(len(labels)), key=values.__getitem__),
-                "answers": labels,
-                "probabilities": values,
-                "input_tokens": count,
-                "calibration": "checkpoint_temperature",
-                "temperature": self.temperature,
-                "backend": self.backend,
+                "answers": answers,
+                "usage": {"input_tokens": input_tokens, "output_tokens": 0, "sequences": len(plan)},
             }
+
+    def _decide_question(self, encoded, reference, has_image, cancelled):
+        reply = self.request(
+            {
+                "operation": "decide",
+                "input_token_ids": list(encoded.input_ids),
+                "readout_positions": [len(encoded.input_ids) - 1],
+                "option_counts": [encoded.option_count],
+                "context_tokens": self.max_input_tokens,
+                "images": [str(self.media.root / reference["id"])] if reference is not None else [],
+            },
+            cancelled=cancelled,
+        )
+        if reply.get("ok") is not True:
+            if reply.get("error") in {"invalid_decision_request", "decider_context_overflow"}:
+                raise DecisionInputError("The decision and image exceed the 4096-token limit. Use a smaller input.")
+            if reply.get("error") == "decider_image_preparation_failed":
+                raise DecisionInputError("The image could not be prepared. Choose a supported PNG or JPEG image.")
+            if reply.get("error") == "decider_resource_limit":
+                raise DecisionInputError("The decision exceeds its context or memory limit. Use a smaller input.")
+            raise DecisionProtocolError
+        rows, count = reply.get("logits"), reply.get("input_tokens")
+        if (
+            not isinstance(rows, list)
+            or len(rows) != 1
+            or not isinstance(rows[0], list)
+            or len(rows[0]) != encoded.option_count
+            or type(count) is not int
+            or not len(encoded.input_ids) <= count <= self.max_input_tokens
+            or not has_image
+            and count != len(encoded.input_ids)
+            or reply.get("cache_hit") is not False
+        ):
+            raise DecisionProtocolError
+        try:
+            values = probabilities(rows[0], self.temperature)
+        except DeciderError:
+            raise DecisionProtocolError from None
+        return values, count
