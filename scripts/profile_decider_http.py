@@ -466,8 +466,10 @@ def run(args) -> dict:
                         }
                     },
                     "images": [
-                        "data:image/png;base64,"
-                        + base64.b64encode(image_bytes).decode("ascii")
+                        {
+                            "url": "data:image/png;base64,"
+                            + base64.b64encode(image_bytes).decode("ascii")
+                        }
                     ],
                 }
                 encode_before, native_before = len(encode_timings), len(native_rows)
