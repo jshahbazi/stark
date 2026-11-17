@@ -2914,6 +2914,74 @@ def test_worker_failure_fences_process_without_private_diagnostics(desktop, mode
     assert any(e["event"] == "error" for e in events(desktop))
 
 
+@pytest.mark.parametrize("stage", ["construction", "readiness"])
+def test_startup_chat_error_preserves_recovery_guidance_and_closes_worker(desktop, model, stage):
+    from unittest.mock import Mock
+
+    from stark_convert.chat import ChatError
+
+    identifier = installed(desktop, model)
+    message = "Not enough available memory (RAM) to run the image model check. Stop other models, then retry."
+    worker = Mock()
+    worker.read.side_effect = ChatError(message)
+    factory = Mock(side_effect=ChatError(message)) if stage == "construction" else Mock(return_value=worker)
+    with patch("stark_convert.desktop.Worker", factory):
+        desktop.dispatch({"command": "run", "model_id": identifier, "mode": "chat"})
+        finish(desktop)
+    assert desktop.worker is None and desktop.active_model is None and desktop.job is None
+    assert any(e["event"] == "error" and e["message"] == message for e in events(desktop))
+    assert events(desktop)[-1]["state"] == "error"
+    if stage == "readiness":
+        worker.close.assert_called_once_with()
+    else:
+        worker.close.assert_not_called()
+
+
+def test_stale_startup_chat_error_closes_only_its_worker(desktop, model):
+    from unittest.mock import Mock
+
+    from stark_convert.chat import ChatError
+
+    identifier = installed(desktop, model)
+    worker, replacement = Mock(), Mock()
+
+    def fail_after_replacement():
+        with desktop.lock:
+            desktop.epoch += 1
+            desktop.worker = replacement
+            desktop.active_model = "replacement"
+            desktop.active_mode = "chat"
+        raise ChatError("The old worker stopped before readiness.")
+
+    worker.read.side_effect = fail_after_replacement
+    with patch("stark_convert.desktop.Worker", return_value=worker):
+        desktop.dispatch({"command": "run", "model_id": identifier, "mode": "chat"})
+        finish(desktop)
+    assert desktop.worker is replacement and desktop.active_model == "replacement" and desktop.active_mode == "chat"
+    assert desktop.job is None
+    replacement.close.assert_not_called()
+    worker.close.assert_called_once_with()
+    assert not any(e["event"] == "error" for e in events(desktop))
+
+
+def test_unexpected_startup_exception_keeps_private_diagnostics_hidden(desktop, model):
+    from unittest.mock import Mock
+
+    identifier = installed(desktop, model)
+    worker = Mock()
+    worker.read.side_effect = ValueError("private startup canary")
+    with patch("stark_convert.desktop.Worker", return_value=worker):
+        desktop.dispatch({"command": "run", "model_id": identifier, "mode": "chat"})
+        finish(desktop)
+    assert desktop.worker is None and desktop.active_model is None and desktop.job is None
+    worker.close.assert_called_once_with()
+    assert "canary" not in desktop.output.getvalue()
+    assert any(
+        e["event"] == "error" and e["message"] == "Unable to complete the operation. Check the model and try again."
+        for e in events(desktop)
+    )
+
+
 def test_idle_worker_exit_is_reported_and_reaped(desktop, model):
     running(desktop, model)
     process = desktop.worker.process

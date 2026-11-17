@@ -77,15 +77,28 @@ def preflight_family_memory(model: Path, config: dict) -> None:
 
         retained = prepared_image_identity(model)
         if retained is not None:
-            from .hybrid_image_memory import retained_check_memory
+            from .hybrid_image_memory import retained_check_headroom, retained_check_memory
 
             try:
                 required = retained_check_memory(retained, directory=model, config=config)
-                available = psutil.virtual_memory().available
+                headroom = retained_check_headroom(retained, required)
+                snapshot = psutil.virtual_memory()
+                available = snapshot.available
+                if headroom < required:
+                    # Keep the full planning estimate as an installed-RAM floor;
+                    # this does not reserve that margin in currently free RAM.
+                    total = getattr(snapshot, "total", None)
+                    if type(total) is not int or total <= 0:
+                        raise ValueError
+                    if total < required:
+                        raise ImageCheckError(
+                            f"This image model requires at least {required / 1e9:.1f} GB of installed RAM; "
+                            f"this machine has {total / 1e9:.1f} GB."
+                        )
             except (OSError, ValueError, psutil.Error):
                 raise ImageCheckError("Cannot inspect this image model's memory requirements.") from None
-            if type(available) is not int or available < required:
-                raise _insufficient_memory(required, available)
+            if type(available) is not int or available < headroom:
+                raise _insufficient_memory(headroom, available)
         return
     family = artifact_image_family(config) if contract.get("schema_version") == 4 else contract.get("family")
     if not supported_image_family(family):

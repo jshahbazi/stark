@@ -41,17 +41,78 @@ def test_exact_paged_artifact_budget_counts_selected_weights_and_peak_reserves()
     assert memory._LILY_RESIDENT + 12 * 1024**3 < required < 96 * 1024**3 < memory._LILY_TOTAL
 
 
+def test_exact_lily_headroom_keeps_full_capacity_estimate_separate():
+    value = identity()
+    required = memory.retained_check_memory(value)
+    assert required == 88_728_893_312
+    assert memory.retained_check_headroom(value, required) == 80_138_958_720
+    assert memory.retained_check_memory(value) == required
+
+
+def test_exact_lily_preflight_uses_incremental_headroom_and_one_capacity_snapshot(tmp_path, monkeypatch):
+    value = identity()
+    monkeypatch.setattr("stark_convert.hybrid_vision.prepared_image_identity", lambda _model: value)
+    calls = []
+
+    def snapshot():
+        calls.append(True)
+        return SimpleNamespace(available=85_000_000_000, total=128 * 1024**3)
+
+    monkeypatch.setattr(image_checks.psutil, "virtual_memory", snapshot)
+    image_checks.preflight_family_memory(tmp_path, {})
+    assert calls == [True]
+
+
+def test_exact_lily_preflight_rejects_below_incremental_headroom(tmp_path, monkeypatch):
+    value = identity()
+    required = memory.retained_check_memory(value)
+    headroom = memory.retained_check_headroom(value, required)
+    monkeypatch.setattr("stark_convert.hybrid_vision.prepared_image_identity", lambda _model: value)
+    monkeypatch.setattr(
+        image_checks.psutil, "virtual_memory", lambda: SimpleNamespace(available=headroom - 1, total=128 * 1024**3)
+    )
+    with pytest.raises(image_checks.ImageCheckError, match="Estimated RAM needed: 80.1 GB"):
+        image_checks.preflight_family_memory(tmp_path, {})
+
+
+def test_exact_lily_preflight_keeps_full_estimate_as_physical_capacity_requirement(tmp_path, monkeypatch):
+    value = identity()
+    required = memory.retained_check_memory(value)
+    monkeypatch.setattr("stark_convert.hybrid_vision.prepared_image_identity", lambda _model: value)
+    monkeypatch.setattr(
+        image_checks.psutil, "virtual_memory", lambda: SimpleNamespace(available=85_000_000_000, total=required - 1)
+    )
+    with pytest.raises(image_checks.ImageCheckError, match="at least 88.7 GB of installed RAM"):
+        image_checks.preflight_family_memory(tmp_path, {})
+
+
+@pytest.mark.parametrize("total", [None, True, False, 0, -1, "137438953472", 128.0 * 1024**3])
+def test_exact_lily_preflight_rejects_invalid_physical_capacity(tmp_path, monkeypatch, total):
+    value = identity()
+    monkeypatch.setattr("stark_convert.hybrid_vision.prepared_image_identity", lambda _model: value)
+    snapshot = SimpleNamespace(available=85_000_000_000)
+    if total is not None:
+        snapshot.total = total
+    monkeypatch.setattr(image_checks.psutil, "virtual_memory", lambda: snapshot)
+    with pytest.raises(image_checks.ImageCheckError, match="Cannot inspect"):
+        image_checks.preflight_family_memory(tmp_path, {})
+
+
 @pytest.mark.parametrize("key", list(memory._LILY_IDENTITY))
 def test_identity_drift_uses_full_payload_fallback(key):
     value = identity()
     value[key] = True if type(value[key]) is int else "changed"
-    assert memory.retained_check_memory(value) == memory._LILY_TOTAL + 2 * 1024**3
+    required = memory.retained_check_memory(value)
+    assert required == memory._LILY_TOTAL + 2 * 1024**3
+    assert memory.retained_check_headroom(value, required) == required
 
 
 def test_inventory_drift_and_external_source_use_full_payload_fallback():
     value = identity()
     value["weight_files"]["shard-0"]["size"] += 1
-    assert memory.retained_check_memory(value) == memory._LILY_TOTAL + 1 + 2 * 1024**3
+    required = memory.retained_check_memory(value)
+    assert required == memory._LILY_TOTAL + 1 + 2 * 1024**3
+    assert memory.retained_check_headroom(value, required) == required
     value = identity()
     value["model_source"] = "ddalcu/Qwen3.8-Flash-Next-Mixed-MLX-Serve"
     assert memory.retained_check_memory(value) == memory._LILY_TOTAL + 2 * 1024**3
@@ -61,6 +122,17 @@ def test_inventory_drift_and_external_source_use_full_payload_fallback():
 def test_malformed_inventory_is_rejected(files):
     with pytest.raises(ValueError, match="memory inventory"):
         memory.retained_check_memory({**memory._LILY_IDENTITY, "weight_files": files})
+    with pytest.raises(ValueError, match="memory inventory"):
+        memory.retained_check_headroom({**memory._LILY_IDENTITY, "weight_files": files}, 88_728_893_312)
+
+
+def test_exact_identity_with_wrong_shard_count_keeps_full_headroom():
+    value = identity()
+    value["weight_files"].pop("shard-54")
+    value["weight_files"]["shard-0"]["size"] += 1
+    required = memory.retained_check_memory(value)
+    assert required == memory._LILY_TOTAL + 2 * 1024**3
+    assert memory.retained_check_headroom(value, required) == required
 
 
 @pytest.fixture
@@ -98,6 +170,7 @@ def test_generic_residency_counts_full_decoder_mtp_and_tower_without_external_pa
         memory._LILY_RESERVES.values()
     )
     first = memory.retained_check_memory(value, directory=model, config=config)
+    assert memory.retained_check_headroom(value, first) == first
     monkeypatch.setattr(memory.os, "sysconf", lambda _key: 65536)
     # Four synthetic n-gram heads touch 3 GiB at 64 KiB pages; the frozen
     # 4 KiB recipe reserves 1 GiB. The real sixteen-head graph scales likewise.
