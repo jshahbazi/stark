@@ -5,9 +5,11 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import profile_decider_http as profiler
 from profile_decider_http import ProfileError, aggregate_rows, generated_png, summarize
 
 
@@ -26,6 +28,26 @@ def row(words: int, elapsed: float, tokens: int) -> dict:
 
 
 class ProfileAggregationTests(unittest.TestCase):
+    def test_gpu_screen_allows_login_ui_and_rejects_python_compute(self):
+        for name in ("loginwindow", "python"):
+            with (
+                self.subTest(name=name),
+                mock.patch.object(
+                    profiler, "process_snapshot", return_value={1: (0, name)}
+                ),
+                mock.patch.object(
+                    profiler, "gpu_counters", side_effect=[{1: 100}, {1: 200}]
+                ),
+                mock.patch.object(profiler.time, "sleep"),
+            ):
+                if name == "python":
+                    with self.assertRaisesRegex(
+                        ProfileError, "foreign_gpu_activity_detected"
+                    ):
+                        profiler.reject_foreign_compute({99})
+                else:
+                    profiler.reject_foreign_compute({99})
+
     def test_aggregate_discards_warmup_and_keeps_only_summaries(self):
         output = aggregate_rows(
             [

@@ -50,6 +50,7 @@ UI_GPU_NAMES = {
     "controlcenter",
     "windowserver",
     "windowmanager",
+    "loginwindow",
     "screencapture",
     "iterm2",
     "codex",
