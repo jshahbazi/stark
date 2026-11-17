@@ -13,12 +13,25 @@ from stark_convert.streaming import ConversionError, UnsupportedConversion, read
 BASELINES = json.loads((Path(__file__).parent / "fixtures" / "phi_decoder_configs.json").read_text())
 
 
-def phi_fixture(path: Path, *, dtype="BF16", sharded=False, partial_factor=0.75, duplicate_head=False):
+def phi_fixture(
+    path: Path,
+    *,
+    dtype="BF16",
+    sharded=False,
+    partial_factor=0.75,
+    duplicate_head=False,
+    untied=False,
+    model_dim=16,
+):
+    # Two query heads and one KV group; the default 16 keeps the original
+    # payloads. CLI preflight needs a native head width, for example 128.
     path.mkdir()
+    head_dim = model_dim // 2
+    pairs = int(head_dim * partial_factor) // 2
     config = {
         "model_type": "phi3",
         "architectures": ["Phi3ForCausalLM"],
-        "hidden_size": 16,
+        "hidden_size": model_dim,
         "intermediate_size": 12,
         "num_hidden_layers": 2,
         "num_attention_heads": 2,
@@ -31,10 +44,10 @@ def phi_fixture(path: Path, *, dtype="BF16", sharded=False, partial_factor=0.75,
         "partial_rotary_factor": partial_factor,
         "rope_scaling": {
             "type": "longrope",
-            "short_factor": [1.0] * (int(8 * partial_factor) // 2),
-            "long_factor": [2.0 + pair / 4 for pair in range(int(8 * partial_factor) // 2)],
+            "short_factor": [1.0] * pairs,
+            "long_factor": [2.0 + pair / 4 for pair in range(pairs)],
         },
-        "tie_word_embeddings": True,
+        "tie_word_embeddings": not untied,
         "hidden_act": "silu",
         "attention_dropout": 0.0,
         "attention_bias": False,
@@ -69,18 +82,20 @@ def phi_fixture(path: Path, *, dtype="BF16", sharded=False, partial_factor=0.75,
         }[dtype](values)
         tensors[name] = (dtype, raw)
 
-    add("model.embed_tokens.weight", (32, 16))
+    add("model.embed_tokens.weight", (32, model_dim))
     if duplicate_head:
         tensors["lm_head.weight"] = tensors["model.embed_tokens.weight"]
-    add("model.norm.weight", (16,))
+    if untied:
+        add("lm_head.weight", (32, model_dim))
+    add("model.norm.weight", (model_dim,))
     for layer in range(2):
         src = f"model.layers.{layer}"
-        add(src + ".input_layernorm.weight", (16,))
-        add(src + ".post_attention_layernorm.weight", (16,))
-        add(src + ".self_attn.qkv_proj.weight", (32, 16))
-        add(src + ".self_attn.o_proj.weight", (16, 16))
-        add(src + ".mlp.gate_up_proj.weight", (24, 16))
-        add(src + ".mlp.down_proj.weight", (16, 12))
+        add(src + ".input_layernorm.weight", (model_dim,))
+        add(src + ".post_attention_layernorm.weight", (model_dim,))
+        add(src + ".self_attn.qkv_proj.weight", (model_dim + 2 * head_dim, model_dim))
+        add(src + ".self_attn.o_proj.weight", (model_dim, model_dim))
+        add(src + ".mlp.gate_up_proj.weight", (24, model_dim))
+        add(src + ".mlp.down_proj.weight", (model_dim, 12))
     if sharded:
         weights = {}
         for shard in range(3):
@@ -254,6 +269,7 @@ def test_phi_malformed_config_rejected_before_unqualified_semantics(tmp_path, ch
         {"lm_head_bias": True},
         {"auto_map": {"AutoConfig": "different.Architecture"}},
         {"architectures": ["PhiForCausalLM"]},
+        {"sliding_window": 64},
     ],
 )
 def test_phi_unqualified_semantics_fail_closed(tmp_path, monkeypatch, changes):
@@ -267,14 +283,97 @@ def test_phi_unqualified_semantics_fail_closed(tmp_path, monkeypatch, changes):
         build_phi_plan(source)
 
 
-def test_untied_phi3_is_explicitly_unsupported(tmp_path):
+@pytest.mark.parametrize("dtype,requested", [("BF16", "bfloat16"), ("F32", "bfloat16"), ("F16", "float32")])
+def test_untied_phi3_plans_a_separate_output_head(tmp_path, dtype, requested):
     source = tmp_path / "source"
-    config, tensors = phi_fixture(source)
-    update_config(source, config, tie_word_embeddings=False)
-    tensors["lm_head.weight"] = ("BF16", np.zeros((32, 16), dtype="<u2"))
+    _, tensors = phi_fixture(source, dtype=dtype, untied=True)
+    plan = build_phi_plan(source, dtype=requested)
+    assert plan.decoder_config["embedding_config"] == {
+        "type": "UntiedEmbeddingConfig",
+        "input_scale": None,
+        "logit_soft_cap": None,
+        "logit_scale": None,
+    }
+    output = tmp_path / "converted.safetensors"
+    write_plan(plan, output, chunk_bytes=96)
+    metadata, converted = read_safetensors_header(output)
+    assert "decoder.embedding.embedding.weights" not in converted
+    assert json.loads(metadata["decoder.embedding.input_embedding.spec"])["layout"] == "input_output"
+    assert json.loads(metadata["decoder.embedding.output_embedding.spec"])["layout"] == "output_input"
+    assert len(metadata) == 10 and len(plan.input_tensors) == len(tensors)
+    if dtype == "BF16":
+        for out, src in (("input", "model.embed_tokens.weight"), ("output", "lm_head.weight")):
+            assert tensor_bytes(converted[f"decoder.embedding.{out}_embedding.weights"]) == tensors[src][1].tobytes()
+    else:
+        target = {"bfloat16": "BF16", "float32": "F32"}[requested]
+        assert converted["decoder.embedding.output_embedding.weights"].dtype == target
+        assert converted["decoder.embedding.input_embedding.weights"].dtype == target
+    # The input embedding and head are distinct payloads in the fixture.
+    assert tensor_bytes(converted["decoder.embedding.input_embedding.weights"]) != tensor_bytes(
+        converted["decoder.embedding.output_embedding.weights"]
+    )
+
+
+@pytest.mark.parametrize("duplicate_head", [False, True])
+def test_tied_phi3_plan_is_unchanged_by_untied_support(tmp_path, duplicate_head):
+    source = tmp_path / "source"
+    phi_fixture(source, duplicate_head=duplicate_head)
+    plan = build_phi_plan(source)
+    names = [operation.name for operation in plan.operations]
+    assert names[0] == "decoder.embedding.embedding.weights"
+    assert not any("input_embedding" in name or "output_embedding" in name for name in names)
+    assert len(names) == 1 + 1 + 2 * 6 and plan.decoder_config["embedding_config"]["type"] == "TiedEmbeddingConfig"
+    assert set(plan.metadata) == {
+        "decoder.embedding.embedding.spec",
+        *(
+            f"decoder.transformer.layers.{layer}.{name}.weights.spec"
+            for layer in range(2)
+            for name in ("mixer.qkvg_projection", "mixer.out_projection", "mlp.up_projection", "mlp.down_projection")
+        ),
+    }
+
+
+@pytest.mark.parametrize("shape", [(31, 16), (32, 15), (16, 32), (32,)])
+def test_untied_phi3_head_shape_mismatch_is_rejected(tmp_path, shape):
+    source = tmp_path / "source"
+    _, tensors = phi_fixture(source, untied=True)
+    tensors["lm_head.weight"] = ("BF16", np.zeros(shape, dtype="<u2"))
     save_tensors(source / "model.safetensors", tensors)
-    with pytest.raises(UnsupportedConversion, match="^Untied Phi3 embeddings"):
+    with pytest.raises(ConversionError, match="^Phi checkpoint tensor shape disagrees with its config$"):
         build_phi_plan(source)
+
+
+def test_untied_phi3_without_a_head_is_rejected(tmp_path):
+    source = tmp_path / "source"
+    _, tensors = phi_fixture(source, untied=True)
+    del tensors["lm_head.weight"]
+    save_tensors(source / "model.safetensors", tensors)
+    with pytest.raises(ConversionError, match="^Phi checkpoint is missing a required tensor$"):
+        build_phi_plan(source)
+
+
+def test_absent_partial_rotary_factor_uses_the_full_head(tmp_path):
+    # Phi-3/Phi-3.5 configs omit the key; Transformers and MLX-LM default it to 1.0.
+    source = tmp_path / "source"
+    config, _ = phi_fixture(source, partial_factor=1.0, untied=True)
+    del config["partial_rotary_factor"]
+    (source / "config.json").write_text(json.dumps(config))
+    layers = build_phi_plan(source).decoder_config["transformer_config"]["layer_configs"]
+    assert all(layer["rope_config"]["head_dim"] == layer["mixer_config"]["head_dim"] == 8 for layer in layers)
+    assert all(len(layer["rope_config"]["long_factor"]) == 4 for layer in layers)
+
+
+@pytest.mark.parametrize("window,supported", [(None, True), (128, True), (4096, True), (127, False), (32, False)])
+def test_phi_sliding_window_shorter_than_context_fails_closed(tmp_path, window, supported):
+    source = tmp_path / "source"
+    config, _ = phi_fixture(source, untied=True)
+    update_config(source, config, sliding_window=window)
+    if supported:
+        layers = build_phi_plan(source).decoder_config["transformer_config"]["layer_configs"]
+        assert all(layer["mixer_config"]["sliding_window_size"] is None for layer in layers)
+    else:
+        with pytest.raises(UnsupportedConversion, match="^Sliding-window attention is outside"):
+            build_phi_plan(source)
 
 
 @pytest.mark.parametrize(

@@ -86,6 +86,135 @@ does not resolve global ownership or support subtraction. MTP remains off.
 
 ## Current result
 
+**Decider HTTP latency diagnosis (2026-11-16).** The
+[source-bound profile](2026-11-16-decider-http-latency.md) measures native Decision
+HTTP medians of 1.106, 4.939 and 19.299 seconds at 80, 400 and 1,360 input
+positions. Native forward time dominates; request encoding takes roughly
+13–15 ms. A signed local build passes separate text/image transport controls.
+This is bounded diagnosis with no speedup candidate and does not supersede
+earlier numerical qualification or the other application's workload timings.
+
+**Lily projection-reuse adoption (2026-11-16).** The user accepted the modest
+long-context benefit below. Group-64 verifier projections now share packed
+weights by default on the implementation branch. Final component controls pass
+240 cases exactly; 56 native checks preserve output/work on all three original
+tasks and cover prefixes, images and cancellation. The
+[adoption record](../model-experiments/2026-11-16-lily-projection-reuse.md)
+keeps host-admission deferral and harness setup failures separate. Earlier
+measurements and their screening decisions are unchanged; two drafts remain
+recommended and the installed app is unchanged.
+
+**Lily very-long-context public benchmark case (2026-11-15).** The
+[InfiniteBench whole-book case](2026-11-15-lily-long-context-infinitebench.md)
+uses 88,398 unmodified native input tokens with two drafts fixed. Sixteen
+measured responses and four warmups retain identical output hashes and MTP
+work. The projection candidate improves median paired useful decode 5.40%
+(8/8 wins; both run orders improve) and complete request time 2.39% (7/8).
+Prefill dominates the request; all busy-host observations, including paging,
+are retained. This is additional evidence for a modest decode gain, not an
+official benchmark score or a promotion by that study. The subsequent
+2026-11-16 adoption decision and final-build validation are recorded above.
+
+**Lily small-row verifier follow-up (2026-11-15).** The
+[two-draft natural-response study](2026-11-15-lily-small-row-verifier.md)
+profiles both existing requests and tests packed-weight reuse across remaining
+generic projections. The candidate passes 60 component cases byte-for-byte;
+32 measured responses plus eight warmups preserve output hashes and MTP work.
+Paired useful decode improves 1.84% for coding (6/8 wins) and 4.54% for planning
+(8/8). Coding is inside baseline variation; planning is a modest positive
+result below the 10% practical minimum. The candidate is rejected for promotion,
+with source and all observations archived. Production code, the two-draft
+recommendation, installed app and prior benchmark data are unchanged.
+
+**Lily natural long-response checks (2026-11-15).** Each comparison retains
+eight measured responses and four warmups on image-loaded before/candidate
+workers. The [coding request](2026-11-15-lily-long-coding-response.md) favors
+two drafts: candidate one is 11.35% slower in paired useful decode, losing all
+four pairs; its longer response also takes 38.06% more time. The
+[planning request](2026-11-15-lily-long-planning-response.md) gives only +1.02%
+paired decode, inside observed noise, with a shorter candidate response and
+unequal background load. Following the coding counterexample, the
+sampling-specific automatic one-draft policy was reverted and Lily's current
+recommendation is two. This branch-only restoration changes no benchmark
+record, does not install or release the app, and is documented in the
+[restoration record](../archive/runs/2026-11-15-lily-mtp-two-draft-default-restored.md).
+
+**Historical Lily sampling-specific MTP candidate (2026-11-15).** The former
+branch candidate selected one draft for the pinned Lily Q4-XL receipt with
+stochastic temperature 1, top-k 20, top-p 0.95 and absent/null min-p. Its fixed
+four-session confirmation retained 64 measured requests, 16 warmups and four
+setup requests; the held-out top-k endpoint reduced median request latency
+14.66% with 8/8 paired blocks favoring one. Seven image-loaded prefix checks
+matched fresh outputs through one-to-two and two-to-one transitions and the
+image-clear boundary. The automatic policy has since been removed; the
+historical measurements remain valid for their fixed workload and do not
+qualify the current default. See
+the [policy record](2026-11-15-lily-sampling-mtp-policy.md) and
+[public aggregates](data/lily-sampling-mtp-policy-2026-11-15.json).
+
+**Flash Next Lily MTP recommendation reconciliation (2026-11-15).** The
+one-draft candidate was reverted after its preregistered follow-up failed the
+artifact-wide performance gate. In the primary 512-token top-k comparison,
+one draft reduced median request latency by 3.58%, below the required 5%; the
+4,096-token nucleus guard regressed useful decode rate by 6.01%. The held-out
+top-k cell favored one draft by 20.03% decode and 14.45% request latency, a
+scoped positive result. The former sampling-specific exception was also
+reverted after long-response evidence; two drafts are the current scalar
+recommendation for Lily. Explicit one-draft requests remain supported. The
+[study](2026-11-15-flashnext-lily-one-draft-default.md),
+[reconciliation](2026-11-15-lily-mtp-default-reconciliation.md), and
+[aggregates](data/lily-mtp-default-reconciliation-2026-11-15.json) preserve
+the off/on, one/two, actual-default comparisons and validation evidence.
+The [restoration record](../archive/runs/2026-11-15-lily-mtp-two-draft-default-restored.md)
+documents the current branch behavior.
+
+**llama.cpp 1.0.0 assessment and Flash Next Lily baseline (2026-11-15).**
+The [ranked source assessment and measurement record](2026-11-15-llama-v1-flashnext-lily-assessment.md)
+screens release techniques against the actual retained Lily path and records a
+fresh image-resident text baseline under ordinary concurrent host activity.
+The [public aggregates](data/llama-v1-flashnext-lily-baseline-2026-11-15.json)
+preserve all measured requests and variability. No engine optimization is
+adopted, and no earlier source-bound study or image qualification is superseded.
+
+**Catalog coding ranking snapshot (2026-11-14).** The Top Models tab uses a
+shared-benchmark relative index across 28 catalog-matched models and 167
+pairwise comparisons, averaged into ten family entries. This is external
+reference-model evidence, independent of Stark's native performance and
+artifact qualification records. See the [calculation and provenance](2026-11-14-catalog-coding-ranking.md)
+and [aggregate results](data/catalog-coding-ranking-2026-11-14.json).
+This replaces the earlier exploratory percentile calculation for this UI;
+it does not supersede any native validation result.
+
+**Ripple attention decode diagnostic (2026-11-12).** A same-loaded-model,
+teacher-forced snapshot diagnostic at a 1,024-token prefix measures median
+native decode at 6.639
+tokens/s before and 7.796 tokens/s after the attention change; all four paired
+rounds favor the candidate, with a 16.3% median paired gain. This isolates
+decoding and does not measure worker end-to-end throughput or establish general
+performance. The
+[attention report](RIPPLE_Q4_ATTENTION_2026_11_12.md) records Q4/Q8 oracle
+qualification, exact fallback behavior and the rejected experiments.
+
+**Ripple-65B Q4_K_M grouped kernels (2026-11-12).** A saved-binary ABBA
+comparison measures median native-worker decode at 4.559 versus 7.460 tokens/s
+(1.64x), with identical quantized weights and generated-token hashes. Four warm
+requests per arm are short and unscreened, and host drift was observed. The
+[kernel report](RIPPLE_Q4_KERNELS_2026_11_12.md) records reference checks,
+component selection and evidence scope. It supersedes timing observations in
+the [initial Q4 report](RIPPLE_Q4_K_M_2026_11_12.md); earlier numerical evidence
+remains source-bound.
+
+**Ripple-65B native GPU graph (2026-11-05 UTC).** A saved-binary comparison on
+the 128 GiB M5 Max measures median decode at 2.760 versus 6.040 tok/s (2.19x)
+with identical Q8 weights and generated-token hashes. Warm ten-token prefill
+measures 3.438 versus 1.544 seconds. Four requests per arm are short and
+unscreened; the candidate arm includes unsigned and signed worker cohorts. The
+[GPU report](RIPPLE_65B_GPU_2026_11_05.md) records reference checks, source
+identities and bounded memory admission. It supersedes timing observations in
+the [initial Ripple report](RIPPLE_65B_NATIVE_2026_11_04.md) for this workload;
+earlier validation evidence remains preserved. These local observations do not
+establish general performance.
+
 **Retained Lily image startup (2026-11-09).** The
 [startup/Playground record](2026-11-09-lily-image-startup.md) preserves a canceled
 baseline, a functionally passing but latency-rejected full-scan candidate, and

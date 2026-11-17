@@ -18,18 +18,105 @@ Guided setup opens at 700 × 800 points, capped to the available screen, so the 
 
 The main menu and playground show **GPU memory** as a percentage and compact usage bar beside the status in both modes. Green indicates usage below 75% of Metal's recommended memory budget, orange starts at 75%, and red starts at 90%. Whole percentages round down so the label agrees with the color thresholds. Hover for the allocated bytes and budget. It refreshes about once a second, including during model loading and requests. Apple silicon uses shared memory; the percentage measures the model worker's Metal resource allocation against the device's recommended working-set size, excluding CPU-only allocations and other applications. This budget is a performance guideline. The bar fills at 100%; percentages above the budget remain visible. If the budget is unavailable, the readout shows allocated bytes with an empty neutral bar. A dash means no measurement is available. Stop clears the readout.
 
+## Decider decisions and images
+
+In **Manage Models**, open **Model Catalog**, browse **Decider Flash v1.3** and
+download the pinned BF16 entry. **Add from Source** also accepts its Hugging Face repository, a complete
+pinned local snapshot, or a prepared Decider folder. Run selects **Decision**
+automatically; saved rows show **Decision and images**.
+
+Enter a question and 2–16 distinct, comma-separated answers in the desired
+order. Supply text, one PNG/JPEG image up to 4 MiB, or both. The result uses the
+checkpoint's saved probability calibration. Image files are private and
+temporary; reset, Stop, model replacement, removal and errors clear the selected
+Decision image. **Cancel** stops the running decision worker. Chat attachments
+and history remain separate.
+
+Decider is not available for chat, tool-calling or Locate. When a native
+Decider model is loaded, other local applications can call the authenticated
+`POST /v1/decisions` endpoint or `/v1/systemone` compatibility alias. The
+request contract and lifecycle are documented in the [local API reference](../../docs/LOCAL_API.md#decisions).
+Its native [reference qualification](../../docs/DECIDER.md) covers the named
+artifact and bounded text/image cases. Packaged-app qualification for this API
+path has not been established, and matched tower-residency text timing remains
+inconclusive.
+
 ## Build and install
 
 For normal use, install the [signed release](../../docs/INSTALLATION.md). The commands below rebuild the app from source during development on an Apple silicon Mac with macOS 26.4 or newer, Xcode's command line tools, Rust 1.98.1, uv, and an existing [standalone CLI installation](../../docs/INSTALLATION.md#install-from-a-source-checkout) whose runtime the app copies. The builder refreshes native dependency and adaptation notices for the current workers using the pinned Rust toolchain and Cargo lockfile.
 
 ```sh
-PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-generate
-PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-score --features optimized
-PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-template
+PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-score --bin stark-score --features optimized
+PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-generate --bin stark-generate
+PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-template --bin stark-template
+PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-score --bin stark-decide
 uv run --no-project --python 3.13.13 python scripts/build_menubar.py --install --open
 ```
 
-The app is compiled directly with `swiftc` from `Sources/*.swift`. It installs to `~/Applications/Stark.app` and runs without the checkout, system Python, Rust or uv. The builder stages and verifies the new app, quits the running copy (force-killing that exact executable if it stalls), swaps the bundles atomically, and refuses to replace an unrelated application. Options: `--install-dir DIR` changes the parent folder; omitting `--install` leaves the app in the ignored `artifacts/menu-bar/` directory; `--runtime`, `--worker`, `--score-worker` and `--template-worker` select a different CLI bundle, generation binary, scoring binary or native template evaluator. Native binaries default to their corresponding `target/release/` paths.
+The app is compiled directly with `swiftc` from `Sources/*.swift`. It installs to `~/Applications/Stark.app` and runs without the checkout, system Python, Rust or uv. The builder stages and verifies the new app, quits the running copy (force-killing that exact executable if it stalls), swaps the bundles atomically, and refuses to replace an unrelated application. Options: `--install-dir DIR` changes the parent folder; omitting `--install` leaves the app in the ignored `artifacts/menu-bar/` directory. `--runtime` selects the CLI bundle; `--worker`, `--score-worker`, `--template-worker` and `--decide-worker` select the four native binaries. They default to their corresponding `target/release/` paths. Build each binary separately with its named `--bin`; `stark-decide` uses default features independently of the optimized scorer. The app records hashes for all four worker overlays, including when its base CLI runtime predates Decider.
+
+Pi's public setup/guard resources come from the separate `stark-agent-clients`
+repository. `Resources/PiClient` is an immutable distribution snapshot;
+`Resources/PiClient.lock.json` pins its exact revision and complete file hashes.
+Clean local and hosted builds use it without a private checkout, download or
+credential. `--pi-client-source /absolute/path/to/stark-agent-clients` optionally
+checks a separate checkout against the same lock. Missing or changed resources
+stop the build before installation. No npm install runs in the app. Change client
+logic in its owning repository, then update the snapshot and lock together.
+
+## Pi in Connections
+
+In **Advanced → Connect to... → Apps**, start a Chat model with tool support and
+choose **Set Up Pi**. Stark detects Pi 1.5.2 and Node.js 22.19 or newer, validates
+the running model's public metadata, and writes a guarded profile under
+`~/Library/Application Support/Stark/Pi/profile-*`. It also saves Stark as the
+default provider/model in normal Pi configuration, preserving other providers,
+extensions and unrelated settings. Pi is excluded from Beginner Guided Setup and Adjust Setup; switching
+to Beginner hides an open Connections window.
+
+Detection includes Pi's managed Node, compatible installed nvm versions, and
+Homebrew/system locations. It does not source interactive shell startup files.
+
+Choose **Open Stark Pi**, then paste the copied key at Terminal's hidden prompt.
+Stark finds Pi automatically and creates or reuses the private working folder
+`~/Library/Application Support/Stark/Pi/Workspace`. **Change Working Folder…**
+optionally selects a project for new sessions in a sheet attached to Connections;
+**Use Stark Workspace** restores the automatic folder. Later, typing `pi`
+normally uses the saved Stark provider in the shell's current project folder.
+Normal Pi obtains the current key from macOS Keychain through a public command
+reference, so macOS may ask you to allow access. Its auth store is untouched;
+an existing stored `stark-local` key takes precedence and must be removed through
+Pi's `/logout` to use the Keychain reference.
+This manual setup keeps the master key in process
+environments and the explicitly requested, concealed/transient clipboard item;
+it writes no key into public profiles, launch scripts or command arguments.
+While Stark runs, it schedules the unchanged clipboard item for clearing after
+two minutes and also clears it on normal quit. Crashes and force quits cannot
+run cleanup. Pi can edit files and run commands. Sessions opened here are not
+saved and disable automatic retries/compaction; normal Pi keeps its existing
+session/retry/compaction policy. The reply ceiling is 1,024 tokens or the lower API limit.
+
+After a model or API-address change choose **Update Setup**. Launch checks the
+client version, model metadata and profile integrity again. After key rotation,
+open a new Pi session with the current key. Setup creates a new profile and keeps
+old public profiles for existing sessions; quit Pi before deleting an old folder.
+Default configuration updates use private `.stark-backup-*` recovery backups
+under `~/.pi/agent`, cooperative locks and a transaction journal. Existing
+unowned Stark providers, malformed files and concurrent edits fail closed.
+Backups may contain pre-existing credentials; keep them private. This flow
+continues to use the master key and adds no managed client-scoped grants.
+Only marked locks of exited Stark helpers are recovered automatically. Unmarked
+locks require inspection after Pi has stopped; setup never steals them.
+Updated bundled setup/guard code requires a fresh profile. Pi's executable and
+resolved symlink directories are included in its isolated PATH so installed
+companion tools such as `fd` are available.
+After replacing Pi or Node choose **Check Installation**; it rediscovers their
+paths. A missing saved executable requires fresh setup instead of a stale launch.
+
+Focused checks: `scripts/test_pi_connection.py`, `scripts/test_pi_client_resources.py`
+and `scripts/test_menubar_windows.py`, plus the integration repository's tests.
+
+## Runtime and signing
 
 The builder embeds `stark-template` in the app's runtime and verifies a synthetic
 render through the installed converter. Chat and Decision modes require this
@@ -104,7 +191,7 @@ uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update 
 
 ## Models and requests
 
-**Manage Models** contains three tabs: **Installed**, **Model Catalog** and
+**Manage Models** contains four tabs: **Installed**, **Top Models**, **Model Catalog** and
 **Add from Source**. Installed lists saved versions; Model Catalog browses model
 families; Add from Source accepts a local folder or a Hugging Face repository name or URL
 such as `Qwen/Qwen3-0.6B`. A folder that already contains a converted Stark model
@@ -116,9 +203,18 @@ means the selected conversion path is unsupported; unavailable or inconclusive
 metadata has a separate explanation. Supported models are governed by the
 [converter](../../tools/converter/README.md). Conversion support alone does not
 guarantee that Stark can render a model's chat template or parse its function
-tool calls. The third tab shows
+tool calls. Add from Source shows
 Download and Conversion progress; **Cancel Installation** cancels. Command-I
 opens that tab in the same window.
+
+Failed installations offer **Retry** while the original source or catalogue
+choice remains available. Native downloads retain completed files after a
+failed image check, so retry checks those files again without downloading them.
+Image checks run inference from the model's current folder without another
+disk copy. Their memory preflight reports estimated RAM needed and currently
+available RAM; stop other models or close memory-heavy apps before retrying a
+memory failure. The estimate includes working memory and does not guarantee
+that every later allocation will fit.
 
 The source tabs start with **Hugging Face**, selected by default, followed by
 **Local Folder**.
@@ -127,7 +223,7 @@ The source tabs start with **Hugging Face**, selected by default, followed by
 These views show the running model's name and use management to choose
 and run a model. Its quantization and stored weight-file size appear beside the
 name when recorded, so saved versions can be distinguished. Installation uses
-the third tab. Entered source and image options remain in memory when switching
+Add from Source. Entered source and image options remain in memory when switching
 tabs or reopening the window. Switching tabs preserves an active installation;
 its progress and cancellation remain accessible. Completion stays in management.
 Search and sort settings are separate for
@@ -136,6 +232,17 @@ the visible rows immediately; family search uses the current catalogue and does
 not fetch from Hugging Face again while you type. Search text stays within the
 current browsing session. Sort choices are remembered between app launches.
 The family overview uses compact, full-width rows in a single column.
+
+**Top Models** shows the ten ranked families from the November 14, 2026
+llmbench shared-benchmark calculation, in descending coding-index order. Each
+row shows its original rank, relative index, **Based on N reference models**
+and a separate shared-benchmark count. Benchmarks count once across the family
+when used in a retained comparison; individual model coverage varies. Search
+preserves that order; selecting a row opens the existing family catalog, with
+Back returning to the ranking. The snapshot remains visible before the backend
+is ready; browsing is enabled when that family is available. It does not fetch
+leaderboard data at runtime. See the [calculation and provenance](../../docs/benchmarks/2026-11-14-catalog-coding-ranking.md)
+for model coverage, attribution and the relative index's limitations.
 
 **Installed** shows compact rows with a readable model name, quantization, file size,
 repo link, **Run** or **Stop**, and removal button. Names may wrap. Recognized
@@ -176,8 +283,11 @@ available quantization or precision, such as **4-bit**, **8-bit** and **BF16**.
 When the labels exceed the available width, a dropdown offers the same filters.
 Floating-point badges describe the app's output weight precision: supported
 FP16 and FP32 source checkpoints appear as **BF16** because the app converts
-their weights to BF16. Qwen3.8 Flash Next currently offers the implemented
-quantized import paths.
+their weights to BF16. MLX 4-bit and 8-bit Qwen2 and Mistral exports whose
+parameters are all F16 keep their quantization badge and install with native
+F16 parameters; see
+[Model-family support](../../docs/MODEL_SUPPORT.md).
+Qwen3.8 Flash Next currently offers the implemented quantized import paths.
 Search narrows the selected tab and sorting applies to its matching rows.
 Entering another family starts at **All models**.
 Catalog cards use a compact heading and a row of quantization, parameter count
@@ -188,21 +298,49 @@ row of a multi-variant card, opens its exact Hugging Face repository, including
 the publisher of a quantized export.
 Each row shows its text or text-and-image capability. Downloads automatically
 include image support when available for that artifact. Sort
-the family overview by name A–Z or Z–A; family detail sorts by name in either
-direction or model size ascending or descending. Unknown numeric values stay last
-in either direction. Download and preparation progress
+the family overview by name A–Z or Z–A. Family detail opens on
+**Top rated (coding)**, with **Top rated (general)**, name in either direction
+and model size ascending or descending beside it. Unknown numeric values stay
+last in either direction. **Hide Unsupported**, checked by default, leaves out
+rows Stark cannot download; unchecked, they appear as **Unavailable** with the
+reason. A GPU-server export (AWQ, GPTQ and similar) that declares its original
+model is folded under that model's row instead of listed on its own. Rows
+appear as each candidate is checked, and GGUF-only repositories are skipped
+because the family catalogues do not offer GGUF downloads.
+[Browsing and removing models](../../docs/MODEL_SUPPORT.md#browsing-and-removing-models)
+gives the ordering, hiding and folding rules. Download and preparation progress
 stay in the browser. A completed download appears in **Installed** without
 selecting it; choose it and **Run** when ready. Some image installations stop
 the running model for their required local checks.
 
 Native downloads show **Downloading model files** while fetching the checkpoint,
-then **Preparing model**. Their progress bar measures completed model files against
-the pinned weight total, including reusable files with matching Hugging Face
-completion metadata. It advances as shards finish; partial allocations do not
-advance it. A separate **received over network** count shows live transfer activity
-between shard completions. Network bytes can differ from model bytes due to
+then **Preparing model**. Their progress bar estimates model bytes against the
+pinned weight total, starting with reusable files with matching Hugging Face
+completion metadata and advancing with live network activity. Completed shards
+establish a lower bound; transfer estimates stay below completion until the
+files are ready. Partial allocations alone do not advance it. A separate
+**received over network** count shows live transfer activity between shard completions. Network bytes can differ from model bytes due to
 compression, deduplication and retries. Phases without a reliable total show status
 without an animated indicator. Final weight validation still gates completion.
+
+Model downloads and their initial remote support checks pause when the Mac
+sleeps and resume automatically after wake. Recognized temporary connection
+failures also keep the installation
+active, showing **Download paused. Waiting for a connection…** and retrying with
+delays from 5 seconds up to 1 minute. Retries reuse the same checked source
+revision, completed cached files and resumable partial download data. Wake
+triggers an immediate retry; the connection may still need time to return.
+The network-byte count accumulates bytes transferred across retry attempts,
+while estimated model progress never moves backward.
+**Cancel Installation** or **Stop** also cancels a waiting download. This recovery
+lasts for the current app session; quitting does not automatically restart the
+installation on the next launch. Disk, permission, access, checkpoint and
+conversion failures still require action. Model failure messages include the
+requested model's short name, including when another model remains loaded.
+
+Stopping a catalog download keeps the selected family, discovered models and pagination available for another download. Stopped or failed catalog downloads retain their last reported download progress on the model row for the current app session. Restarting that model’s download hides the row summary while the full progress panel is shown. Progress is matched by repository, pinned revision and artifact mode; it is not a fresh measurement of the download cache.
+
+For converted checkpoints, the download byte count estimates progress from network activity when file reconstruction lags, includes cached files, and caps transfer estimates below completion until reconstruction catches up.
 
 The catalogue starts with known sources, then follows the family's Hugging Face
 architecture search through successive pages. Each request checks up to 30
@@ -298,6 +436,14 @@ the same physical memory; the algorithm never adds their budgets together.
 
 Quality uses bundled, dated whatmodel.sh General Work/Coding rankings for
 11 RAM sizes from 8–512 GB, after Stark’s compatibility and resource checks.
+Alternatives in both Quality and Speed must be within 10 cached task-score
+points of that mode's best admitted model and represent distinct parent models. A distant or unknown
+score does not fill an alternative slot; without cached coverage, the guide
+offers one fallback. Cards show the reference score and its quantization
+limitation. Model offers use installed RAM and the GPU memory budget. Current
+available memory can add a reminder to free memory before starting; changes
+in current memory do not alter the model ranking. That reminder uses the
+artifact's startup working set when it differs from total mapped memory.
 No recommendation click requests the leaderboard. Speed selects the highest
 cached task score above its reference floor within an export-weight budget of
 25% of physical RAM, after the normal resource checks. A missing qualifying
@@ -347,14 +493,15 @@ n-gram table. Full accounting and its bounds are documented in
 [recommendation evidence](../../docs/MODEL_RECOMMENDATIONS.md). GLM and the
 original mixed export use conservative full-weight GPU estimates, which can
 exclude them from the guide on a 128 GiB Mac despite their Advanced load path.
-Recommendations and startup share the current available-memory check; new
+Recommendations use installed physical RAM and the GPU budget. New
 downloads additionally need enough space for
 source and converted copies plus setup reserves. Native preparation downloads
 into the library volume and publishes by rename, so it needs one weight copy
 plus metadata and the preparation helper's 4 GiB reserve. It does not require a
 second weight-sized copy in the Hugging Face cache. Starting rechecks available
-memory after releasing the previous worker. A running model's memory is never
-assumed to be reclaimable during recommendations.
+memory after releasing the previous worker. Actual preparation retains a
+2 GiB available-memory working allowance. Current memory pressure never
+hides or reorders otherwise eligible recommendations.
 
 Fallback ranking first prefers comfortable memory headroom. **Balanced** next
 prefers source task tags when available, then scales its memory penalty to this Mac: its
@@ -483,7 +630,7 @@ Select **Connections** in the menu or playground window. The shared model header
 
 For other applications, select **Connect your own app**, choose an OpenAI-compatible provider in the client and copy the **Base URL**, **API key** and **Model ID** individually. **Advanced settings** contains the saved listening port, API retry and key-regeneration controls, **Copy All as JSON**, **Copy curl Example** and API capability details. Model IDs use the Hugging Face repository ID (`owner/model`) for Hugging Face installs and the model name for local installs. Existing installations expose these names automatically.
 
-The model picker under **Connect your own app** chooses which model ID to inspect and include in the JSON. It does not switch the running model or the model published to managed apps. Choose **Chat** mode and use **Run** in Stark to serve that model. The JSON includes the selected model, the running model, whether they match, running-model limits, endpoints, supported capabilities and usage notes. It includes the API key even when the key is hidden in the window. Treat that JSON as a credential; paste it only into trusted client settings. **Copy curl Example** copies a streaming request that prompts for the key with terminal echo disabled and passes it to curl over standard input. The example contains no key and is also included in the JSON when a model is running.
+The model picker under **Connect your own app** lists installed chat-capable models by readable name and marks the loaded entry. Decision-only models are excluded. It defaults to the loaded model when eligible each time Connections opens and follows changes to the loaded model while open. You can choose another model ID to inspect and include in the JSON. It does not switch the running model or the model published to managed apps. Use **Run** in Stark to serve that model; chat-capable models remain available to apps in either Playground mode. The JSON includes the selected model, the running model, whether they match, running-model limits, endpoints, supported capabilities and usage notes. It includes the API key even when the key is hidden in the window. Treat that JSON as a credential; paste it only into trusted client settings. **Copy curl Example** copies a streaming request that prompts for the key with terminal echo disabled and passes it to curl over standard input. The example contains no key and is also included in the JSON when a model is running.
 
 ### Connect OpenWork without copying a key
 
@@ -515,9 +662,9 @@ Keychain reads and updates run off the main thread. If macOS waits for access ap
 
 The key is for native applications on this Mac; browser-origin requests are rejected and remote devices are unsupported. Copies of the API key and connection JSON carry concealed and transient pasteboard markers so clipboard software that honors them can avoid retaining or syncing credentials. These markers are advisory; receiving applications and clipboard software that ignores them can still read the copied data. Use the explicit **Copy** button for the key; **Show** reveals it without enabling text selection.
 
-The API offers authenticated health, capability, model listing and chat completion endpoints with streaming, temperature, top-p, top-k, min-p, seed and up to four stop strings. Workers with active passing image evidence accept inline PNG/JPEG image data URLs; the status document reports `image_verification`. Omitting an output limit uses the remaining finite context after tokenization, stopping on EOS or another termination condition. Explicit limits are honored; there is no separate 4,096-token ceiling or 512-token default. Context follows a declared finite model maximum, reported as `context_length` in `/v1/models`. Models without a declared finite maximum report `null` and `context_capacity_known: false`; automatic output uses a finite allowance selected from the loaded model’s state requirements and current memory headroom.
+The API offers authenticated health, capability and model listing endpoints. With a chat model loaded, `POST /v1/chat/completions` supports streaming, sampling controls and up to four stop strings. With a native Decider model loaded, `POST /v1/decisions` and its `/v1/systemone` alias accept buffered decision requests with up to 32 questions, up to 255 options per question and one optional inline PNG/JPEG image. Decision requests use the checkpoint's saved temperature. The model listing marks a loaded Decider with `capabilities.decisions: true` and `max_output_tokens: 0`. Managed OpenWork and OpenCode Desktop capabilities remain restricted to chat routes; decision calls use the API master key. Chat models accepting images require passing image evidence, and the status document reports `image_verification`. Omitting a chat output limit uses the remaining finite context after tokenization, stopping on EOS or another termination condition. Explicit limits are honored; there is no separate 4,096-token ceiling or 512-token default. Context follows a declared finite model maximum, reported as `context_length` in `/v1/models`. Models without a declared finite maximum report `null` and `context_capacity_known: false`; automatic output uses a finite allowance selected from the loaded model’s state requirements and current memory headroom.
 
-The shared resource budget automatically selects logical content admission from available RAM at startup with a 16 MiB floor and no fixed content ceiling. Encoded text JSON permits six times the content budget plus 2 MiB for framing. Image requests have 6 MiB of additional encoded-body allowance; compressed images remain limited to 4 MiB. Tool results use the aggregate content budget without a separate 256 KiB result cap. Normal app use requires no budget configuration. A developer can override the process-start budget with `STARK_REQUEST_BUDGET_MIB` for controlled runtime testing; the [budget contract](../../docs/WORKER_PROTOCOLS.md#resource-budget) describes that override and the framing, pending-body and sandbox allocation limits. Available memory, deadlines, sandbox protections and actual model context still apply; byte admission does not guarantee every encoding of a full token window or qualify full-window execution. Up to eight requests queue behind the active one for at most 30 seconds. Routes, parameters, error codes and limits are in the [local API contract](../../docs/LOCAL_API.md).
+The shared resource budget automatically selects logical content admission from available RAM at startup with a 16 MiB floor and no fixed content ceiling. Encoded text JSON permits six times the content budget plus 2 MiB for framing. Image requests have 6 MiB of additional encoded-body allowance; compressed images remain limited to 4 MiB. Tool results use the aggregate content budget without a separate 256 KiB result cap. Normal app use requires no budget configuration. A developer can override the process-start budget with `STARK_REQUEST_BUDGET_MIB` for controlled runtime testing; the [budget contract](../../docs/WORKER_PROTOCOLS.md#resource-budget) describes that override and the framing, pending-body and sandbox allocation limits. Available memory, deadlines, sandbox protections and actual model context still apply; byte admission does not guarantee every encoding of a full token window or qualify full-window execution. Chat and Decision requests share one worker queue with up to eight pending requests and a 30-second wait limit. Cancelling an active Decision request closes the native worker; run it again to continue. Routes, parameters, error codes and limits are in the [local API contract](../../docs/LOCAL_API.md).
 
 ## Where the app keeps state
 

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import importlib.util
 import io
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -26,6 +28,121 @@ SPEC.loader.exec_module(distribution)
 
 
 class BundleConstructionTests(unittest.TestCase):
+    def test_pruning_preserves_runtime_modules_and_notices(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            remove = [
+                "include/python3.13/Python.h",
+                "lib/libpython3.13.dylib",
+                "lib/libtcl9.0.dylib",
+                "lib/libtcl9tk9.0.dylib",
+                "lib/tcl9.0/init.tcl",
+                "lib/tk9.0/tk.tcl",
+                "lib/itcl4.3.5/pkgIndex.tcl",
+                "lib/thread3.0.4/pkgIndex.tcl",
+                "lib/python3.13/tkinter/__init__.py",
+                "lib/python3.13/turtle.py",
+                "lib/python3.13/idlelib/__init__.py",
+                "lib/python3.13/lib-dynload/_tkinter.cpython-313-darwin.so",
+            ]
+            keep = [
+                "bin/python3.13",
+                "lib/python3.13/ssl.py",
+                "lib/python3.13/site-packages/numpy/__init__.py",
+                "LICENSE",
+            ]
+            for name in remove + keep:
+                path = runtime / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"synthetic fixture")
+            self.assertTrue(distribution.prune_python_runtime(runtime))
+            self.assertTrue(all(not (runtime / name).exists() for name in remove))
+            self.assertTrue(all((runtime / name).exists() for name in keep))
+            self.assertEqual(distribution.prune_python_runtime(runtime), [])
+
+    def test_pruning_rejects_new_native_dependency_on_removed_library(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            (runtime / "python").write_bytes(b"\xcf\xfa\xed\xfe")
+            for library in ("libpython3.13.dylib", "libtcl9.0.dylib"):
+                with (
+                    patch.object(
+                        distribution,
+                        "run",
+                        return_value=subprocess.CompletedProcess(
+                            [], 0, stdout=("python:\n\t@rpath/" + library).encode()
+                        ),
+                    ),
+                    self.assertRaisesRegex(
+                        distribution.BuildError, "python_dependency_on_removed_library"
+                    ),
+                ):
+                    distribution.verify_python_linkage(runtime, {})
+
+    def test_menu_builder_recipe_imports_and_stages_pi_without_a_private_checkout(self):
+        with tempfile.TemporaryDirectory(prefix="stark-clean-recipe-") as temporary:
+            root = Path(temporary) / "stark"
+            for name in distribution.RECIPE_INPUTS:
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(distribution.ROOT / name, target)
+            resources = root / "apps/menu-bar/Resources"
+            resources.mkdir(parents=True)
+            actual = distribution.ROOT / "apps/menu-bar/Resources"
+            shutil.copy2(
+                actual / "PiClient.lock.json", resources / "PiClient.lock.json"
+            )
+            shutil.copytree(actual / "PiClient", resources / "PiClient")
+            self.assertFalse((root.parent / "stark-agent-clients").exists())
+            command = subprocess.run(
+                [
+                    sys.executable,
+                    "-B",
+                    "-s",
+                    "-E",
+                    str(root / "scripts/build_menubar.py"),
+                    "--help",
+                ],
+                cwd=root,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(command.returncode, 0, "clean_menu_builder_import_failed")
+            script = (
+                "import sys; from pathlib import Path; "
+                "sys.path.insert(0, str(Path('scripts').resolve())); "
+                "from pi_client_resources import install_pi_client; "
+                "output=Path('staged-resources'); output.mkdir(); "
+                "result=install_pi_client(output, source=None); "
+                "assert len(result['files_sha256']) == 8"
+            )
+            staged = subprocess.run(
+                [sys.executable, "-B", "-s", "-E", "-c", script],
+                cwd=root,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(
+                staged.returncode, 0, "clean_menu_builder_pi_staging_failed"
+            )
+
+    def test_pi_resource_stager_is_imported_and_recorded_in_distribution_recipe(self):
+        self.assertIn("scripts/pi_client_resources.py", distribution.RECIPE_INPUTS)
+        self.assertIn("apps/menu-bar", distribution.SOURCE_PATHS)
+        builder_path = Path(__file__).with_name("build_menubar.py")
+        tree = ast.parse(builder_path.read_text(encoding="utf-8"))
+        imports = {
+            (node.module, alias.name)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+        }
+        self.assertIn(("pi_client_resources", "install_pi_client"), imports)
+
     def test_local_archives_require_a_development_suffix_without_tag_lookup(self):
         source = {"revision": "a" * 40, "dirty": True}
         with patch.object(distribution, "run") as command:
@@ -131,6 +248,8 @@ class BundleConstructionTests(unittest.TestCase):
             score_worker.write_bytes(b"fresh release score worker")
             template_worker = bundle / "libexec/stark-template"
             template_worker.write_bytes(b"fresh release template worker")
+            decide_worker = bundle / "libexec/stark-decide"
+            decide_worker.write_bytes(b"fresh release decide worker")
             calls = []
 
             def command_result(command, stage, *_args, **_kwargs):
@@ -145,6 +264,13 @@ class BundleConstructionTests(unittest.TestCase):
                 self.assertEqual(
                     command[command.index("--template-worker") + 1],
                     str(template_worker),
+                )
+                self.assertEqual(
+                    command[command.index("--decide-worker") + 1], str(decide_worker)
+                )
+                self.assertNotEqual(
+                    command[command.index("--decide-worker") + 1],
+                    str(distribution.ROOT / "target/release/stark-decide"),
                 )
                 self.assertNotEqual(
                     command[command.index("--score-worker") + 1],
@@ -578,6 +704,7 @@ class BundleConstructionTests(unittest.TestCase):
                 "LICENSE.qwen38-reference",
                 "LICENSE.omlx-reference",
                 "LICENSE.flint-reference",
+                "LICENSE.ripple-reference",
                 "LICENSE.mlx-reference",
                 "provenance/UPSTREAM.md",
                 "tools/converter/LICENSE.lalamo",
@@ -768,6 +895,7 @@ class BundleConstructionTests(unittest.TestCase):
                 "LICENSE.qwen38-reference",
                 "LICENSE.omlx-reference",
                 "LICENSE.flint-reference",
+                "LICENSE.ripple-reference",
                 "LICENSE.mlx-reference",
             ):
                 self.assertEqual(
@@ -858,6 +986,12 @@ class BundleConstructionTests(unittest.TestCase):
                         environment, allow_dirty=True
                     )
                     self.assertTrue(receipt["dirty"])
+                    self.assertIn(
+                        "scripts/pi_client_resources.py", receipt["recipe_sha256"]
+                    )
+                    self.assertIn(
+                        "scripts/pi_client_resources.py", receipt["files_sha256"]
+                    )
                     self.assertIn("crates/engine/new.rs", receipt["files_sha256"])
                     for source in lily_sources:
                         self.assertEqual(
@@ -884,7 +1018,13 @@ class BundleConstructionTests(unittest.TestCase):
             root = Path(temporary)
             release = root / "target" / "release"
             release.mkdir(parents=True)
-            for name in ("stark-score", "stark-generate", "stark-template"):
+            workers = (
+                "stark-score",
+                "stark-generate",
+                "stark-template",
+                "stark-decide",
+            )
+            for name in workers:
                 (release / name).write_bytes(name.encode())
             bundle = root / "bundle"
             with (
@@ -895,22 +1035,29 @@ class BundleConstructionTests(unittest.TestCase):
             ):
                 distribution.build_native(bundle, "cargo", {})
             calls = [call.args[0] for call in command.call_args_list]
-            self.assertEqual(len(calls), 3)
-            self.assertEqual(calls[0][-2:], ["--features", "optimized"])
-            self.assertNotIn("--features", calls[1])
-            self.assertNotIn("--features", calls[2])
-            self.assertTrue(
-                all("--locked" in call and "+1.98.1" in call for call in calls)
-            )
-            self.assertEqual(verify.call_count, 3)
+            self.assertEqual(len(calls), 4)
+            for name, invocation in zip(workers, calls, strict=True):
+                with self.subTest(worker=name):
+                    expected = [
+                        "cargo",
+                        "+1.98.1",
+                        "build",
+                        "--release",
+                        "--locked",
+                        "-p",
+                        "stark-score" if name == "stark-decide" else name,
+                        "--bin",
+                        name,
+                    ]
+                    if name == "stark-score":
+                        expected.extend(["--features", "optimized"])
+                    self.assertEqual(invocation, expected)
+                    self.assertEqual(
+                        (bundle / "libexec" / name).read_bytes(), name.encode()
+                    )
             self.assertEqual(
-                (bundle / "libexec" / "stark-score").read_bytes(), b"stark-score"
-            )
-            self.assertEqual(
-                (bundle / "libexec" / "stark-generate").read_bytes(), b"stark-generate"
-            )
-            self.assertEqual(
-                (bundle / "libexec" / "stark-template").read_bytes(), b"stark-template"
+                [call.args[0] for call in verify.call_args_list],
+                [release / name for name in workers],
             )
 
     def test_version_cannot_escape_archive_or_install_directory(self):

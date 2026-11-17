@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import sign_distribution as signing
+from pi_client_resources import PiClientResourceError, install_pi_client
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_ID = "com.starkengine.menubar"
@@ -34,6 +35,7 @@ RUNTIME_MANIFEST = Path("share/stark/manifest.json")
 PYTHON = Path("libexec/python/bin/python3.13")
 CONVERTER = Path("libexec/python/lib/python3.13/site-packages/stark_convert")
 OPENWORK_CONNECTOR_LOCK = ROOT / "apps/menu-bar/Resources/OpenWorkConnector.lock.json"
+PI_CLIENT_LOCK = ROOT / "apps/menu-bar/Resources/PiClient.lock.json"
 OPENWORK_CONNECTOR_REPOSITORY = "https://github.com/jshahbazi/stark-openwork"
 OPENWORK_CONNECTOR_FILES = (
     "package.json",
@@ -469,7 +471,10 @@ def copy_runtime_for_application(
 
     shutil.copytree(runtime, embedded, symlinks=False, ignore=ignore)
     (embedded / ".archive-sha256").unlink(missing_ok=True)
-    if excluded:
+    python = embedded / "libexec/python"
+    pruned = signing.distribution.prune_python_runtime(python)
+    signing.distribution.verify_python_linkage(python, signing.environment())
+    if excluded or pruned:
         derived = json.loads(json.dumps(manifest))
         (embedded / RUNTIME_MANIFEST).unlink()
         derived["files_sha256"] = {
@@ -480,6 +485,7 @@ def copy_runtime_for_application(
         derived["application_embedding"] = {
             "parent_manifest_sha256": sha256(runtime / RUNTIME_MANIFEST),
             "excluded_payload": excluded,
+            "pruned_python_payload": pruned,
         }
         (embedded / RUNTIME_MANIFEST).write_text(
             json.dumps(derived, indent=2, sort_keys=True) + "\n"
@@ -1036,6 +1042,11 @@ def build(options: argparse.Namespace) -> Path:
     runtime = options.runtime.expanduser().resolve()
     worker = options.worker.expanduser().resolve()
     score_worker = options.score_worker.expanduser().resolve()
+    decide_worker = (
+        getattr(options, "decide_worker", ROOT / "target/release/stark-decide")
+        .expanduser()
+        .resolve()
+    )
     template_worker = options.template_worker.expanduser().resolve()
     worker_record_path = getattr(options, "worker_build_record", None)
     if worker_record_path is not None:
@@ -1070,6 +1081,16 @@ def build(options: argparse.Namespace) -> Path:
     ):
         raise BuildError("arm64_score_worker_missing")
     verify_worker(score_worker, "score")
+    if (
+        not decide_worker.is_file()
+        or "arm64"
+        not in run(
+            ["/usr/bin/lipo", "-archs", str(decide_worker)],
+            "decide_worker_architecture",
+        ).split()
+    ):
+        raise BuildError("arm64_decide_worker_missing")
+    verify_worker(decide_worker, "decide")
     if (
         not template_worker.is_file()
         or "arm64"
@@ -1113,6 +1134,14 @@ def build(options: argparse.Namespace) -> Path:
             source=getattr(options, "openwork_connector", None),
             allow_development=getattr(options, "allow_development_connector", False),
         )
+        try:
+            pi_client = install_pi_client(
+                resources,
+                source=getattr(options, "pi_client_source", None),
+                lockfile=PI_CLIENT_LOCK,
+            )
+        except PiClientResourceError as error:
+            raise BuildError(str(error)) from None
         for helper in ("update_app.py", "install_app.py"):
             shutil.copy2(ROOT / "scripts" / helper, resources / helper)
         embedded = resources / "runtime"
@@ -1121,10 +1150,14 @@ def build(options: argparse.Namespace) -> Path:
         )
         shutil.copy2(worker, embedded / "libexec/stark-generate")
         shutil.copy2(score_worker, embedded / "libexec/stark-score")
+        shutil.copy2(decide_worker, embedded / "libexec/stark-decide")
         shutil.copy2(template_worker, embedded / "libexec/stark-template")
         native_notices = install_native_notices(embedded, temporary)
         converter_package = install_converter(embedded, temporary)
         desktop_dependencies = install_desktop_dependencies(embedded, temporary)
+        signing.distribution.verify_python_linkage(
+            embedded / "libexec/python", signing.environment()
+        )
         shutil.copy2(artwork, resources / "Stark.jpg")
         shutil.copy2(template, resources / "MenuBarTemplate.png")
         if worker_record_path is not None:
@@ -1163,6 +1196,8 @@ def build(options: argparse.Namespace) -> Path:
         )
         inspection = (
             "import inspect,json; import stark_convert.desktop,stark_convert.chat,stark_convert.decision,jinja2; "
+            "import stark_convert.desktop_decider,stark_convert.decider,stark_convert.decider_install; "
+            "assert callable(stark_convert.desktop_decider.DesktopDeciderWorker); "
             "import stark_convert.desktop_media,stark_convert.media,stark_convert.vision_runtime; "
             "import stark_convert.image_checks,stark_convert.vision_family,stark_convert.model_support,stark_convert.model_inventory,stark_convert.model_catalog,stark_convert.model_removal,stark_convert.guided_models; "
             "assert callable(stark_convert.model_support.support_matrix); "
@@ -1201,6 +1236,7 @@ def build(options: argparse.Namespace) -> Path:
         if (
             "--worker" not in response
             or "--score-worker" not in response
+            or "--decide-worker" not in response
             or "--data-dir" not in response
             or "--attachment-root" not in response
         ):
@@ -1225,6 +1261,7 @@ def build(options: argparse.Namespace) -> Path:
             "overlays_sha256": {
                 "libexec/stark-generate": sha256(embedded / "libexec/stark-generate"),
                 "libexec/stark-score": sha256(embedded / "libexec/stark-score"),
+                "libexec/stark-decide": sha256(embedded / "libexec/stark-decide"),
                 "libexec/stark-template": sha256(embedded / "libexec/stark-template"),
                 **native_notices["files_sha256"],
                 **converter_package["files_sha256"],
@@ -1251,6 +1288,11 @@ def build(options: argparse.Namespace) -> Path:
                 for key, value in openwork_connector.items()
                 if key != "resources_sha256"
             },
+            "pi_client": {
+                key: value
+                for key, value in pi_client.items()
+                if key != "resources_sha256"
+            },
             "resources_sha256": {
                 **{
                     name: sha256(resources / name)
@@ -1263,12 +1305,14 @@ def build(options: argparse.Namespace) -> Path:
                     )
                 },
                 **openwork_connector["resources_sha256"],
+                **pi_client["resources_sha256"],
             },
             "executable_before_signing_sha256": sha256(executable),
             "validation": {
                 "base_runtime_hashes": "passed",
                 "worker_invalid_arguments": "passed",
                 "score_worker_invalid_arguments": "passed",
+                "decide_worker_invalid_arguments": "passed",
                 "current_native_dependency_and_adaptation_notices": "passed",
                 "python_imports": "passed",
                 "converter_progress_api": "passed",
@@ -1279,6 +1323,8 @@ def build(options: argparse.Namespace) -> Path:
                 "openwork_connector_lock": "development_override"
                 if openwork_connector["development_override"]
                 else "passed",
+                "pi_client_resources": "passed",
+                "pi_client_lock": "passed",
                 "model_loaded": False,
             },
             "signature": "local ad-hoc; no Developer ID signature or notarization",
@@ -1348,6 +1394,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Native chat-template evaluator to embed",
     )
     parser.add_argument(
+        "--decide-worker",
+        type=Path,
+        default=ROOT / "target/release/stark-decide",
+        help="Native Decider worker to embed (built separately with default features)",
+    )
+    parser.add_argument(
         "--worker-build-record",
         type=Path,
         help="Optional source-bound build record for a development worker",
@@ -1361,6 +1413,11 @@ def main(argv: list[str] | None = None) -> int:
         "--openwork-connector",
         type=Path,
         help="Local first-party connector source; pinned hashes are verified",
+    )
+    parser.add_argument(
+        "--pi-client-source",
+        type=Path,
+        help="Local first-party Pi client source; the immutable public file hashes are verified",
     )
     parser.add_argument(
         "--allow-development-connector",

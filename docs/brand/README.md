@@ -14,3 +14,5 @@ The visual direction uses warm paper, charcoal and gold. The README uses GitHub-
 | Muted ink | `#63675f` | Secondary copy on paper |
 
 The original upstream images and licensing/provenance assets remain available in their existing locations. The redesign changes the public entry points; it does not replace historical attribution.
+
+The website favicon uses the owner-supplied `stark-crop.jpg`, stored unchanged as `website/public/assets/stark-favicon.jpg`. Its SHA-256 is `7aa525e91bf19b64964219f0473b71fe3d33fc4e63cabd08c56ef8e3f66f0314`.

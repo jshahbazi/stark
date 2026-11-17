@@ -97,7 +97,7 @@ The reply:
 | `metrics` | `state_creation_seconds`, `prefill_seconds`, `readout_seconds`, `score_seconds` (native call plus readout) and `total_seconds` (whole request); the native stages are `0` on a cache hit |
 | `peak_memory_bytes`, `cache` | As in readiness |
 
-Logits are read from the engine as BF16 and widened, then all arithmetic is done in f64. `log_probabilities` normalise over the complete vocabulary; `candidate_probabilities` normalise over the candidates only. The decision rule that consumes these values belongs to the caller.
+Logits are read from the engine in its activation dtype (BF16, or F16 for an admitted F16 dense artifact) and widened, then all arithmetic is done in f64. `log_probabilities` normalise over the complete vocabulary; `candidate_probabilities` normalise over the candidates only. The decision rule that consumes these values belongs to the caller.
 
 ### Reset cache
 

@@ -30,7 +30,7 @@ Everything a user runs is one of: `Stark.app`, the `stark` shell launcher (`scri
 | Path | Contents |
 | --- | --- |
 | `src/engine/` | `Engine` (Metal context, capture manager), `LanguageModel` loading, `language_model/stream/` (generation: prefill, decode loop, sampling, lookahead), `language_model/scoring.rs` (next-token readout), `language_model/state.rs` (per-request state), `classifier_model.rs` (loads classifiers produced by the converter's ModernBERT path; no worker runs one) |
-| `src/engine/hybrid/` | Native GLM, Qwen3.8 and Flint loading, execution and request state; admitted Lily-format and external affine Qwen checkpoints select the in-process mixed-precision adapter |
+| `src/engine/hybrid/` | Native GLM, Qwen3.8, Flint and Ripple loading, execution and request state; admitted Lily-format and external affine Qwen checkpoints select the in-process mixed-precision adapter |
 | `vendor/lily-core/` | Pinned Lily Rust/Metal 4 Qwen core, with server, persistence and diagnostics removed; speculative execution disabled; licenses and patch provenance retained |
 | `src/encodable_block/` | The model graph as encodable blocks: `decoder.rs`, `transformer.rs`, `transformer_layer.rs`, `mixer/attention/`, `mixer/delta_net.rs`, `mixer/mamba2.rs`, `mlp/`, `linear/`, `sampling/`, embeddings and normalisation |
 | `src/backends/metal/` | Metal context, command buffers, buffer allocation and retirement, kernel wrappers under `kernel/` (matmul GEMM and GEMV, attention, GDN, sampling, normalization); `.metal` sources live next to their Rust wrappers |
@@ -41,7 +41,7 @@ Everything a user runs is one of: `Stark.app`, the `stark` shell launcher (`scri
 | `build/` | The build script: scans GPU type definitions, generates Rust bindings for each kernel, and compiles `.metal` sources with Xcode's Metal toolchain into `.metallib` files embedded in the binary (`build/metal/`), or compiles CPU kernels (`build/cpu/`) |
 | `unit/` | The engine unit and benchmark suite; see [Contributing](../CONTRIBUTING.md#engine-tests) |
 
-A generation request creates a `LanguageModelState` sized to the requested context, runs prefill in batches of up to 1,024 tokens, then decodes one token per command buffer with the sampler on the GPU. A scoring request runs the same prefill batching with a flat topology, reads the logits at the final prompt position as BF16 and drops the state. No native state outlives a request in the scorer. The generator drops its state too unless started with `--prefix-cache`. In that case it keeps one in-memory state of the previous text request and rewinds its full-attention KV cache to a 1,024-token chunk boundary of the shared prompt prefix ([prefix reuse](GENERATION.md#prefix-reuse)). Native GLM-5.3 and mixed-precision Qwen3.8 restore recurrent/history snapshots on 1,024- and 4,096-token grids respectively, while retaining completed attention rows in the loaded model. They resume only when the next prompt begins with the whole retained prefix and its scope, context and state-affecting options match.
+A generation request creates a `LanguageModelState` sized to the requested context, runs prefill in batches of up to 1,024 tokens, then decodes one token per command buffer with the sampler on the GPU. A scoring request runs the same prefill batching with a flat topology, reads the logits at the final prompt position in the model's activation dtype (BF16, or F16 for the [native F16 dense profile](MODEL_SUPPORT.md)) and drops the state. No native state outlives a request in the scorer. The generator drops its state too unless started with `--prefix-cache`. In that case it keeps one in-memory state of the previous text request and rewinds its full-attention KV cache to a 1,024-token chunk boundary of the shared prompt prefix ([prefix reuse](GENERATION.md#prefix-reuse)). Native GLM-5.3 and mixed-precision Qwen3.8 restore recurrent/history snapshots on 1,024- and 4,096-token grids respectively, while retaining completed attention rows in the loaded model. They resume only when the next prompt begins with the whole retained prefix and its scope, context and state-affecting options match.
 
 Mixed-precision inference is permitted by [repository policy](../AGENTS.md).
 Activation, accumulation, recurrent-state, cache and weight precision are chosen
@@ -236,6 +236,10 @@ negotiate `images`, `image_attachment_transport: private-file-v1`, and
 `max_image_bytes: 4194304`. `image_progress` reports `preparing` or `generating`;
 these are phases, not measured percentages. Native validation remains
 authoritative. See [native image support](MULTIMODAL_IMPLEMENTATION.md).
+
+### Automatic runtime selection for connected apps
+
+The Playground mode selects its interaction. The backend selects the native worker protocol for each operation: generation for the OpenAI-compatible API, scoring for Playground decisions. Authenticated discovery may prepare generation before returning its live capabilities. Automatic preparation reserves the existing operation slot, closes the previous worker, clears native caches, and fences readiness against Stop/model replacement. It emits `runtime_ready` without changing the Playground selection. A busy decision is preserved and clients receive `429/model_busy`; an unsuccessful load produces `503/runtime_load_failed`. Only one worker is resident. Repeated API generations retain the worker and its existing cache-scope rules.
 
 ## Where validation lives
 

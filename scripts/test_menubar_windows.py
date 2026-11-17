@@ -25,6 +25,11 @@ final class ForbiddenWindowCredentialStorage: APICredentialStorage {
     func replace(_ data: Data) -> OSStatus { fatalError("unexpected_credential_access") }
 }
 
+final class ConnectionModeWindowProbe: NSWindow {
+    var hiddenForBeginner = false
+    override func orderOut(_ sender: Any?) { hiddenForBeginner = true; super.orderOut(sender) }
+}
+
 struct CatalogPickerBoundsProbe: NSViewRepresentable {
     let view: NSView
     func makeNSView(context: Context) -> NSView { view }
@@ -318,9 +323,17 @@ extension EngineController {
         apiKey = apiAvailable ? String(repeating: "a", count: 64) : ""
         apiMessage = apiAvailable ? "Local API is available on this Mac."
             : "The saved API port is occupied. Close the conflicting app or choose another port."
-        supportsTools = nextMode == .chat && !["idle", "error", "loading", "stopping"].contains(nextState)
+        supportsTools = nextMode != nil && !["idle", "error", "loading", "stopping"].contains(nextState)
         apiContextTokens = 32_768
         apiMaxNewTokens = 512
+    }
+
+    func configureDecisionConnectionFixture(metadata: Bool, includeChat: Bool) {
+        configureConnectionFixture(state: "ready", loadedMode: .decision, apiAvailable: true, hasModels: true)
+        models[0] = InstalledModel(id: "window-fixture", name: "Decision fixture", path: "/window-fixture",
+                                   apiID: "fixture/decision-model", artifactMode: metadata ? .decision : .text)
+        if !includeChat { models.removeLast() }
+        decisionModel = !metadata
     }
 
     func switchConnectionFixtureToOtherModel() {
@@ -401,7 +414,7 @@ extension AppDelegate {
         let credentials = APICredentialStore(service: suite, storage: storage)
         let engine = EngineController(apiCredentials: credentials, apiDefaults: defaults,
                                       gpuMemoryBudgetBytes: 8_589_934_592)
-        let delegate = AppDelegate(engine: engine)
+        let delegate = AppDelegate(engine: engine, interface: StarkInterfacePreferences(defaults: defaults))
         // Reopen may arrive before the status item exists. It must stay quiet.
         guard !delegate.applicationShouldHandleReopen(application, hasVisibleWindows: false),
               delegate.promptWindow == nil, delegate.connectionWindow == nil,
@@ -421,6 +434,17 @@ extension AppDelegate {
         }
         prompt.close()
         connection.close()
+        let modeConnection = ConnectionModeWindowProbe(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
+        delegate.connectionWindow = modeConnection
+        delegate.interface.select(.beginner)
+        delegate.interfaceDidChange()
+        guard modeConnection.hiddenForBeginner, !modeConnection.isVisible,
+              delegate.beginnerWindow == nil, delegate.beginnerChatWindow == nil,
+              !delegate.menuPanel.isVisible else { return false }
+        delegate.interface.select(.advanced)
+        delegate.interfaceDidChange()
+        guard !modeConnection.isVisible, delegate.modelsWindow == nil else { return false }
+        modeConnection.close()
         for _ in 0..<20 { engine.exerciseBackgroundWindowUpdates() }
         RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         return !prompt.isVisible && !connection.isVisible && !delegate.menuPanel.isVisible
@@ -447,7 +471,7 @@ extension AppDelegate {
             ("removing", .chat, true, true, true),
             ("stopping", .chat, true, true, false),
             ("error", .chat, false, true, false),
-            ("ready", .decision, true, true, false)
+            ("ready", .decision, true, true, true)
         ]
         for (state, mode, apiAvailable, hasModels, servesChat) in scenarios {
             engine.configureConnectionFixture(state: state, loadedMode: mode,
@@ -485,6 +509,17 @@ extension AppDelegate {
                 guard !window.isVisible, window.contentView?.fittingSize.width == 570,
                       window.contentView?.fittingSize.height == 680 else { return false }
                 window.close()
+            }
+        }
+        for metadata in [false, true] {
+            for includeChat in [false, true] {
+                engine.configureDecisionConnectionFixture(metadata: metadata, includeChat: includeChat)
+                let view = ConnectionDetailsView.windowFixture(engine: engine, otherApps: true,
+                    advanced: false, revealKey: false, inspectedModel: "window-fixture")
+                guard !view.windowFixtureServesChat,
+                      view.windowFixtureExportMatches(servesChat: false, selectedMatches: false),
+                      view.windowFixtureInspectedID == (includeChat
+                          ? "fixture/a-long-saved-model-identifier-for-layout-coverage" : "") else { return false }
             }
         }
         engine.desktopConnections.shutdown()

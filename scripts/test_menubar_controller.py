@@ -213,6 +213,46 @@ extension EngineController {
         }
         let apiFirst = String(repeating: "a", count: 32), apiSecond = String(repeating: "b", count: 32)
         switch scenario {
+        case "system-sleep-wake-commands":
+            let center = NotificationCenter()
+            engine.observeSystemSleep(center: center)
+            engine.observeSystemSleep(center: center) // Re-registration must not duplicate commands.
+            center.post(name: NSWorkspace.willSleepNotification, object: nil)
+            guard command()["command"] as? String == "system_sleep", engine.modelReady else { return false }
+            center.post(name: NSWorkspace.didWakeNotification, object: nil)
+            guard command()["command"] as? String == "system_wake", engine.modelReady else { return false }
+            engine.stopObservingSystemSleep()
+            center.post(name: NSWorkspace.didWakeNotification, object: nil)
+            guard noCommandSent() else { return false }
+            engine.observeSystemSleep(center: center)
+            engine.shutdown()
+            return command()["command"] as? String == "quit" && engine.systemNotificationObservers.isEmpty
+        case "beginner-install-failure-name":
+            _ = prepareBeginnerReport()
+            guard engine.installBeginnerModel(recipeID: "fixture-recipe") else { return false }
+            let install = command()
+            engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Preparation failed."])
+            return engine.beginnerInstallError == "Starting model: Preparation failed." &&
+                engine.beginnerInstallState == "failed" && engine.activeInstallModelName == nil
+        case "model-failure-names":
+            engine.models = [InstalledModel(id: "fixture-model", name: "Qwen3-4B", path: "/private/model", apiID: "fixture")]
+            engine.install(source: "publisher/Qwen3-8B", kind: "huggingface")
+            let install = command()
+            engine.apply(["event": "status", "state": "installing", "message": "Download paused. Waiting for a connection…"])
+            guard engine.activeInstallRequestID == install["support_request_id"] as? String,
+                  engine.activeInstallModelName == "Qwen3 8B", engine.busy else { return false }
+            engine.apply(["event": "error", "request_id": "stale-request", "message": "Stale failure"])
+            guard engine.errorMessage == nil else { return false }
+            engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Download failed."])
+            guard engine.errorMessage == "Qwen3 8B: Download failed.", engine.activeInstallModelName == nil else { return false }
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            engine.apply(["event": "error", "message": "Generation failed."])
+            guard engine.errorMessage == "Qwen3 4B: Generation failed." else { return false }
+            engine.state = "loading"; engine.loadedID = ""; engine.selectedID = "fixture-model"
+            engine.apply(["event": "error", "message": "Loading failed."])
+            guard engine.errorMessage == "Qwen3 4B: Loading failed." else { return false }
+            return engine.modelFailure("Qwen3 4B: Loading failed.", name: "Qwen3 4B") == "Qwen3 4B: Loading failed." &&
+                engine.shortModelName("/private/model/Qwen3-4B") == "Qwen3 4B"
         case "worker-pipe-small-guided-reply":
             let replies = Pipe()
             engine.observeBackendOutput(replies.fileHandleForReading)
@@ -422,7 +462,8 @@ extension EngineController {
             engine.apply(["event": "error", "request_id": id, "message": "Source recipe changed"])
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
             return engine.modelReady && engine.selectedID == "fixture-model" && engine.loadedID == "fixture-model" &&
-                engine.messages.count == 1 && engine.supportsTools && engine.toolParser == "fixture"
+                engine.messages.count == 1 && engine.supportsTools && engine.toolParser == "fixture" &&
+                engine.errorMessage == "New: Source recipe changed"
         case "beginner-invalid-ready-settles-start":
             engine.models = [variant("fixture-model", name: "Current", display: nil), variant("new-model", name: "New", display: nil)]
             _ = prepareBeginnerReport(["new-model"])
@@ -1013,6 +1054,9 @@ extension EngineController {
                   let glm = families.first(where: { $0.id == "glm5_next" }),
                   glm.containers == [".gguf"], glm.sourceFormats == ["UD-Q2_K_XL"],
                   glm.hasAppMode(.text), !glm.hasAppMode(.visionLanguage), !glm.hasAppMode(.decision),
+                  let ripple = families.first(where: { $0.id == "ricursive" }),
+                  ripple.displayName == "Ripple-65B Preview", ripple.sourceFormats == ["Q8_0", "Q4_K_M"],
+                  ripple.hasAppMode(.text), !ripple.hasAppMode(.visionLanguage), !ripple.hasAppMode(.decision),
                   families.first(where: { $0.id == "qwen3_5" })?.modes[.visionLanguage]?.status == .conditional else { return false }
             engine.install(source: "fixture/source", kind: "huggingface", artifactMode: "vision-language")
             let requested = command()
@@ -1047,8 +1091,9 @@ extension EngineController {
             let inventory = ModelsInventory(models: [], loadedID: "missing", registry: nil)
             guard inventory.models.isEmpty, inventory.families == nil,
                   ModelsSheetTab.initial == .installed,
-                  ModelsSheetTab.allCases == [.installed, .download, .installModel],
+                  ModelsSheetTab.allCases == [.installed, .topModels, .download, .installModel],
                   ModelsSheetTab.installed.title(modelCount: 0) == "Installed (0)",
+                  ModelsSheetTab.topModels.title(modelCount: 0) == "Top Models",
                   ModelsSheetTab.download.title(modelCount: 0) == "Model Catalog",
                   ModelsSheetTab.installModel.title(modelCount: 0) == "Add from Source",
                   ModelsSheetTab.installed.emptyTitle == "No models yet",
@@ -1063,8 +1108,13 @@ extension EngineController {
             raw["families"] = Array(families.reversed())
             guard let registry = ModelFamilyRegistry(raw),
                   let rows = ModelsInventory(models: [], loadedID: "", registry: registry).families else { return false }
+            guard TopModelRanking.entries.count == 10,
+                  TopModelRanking.entries.allSatisfy({ entry in rows.contains(where: { $0.id == entry.id }) }),
+                  TopModelRanking.matching("qwen").map(\.rank) == [1, 3, 4, 5],
+                  TopModelRanking.matching("no-such-family").isEmpty,
+                  TopModelRanking.matching("").map(\.rank) == Array(1...10) else { return false }
             return rows.map(\.name) == ["Flint", "Gemma 2", "Gemma 3", "Gemma 3 images", "Gemma 4", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
-                "Mistral", "OLMo 3", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.5 MoE", "Qwen3.8 Flash Next", "SmolLM3"] &&
+                "Mistral", "OLMo 3", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.5 MoE", "Qwen3.8 Flash Next", "Ripple-65B Preview", "SmolLM3"] &&
                 !rows.contains(where: { $0.id == "modernbert" })
         case "models-display-event":
             engine.apply(["event": "models", "models": [
@@ -1083,6 +1133,21 @@ extension EngineController {
             for key in ["family_id", "quantization", "weight_bytes", "source_revision"] { unknown[key] = NSNull() }
             guard let descriptor = InstalledModelDisplay(unknown) else { return false }
             return descriptor.familyID == nil && descriptor.quantization == nil && descriptor.weightBytes == nil && descriptor.sourceRevision == nil
+        case "models-ripple-display-event":
+            var display = modelDisplay("repo:AtomicChat/Ripple-65B-Preview-GGUF")
+            display["group_name"] = "Ripple-65B-Preview-GGUF"
+            display["family_id"] = "ricursive"
+            display["quantization"] = "Q8_0"
+            display["weight_bytes"] = Int64(68_840_113_568)
+            engine.apply(["event": "models", "models": [
+                ["id": "ripple", "name": "Ripple-65B Preview", "path": "/private/ripple", "display": display]
+            ]])
+            guard let model = engine.models.first, model.display?.familyID == "ricursive",
+                  model.display?.quantization == "Q8_0", model.display?.weightBytes == 68_840_113_568 else { return false }
+            let inventory = ModelsInventory(models: engine.models, loadedID: "", registry: nil)
+            return inventory.groups.first?.family == "Ripple-65B Preview" &&
+                inventory.models.first?.detailLabels.first == "Q8_0" &&
+                inventory.models.first?.detailLabels.count == 4 && !engine.supportsImages
         case "models-display-native-families":
             for (familyID, familyName, repository) in [
                 ("olmo3", "OLMo 3", "allenai/Olmo-3-7B-Instruct"),
@@ -2110,6 +2175,36 @@ extension EngineController {
                   !engine.catalogItemIsDownloaded(parsed, artifactMode: .visionLanguage) else { return false }
             engine.apply(["event": "models", "models": [["id": "fixture-model", "name": "Exact saved name", "path": "/private/model", "artifact_mode": "unknown"]]])
             return !engine.catalogItemIsDownloaded(parsed, artifactMode: .text) && engine.loadedID == "fixture-model"
+        case "catalog-retained-download-progress":
+            engine.requestModelCatalog(familyID: "qwen3")
+            let browse = command(); engine.apply(catalogReply(browse))
+            guard let item = engine.catalog?.items.first else { return false }
+            engine.installCatalogItem(id: item.id)
+            let install = command()
+            engine.apply(["event": "progress", "request_id": install["support_request_id"]!,
+                          "phase": "download", "state": "running", "completed_bytes": Int64(40), "total_bytes": Int64(100)])
+            guard engine.retainedCatalogDownloadProgress(for: item) == nil else { return false }
+            engine.stop()
+            let stop = commands().last!
+            guard stop["command"] as? String == "stop", stop["preserve_catalog"] as? Bool == true,
+                  engine.catalog?.items.first?.id == item.id, engine.catalogFamilyID == "qwen3",
+                  engine.catalogRequestID == browse["request_id"] as? String else { return false }
+            guard let retained = engine.retainedCatalogDownloadProgress(for: item),
+                  retained.completedBytes == 40, retained.totalBytes == 100,
+                  retained.state == "cancelled", retained.fraction == 0.4 else { return false }
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            guard !engine.busy, engine.catalog?.status == .ready else { return false }
+            guard engine.retainedCatalogDownloadProgress(for: item)?.completedBytes == 40 else { return false }
+            var changed = catalogItem(); changed["revision"] = String(repeating: "b", count: 40)
+            guard let otherRevision = FamilyModelCatalog.Item(changed),
+                  engine.retainedCatalogDownloadProgress(for: otherRevision) == nil else { return false }
+            engine.installCatalogItem(id: item.id)
+            guard engine.catalogInstallation != nil,
+                  engine.retainedCatalogDownloadProgress(for: item) == nil else { return false }
+            engine.apply(["event": "progress", "request_id": install["support_request_id"]!,
+                          "phase": "download", "state": "running", "completed_bytes": Int64(99), "total_bytes": Int64(100)])
+            engine.stop()
+            return engine.retainedCatalogDownloadProgress(for: item)?.completedBytes == 40
         case "catalog-install-selection":
             var callbacks = 0; engine.onInstalled = { callbacks += 1 }
             engine.requestModelCatalog(familyID: "qwen3")
@@ -2198,6 +2293,43 @@ extension EngineController {
                 cleanup["request_id"] as? String == browse["request_id"] as? String &&
                 engine.catalogInstallation == nil && engine.catalog == nil && callbacks == 0 &&
                 engine.selectedID == "fixture-model" && engine.loadedID == "fixture-model" && engine.modelReady
+        case "catalog-install-retry":
+            engine.requestModelCatalog(familyID: "qwen3")
+            let browse = command(); engine.apply(catalogReply(browse))
+            engine.installCatalogItem(id: "entry")
+            let first = command()
+            guard !engine.canRetryInstallation else { return false }
+            engine.apply(["event": "error", "request_id": first["support_request_id"]!, "message": "Insufficient RAM"])
+            guard engine.canRetryInstallation else { return false }
+            engine.retryInstallation()
+            let retry = command()
+            guard retry["command"] as? String == "install_catalog",
+                  retry["catalog_request_id"] as? String == first["catalog_request_id"] as? String,
+                  retry["entry_id"] as? String == first["entry_id"] as? String,
+                  retry["artifact_mode"] as? String == first["artifact_mode"] as? String,
+                  retry["support_request_id"] as? String != first["support_request_id"] as? String,
+                  !engine.canRetryInstallation, engine.errorMessage == nil else { return false }
+            engine.apply(["event": "error", "request_id": first["support_request_id"]!, "message": "Stale failure"])
+            guard engine.errorMessage == nil else { return false }
+            engine.apply(["event": "error", "request_id": retry["support_request_id"]!, "message": "Insufficient RAM"])
+            guard engine.canRetryInstallation else { return false }
+            engine.cancelModelCatalog()
+            return !engine.canRetryInstallation
+        case "source-install-retry":
+            engine.install(source: "fixture/source", kind: "huggingface", artifactMode: "vision-language")
+            let first = command()
+            engine.apply(["event": "error", "request_id": first["support_request_id"]!, "message": "Insufficient RAM"])
+            guard engine.canRetryInstallation else { return false }
+            engine.retryInstallation()
+            let retry = command()
+            guard retry["source"] as? String == "fixture/source",
+                  retry["kind"] as? String == "huggingface",
+                  retry["artifact_mode"] as? String == "vision-language",
+                  retry["support_request_id"] as? String != first["support_request_id"] as? String,
+                  !engine.canRetryInstallation else { return false }
+            engine.apply(["event": "installed", "support_request_id": retry["support_request_id"]!, "model": ["id": "downloaded"]])
+            engine.apply(["event": "status", "state": "idle", "message": "Model installed"])
+            return !engine.canRetryInstallation && engine.errorMessage == nil
         case "catalog-install-stale-error":
             engine.requestModelCatalog(familyID: "qwen3")
             let browse = command(); engine.apply(catalogReply(browse))
@@ -2208,7 +2340,7 @@ extension EngineController {
             guard engine.catalogInstallation != nil, engine.errorMessage == nil, engine.busy else { return false }
             engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Fixture download failed"])
             guard engine.catalogInstallation == nil, engine.catalogInstallFailed,
-                  engine.catalogInstallMessage == "Fixture download failed", engine.modelReady else { return false }
+                  engine.catalogInstallMessage == "Model 2: Fixture download failed", engine.modelReady else { return false }
             engine.resetInstallProgress(kind: "huggingface")
             return engine.errorMessage == nil && engine.loadedID == "fixture-model"
         case "image-catalog-install-admission-error":
@@ -2244,10 +2376,9 @@ extension EngineController {
             let install = command()
             engine.stop()
             let stoppedCommands = commands()
-            guard stoppedCommands.map({ $0["command"] as! String }) == ["stop", "catalog"],
-                  let refresh = stoppedCommands.last,
-                  refresh["request_id"] as? String != browse["request_id"] as? String,
-                  engine.catalogFamilyID == "qwen3", engine.catalogLoading,
+            guard stoppedCommands.map({ $0["command"] as! String }) == ["stop"],
+                  stoppedCommands.first?["preserve_catalog"] as? Bool == true,
+                  engine.catalogFamilyID == "qwen3", !engine.catalogLoading,
                   engine.catalogInstallation == nil, engine.activeInstallRequestID == nil else { return false }
             engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
             engine.selectedID = "replacement"
@@ -2255,16 +2386,9 @@ extension EngineController {
             engine.apply(["event": "installed", "support_request_id": install["support_request_id"]!, "model": ["id": "stale-model"]])
             engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Stale failure"])
             engine.apply(catalogReply(browse))
-            guard engine.catalog == nil, engine.catalogLoading, engine.errorMessage == nil,
-                  engine.catalogInstallMessage == nil, !engine.catalogInstallFailed else { return false }
-            engine.apply(catalogReply(refresh))
-            guard engine.selectedID == "replacement", engine.loadedID == "replacement", engine.modelReady,
-                  engine.catalog?.status == .ready, engine.catalog?.items.map(\.id) == ["entry"],
-                  !engine.catalogLoading, engine.catalogError == nil else { return false }
-            engine.installCatalogItem(id: "entry")
-            let retry = command()
-            return retry["command"] as? String == "install_catalog" &&
-                retry["catalog_request_id"] as? String == refresh["request_id"] as? String
+            return engine.selectedID == "replacement" && engine.loadedID == "replacement" && engine.modelReady &&
+                engine.catalog?.items.first?.id == "entry" && engine.catalogFamilyID == "qwen3" &&
+                engine.catalogInstallation == nil && engine.errorMessage == nil
         case "model-removal-confirmation":
             let imported = InstalledModel(id: "imported", name: "Exact imported name", path: "/private/imported", apiID: "id",
                                           removal: InstalledModelRemoval(removal("unregister")))
@@ -2310,7 +2434,7 @@ extension EngineController {
             engine.apply(["event": "model_remove_error", "request_id": "old", "model_id": "fixture-model", "message": "Stale error", "stopped_model_id": "fixture-model"])
             guard engine.busy, engine.loadedID == "fixture-model", engine.supportsImages else { return false }
             engine.apply(["event": "model_remove_error", "request_id": request["request_id"]!, "model_id": "fixture-model", "message": "Fixture rollback", "stopped_model_id": "fixture-model"])
-            return !engine.busy && engine.loadedID.isEmpty && !engine.supportsImages && engine.models.count == 1 && engine.removalError == "Fixture rollback"
+            return !engine.busy && engine.loadedID.isEmpty && !engine.supportsImages && engine.models.count == 1 && engine.removalError == "Running: Fixture rollback"
         case "image-model-removal-admission-error":
             engine.models = [InstalledModel(id: "other", name: "Other", path: "/private/other", apiID: "id",
                                             removal: InstalledModelRemoval(removal()))]
@@ -2318,7 +2442,7 @@ extension EngineController {
             let request = command()
             engine.apply(["event": "error", "request_id": request["request_id"]!, "message": "Wait for the current operation."])
             return !engine.busy && engine.modelReady && engine.loadedID == "fixture-model" && engine.supportsImages &&
-                engine.models.count == 1 && engine.removalError == "Wait for the current operation."
+                engine.models.count == 1 && engine.removalError == "Other: Wait for the current operation."
         case "support-registry-invalid":
             var raw = familyRegistry()
             raw["schema_version"] = true
@@ -2432,7 +2556,7 @@ extension EngineController {
             engine.apply(["event": "model_support", "request_id": requested["support_request_id"]!, "report": report])
             engine.apply(["event": "error", "message": failure])
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
-            guard engine.errorMessage == failure, engine.installSupportReport != nil else { return false }
+            guard engine.errorMessage == "Unsupported: " + failure, engine.installSupportReport != nil else { return false }
             engine.resetInstallProgress(kind: "huggingface")
             guard engine.errorMessage == nil, engine.installSupportReport == nil, engine.loadedID == "fixture-model",
                   engine.downloadProgress.state == "waiting" else { return false }
@@ -2460,7 +2584,7 @@ extension EngineController {
             _ = command()
             engine.apply(["event": "error", "message": "Fixture install failure"])
             engine.resetInstallProgress(kind: "local")
-            guard engine.errorMessage == "Fixture install failure", engine.downloadProgress.state == "failed" else { return false }
+            guard engine.errorMessage == "Source: Fixture install failure", engine.downloadProgress.state == "failed" else { return false }
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
             engine.resetInstallProgress(kind: "local")
             return engine.errorMessage == nil && engine.downloadProgress.state == "skipped"
@@ -2775,6 +2899,16 @@ extension EngineController {
             engine.state = "stopping"
             engine.apply(["event": "ready", "mode": "decision", "model_id": "fixture-model"])
             return engine.state == "stopping" && !engine.modelReady
+        case "automatic-runtime-preserves-playground":
+            engine.decisionText = "synthetic input"
+            engine.apply(["event": "status", "state": "loading", "message": "Preparing model"])
+            engine.apply(["event": "runtime_ready", "mode": "chat", "model_id": "fixture-model",
+                          "tools": true, "tool_parser": "fixture", "context_capacity_known": true,
+                          "max_context_tokens": 8192, "api_context_tokens": 8192, "api_max_output_tokens": 1024])
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            return engine.mode == .decision && engine.loadedMode == .decision && engine.modelReady &&
+                engine.decisionText == "synthetic input" && engine.supportsTools && engine.apiContextTokens == 8192 &&
+                engine.apiMaxNewTokens == 1024
         case "wrong-mode-decision":
             engine.mode = .chat
             engine.loadedMode = .chat
@@ -2863,6 +2997,10 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_api_credential_reuse_and_failed_rotation(self):
         self.exercise("api-reuse-rotation-and-connection-events")
 
+    def test_installation_retry_preserves_source_and_fences_catalog_requests(self):
+        self.exercise("source-install-retry")
+        self.exercise("catalog-install-retry")
+
     def test_api_port_persistence_and_conflict_keeps_model_usable(self):
         self.exercise("api-port-settings-and-conflict")
 
@@ -2949,6 +3087,8 @@ class ControllerLifecycleTests(unittest.TestCase):
                         / "apps/menu-bar/Sources/OpenCodeConnectionController.swift"
                     ),
                     str(ROOT / "apps/menu-bar/Sources/DesktopConnections.swift"),
+                    str(ROOT / "apps/menu-bar/Sources/PiConnectionController.swift"),
+                    str(ROOT / "apps/menu-bar/Sources/ConnectionClipboard.swift"),
                     "-o",
                     str(cls.executable),
                 ],
@@ -3001,6 +3141,7 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_ready_requires_requested_model_and_mode(self):
         self.exercise("ready-mode-guard")
+        self.exercise("automatic-runtime-preserves-playground")
 
     def test_chat_mode_ignores_decision_event(self):
         self.exercise("wrong-mode-decision")
@@ -3058,6 +3199,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_model_display_metadata_cannot_change_runtime_capabilities(self):
         self.exercise("models-display-event")
+
+    def test_ripple_inventory_preserves_family_quantization_and_weight_size(self):
+        self.exercise("models-ripple-display-event")
 
     def test_installed_model_display_accepts_olmo3_and_gemma4_families(self):
         self.exercise("models-display-native-families")
@@ -3235,6 +3379,9 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_downloaded_catalog_status_matches_live_ids_and_artifact_mode(self):
         self.exercise("catalog-installed-mode")
 
+    def test_catalog_retains_stopped_download_progress_until_restart(self):
+        self.exercise("catalog-retained-download-progress")
+
     def test_catalog_install_retains_selection_and_browser_after_terminal_status(self):
         self.exercise("catalog-install-selection")
 
@@ -3304,6 +3451,15 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_install_error_cannot_clear_before_active_install_finishes(self):
         self.exercise("install-error-active-guard")
+
+    def test_model_failure_names_follow_the_failed_request(self):
+        self.exercise("model-failure-names")
+
+    def test_guided_install_failure_names_the_requested_model(self):
+        self.exercise("beginner-install-failure-name")
+
+    def test_system_sleep_and_wake_forward_commands_without_changing_model_state(self):
+        self.exercise("system-sleep-wake-commands")
 
     def test_shutdown_clears_registry_and_pending_support_events(self):
         self.exercise("support-shutdown-fence")

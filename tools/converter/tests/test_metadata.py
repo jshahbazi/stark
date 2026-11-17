@@ -130,7 +130,8 @@ def test_unverified_profile_leaves_no_output(
 @pytest.mark.parametrize(
     ("filename", "changes"),
     [
-        ("tokenizer_config.json", {"chat_template": [{"name": "default", "template": "{{ messages }}"}]}),
+        # A named list is admitted only with a `default` entry (test_named_chat_templates.py).
+        ("tokenizer_config.json", {"chat_template": [{"name": "tool_use", "template": "{{ messages }}"}]}),
         ("tokenizer_config.json", {"bos_token": {"content": "[BOS]"}}),
     ],
 )

@@ -134,7 +134,7 @@ METAL_FUNC ElementT apply_rope(
 // head coordinates. Query lanes return before loading, RoPE or storing. K/V
 // expressions and the original exact dispatch extents are retained.
 template <typename ElementT, typename RopeT>
-VARIANTS(ElementT, bfloat)
+VARIANTS(ElementT, half, bfloat)
 VARIANTS(RopeT, float)
 PUBLIC KERNEL(AttentionPrepareKVOnly) (
   const device ElementT* qkvg,
@@ -188,7 +188,7 @@ PUBLIC KERNEL(AttentionPrepareKVOnly) (
 }
 
 template <typename ElementT, typename RopeT>
-VARIANTS(ElementT, bfloat)
+VARIANTS(ElementT, half, bfloat)
 VARIANTS(RopeT, float)
 PUBLIC KERNEL(AttentionPrepare) (
   const device ElementT* qkvg, // [token, input_row_stride], with an optional trailing gate

@@ -48,8 +48,8 @@ struct BeginnerModelReport {
 
         var recommendation: String {
             switch name {
-            case "whatmodel.sh · General Work": return "Recommended using the cached General Work leaderboard."
-            case "whatmodel.sh · Coding": return "Recommended using the cached Coding leaderboard."
+            case "whatmodel.sh · General Work": return "Cached General Work score: \(score). Parent-model reference; this quantization was not evaluated."
+            case "whatmodel.sh · Coding": return "Cached Coding score: \(score). Parent-model reference; this quantization was not evaluated."
             case "LiveCodeBench": return "Recommended for coding using published benchmark results."
             case "BFCL": return "Recommended using published tool-use results."
             default: return "Recommended using published instruction-following results."
@@ -68,6 +68,7 @@ struct BeginnerModelReport {
         let installedBytes: Int64
         let setupBytes: Int64
         let runtimeBytes: Int64
+        let startupBytes: Int64
         let gpuRuntimeBytes: Int64
         let contextTokens: Int
         let installedIDs: [String]
@@ -109,6 +110,10 @@ struct BeginnerModelReport {
                 setupBytes = remaining
             } else { setupBytes = setup }
             runtimeBytes = runtime; contextTokens = Int(context)
+            if let value = raw["startup_memory_bytes_estimate"] {
+                guard let startup = BeginnerMetadata.integer(value), startup > 0, startup <= runtime else { return nil }
+                startupBytes = startup
+            } else { startupBytes = runtime }
             if let value = raw["gpu_memory_bytes_estimate"] {
                 guard let gpu = BeginnerMetadata.integer(value), gpu > 0, gpu <= runtime else { return nil }
                 gpuRuntimeBytes = gpu
@@ -136,7 +141,7 @@ struct BeginnerModelReport {
             if prefersSpeed { summary = "Selected within a speed budget for your Mac using published model scores. Actual speed varies." }
             else if let reference = benchmarkReference, reference.usedForRanking { summary = reference.recommendation }
             if benchmarkReference == nil { summary += " No benchmark result is recorded." }
-            if let availableMemoryBytes, availableMemoryBytes < runtimeBytes {
+            if let availableMemoryBytes, availableMemoryBytes < startupBytes {
                 summary += " Free up memory before starting."
             }
             return summary

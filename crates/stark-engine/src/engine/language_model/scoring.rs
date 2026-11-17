@@ -2,7 +2,7 @@
 use std::time::Instant;
 
 use derive_more::Debug;
-use half::bf16;
+use half::{bf16, f16};
 use thiserror::Error;
 
 use crate::{
@@ -10,6 +10,7 @@ use crate::{
         Backend, BufferCpuAccessible, BufferRef, CommandBuffer, CommandBufferEncoding, CommandBufferExecutable,
         CommandBufferPending, Context, gpu_types::trie::TrieNode as GpuTrieNode,
     },
+    data_type::DataType,
     encodable_block::{batch_topology::BatchTopology, decoder::DecoderError},
     engine::language_model::{LanguageModel, state::LanguageModelCreateEmptyStateError},
 };
@@ -105,7 +106,8 @@ where
     /// - `context_tokens` sizes the per-layer KV capacity of the temporary
     ///   state; nothing is cached between calls and the state is dropped on
     ///   every exit path, including errors.
-    /// - Logits are read from the engine's BF16 readout and widened to `f32`;
+    /// - Logits are read from the engine's BF16 (or admitted F16) readout and
+    ///   widened to `f32`;
     ///   `InvalidOutput` covers both a missing readout and non-finite values.
     /// - The timing fields are wall-clock seconds; `readout_seconds` includes
     ///   the full-vocabulary conversion.
@@ -199,8 +201,13 @@ where
         let prefill_seconds = prefill_started.elapsed().as_secs_f64();
         let readout_started = Instant::now();
         let final_logits = final_logits.ok_or(LanguageModelScoreError::InvalidOutput)?;
-        // Engine::load_language_model fixes internal readout data type to BF16.
-        let logits: Vec<f32> = (&final_logits).as_slice::<bf16>().iter().map(|value| value.to_f32()).collect();
+        // The readout uses the decoder's activation dtype: BF16 for every
+        // established artifact, F16 only for the admitted F16 dense profile.
+        let logits: Vec<f32> = match self.decoder.data_type() {
+            DataType::BF16 => (&final_logits).as_slice::<bf16>().iter().map(|value| value.to_f32()).collect(),
+            DataType::F16 => (&final_logits).as_slice::<f16>().iter().map(|value| value.to_f32()).collect(),
+            _ => return Err(LanguageModelScoreError::InvalidOutput),
+        };
         if logits.len() != vocab_size || logits.iter().any(|value| !value.is_finite()) {
             return Err(LanguageModelScoreError::InvalidOutput);
         }

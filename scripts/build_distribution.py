@@ -34,6 +34,7 @@ RUST_VERSION = "1.98.1"
 RECIPE_INPUTS = (
     "scripts/build_distribution.py",
     "scripts/build_menubar.py",
+    "scripts/pi_client_resources.py",
     "scripts/sign_distribution.py",
     "scripts/install_app.py",
     "scripts/update_app.py",
@@ -285,6 +286,7 @@ def build_native(bundle: Path, cargo: str, environment: dict[str, str]) -> None:
         ("stark-score", ["--features", "optimized"]),
         ("stark-generate", []),
         ("stark-template", []),
+        ("stark-decide", []),
     ):
         print(f"Building {name} with locked dependencies", flush=True)
         # Keep these invocations separate: Cargo feature unification must not
@@ -297,7 +299,7 @@ def build_native(bundle: Path, cargo: str, environment: dict[str, str]) -> None:
                 "--release",
                 "--locked",
                 "-p",
-                name,
+                "stark-score" if name == "stark-decide" else name,
                 "--bin",
                 name,
                 *features,
@@ -366,6 +368,59 @@ def normalize_python_configuration(runtime: Path, managed_prefix: Path) -> None:
         + ", _stark_sys.base_prefix)\n"
         + "del _stark_key, _stark_value, _stark_sys\n"
     )
+
+
+def prune_python_runtime(runtime: Path) -> list[str]:
+    """Remove development and Tk GUI payload from the pinned private runtime."""
+    patterns = (
+        "include",
+        "lib/python3.13/idlelib",
+        "lib/python3.13/tkinter",
+        "lib/python3.13/turtledemo",
+        "lib/python3.13/turtle.py",
+        "lib/python3.13/lib-dynload/_tkinter.*",
+        "lib/libtcl*.dylib",
+        "lib/libpython*.dylib",
+        "lib/tcl*",
+        "lib/tk*",
+        "lib/itcl*",
+        "lib/thread*",
+    )
+    removed = []
+    for pattern in patterns:
+        for path in sorted(runtime.glob(pattern)):
+            removed.append(path.relative_to(runtime).as_posix())
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+    return removed
+
+
+def verify_python_linkage(runtime: Path, environment: dict[str, str]) -> None:
+    """Fail closed if a runtime change adds a dependency on a removed library."""
+    for path in runtime.rglob("*"):
+        if not path.is_file():
+            continue
+        with path.open("rb") as stream:
+            magic = stream.read(4)
+        if magic not in {
+            b"\xcf\xfa\xed\xfe",
+            b"\xfe\xed\xfa\xcf",
+            b"\xca\xfe\xba\xbe",
+            b"\xca\xfe\xba\xbf",
+        }:
+            continue
+        dependencies = run(
+            ["/usr/bin/otool", "-L", str(path)], "python_linkage", environment
+        ).stdout.decode()
+        if any(
+            Path(line.strip().split(" (", 1)[0]).name.startswith(
+                ("libpython", "libtcl", "libtk")
+            )
+            for line in dependencies.splitlines()[1:]
+        ):
+            raise BuildError("python_dependency_on_removed_library")
 
 
 def build_python(
@@ -504,6 +559,8 @@ def build_python(
             shutil.rmtree(entry)
     for entry in runtime.rglob("*.pyc"):
         entry.unlink()
+    prune_python_runtime(runtime)
+    verify_python_linkage(runtime, environment)
     shutil.copyfile(
         requirements, bundle / "share" / "stark" / "converter-requirements.txt"
     )
@@ -565,6 +622,7 @@ def dependency_licenses(bundle: Path, cargo: str, environment: dict[str, str]) -
         "LICENSE.qwen38-reference",
         "LICENSE.omlx-reference",
         "LICENSE.flint-reference",
+        "LICENSE.ripple-reference",
         "LICENSE.mlx-reference",
         "provenance/UPSTREAM.md",
         "tools/converter/LICENSE.lalamo",
@@ -850,7 +908,7 @@ def verify_relocation(bundle: Path, environment: dict[str, str]) -> None:
             or help_reply.stderr
         ):
             raise BuildError("relocated_launcher_converter_help_identity")
-        for name in ("stark-score", "stark-generate", "stark-template"):
+        for name in ("stark-score", "stark-generate", "stark-template", "stark-decide"):
             verify_native(relocated / "libexec" / name, environment)
         if (relocated / "app" / "Stark.app").exists():
             verify_application(relocated / "app" / "Stark.app", environment)
@@ -928,6 +986,8 @@ def build_application(
             str(bundle / "libexec/stark-generate"),
             "--score-worker",
             str(bundle / "libexec/stark-score"),
+            "--decide-worker",
+            str(bundle / "libexec/stark-decide"),
             "--template-worker",
             str(bundle / "libexec/stark-template"),
             "--output",

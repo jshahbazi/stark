@@ -27,10 +27,20 @@ Unqualified native plans include a 3 GiB loading/workspace allowance and round s
 and GPU estimates up to GiB. These are conservative estimates, not observed
 peak RSS or a guarantee that the loader will admit a machine under memory
 pressure. The guide retains the 2 GiB physical reserve and 85% Metal budget
-check. Recommendations and startup use the same `execution_allowed` predicate:
-current available memory must cover the effective system plan. Startup rereads
-memory and revalidates the actual artifact after releasing its previous worker.
+check. Recommendations use `recommendation_allowed`: installed physical RAM,
+GPU budget and setup storage determine which models the Mac can support.
+Current available memory does not filter or reorder offers, including when
+the available-memory probe is missing. The card can advise freeing memory
+before starting. Actual preparation retains a separate 2 GiB current-memory
+working allowance for new installs. Startup uses `execution_allowed`, rereads
+available memory and revalidates the actual artifact after releasing its
+previous worker; available memory must then cover the effective startup plan.
 An installed copy waives download space, never current execution headroom.
+The [installed-RAM policy check](archive/runs/2026-11-13-guided-capacity-recommendations.md)
+records stable native offers across different available-memory observations.
+The [corner-case review](archive/runs/2026-11-13-guided-recommendation-review.md)
+records the effective startup reminder, shared alternative policy and
+discovery ordering/protocol regressions.
 
 For the 128 GiB / 107.52 GB Metal-budget envelope, the current 32K-context
 estimates are 29 GiB for Flint, 87 GiB system for qualified Lily and 88 GiB for
@@ -45,7 +55,7 @@ are not freshly rehashed. Fresh recommendations obtain the same resident plan
 from a SHA-256 binding to the complete pinned native preparation profile,
 including source revisions, geometry, precision metadata, templates and file
 inventory. They do not require an installed copy. A changed or unknown profile
-retains conservative planning. Disk, current RAM and GPU checks still apply.
+retains conservative planning. Disk, installed RAM and GPU capacity checks still apply.
 An existing copy is independently revalidated; if it fails exact artifact
 checks, the report and startup both use its conservative plan. A source-only
 estimate never authorizes an unverified installed copy. At <=32K context and
@@ -82,16 +92,46 @@ The recommendation path never requests whatmodel.sh. Hardware checks and support
 
 ### Selection policy
 
-1. Exclude candidates without a complete supported conversion/native route, usable chat template, tool parser, 32K context and adequate current RAM, GPU budget and disk. Leaderboard rank never grants compatibility.
+1. Exclude candidates without a complete supported conversion/native route, usable chat template, tool parser, 32K context and adequate installed RAM, GPU budget and disk. Current available memory affects startup readiness, never recommendation eligibility or rank. Leaderboard rank never grants compatibility.
 2. Select the largest cached RAM bucket no greater than this Mac's physical RAM in GiB. Below the smallest bucket, cached coverage is unavailable; above the largest, use the largest bucket with actual resource checks.
 3. Match exact parent repositories from the pinned source catalogue. Reviewed export-to-parent bindings also require the exact export repository and revision. No fuzzy names, quantization labels or mutable commands establish identity. Ambiguous parents have no automatic score. A changed export revision requires another review.
-4. **Quality** puts covered candidates first by descending task score. Equal scores retain deterministic fallback order. Missing scores stay unknown and follow scored candidates. Signed relative scores are not percentages or native artifact accuracy measurements. Parent scores do not establish export equivalence.
-5. **Speed** admits only candidates with a cached parent-model task score of at least **40 for General Work** or **35 for Coding**, and exact export weights no larger than **25% of physical RAM**. All normal runtime, GPU, free-memory and disk checks still apply. Within that pool, select descending task score; ties prefer a smaller runtime plan, then smaller weight payload, then deterministic fallback order. The increasing payload allowance lets larger Macs select stronger models without always choosing the smallest eligible checkpoint. Unknown scores, candidates below the floor and exports over the budget are excluded from all Speed alternatives. These are editorial product thresholds on separate relative score scales; review them when refreshing the leaderboard. They do not certify quantized task quality or measured response speed. Source speeds retain their provenance but do not rank these candidates.
-6. Offer one primary recommendation with up to two alternatives behind a disclosure. Historical benchmark results remain reference information when the cached leaderboard determines ordering.
+4. **Quality** selects descending task score after admission. Alternatives must have a cached score within **10 points** of the best admitted model on the same task scale, and each offer must represent a distinct parent model. Equal scores retain deterministic fallback order. Unknown scores never fill alternatives behind a scored choice. With no cached scores, offer one explicitly unknown benchmark/resource fallback. The 10-point distance is an editorial product threshold, reviewed with snapshot refreshes; it does not establish comparable measured artifact quality. Signed relative scores are not percentages or native artifact accuracy measurements. Parent scores do not establish export equivalence.
+5. **Speed** admits only candidates with a cached parent-model task score of at least **40 for General Work** or **35 for Coding**, and exact export weights no larger than **25% of physical RAM**. Installed RAM, GPU and disk checks still apply. Within that pool, select descending task score; ties prefer a smaller runtime plan, then smaller weight payload, then deterministic fallback order. Alternatives use the same **10-point distance** and **distinct-parent** rule as Quality, measured against the best candidate inside Speed's eligible pool. The increasing payload allowance lets larger Macs select stronger models without always choosing the smallest eligible checkpoint. Unknown scores, candidates below the floor and exports over the budget are excluded from all Speed alternatives. These are editorial product thresholds on separate relative score scales; review them when refreshing the leaderboard. They do not certify quantized task quality or measured response speed. Source speeds retain their provenance but do not rank these candidates.
+6. Offer one primary recommendation with up to two alternatives behind a disclosure; fewer are shown when the policy admits fewer. Each cached Quality offer shows its score and the parent-model/unevaluated-quantization limitation directly on its card. Historical benchmark results remain reference information when the cached leaderboard determines ordering.
 
 The site's memory/variant estimates use an 8K conversation allowance. Stark's 32K model-specific plan remains authoritative, including actual export weights and state. The captured site's ranking applies the same parent score across quantized variants; it does not benchmark each quantization separately. Speed's budget uses actual export weight bytes, so a quantized export may fit while its BF16 counterpart does not. Its parent score does not establish that the export preserves quality. The guide labels this limitation, and structured evidence explicitly marks quantization quality as unevaluated by this ranking. No generic bit-width quality penalty is invented. Site quantizations remain provenance and are not automatically installed. Snapshot inclusion adds no backend, conversion route or native qualification.
 
 If the snapshot is unavailable, malformed or covers none of the eligible models, **Quality** retains its offline benchmark/resource fallback. **Speed** reports no qualifying recommendation, with a direct **Choose Quality** action and Advanced browsing; it never waives the score floor or weight budget. `recommendation_benchmarks.json` retains its source-bound IFEval, BFCL and LiveCodeBench records separately. General Work's Quality fallback uses instruction-following references; Coding uses the published coding cohort. Former task/preference API values retain their legacy behavior for older clients. New guides send `general`/`coding` and `quality`/`speed`.
+
+### Guided discovery coverage
+
+Guided discovery checks a bounded metadata window, not every repository. It
+prioritizes the selected task's cached sources before inspecting that window;
+popularity alone must not spend the candidate budget before scored models are
+checked. Registered seeds join the same priority ordering, and overlapping
+Hub queries contribute each repository once. Pinned seeds retain their source
+revision and are not screened using metadata from a different head revision.
+Only downloadable rows cross the subprocess boundary. Its row limit and
+timeout derive from the supported family count, page size, three lookup
+workers and per-family deadline; unavailable pages cannot exhaust the result
+budget. The serialized response retains its 2 MiB bound.
+Search priority does not grant a parent score or waive compatibility,
+template, parser, context or resource checks. In particular, an unreviewed
+quantized export may be discoverable without an admissible guide score.
+
+Backend support also does not establish a guided memory plan. Gemma 4 currently
+remains outside guided recommendations because its route-specific memory
+layout is not covered by the guide planner. Its Advanced conversion support
+does not authorize adding it to the dense planning allowlist. GLM Flash and
+Flint currently have no matching cached Coding parent score in the 128 GiB
+snapshot, so neither can displace a scored Quality choice on that evidence.
+The built-in Qwen3.6-27B catalogue record also has no adapter and retains
+`conversion: planned` / `qualification: pending`; the catalogue excludes that
+record before guided ranking. Search prioritization does not promote that
+checkpoint or replace its missing onboarding evidence.
+The [November 13 investigation](archive/runs/2026-11-13-guided-alternatives.md)
+records the screenshot's score gap, live aggregate memory checks, partial
+metadata scans and the separate qualification/planning blockers.
 
 The [RAM-scaled Speed check](archive/runs/2026-11-11-speed-recommendation-policy.md) records the current primary choices, exact source identities, hardware assumptions and model-free regression results.
 

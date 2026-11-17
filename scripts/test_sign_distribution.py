@@ -34,8 +34,8 @@ NATIVE_NAMES = (
     "libexec/stark-score",
     "libexec/stark-generate",
     "libexec/stark-template",
+    "libexec/stark-decide",
     "libexec/python/bin/python3.13",
-    "libexec/python/lib/libpython3.13.dylib",
     "libexec/python/lib/python3.13/site-packages/example/native.so",
 )
 
@@ -659,6 +659,42 @@ class SigningTests(unittest.TestCase):
                 identifiers.append(arguments[arguments.index("--identifier") + 1])
             self.assertEqual(len(set(identifiers)), len(NATIVE_NAMES))
 
+    def test_legacy_shared_python_library_is_still_signed_when_present(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture(root)
+            bundle = root / "source/stark"
+            name = "libexec/python/lib/libpython3.13.dylib"
+            library = bundle / name
+            library.write_bytes(
+                b"\xcf\xfa\xed\xfe" + bytes(8) + (6).to_bytes(4, "little")
+            )
+            with (
+                patch.object(signing, "run") as command,
+                patch.object(signing, "verify_signature") as verify,
+            ):
+                paths = signing.sign_bundle(bundle, IDENTITY, None, {})
+            self.assertEqual(set(paths), {*NATIVE_NAMES, name})
+            self.assertEqual(command.call_count, len(NATIVE_NAMES) + 1)
+            self.assertEqual(verify.call_count, len(NATIVE_NAMES) + 1)
+
+    def test_required_workers_and_interpreter_must_be_native_images(self):
+        for name in (
+            "libexec/stark-score",
+            "libexec/stark-generate",
+            "libexec/stark-template",
+            "libexec/python/bin/python3.13",
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                fixture(root)
+                bundle = root / "source/stark"
+                (bundle / name).write_text("not a native runtime image\n")
+                with self.assertRaisesRegex(
+                    signing.SigningError, "required_mach_o_missing"
+                ):
+                    signing.macho_files(bundle)
+
     def test_non_loadable_objects_are_preserved_without_executable_signatures(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "python.o"
@@ -883,7 +919,7 @@ class SigningTests(unittest.TestCase):
                     for call in verify.call_args_list
                     if call.kwargs.get("notarized")
                 ]
-                self.assertEqual(len(online), 4)
+                self.assertEqual(len(online), 5)
 
 
 if __name__ == "__main__":

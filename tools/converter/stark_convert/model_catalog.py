@@ -22,8 +22,14 @@ from .model_support import (
 from .registry import get_model, models
 from .sources import huggingface_repository
 from .streaming import ConversionError, UnsupportedConversion
+from .template_compat import NamedTemplateError, is_named_template_list, select_named_chat_template
 from .vision_contract import REPO as EXACT_VISION_REPO
 from .vision_contract import REVISION as EXACT_VISION_REVISION
+
+_DECIDER_FAMILY_ID = "decider-flash-v1.3"
+_DECIDER_REPO = "perplexity-ai/pplx-decider-flash-v1.3"
+_DECIDER_REVISION = "d06fb3f2d97e0a52325a0d463c450cf0338f44fe"
+_DECIDER_WEIGHT_BYTES = 9_079_921_808
 
 MAX_ITEMS = 30
 MAX_CANDIDATES = MAX_ITEMS
@@ -97,6 +103,7 @@ _SEARCH_TERMS = {
 def _repository_search(api, definition, remaining, expected=0):
     """Interleave aliases and name searches so large tags cannot starve others.
 
+    Each repository contributes one listing position across overlapping queries.
     ``expected`` is how many listing positions the caller plans to walk. Each
     listing is requested at about that size and grows only if more are needed,
     because a listing reply carries every repository's file list.
@@ -123,6 +130,7 @@ def _repository_search(api, definition, remaining, expected=0):
             sent, size = count, size * 2
 
     streams = [iter(results(query)) for query in queries]
+    seen = set()
     while streams:
         active = []
         for stream in streams:
@@ -133,7 +141,8 @@ def _repository_search(api, definition, remaining, expected=0):
                 continue
             active.append(stream)
             repo = _repo(_field(item, "id"))
-            if repo is not None:
+            if repo is not None and repo.casefold() not in seen:
+                seen.add(repo.casefold())
                 # The listing's head revision lets a cached verdict answer
                 # without any per-repository request.
                 revision = _field(item, "sha")
@@ -609,6 +618,32 @@ def _positive_int(value):
 
 
 def _source_chat_template(entry, repo, names, read):
+    """Return (template, blocker, from_named_list) for the template conversion would use.
+
+    A Hugging Face named list contributes its `default` entry, exactly as the
+    converter selects it; any other list or mapping stays unavailable.
+    """
+    template, blocker = _source_chat_template_value(entry, repo, names, read)
+    if blocker is not None:
+        return None, blocker, False
+    named = is_named_template_list(template)
+    if named:
+        try:
+            template, _selection = select_named_chat_template(template)
+        except NamedTemplateError:
+            return None, "chat_template_invalid", False
+    if not isinstance(template, str):
+        return None, "chat_template_missing", False
+    template = _GENERATION_BLOCK_TAG.sub("", template)
+    try:
+        if not template or len(template.encode("utf-8")) > _MAX_CHAT_TEMPLATE_BYTES:
+            return None, "chat_template_invalid", False
+    except UnicodeEncodeError:
+        return None, "chat_template_invalid", False
+    return template, None, named
+
+
+def _source_chat_template_value(entry, repo, names, read):
     """Read only same-revision metadata used by Stark's chat conversion path."""
     files = entry.get("files", {}) if isinstance(entry, dict) else {}
     tokenizer_spec = files.get("tokenizer_config") or {"repo": repo, "filename": "tokenizer_config.json"}
@@ -655,18 +690,12 @@ def _source_chat_template(entry, repo, names, read):
             template = _inline_text("chat_template", inline_id)
         except Exception:
             return None, "chat_template_inline_source_unavailable"
-    if not isinstance(template, str):
-        return None, "chat_template_missing"
-    template = _GENERATION_BLOCK_TAG.sub("", template)
-    try:
-        if not template or len(template.encode("utf-8")) > _MAX_CHAT_TEMPLATE_BYTES:
-            return None, "chat_template_invalid"
-    except UnicodeEncodeError:
-        return None, "chat_template_invalid"
     return template, None
 
 
-def _planning_metadata(family, config, info, names, sizes, *, chat_template=None, chat_template_blocker=None):
+def _planning_metadata(
+    family, config, info, names, sizes, *, chat_template=None, chat_template_blocker=None, chat_template_named=False
+):
     """Return bounded runtime-planning inputs without implying measured fit."""
     text = config.get("text_config", config)
     if not isinstance(text, dict):
@@ -700,7 +729,12 @@ def _planning_metadata(family, config, info, names, sizes, *, chat_template=None
 
     native_template = normalize_chat_template(chat_template) if isinstance(chat_template, str) else None
     chat_template_available = template_program_sha256(native_template) is not None
-    tool_parser = tool_parser_for({"prompt_template": native_template}) if chat_template_available else None
+    # A named list's tool entries are unreviewed, so its rows never advertise tools.
+    tool_parser = (
+        tool_parser_for({"prompt_template": native_template})
+        if chat_template_available and not chat_template_named
+        else None
+    )
     supports_tools = tool_parser is not None
     if not chat_template_available:
         blockers.append(chat_template_blocker or "chat_template_unavailable")
@@ -888,9 +922,12 @@ def _catalog_image_metadata(family, config, repo, revision, names, read):
             from .gemma3_contract import normalize_processor
 
             normalize_processor(_json(read("preprocessor_config.json", 65536)))
-            template, _reason = _source_chat_template(None, repo, names, read)
+            template, _reason, named = _source_chat_template(None, repo, names, read)
+            # Image artifacts pin their own reviewed template; named lists stay refused.
             return (
-                isinstance(template, str) and hashlib.sha256(template.encode()).hexdigest() == _GEMMA3_IMAGE_TEMPLATE
+                not named
+                and isinstance(template, str)
+                and hashlib.sha256(template.encode()).hexdigest() == _GEMMA3_IMAGE_TEMPLATE
             )
         if family == "gemma4_text":
             from .adapters.gemma4_vision import PROFILES
@@ -936,19 +973,22 @@ def family_catalog(
     cache_dir=None,
     on_item=None,
     physical_memory=None,
+    ranking_task=None,
 ):
     """Return candidate downloads; actual installation must repeat pinned preflight.
 
     ``cache_dir`` reuses verdicts for unchanged revisions. ``on_item`` receives
     each accepted row as soon as it is checked, before the sorted report.
     Browsing rows carry a parent-model reference score when one is known, and
-    sources with one are inspected first; ``physical_memory`` (this machine's
+    sources with one are inspected first. Guided planning can also set
+    ``ranking_task`` to prioritize its bounded listing window without attaching
+    reference scores to its planned rows. ``physical_memory`` (this machine's
     by default) prefers models from a RAM list this machine can use.
     """
     from .catalog_cache import VerdictCache
     from .catalog_ranking import host_memory, reference_scores
     from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
-    from .native_catalog import FLINT_FAMILY_ID
+    from .native_catalog import FLINT_FAMILY_ID, RIPPLE_FAMILY_ID
     from .native_catalog import catalog_items as native_catalog_items
     from .native_catalog import unavailable_item as native_unavailable_item
 
@@ -962,31 +1002,79 @@ def family_catalog(
     if type(planning) is not bool or type(deadline_seconds) not in (int, float) or not 0 < deadline_seconds <= 600:
         return report(family_id or "", "error", "The model catalogue request is invalid.")
 
-    native_family = family_id in {NATIVE_FAMILY_ID, FLINT_FAMILY_ID}
-    family = family_id if native_family else normalize_architecture(family_id)
+    native_family = family_id in {NATIVE_FAMILY_ID, FLINT_FAMILY_ID, RIPPLE_FAMILY_ID}
+    family = family_id if native_family or family_id == _DECIDER_FAMILY_ID else normalize_architecture(family_id)
     definition = next((item for item in support_matrix()["families"] if item["family_id"] == family), None)
-    if definition is None or not any(
-        definition["modes"][mode]["status"] == "conditional" for mode in ("text", "vision-language")
+    if family != _DECIDER_FAMILY_ID and (
+        definition is None
+        or not any(definition["modes"][mode]["status"] == "conditional" for mode in ("text", "vision-language"))
     ):
         return report(family or "", "error", "This model family is not available in Stark.")
     if type(limit) is not int or not 1 <= limit <= MAX_ITEMS:
         return report(family, "error", "The model catalogue request is invalid.")
     if offline or os.environ.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes"}:
         return report(family, "offline", "Connect to the internet to browse models.")
+    if ranking_task not in (None, "general", "coding"):
+        return report(family, "error", "The model catalogue request is invalid.")
+    if family == _DECIDER_FAMILY_ID:
+        name = "Decider Flash v1.3"
+        item = {
+            "id": hashlib.sha256((_DECIDER_REPO + "@" + _DECIDER_REVISION).encode()).hexdigest()[:32],
+            "repo": _DECIDER_REPO,
+            "revision": _DECIDER_REVISION,
+            "name": name,
+            "size_label": "4B",
+            "parameter_count": None,
+            "weight_bytes": _DECIDER_WEIGHT_BYTES,
+            "quantization": "BF16",
+            "artifact_modes": ["decision"],
+            "default_artifact_mode": "decision",
+            "downloadable": True,
+            "model_group": _model_group(_DECIDER_FAMILY_ID, _DECIDER_REPO, name, "BF16", None),
+            "images": True,
+            "max_images": 1,
+        }
+        items = [item][offset : offset + limit]
+        if on_item is not None:
+            for candidate in items:
+                on_item(candidate)
+        return report(
+            family,
+            "ready",
+            "Choose Decider Flash v1.3 to install its Decision-only BF16 artifact.",
+            items,
+        )
+    if family == RIPPLE_FAMILY_ID:
+        # Both quantizations share a repository but have distinct pinned
+        # revisions. Keep their exact artifact identities rather than collapsing
+        # them through the generic repository discovery map below.
+        choices = native_catalog_items(family)
+        items = choices[offset : offset + limit]
+        if on_item is not None:
+            for item in items:
+                on_item(item)
+        return report(
+            family,
+            "ready",
+            "Choose a model to download." if items else "No more models are available.",
+            items,
+            next_offset=offset + len(items) if offset + len(items) < len(choices) else None,
+        )
     if hub is None:
         import huggingface_hub
 
         hub = huggingface_hub
     deadline = time.monotonic() + deadline_seconds
     cache = VerdictCache(cache_dir, family, planning=planning) if cache_dir is not None else None
-    # Guided setup ranks its own planned recipes; only browsing is ordered here.
-    ranking = None if planning else reference_scores()
+    # Guided planning uses reference scores only to choose which bounded source
+    # metadata to inspect first. Its own report remains score-free.
+    ranking = reference_scores() if not planning or ranking_task is not None else None
     if ranking is not None and physical_memory is None:
         physical_memory = host_memory()
 
     def scored(item, tags=()):
         """Attach the reference score a checked row may show."""
-        if ranking is None:
+        if ranking is None or planning:
             return item
         base_name = _without_quantization_suffix(item["repo"].split("/")[-1], item["quantization"])
         reference = ranking.reference(item["repo"], item["revision"], item["quantization"], tags, base_name)
@@ -1011,8 +1099,12 @@ def family_catalog(
 
         def repositories():
             nonlocal discovery_failed
-            for seed in seeds:
-                yield seed, None, None
+            prioritize_seeds = planning and ranking is not None
+            seed_entries = [
+                (seed, pins.get(seed) or native_items.get(seed, {}).get("revision"), None) for seed in seeds
+            ]
+            if not prioritize_seeds or api is None:
+                yield from seed_entries
             if api is None:
                 return
             expected = offset + limit + 1
@@ -1030,6 +1122,16 @@ def family_catalog(
                             break
                 except Exception:
                     failed = True
+                if prioritize_seeds:
+                    # Registry order must not spend the guide's candidate
+                    # slots before its selected-task scores are considered.
+                    combined = {entry[0].casefold(): entry for entry in seed_entries}
+                    fixed = {repo.casefold() for repo in (*pins, *native_items)}
+                    for entry in window:
+                        key = entry[0].casefold()
+                        if key not in combined or key not in fixed:
+                            combined[key] = entry
+                    window = list(combined.values())
 
                 def placement(entry):
                     siblings = _field(entry[2], "siblings")
@@ -1039,10 +1141,26 @@ def family_catalog(
                         str(_field(sibling, "rfilename")).endswith(".safetensors") for sibling in siblings
                     )
                     rank = (
-                        ranking.priority(entry[0], _field(entry[2], "tags"), physical_memory) if importable else None
+                        ranking.priority(
+                            entry[0],
+                            _field(entry[2], "tags"),
+                            physical_memory,
+                            task=ranking_task if planning else None,
+                            revision=entry[1],
+                            exact_first=planning,
+                        )
+                        if importable
+                        else None
                     )
-                    # Scored sources from a list this machine can use, then
-                    # other scored sources, then the rest in listing order.
+                    if planning:
+                        # Exact scored parents and revision-reviewed exports
+                        # must reach guided admission before inferred quantized
+                        # variants, regardless of their inherited parent score.
+                        if rank is None:
+                            return (2, 1, 0)
+                        exact, fits, score = rank
+                        return (0 if exact else 1, 0 if fits else 1, -score)
+                    # Browsing preserves its established host-fit-first order.
                     return (2, 0) if rank is None else (0 if rank[0] else 1, -rank[1])
 
                 yield from sorted(window, key=placement)
@@ -1315,9 +1433,11 @@ def family_catalog(
                 parameters = _parameters(info, quantization != "BF16" or extra_weights)
                 if parameters is None and quantization != "BF16" and not extra_weights:
                     parameters = _dense_config_parameters(config, family)
-                chat_template, chat_template_blocker = (None, None)
+                chat_template, chat_template_blocker, chat_template_named = (None, None, False)
                 if planning:
-                    chat_template, chat_template_blocker = _source_chat_template(entry, repo, names, read_pinned)
+                    chat_template, chat_template_blocker, chat_template_named = _source_chat_template(
+                        entry, repo, names, read_pinned
+                    )
                 item = {
                     "id": hashlib.sha256((repo + "@" + revision).encode()).hexdigest()[:32],
                     "repo": repo,
@@ -1345,6 +1465,7 @@ def family_catalog(
                         sizes,
                         chat_template=chat_template,
                         chat_template_blocker=chat_template_blocker,
+                        chat_template_named=chat_template_named,
                     )
                     item["task_tags"] = item["planning"]["task_tags"]
                     item["license"] = item["planning"]["license"]

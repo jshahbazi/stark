@@ -21,7 +21,7 @@ from pathlib import Path
 from . import __version__
 from .adapters.gemma4_vision import PROFILES as GEMMA4_IMAGE_PROFILES
 from .contracts import CapabilityResult, ConversionRequest, ConversionResult, PlannedConversion
-from .model_support import MODES, preflight_source, support_matrix
+from .model_support import MODES, NATIVE_F16_FAMILIES, auto_f16_refusal, preflight_source, support_matrix
 from .profiles import GENERIC_PROFILE, generic_entry
 from .progress import FDProgressSink, ProgressCallback, ProgressReporter, converter_failure_category, reporter
 from .provenance import file_hash, toolchain_provenance
@@ -48,6 +48,50 @@ from .vision_family import (
     validate_family_output_header,
     validate_family_plan,
 )
+
+
+def _native_f16(dtype: str, adapter: str | None) -> bool:
+    """F16 output that the native dense engine can load (full attention only)."""
+    return dtype == "float16" and adapter in NATIVE_F16_FAMILIES
+
+
+def _concrete_dtype(dtype: str) -> str:
+    """`auto` resolves only after planning; admission before that uses its BF16 fallback."""
+    return "bfloat16" if dtype == "auto" else dtype
+
+
+def _select_auto_dtype(
+    snapshot: SourceSnapshot, planned: PlannedConversion, support_mode: str | None
+) -> tuple[PlannedConversion, dict]:
+    """Choose F16 for an all-F16 MLX affine source whose family has a recorded F16 pass.
+
+    `planned` is the BF16 plan. Any refusal keeps it unchanged, so every other
+    source converts exactly as an explicit `--dtype bfloat16` request would.
+    """
+    from .qualifications import has_recorded_qualification
+
+    request, tensors = planned.request, planned.tensors
+    sources = tensors.input_tensors or tuple(
+        source for operation in tensors.operations for source in operation.sources
+    )
+    specs = (json.loads(value).get("type") for key, value in tensors.metadata.items() if key.endswith(".spec"))
+    reason = auto_f16_refusal(
+        planned.capability.adapter,
+        planned.model_config,
+        (source.dtype for source in sources),
+        specs,
+        mode=support_mode or request.artifact_mode,
+        artifact_mode=request.artifact_mode,
+        model_kind=request.model_kind,
+        require_native_support=request.require_native_support,
+        qualified=has_recorded_qualification(request.repo),
+    )
+    if reason is None:
+        candidate = plan_conversion(snapshot, replace(request, dtype="float16"))
+        if candidate.capability.native_loading != "runtime_blocked":
+            return candidate, {"requested": "auto", "selected": "float16", "reason": "all_f16_mlx_affine_source"}
+        reason = candidate.capability.reason or "native_f16_runtime_blocked"
+    return planned, {"requested": "auto", "selected": "bfloat16", "reason": reason}
 
 
 def capability(request: ConversionRequest) -> CapabilityResult:
@@ -134,7 +178,9 @@ def capability(request: ConversionRequest) -> CapabilityResult:
             adapter=request.architecture if supported else None,
             model_kind=request.model_kind,
             conversion="implemented" if supported else "unsupported",
-            native_loading="runtime_blocked" if supported and request.dtype != "bfloat16" else "unverified",
+            native_loading="runtime_blocked"
+            if supported and request.dtype != "bfloat16" and not _native_f16(request.dtype, request.architecture)
+            else "unverified",
             reason=None if supported else "checkpoint_architecture_required",
         )
     kind = {"LanguageModelSpec": "language", "ClassifierModelSpec": "classifier", "TTSModelSpec": "tts"}
@@ -146,7 +192,7 @@ def capability(request: ConversionRequest) -> CapabilityResult:
     if supported and entry["adapter"] in {"qwen3_5", "lfm2", "llamba", "modernbert"}:
         native = "unverified"
     if supported and request.dtype != "bfloat16":
-        native = "runtime_blocked"
+        native = "unverified" if _native_f16(request.dtype, entry["adapter"]) else "runtime_blocked"
     return CapabilityResult(
         adapter=entry["adapter"] if supported else None,
         model_kind=actual_kind,
@@ -358,6 +404,12 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             result = replace(result, native_loading="runtime_blocked", reason="native_delta_net_dimensions")
         if mixer["type"] in {"DeltaNetConfig", "ShortConvConfig", "Mamba2Config"} and mixer["kernel_size"] < 2:
             result = replace(result, native_loading="runtime_blocked", reason="native_convolution_kernel")
+        if (
+            request.dtype == "float16"
+            and result.native_loading != "runtime_blocked"
+            and mixer.get("sliding_window_size") is not None
+        ):
+            result = replace(result, native_loading="runtime_blocked", reason="native_f16_sliding_window")
     return PlannedConversion(request, result, tensors, config, artifact_contract)
 
 
@@ -396,10 +448,17 @@ def convert(
     metadata_profile: str | None = None,
     artifact_mode: str = "text",
     progress: ProgressCallback | ProgressReporter | None = None,
+    support_mode: str | None = None,
 ) -> dict:
-    """Publish complete independently converted outputs; unsupported inputs fail."""
+    """Publish complete independently converted outputs; unsupported inputs fail.
+
+    `dtype="auto"` plans BF16 and switches to F16 only under `_select_auto_dtype`;
+    `support_mode` names the app mode whose native F16 admission must hold.
+    """
     from .metadata import write_metadata
 
+    automatic = dtype == "auto"
+    dtype = _concrete_dtype(dtype)
     if isinstance(source, SourceSnapshot) and source.conversion_profile is not None:
         profile = source.conversion_profile
         metadata_profile = metadata_profile or profile["metadata_profile"]
@@ -473,6 +532,10 @@ def convert(
                 return receipt
         provenance = toolchain_provenance()
         planned = plan_conversion(snapshot, request)
+        dtype_selection = None
+        if automatic:
+            planned, dtype_selection = _select_auto_dtype(snapshot, planned, support_mode)
+            dtype = planned.request.dtype
         entry = get_model(repo)
         if artifact_mode == "vision-language" and entry is not None and snapshot.conversion_profile is None:
             entry = {
@@ -514,6 +577,7 @@ def convert(
                     **entry,
                     "files": {key: value for key, value in entry["files"].items() if key != "chat_template"},
                 }
+        template_provenance = {}
         if planned.request.model_kind == "classifier":
             from .classifier_metadata import write_classifier_metadata
 
@@ -527,8 +591,30 @@ def convert(
             }
         else:
             fragments = write_metadata(
-                snapshot.root, staging, config, model_entry=entry, resolve_file=snapshot.resolve_file
+                snapshot.root,
+                staging,
+                config,
+                model_entry=entry,
+                resolve_file=snapshot.resolve_file,
+                provenance=template_provenance,
             )
+            if template_provenance and artifact_mode != "text":
+                # Image artifacts pin their own reviewed templates.
+                raise UnsupportedConversion("Image conversion requires a plain chat template")
+            codec = fragments.get("token_codec_config")
+            if artifact_mode == "text" and isinstance(codec, dict) and isinstance(codec.get("prompt_template"), str):
+                from .template_runtime import TemplateHelperMissing, probe_system_role
+
+                try:
+                    # Test-render with fixed synthetic messages. A program that
+                    # refuses only a leading system message gets the fold policy.
+                    system_role = probe_system_role(
+                        codec["prompt_template"], bos_token=codec.get("bos_token"), eos_token=codec.get("eos_token")
+                    )
+                except TemplateHelperMissing:
+                    raise ConversionError("Native chat-template helper is missing") from None
+                if system_role is not None:
+                    template_provenance["chat_template_system_role"] = system_role
             root_config = {
                 "type": (
                     "Gemma3VisionLanguageModelConfig"
@@ -674,6 +760,8 @@ def convert(
             "config_sha256": artifact_hashes["config_sha256"],
             "tokenizer_sha256": artifact_hashes["tokenizer_sha256"],
             "native_qualification": qualification,
+            **({"dtype_selection": dtype_selection} if dtype_selection is not None else {}),
+            **template_provenance,
             **({"storage_validation": storage_validation} if storage_validation is not None else {}),
             "architecture": planned.capability.adapter,
             "metadata_profile": planned.request.metadata_profile or entry["metadata_profile"],
@@ -719,7 +807,13 @@ def main() -> int:
     parser.add_argument("--revision", help="HF revision resolved to an immutable commit")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--backend", choices=("auto", "streaming"), default="auto")
-    parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
+    parser.add_argument(
+        "--dtype",
+        choices=("bfloat16", "float16", "float32", "auto"),
+        default="bfloat16",
+        help="Output dtype; auto selects F16 only for an all-F16 MLX affine source of a family with a recorded "
+        "native F16 pass, and BF16 otherwise",
+    )
     parser.add_argument("--model-kind", choices=("language", "classifier", "tts"))
     parser.add_argument(
         "--artifact-mode",
@@ -821,7 +915,10 @@ def main() -> int:
                 repo=repo,
                 revision=args.revision,
                 mode=args.support_mode or args.artifact_mode,
-                dtype=args.dtype,
+                # Tensor dtypes are unknown before download. `auto` admits by
+                # its BF16 fallback; conversion selects F16 only if F16
+                # admission also holds for the downloaded tensors.
+                dtype=_concrete_dtype(args.dtype),
                 model_kind=args.model_kind,
                 architecture=args.architecture,
                 offline=args.offline,
@@ -835,7 +932,7 @@ def main() -> int:
         model_kind = args.model_kind or "language"
         request = ConversionRequest(
             repo,
-            args.dtype,
+            _concrete_dtype(args.dtype),
             model_kind,
             args.backend,
             args.chunk_mib * 1024 * 1024,
@@ -887,7 +984,7 @@ def main() -> int:
             metadata_profile=args.metadata_profile,
             artifact_mode=args.artifact_mode,
             support_mode=args.support_mode,
-            dtype=args.dtype,
+            dtype=_concrete_dtype(args.dtype),
             model_kind=model_kind,
             **({"progress": progress} if progress is not None else {}),
         )
@@ -906,6 +1003,7 @@ def main() -> int:
             metadata_profile=args.metadata_profile,
             artifact_mode=args.artifact_mode,
             **({"progress": progress} if progress is not None else {}),
+            support_mode=args.support_mode,
         )
     except BaseException as error:
         category = "interrupted" if isinstance(error, KeyboardInterrupt) else converter_failure_category(error)

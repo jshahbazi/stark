@@ -17,7 +17,7 @@ struct ConnectionInfo {
 
     static let usageNotes = [
         "Choose OpenAI-compatible or Custom OpenAI in your client.",
-        "Choose Chat mode and use Run in Stark to serve the selected model before sending requests.",
+        "Use Run in Stark to serve the selected model. Either Playground mode works; Stark prepares the required runtime automatically.",
         "Keep Stark open. The address is reachable by native applications on this Mac only; containers and other devices cannot connect.",
         "The API key is saved in macOS Keychain. The configured port is reused across restarts.",
         "Regenerating the API key requires updating every connected app. Viewing or copying settings never changes the key.",

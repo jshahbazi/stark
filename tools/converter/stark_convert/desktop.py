@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 from jinja2.exceptions import TemplateError
 
+from .api_decisions import run_decision
 from .api_request import parse_chat_request
 from .api_tools import (
     ToolTextStream,
@@ -50,7 +51,8 @@ from .chat import (
     read_model_config,
     render_template,
 )
-from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
+from .decision import DecisionInputError, ScoreWorker, decide
+from .desktop_decider import DesktopDeciderWorker, is_decider, prepared_decider, validate_desktop_inputs
 from .desktop_media import DesktopAttachments
 from .generation_eta import GenerationEstimates
 from .guided_models import (
@@ -76,6 +78,7 @@ from .model_removal import RemovalError, prepare_removal, removal_info, remove_m
 from .model_support import support_matrix
 from .mtp import mtp_capabilities, resolve_mtp
 from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
+from .native_catalog import RIPPLE_FAMILY_ID
 from .native_catalog import allowed_choice as native_choice_allowed
 from .native_catalog import catalog_item as native_catalog_item
 from .native_catalog import catalog_items as native_catalog_items
@@ -101,6 +104,7 @@ from .vision_runtime import (
 
 MAX_COMMAND_BYTES = WIRE_BYTES
 MAX_PROGRESS_BYTES = 4096
+DOWNLOAD_RETRY_INITIAL_SECONDS = 5
 MAX_SUPPORT_BYTES = 65536
 MAX_CATALOG_BYTES = 256 * 1024
 PROGRESS_PHASES = ("download", "conversion")
@@ -284,6 +288,8 @@ def model_valid(path):
         return False
     try:
         config = read_model_config(path)
+        if is_decider(config):
+            return prepared_decider(path, config)
         if not isinstance(config.get("decoder_config"), dict):
             return False
         if config.get("type") in VISION_MODEL_TYPES:
@@ -396,6 +402,7 @@ def converter_failure_message(category):
         "unsupported_format_or_config": "This model format or configuration is not supported by the converter.",
         "invalid_checkpoint": "The checkpoint is incomplete or invalid. Check the source revision and retry.",
         "conversion_failed": "Model conversion failed. Check the model source and try again.",
+        "network_unavailable": "The model download lost its connection. Check your internet access and retry.",
     }.get(category, "Model conversion failed. Check the model source and try again.")
 
 
@@ -425,9 +432,19 @@ class Desktop:
     the HTTP contract.
     """
 
-    def __init__(self, executable, data_dir, output=None, timeout=300, score_executable=None, attachment_root=None):
+    def __init__(
+        self,
+        executable,
+        data_dir,
+        output=None,
+        timeout=300,
+        score_executable=None,
+        attachment_root=None,
+        decide_executable=None,
+    ):
         self.executable = executable
         self.score_executable = score_executable or Path(executable).with_name("stark-score")
+        self.decide_executable = decide_executable or Path(executable).with_name("stark-decide")
         self.data_dir = data_dir.expanduser().absolute()
         self.output = output or sys.stdout
         self.timeout = timeout
@@ -456,15 +473,21 @@ class Desktop:
         self.guided_install_request_id = None
         self.install_cancelled = None
         self.install_committing = False
+        self.system_asleep = False
+        self.download_retry_wake = threading.Event()
+        self.download_retry_epoch = None
+        self.download_interrupted_epoch = None
+        self.download_transferred_offset = 0
         self.guided_reports = {}
         self.guided_install_offer_id = None
         self.guided_hardware = {}
         self.guided_discovery_generation = 0
         self.guided_discovery_process = None
         self.guided_discovery_job = None
-        self.guided_catalog_cache = None
+        self.guided_catalog_cache = {}
         self.active_model = None
         self.active_mode = None
+        self.playground_mode = None
         self.vocab_size = None
         self.template = None
         self.codec = None
@@ -613,7 +636,18 @@ class Desktop:
                     raise
 
     def start_catalog(self, family, request_id, offset=0):
-        allowed = {item["family_id"] for item in support_matrix()["families"] if item["model_kind"] == "language"}
+        from .decider_install import FAMILY_ID as DECIDER_FAMILY_ID
+
+        allowed = {
+            item["family_id"]
+            for item in support_matrix()["families"]
+            if item["model_kind"] == "language"
+            or (
+                item["family_id"] == DECIDER_FAMILY_ID
+                and item["model_kind"] == "decision"
+                and item["modes"]["decision"]["status"] == "conditional"
+            )
+        }
         if (
             family not in allowed
             or not self.request_id(request_id)
@@ -768,7 +802,7 @@ class Desktop:
                 or not isinstance(item.get("artifact_modes"), list)
                 or not item["artifact_modes"]
                 or len(item["artifact_modes"]) != len(set(item["artifact_modes"]))
-                or not set(item["artifact_modes"]) <= {"text", "vision-language"}
+                or not set(item["artifact_modes"]) <= {"text", "vision-language", "decision"}
                 or item.get("default_artifact_mode") not in item["artifact_modes"]
             ):
                 raise ValueError()
@@ -957,7 +991,7 @@ class Desktop:
             native_choice = native_source_choice(self.catalog_family_id, item)
             fixed_native_ids = {native_item["id"] for native_item in native_catalog_items(self.catalog_family_id)}
             if (
-                self.catalog_family_id == NATIVE_FAMILY_ID or item["id"] in fixed_native_ids
+                self.catalog_family_id in {NATIVE_FAMILY_ID, RIPPLE_FAMILY_ID} or item["id"] in fixed_native_ids
             ) and native_choice is None:
                 raise DesktopError("Refresh this family before downloading a model.")
             installed = self.catalog_installed_ids(item, mode)
@@ -1066,14 +1100,17 @@ class Desktop:
             process = getattr(self, "guided_discovery_process", None)
         terminate(process)
 
-    def run_guided_discovery(self, generation):
+    def run_guided_discovery(self, generation, task="general"):
         process = None
         try:
+            from .guided_discovery import discovery_bounds
+
+            maximum_items, timeout_seconds = discovery_bounds()
             with self.lock:
                 if generation != self.guided_discovery_generation:
                     return None
                 process = subprocess.Popen(
-                    [sys.executable, "-I", "-B", "-m", "stark_convert.guided_discovery"],
+                    [sys.executable, "-I", "-B", "-m", "stark_convert.guided_discovery", "--task", task],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
@@ -1081,7 +1118,7 @@ class Desktop:
                     start_new_session=True,
                 )
                 self.guided_discovery_process = process
-            pending, deadline = bytearray(), time.monotonic() + 65
+            pending, deadline = bytearray(), time.monotonic() + timeout_seconds
             while True:
                 with self.lock:
                     if generation != self.guided_discovery_generation:
@@ -1104,7 +1141,7 @@ class Desktop:
                 not isinstance(report, dict)
                 or report.get("schema_version") != 1
                 or not isinstance(report.get("items"), list)
-                or len(report["items"]) > 450
+                or len(report["items"]) > maximum_items
             ):
                 raise ValueError()
             return report
@@ -1119,19 +1156,20 @@ class Desktop:
 
     def load_guided_models(self, task, preference, hardware, excluded, request_id, generation):
         try:
+            discovery_task = "coding" if task in {"coding", "code"} else "general"
             with self.lock:
-                cached = self.guided_catalog_cache
+                cached = self.guided_catalog_cache.get(discovery_task)
             if cached is not None and time.monotonic() - cached[0] < 600:
                 discovery = cached[1]
             else:
-                discovery = self.run_guided_discovery(generation)
+                discovery = self.run_guided_discovery(generation, discovery_task)
                 if discovery is None:
                     return
                 with self.lock:
                     if generation != self.guided_discovery_generation:
                         return
                     if discovery["items"] and not discovery.get("failed_families", 0):
-                        self.guided_catalog_cache = (time.monotonic(), discovery)
+                        self.guided_catalog_cache[discovery_task] = (time.monotonic(), discovery)
             self.publish_guided_models(task, preference, hardware, excluded, request_id, discovery, generation)
         except Exception:
             # Network/discovery failure keeps the exact qualified starters and
@@ -1392,6 +1430,7 @@ class Desktop:
                 )
                 return
             self.install_cancelled.set()
+            self.download_retry_wake.set()
             converter = self.converter
         self.terminate_converter(converter)
 
@@ -1473,8 +1512,10 @@ class Desktop:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def close_worker(self):
+    def close_worker(self, *, expected=None):
         with self.lock:
+            if expected is not None and self.worker is not expected:
+                return
             worker, self.worker = self.worker, None
             self.active_model = None
             self.active_mode = None
@@ -1546,11 +1587,15 @@ class Desktop:
             previous = self.install_progress.get(phase, {})
             self.progress(epoch, phase, "failed", previous.get("completed_bytes", 0), previous.get("total_bytes"))
 
-    def stop(self, quiet=False):
-        self.cancel_catalog()
+    def stop(self, quiet=False, *, preserve_catalog=False):
+        if not preserve_catalog:
+            self.cancel_catalog()
         self.cancel_guided_discovery()
         with self.lock:
             cancelled = self.install_progress.copy() if self.install_epoch == self.epoch else {}
+            if self.install_cancelled is not None:
+                self.install_cancelled.set()
+            self.download_retry_wake.set()
             self.epoch += 1
             self.api_condition.notify_all()
             self.install_epoch = None
@@ -1589,6 +1634,8 @@ class Desktop:
             epoch = self.epoch
             installing = state == "installing"
             if installing:
+                self.download_retry_wake.clear()
+                self.download_interrupted_epoch = None
                 self.install_request_id = request_id
                 self.guided_install_request_id = request_id if guided_install else None
                 self.install_cancelled = threading.Event()
@@ -1672,6 +1719,8 @@ class Desktop:
         discarding = False
         exited_at = None
         failure_category = None
+        with self.lock:
+            transferred_offset = self.download_transferred_offset if self.download_retry_epoch == epoch else 0
         while True:
             if process.poll() is not None:
                 exited_at = exited_at or time.monotonic()
@@ -1704,6 +1753,22 @@ class Desktop:
                     # The app still validates/publishes the model and registry.
                     if event["phase"] == "conversion" and event["state"] == "complete":
                         event["state"] = "running"
+                    if event["phase"] == "download" and transferred_offset and "transferred_bytes" in event:
+                        event["transferred_bytes"] = min(2**63 - 1, transferred_offset + event["transferred_bytes"])
+                        # Initial cache-discovery frames from a restarted child
+                        # can trail the last attempt's logical byte count. Keep
+                        # its transfer accounting without moving the bar back.
+                        with self.lock:
+                            previous = self.install_progress.get("download", {})
+                            event["completed_bytes"] = max(
+                                event["completed_bytes"], previous.get("completed_bytes", 0)
+                            )
+                            totals = [
+                                value
+                                for value in (event["total_bytes"], previous.get("total_bytes"))
+                                if value is not None
+                            ]
+                            event["total_bytes"] = max(*totals, event["completed_bytes"]) if totals else None
                     self.progress(epoch, **event)
             if len(pending) > MAX_PROGRESS_BYTES:
                 pending = b""
@@ -1718,6 +1783,8 @@ class Desktop:
                 if epoch != self.epoch:
                     return None
                 self.check_install_cancelled(epoch)
+                if self.download_retry_epoch == epoch and self.system_asleep:
+                    return 1, "network_unavailable"
                 process = subprocess.Popen(
                     [*command, "--progress-fd", str(write_descriptor)],
                     stdin=subprocess.DEVNULL,
@@ -1748,6 +1815,105 @@ class Desktop:
                     if self.converter is process:
                         self.converter = None
 
+    def run_download_converter(self, command, environment, epoch):
+        """Keep an explicitly requested download alive across sleep/network loss.
+
+        Retry only typed transient transport failures before conversion starts.
+        Reuse the exact command, pinned revision, Hub cache and owned native
+        staging. Cancellation and Stop still retire the installation's epoch.
+        """
+        with self.lock:
+            self.download_retry_epoch = epoch
+            self.download_transferred_offset = 0
+        try:
+            return self.retry_download_converter(command, environment, epoch)
+        finally:
+            with self.lock:
+                self.download_retry_epoch = None
+                self.download_transferred_offset = 0
+
+    def retry_download_converter(self, command, environment, epoch):
+        delay = DOWNLOAD_RETRY_INITIAL_SECONDS
+        while True:
+            with self.lock:
+                if epoch != self.epoch:
+                    return None
+                self.check_install_cancelled(epoch)
+            result = self.run_converter(command, environment, epoch)
+            with self.lock:
+                if epoch != self.epoch:
+                    return result
+                self.check_install_cancelled(epoch)
+                conversion = self.install_progress.get("conversion", {})
+                interrupted_by_sleep = self.download_interrupted_epoch == epoch
+                if interrupted_by_sleep:
+                    self.download_interrupted_epoch = None
+                    if result is None or (isinstance(result, tuple) and result[0] != 0):
+                        # Publication can finish just as sleep terminates the
+                        # child. Let the installer's normal validation admit it.
+                        output = Path(command[command.index("--output") + 1])
+                        if model_valid(output):
+                            return 0, None
+                        result = (1, "network_unavailable")
+                if (
+                    not isinstance(result, tuple)
+                    or len(result) != 2
+                    or result[0] == 0
+                    or result[1] != "network_unavailable"
+                    or (not interrupted_by_sleep and conversion.get("state") in {"running", "complete"})
+                ):
+                    return result
+                if interrupted_by_sleep and conversion.get("state") == "running":
+                    # A buffered conversion-start frame can arrive after the
+                    # sleep handler selected this downloading child to stop.
+                    self.progress(
+                        epoch, "conversion", "waiting", conversion["completed_bytes"], conversion["total_bytes"]
+                    )
+                self.status("installing", "Download paused. Waiting for a connection…", epoch)
+            if not self.wait_for_download_retry(epoch, delay):
+                return result
+            with self.lock:
+                if epoch != self.epoch:
+                    return result
+                self.check_install_cancelled(epoch)
+                self.download_transferred_offset = self.install_progress.get("download", {}).get(
+                    "transferred_bytes", 0
+                )
+                self.status("installing", "Resuming model download…", epoch)
+            delay = min(delay * 2, 60)
+
+    def wait_for_download_retry(self, epoch, delay):
+        deadline = time.monotonic() + delay
+        while True:
+            with self.lock:
+                if epoch != self.epoch:
+                    return False
+                self.check_install_cancelled(epoch)
+                if not self.system_asleep and (self.download_retry_wake.is_set() or time.monotonic() >= deadline):
+                    self.download_retry_wake.clear()
+                    return True
+                self.download_retry_wake.clear()
+                remaining = None if self.system_asleep else max(0, deadline - time.monotonic())
+            self.download_retry_wake.wait(remaining)
+
+    def system_power(self, asleep):
+        """Suspend only active weight downloads; preserve workers and conversion."""
+        converter = None
+        with self.lock:
+            self.system_asleep = asleep
+            if asleep:
+                if (
+                    self.download_retry_epoch == self.epoch
+                    and self.install_epoch == self.epoch
+                    and self.install_progress.get("conversion", {}).get("state") not in {"running", "complete"}
+                ):
+                    self.download_interrupted_epoch = self.epoch
+                    converter = self.converter
+            else:
+                self.download_retry_wake.set()
+        if converter is not None:
+            self.terminate_converter(converter)
+
     def run_support_check(self, command, environment, epoch):
         """Read one bounded metadata-only report from an isolated cancellable child."""
         process = None
@@ -1756,6 +1922,8 @@ class Desktop:
                 if epoch != self.epoch:
                     return None
                 self.check_install_cancelled(epoch)
+                if self.download_retry_epoch == epoch and self.system_asleep:
+                    return None
                 process = subprocess.Popen(
                     command,
                     stdin=subprocess.DEVNULL,
@@ -1818,6 +1986,55 @@ class Desktop:
                     if self.converter is process:
                         self.converter = None
 
+    def run_install_support_check(self, command, environment, epoch):
+        """Resume remote installation preflight only after sleep interrupted it.
+
+        Discovery and local checks retain their existing failure behavior. A
+        complete report, including unsupported/inconclusive results, remains
+        authoritative even if sleep arrived while its child was finishing.
+        """
+        with self.lock:
+            if epoch != self.epoch:
+                return None
+            self.download_retry_epoch = epoch
+        try:
+            while True:
+                with self.lock:
+                    if epoch != self.epoch:
+                        return None
+                    self.check_install_cancelled(epoch)
+                    asleep = self.system_asleep
+                    if asleep:
+                        self.status("installing", "Download paused. Waiting for a connection…", epoch)
+                if asleep and not self.wait_for_download_retry(epoch, 0):
+                    return None
+                failure = None
+                try:
+                    report = self.run_support_check(command, environment, epoch)
+                except DesktopError as error:
+                    report, failure = None, error
+                with self.lock:
+                    if epoch != self.epoch:
+                        return None
+                    self.check_install_cancelled(epoch)
+                    interrupted = self.download_interrupted_epoch == epoch
+                    self.download_interrupted_epoch = None
+                    if report is not None:
+                        return report
+                    if not interrupted:
+                        if failure is not None:
+                            raise failure
+                        return None
+                    self.status("installing", "Download paused. Waiting for a connection…", epoch)
+                if not self.wait_for_download_retry(epoch, 0):
+                    return None
+                self.status("installing", "Checking model family before downloading weights…", epoch)
+        finally:
+            with self.lock:
+                self.download_retry_epoch = None
+                if self.download_interrupted_epoch == epoch:
+                    self.download_interrupted_epoch = None
+
     def check_install_support(
         self,
         epoch,
@@ -1829,28 +2046,45 @@ class Desktop:
         expected_revision=None,
         metadata_profile=None,
     ):
-        command = [
-            sys.executable,
-            "-I",
-            "-B",
-            "-m",
-            "stark_convert.cli",
-            source,
-            "--preflight",
-            "--support-mode",
-            support_mode,
-            "--artifact-mode",
-            selected_mode,
-        ]
+        native_decision = selected_mode == "decision"
+        command = [sys.executable, "-I", "-B", "-m"]
+        if native_decision:
+            command.extend(
+                [
+                    "stark_convert.decider_install",
+                    "preflight",
+                    source,
+                    "--kind",
+                    kind,
+                    "--mode",
+                    support_mode,
+                ]
+            )
+        else:
+            command.extend(
+                [
+                    "stark_convert.cli",
+                    source,
+                    "--preflight",
+                    "--support-mode",
+                    support_mode,
+                    "--artifact-mode",
+                    selected_mode,
+                ]
+            )
         if expected_revision is not None:
             command.extend(["--revision", expected_revision])
-        if kind == "local" or get_model(source) is None or metadata_profile == "hf-generic":
+        if not native_decision and (kind == "local" or get_model(source) is None or metadata_profile == "hf-generic"):
             command.extend(["--metadata-profile", "hf-generic"])
-        if kind == "local":
+        if kind == "local" and not native_decision:
             command.append("--offline")
         environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
         self.status("installing", "Checking model family before downloading weights…", epoch)
-        report = self.run_support_check(command, environment, epoch)
+        report = (
+            self.run_install_support_check(command, environment, epoch)
+            if kind == "huggingface"
+            else self.run_support_check(command, environment, epoch)
+        )
         with self.lock:
             if epoch != self.epoch:
                 return None
@@ -1903,8 +2137,8 @@ class Desktop:
             or re.fullmatch(r"[0-9a-f]{40}", expected_revision) is None
         ):
             raise DesktopError("Choose a pinned model version to download.")
-        if artifact_mode not in (None, "text", "vision-language"):
-            raise DesktopError("Choose text or vision-language conversion.")
+        if artifact_mode not in (None, "text", "vision-language", "decision"):
+            raise DesktopError("Choose text or vision-language conversion, or native Decision mode.")
         selected_mode = artifact_mode or "text"
         if support_mode not in (None, "text", "decision", "vision-language"):
             raise DesktopError("Choose text, decision or image support.")
@@ -1931,13 +2165,17 @@ class Desktop:
             if converted:
                 config = read_model_config(path)
                 stored_mode = (
-                    "vision-language"
+                    "decision"
+                    if is_decider(config)
+                    else "vision-language"
                     if (config.get("type") in VISION_MODEL_TYPES or model_image_family(config, path) is not None)
                     else "text"
                 )
                 if artifact_mode is not None and selected_mode != stored_mode:
                     raise DesktopError("The selected conversion mode does not match this Stark artifact.")
                 selected_mode = stored_mode
+                if stored_mode == "decision":
+                    name = "Decider Flash v1.3"
         elif kind == "huggingface":
             try:
                 source = huggingface_repository(source)
@@ -1958,7 +2196,26 @@ class Desktop:
             source_key, name, converted = "huggingface:" + native_item["repo"], native_item["name"], False
         else:
             raise DesktopError("Choose a local folder or Hugging Face repository.")
+        raw_decider = False
+        if not converted and kind in {"local", "huggingface"}:
+            from .decider_install import is_decider_source
+
+            raw_decider = is_decider_source(str(path) if kind == "local" else source, kind=kind)
+            if raw_decider:
+                if artifact_mode not in (None, "decision"):
+                    raise DesktopError("Choose native Decision mode to install this Decider source.")
+                selected_mode = "decision"
+                name = "Decider Flash v1.3"
         purpose = support_mode or selected_mode
+        if selected_mode == "decision" and artifact_mode is None and support_mode == "text":
+            # Add Source inherits the current Chat purpose before inspecting a
+            # folder/repository. A recognized Decider source determines its
+            # only supported workflow when no artifact mode was requested.
+            purpose = "decision"
+        if selected_mode == "decision" and purpose != "decision":
+            raise DesktopError("Decider artifacts support native Decision mode only.")
+        if selected_mode == "decision" and not converted and not raw_decider:
+            raise DesktopError("Choose the pinned Decider Flash source or import a prepared Decider artifact.")
         if converted and selected_mode == "vision-language" and purpose == "text":
             purpose = "vision-language"  # Ordinary Chat can import an existing image artifact.
         if selected_mode == "vision-language" and purpose != "vision-language":
@@ -2038,7 +2295,21 @@ class Desktop:
                     staging.mkdir(mode=0o700)
                 output = staging / "model"
                 command = [sys.executable, "-I", "-B", "-m"]
-                if kind == "native":
+                if raw_decider:
+                    command.extend(
+                        [
+                            "stark_convert.decider_install",
+                            "prepare",
+                            str(path) if kind == "local" else source,
+                            "--kind",
+                            kind,
+                            "--output",
+                            str(output),
+                            "--revision",
+                            source_revision,
+                        ]
+                    )
+                elif kind == "native":
                     command.extend(["stark_convert.hybrid_prepare", source, "--output", str(output)])
                     if selected_mode == "vision-language":
                         command.extend(["--artifact-mode", "vision-language"])
@@ -2064,6 +2335,11 @@ class Desktop:
                         command.append("--offline")
                     if selected_mode == "vision-language":
                         command.extend(["--artifact-mode", "vision-language"])
+                    else:
+                        # The converter keeps BF16 unless the downloaded tensors
+                        # are all F16 MLX affine planes of a family with a
+                        # recorded native F16 pass (cli._select_auto_dtype).
+                        command.extend(["--dtype", "auto"])
                     if source_revision is not None:
                         command.extend(["--revision", source_revision])
                 environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
@@ -2074,7 +2350,11 @@ class Desktop:
                 if kind == "native" and output.exists():
                     result, failure_category = 0, None
                 else:
-                    converter_result = self.run_converter(command, environment, epoch)
+                    converter_result = (
+                        self.run_download_converter(command, environment, epoch)
+                        if kind in {"huggingface", "native"}
+                        else self.run_converter(command, environment, epoch)
+                    )
                     if isinstance(converter_result, tuple) and len(converter_result) == 2:
                         result, failure_category = converter_result
                     else:
@@ -2110,7 +2390,7 @@ class Desktop:
                     path = managed
             verification = self.check_family_install(epoch, path)
             model = {"id": identifier, "name": name, "path": str(path), "source": source_key}
-            if selected_mode == "vision-language":
+            if selected_mode in {"vision-language", "decision"}:
                 model["artifact_mode"] = selected_mode
             if verification is not None:
                 model["image_verification"] = verification
@@ -2202,26 +2482,38 @@ class Desktop:
             if not current and worker is not None:
                 worker.close()
 
-    def run(self, epoch, identifier, mode="chat", *, guided_context=None, guided_request_id=None):
+    def run(self, epoch, identifier, mode="chat", *, guided_context=None, guided_request_id=None, automatic=False):
         model = next((m for m in self.models if m["id"] == identifier), None)
         if model is None or not model_valid(Path(model["path"])):
             raise DesktopError("Select an installed model whose folder is still available.")
         config = read_model_config(Path(model["path"]))
+        native_decision = is_decider(config)
+        if native_decision and mode != "decision":
+            raise DesktopError("This Decider model supports Decision mode only.")
         vision = (
             config.get("type") in VISION_MODEL_TYPES or model_image_family(config, Path(model["path"])) is not None
         )
-        codec, template = (None, None) if vision else load_template(Path(model["path"]))
+        codec, template = (None, None) if vision or native_decision else load_template(Path(model["path"]))
         if mode == "decision" and vision:
             raise DesktopError("Vision-language artifacts support Chat mode only.")
         with self.lock:
             if epoch != self.epoch:
                 return
+            if not automatic:
+                self.playground_mode = mode
 
             def on_gpu_memory(source, amount):
-                self.report_gpu_memory(epoch, identifier, mode, source, amount)
+                self.report_gpu_memory(epoch, identifier, self.playground_mode or mode, source, amount)
 
             worker = (
-                ScoreWorker(
+                DesktopDeciderWorker(
+                    self.decide_executable,
+                    Path(model["path"]),
+                    self.timeout,
+                    gpu_memory_callback=on_gpu_memory,
+                )
+                if native_decision
+                else ScoreWorker(
                     self.score_executable,
                     Path(model["path"]),
                     self.timeout,
@@ -2243,9 +2535,10 @@ class Desktop:
         if vision:
             codec, template = load_template(Path(model["path"]), expected_hashes=worker.image_input)
         if mode == "decision":
-            if (
-                ready.get("ready") is not True
-                or ready.get("mode") != "exact-token-scoring-cache-v1"
+            if ready.get("ready") is not True or (
+                ready.get("mode") != "decider"
+                if native_decision
+                else ready.get("mode") != "exact-token-scoring-cache-v1"
                 or type(ready.get("vocab_size")) is not int
                 or not 0 < ready["vocab_size"] <= 2**32 - 1
             ):
@@ -2256,16 +2549,30 @@ class Desktop:
                     return
                 self.codec, self.template = codec, template
                 self.active_model, self.active_mode = identifier, mode
-                self.vocab_size = ready["vocab_size"]
+                self.vocab_size = ready.get("vocab_size")
                 self.messages = []
+                fields = {
+                    "resource_budget": self.resource_budget_summary(),
+                    "tools": bool(not native_decision and tool_parser_for(codec)),
+                    "tool_parser": tool_parser_for(codec) if not native_decision else None,
+                }
+                if native_decision:
+                    self.context_limit = self.context = ready["max_input_tokens"]
+                    self.context_capacity_known = True
+                    self.output_limit = self.maximum = 0
+                    self.api_context = self.api_maximum = self.api_vocab = 0
+                    fields.update(self.settings_summary())
+                elif not automatic:
+                    fields.update(context_capacity_known=False, api_context_tokens=0, api_max_output_tokens=0)
                 self.emit(
-                    "ready",
+                    "runtime_ready" if automatic else "ready",
                     epoch,
                     model_id=identifier,
                     mode=mode,
-                    resource_budget=self.resource_budget_summary(),
+                    **fields,
                 )
-                self.status("ready", "Ready", epoch)
+                if not automatic:
+                    self.status("ready", "Ready", epoch)
             return
         if (
             ready.get("ready") is not True
@@ -2302,19 +2609,117 @@ class Desktop:
             self.prefix_reset_pending = False
             self.reset()
             self.emit(
-                "ready",
+                "runtime_ready" if automatic else "ready",
                 epoch,
                 model_id=identifier,
                 mode=mode,
                 **self.settings_summary(),
                 **({"request_id": guided_request_id} if guided_request_id else {}),
             )
-            self.status("ready", "Ready", epoch)
+            if not automatic:
+                self.status("ready", "Ready", epoch)
+
+    def ensure_runtime(self, mode, *, cancelled=None, model_id=None):
+        """Select the protocol required by an operation, without changing the Playground.
+
+        Reserve the existing operation slot before releasing the lock to load.
+        Stop/model replacement can close a loading worker and fence its readiness.
+        Only one worker is resident; all native caches disappear on a switch.
+        """
+        current = threading.current_thread()
+        with self.lock:
+            if self.api_closing:
+                raise APIError(503, "Stark is shutting down.", "server_stopped")
+            if self.job is not None and self.job is not current and self.current_state == "loading":
+                raise APIError(
+                    429, "Stark is preparing the model. Wait for loading to finish, then retry.", "model_busy"
+                )
+            if self.active_model is None or self.worker is None:
+                raise APIError(
+                    503, "Run a model in Stark, then retry. Either Playground mode works.", "model_not_loaded"
+                )
+            active = next(m for m in self.models if m["id"] == self.active_model)
+            if model_id not in (None, api_model_id(active), self.active_model, active["name"]):
+                raise APIError(
+                    404, "Select the running model ID from Connection Details or /v1/models.", "model_not_found"
+                )
+            if cancelled is not None and cancelled.is_set():
+                raise cancellation_error(cancelled)
+            if mode == "chat" and getattr(self.worker, "backend", None) == "decision-native":
+                raise APIError(
+                    400,
+                    "This Decider model supports Decision mode only. Run a chat model for connected apps.",
+                    "mode_not_supported",
+                )
+            if self.active_mode == mode:
+                return
+            if (self.job is not None and self.job is not current) or self.api_queue:
+                raise APIError(
+                    429, "Stark is using the model. Wait for the current operation, then retry.", "model_busy"
+                )
+            epoch, identifier = self.epoch, self.active_model
+            previous_worker = self.worker
+            owned_slot = self.job is None
+            self.job = current
+            self.status(
+                "loading",
+                "Preparing model for the connected app…" if mode == "chat" else "Preparing model for a decision…",
+                epoch,
+            )
+        try:
+            with self.lock:
+                if self.epoch != epoch:
+                    raise APIError(503, "Model changed or stopped while preparing the request.", "model_changed")
+            self.close_worker(expected=previous_worker)
+            self.run(epoch, identifier, mode, automatic=True)
+            with self.lock:
+                if self.epoch != epoch or self.active_model != identifier or self.active_mode != mode:
+                    raise APIError(
+                        503,
+                        "Model changed or stopped while preparing the request. Retry with the running model.",
+                        "model_changed",
+                    )
+                if cancelled is not None and cancelled.is_set():
+                    raise cancellation_error(cancelled)
+        except APIError:
+            raise
+        except Exception:
+            with self.lock:
+                if self.epoch != epoch:
+                    raise APIError(
+                        503, "Model changed or stopped while preparing the request.", "model_changed"
+                    ) from None
+                self.close_worker()
+            raise APIError(
+                503,
+                "Stark could not prepare the model for this request. Run the model again or choose another model.",
+                "runtime_load_failed",
+            ) from None
+        finally:
+            with self.lock:
+                if owned_slot and self.job is current:
+                    self.job = None
+                    self.api_condition.notify_all()
+                if epoch == self.epoch:
+                    self.status(
+                        "ready" if self.worker else "error", "Ready" if self.worker else "Model stopped", epoch
+                    )
 
     def settings_summary(self):
         # Prompts stay in memory; acknowledgements contain limits and capabilities.
         capability, enabled = self.mtp_settings()
         return {
+            **(
+                {
+                    "backend": "decision-native",
+                    "decision_model": True,
+                    "decision_calibration": "checkpoint_temperature",
+                    "decision_images": bool(self.attachments is not None and getattr(self.worker, "images", False)),
+                    "max_images": 1,
+                }
+                if getattr(self.worker, "backend", None) == "decision-native"
+                else {}
+            ),
             "resource_budget": self.resource_budget_summary(),
             "context_tokens": self.context,
             "api_context_tokens": self.api_context,
@@ -2454,6 +2859,10 @@ class Desktop:
 
     def reset(self):
         with self.lock:
+            if getattr(self.worker, "backend", None) == "decision-native":
+                self.worker.reset_decision()
+                if self.attachments is not None:
+                    self.attachments.clear()
             system = self.system_prompt
             if system is None:
                 system = (self.codec or {}).get("default_system_prompt")
@@ -2896,6 +3305,7 @@ class Desktop:
                 api_key=key,
                 port=port,
                 status=self.api_status,
+                decide=self.api_decide,
                 cancellable=True,
             )
             details = replacement.start()
@@ -2965,9 +3375,47 @@ class Desktop:
 
     def api_models(self):
         with self.lock:
-            if self.active_model is None or self.active_mode != "chat":
+            if self.job is not None and self.current_state == "loading":
+                raise APIError(
+                    429, "Stark is preparing the model. Wait for loading to finish, then retry.", "model_busy"
+                )
+            needs_generation = (
+                self.active_model is not None
+                and self.active_mode == "decision"
+                and getattr(self.worker, "backend", None) != "decision-native"
+            )
+        if needs_generation:
+            self.ensure_runtime("chat")
+        with self.lock:
+            return self._api_models()
+
+    def _api_models(self):
+        """Read discovery under self.lock without starting a worker."""
+        with self.lock:
+            native_decision = getattr(self.worker, "backend", None) == "decision-native"
+            if self.active_model is None or (self.active_mode != "chat" and not native_decision):
                 return []
             model = next(m for m in self.models if m["id"] == self.active_model)
+            if native_decision:
+                return [
+                    {
+                        "id": api_model_id(model),
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "stark",
+                        "name": model["name"],
+                        "context_length": self.worker.max_input_tokens,
+                        "context_capacity_known": True,
+                        "max_output_tokens": 0,
+                        "tool_calling": False,
+                        "capabilities": {
+                            "decisions": True,
+                            "images": self.worker.images,
+                            "mtp": mtp_capabilities(None),
+                        },
+                        "defaults": {"mtp": False},
+                    }
+                ]
             capability, enabled = self.mtp_settings()
             return [
                 {
@@ -2986,17 +3434,19 @@ class Desktop:
             ]
 
     def api_status(self):
+        self.api_models()
         with self.lock:
             capability, enabled = self.mtp_settings()
+            native_decision = bool(self.worker and getattr(self.worker, "backend", None) == "decision-native")
             return {
                 "status": "ok",
                 "resource_budget": self.resource_budget_summary(),
-                "model_loaded": self.active_model is not None and self.active_mode == "chat",
+                "model_loaded": self.active_model is not None and (self.active_mode == "chat" or native_decision),
                 "busy": self.job is not None,
                 "queued_requests": len(self.api_queue),
                 "queue_limit": self.api_queue_limit,
                 "queue_timeout_seconds": self.api_queue_timeout,
-                "models": self.api_models(),
+                "models": self._api_models(),
                 "defaults": {"mtp": enabled},
                 "image_verification": (
                     getattr(self.worker, "image_verification", "unverified")
@@ -3007,11 +3457,13 @@ class Desktop:
                     else "unverified"
                 ),
                 "capabilities": {
-                    "chat_completions": True,
-                    "streaming": True,
+                    "chat_completions": not native_decision,
+                    "decisions": native_decision,
+                    "streaming": not native_decision,
                     "sampling": ["temperature", "top_p", "top_k", "min_p", "seed"],
                     "stop_sequences": bool(self.active_mode == "chat" and self.worker and self.worker.stop_sequences),
-                    "cancellation": bool(self.active_mode == "chat" and self.worker and self.worker.cancellation),
+                    "cancellation": native_decision
+                    or bool(self.active_mode == "chat" and self.worker and self.worker.cancellation),
                     "tool_calling": bool(self.active_mode == "chat" and tool_parser_for(self.codec)),
                     "tool_parser": tool_parser_for(self.codec) if self.active_mode == "chat" else None,
                     "tool_choices": ["auto", "none", "required", "function"]
@@ -3019,8 +3471,7 @@ class Desktop:
                     else [],
                     "structured_output": False,
                     "images": bool(
-                        self.context_capacity_known
-                        and self.active_mode == "chat"
+                        (native_decision or self.context_capacity_known and self.active_mode == "chat")
                         and self.worker
                         and getattr(self.worker, "images", False)
                     ),
@@ -3029,6 +3480,35 @@ class Desktop:
                     "mtp": capability,
                 },
             }
+
+    def api_decide(self, payload, cancelled=None):
+        return run_decision(self, payload, cancelled)
+
+    def reserve_api_request(self, epoch, identifier, cancelled):
+        """Claim the shared FIFO worker slot while holding self.lock."""
+        if len(self.api_queue) >= self.api_queue_limit:
+            raise APIError(429, "Stark's request queue is full. Retry shortly.", "queue_full")
+        ticket = object()
+        self.api_queue.append(ticket)
+        deadline = time.monotonic() + self.api_queue_timeout
+        try:
+            while self.job is not None or self.api_queue[0] is not ticket:
+                if cancelled.is_set():
+                    raise cancellation_error(cancelled)
+                if self.api_closing or self.epoch != epoch:
+                    raise APIError(503, "Model changed or stopped while this request waited.", "model_changed")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise APIError(429, "Request queue wait expired. Retry shortly.", "queue_timeout")
+                self.api_condition.wait(min(0.1, remaining))
+            if cancelled.is_set():
+                raise cancellation_error(cancelled)
+            if self.api_closing or self.epoch != epoch or self.active_model != identifier:
+                raise APIError(503, "Model changed or stopped while this request waited.", "model_changed")
+        finally:
+            self.api_queue.remove(ticket)
+            self.api_condition.notify_all()
+        self.job = threading.current_thread()
 
     def api_complete(self, payload, on_delta=None, cancelled=None):
         """Run one chat completion for the HTTP API and return the response body.
@@ -3045,7 +3525,12 @@ class Desktop:
         and the app shows the model as stopped).
         """
         cancelled = cancelled or threading.Event()
+        self.ensure_runtime(
+            "chat", cancelled=cancelled, model_id=payload.get("model") if isinstance(payload, dict) else None
+        )
         with self.lock:
+            if self.active_model is None or self.worker is None or self.active_mode != "chat":
+                raise APIError(503, "Model changed or stopped before this request started.", "model_changed")
             request = parse_chat_request(
                 payload,
                 self.api_maximum,
@@ -3093,29 +3578,7 @@ class Desktop:
             enabled_mtp = (default_mtp and request["image"] is None) if request["mtp"] is None else request["mtp"]
             drafts = self.resolve_request_mtp(enabled_mtp, capability, request["image"])
             epoch, identifier, worker = self.epoch, self.active_model, self.worker
-            if len(self.api_queue) >= self.api_queue_limit:
-                raise APIError(429, "Stark's request queue is full. Retry shortly.", "queue_full")
-            ticket = object()
-            self.api_queue.append(ticket)
-            deadline = time.monotonic() + self.api_queue_timeout
-            try:
-                while self.job is not None or self.api_queue[0] is not ticket:
-                    if cancelled.is_set():
-                        raise cancellation_error(cancelled)
-                    if self.api_closing or self.epoch != epoch:
-                        raise APIError(503, "Model changed or stopped while this request waited.", "model_changed")
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise APIError(429, "Request queue wait expired. Retry shortly.", "queue_timeout")
-                    self.api_condition.wait(min(0.1, remaining))
-                if cancelled.is_set():
-                    raise cancellation_error(cancelled)
-                if self.api_closing or self.epoch != epoch or self.active_model != identifier:
-                    raise APIError(503, "Model changed or stopped while this request waited.", "model_changed")
-            finally:
-                self.api_queue.remove(ticket)
-                self.api_condition.notify_all()
-            self.job = threading.current_thread()
+            self.reserve_api_request(epoch, identifier, cancelled)
             estimate_key = self.estimate_key(
                 context=self.api_context,
                 sampling=request["sampling"],
@@ -3270,19 +3733,66 @@ class Desktop:
                         "ready" if self.worker else "error", "Ready" if self.worker else "Model stopped", epoch
                     )
 
-    def decide(self, epoch, text, question, answers):
-        with self.lock:
-            if self.active_mode != "decision" or self.worker is None:
-                raise DesktopError("Choose Decision mode and run a model before evaluating a decision.")
-            worker, codec, template, vocab_size = self.worker, self.codec, self.template, self.vocab_size
-        try:
-            reply = decide(worker, codec, template, text, question, answers, vocab_size)
-        except DecisionInputError as error:
-            raise DesktopError(str(error)) from None
+    def discard_decision_attachment(self, reference):
+        if reference is not None and self.attachments is not None:
+            try:
+                self.attachments.claim(reference)
+            except MediaError:
+                pass
+
+    def decide(self, epoch, text, question, answers, reference=None, request_id=None):
         with self.lock:
             if epoch != self.epoch:
                 return
-            self.emit("decision", epoch, **reply)
+            if self.playground_mode != "decision":
+                self.discard_decision_attachment(reference)
+                raise DesktopError("Choose Decision mode and run a model before evaluating a decision.")
+        try:
+            self.ensure_runtime("decision")
+        except APIError as error:
+            self.discard_decision_attachment(reference)
+            raise DesktopError(error.message) from None
+        with self.lock:
+            if epoch != self.epoch:
+                return
+            if self.active_mode != "decision" or self.worker is None:
+                raise DesktopError("Choose Decision mode and run a model before evaluating a decision.")
+            worker, codec, template, vocab_size = self.worker, self.codec, self.template, self.vocab_size
+            native = getattr(worker, "backend", None) == "decision-native"
+            attachments = self.attachments
+        claimed = False
+        try:
+            image = None
+            if reference is not None:
+                if not native or attachments is None or not getattr(worker, "images", False):
+                    raise DesktopError("This Decision worker does not support image attachments.")
+                self.emit(
+                    "image_progress", epoch, phase="preparing", **({"request_id": request_id} if request_id else {})
+                )
+                image = attachments.claim(reference)
+                claimed = True
+            if native:
+                if image is not None:
+                    self.emit(
+                        "image_progress",
+                        epoch,
+                        phase="deciding",
+                        **({"request_id": request_id} if request_id else {}),
+                    )
+                reply = worker.decide(text, question, answers, image=image)
+            else:
+                reply = decide(worker, codec, template, text, question, answers, vocab_size)
+        except DecisionInputError as error:
+            raise DesktopError(str(error)) from None
+        except MediaError as error:
+            raise DesktopError(str(error)) from None
+        finally:
+            if not claimed:
+                self.discard_decision_attachment(reference)
+        with self.lock:
+            if epoch != self.epoch or self.worker is not worker:
+                return
+            self.emit("decision", epoch, **reply, **({"request_id": request_id} if request_id else {}))
             self.status("ready", "Ready", epoch)
 
     def monitor(self):
@@ -3299,6 +3809,8 @@ class Desktop:
         command = payload["command"]
         if command == "list":
             self.library()
+        elif command in {"system_sleep", "system_wake"} and set(payload) == {"command"}:
+            self.system_power(command == "system_sleep")
         elif command == "configure_api":
             self.configure_api(payload)
         elif command in {"grant_api_client", "revoke_api_clients"}:
@@ -3356,7 +3868,7 @@ class Desktop:
                 request_id=request_id,
             )
         elif command in ("stop", "quit"):
-            self.stop()
+            self.stop(preserve_catalog=command == "stop" and payload.get("preserve_catalog") is True)
             return command != "quit"
         elif command == "run" and isinstance(payload.get("model_id"), str):
             mode = payload.get("mode", "chat")
@@ -3366,8 +3878,8 @@ class Desktop:
             self.start(self.run, "loading", "Loading model…", payload["model_id"], mode)
         elif command == "install" and isinstance(payload.get("source"), str) and isinstance(payload.get("kind"), str):
             artifact_mode = payload.get("artifact_mode")
-            if artifact_mode not in (None, "text", "vision-language"):
-                raise DesktopError("Choose text or vision-language conversion.")
+            if artifact_mode not in (None, "text", "vision-language", "decision"):
+                raise DesktopError("Choose text or vision-language conversion, or native Decision mode.")
             if "support_mode" in payload or "support_request_id" in payload:
                 self.start(
                     self.install,
@@ -3423,11 +3935,49 @@ class Desktop:
                     request_id=request_id,
                 )
         elif command == "decide":
+            reference, request_id = payload.get("image"), payload.get("request_id")
             try:
-                answers = validate_inputs(payload.get("text"), payload.get("question"), payload.get("answers"))
+                if set(payload) - {"command", "text", "question", "answers", "image", "request_id"}:
+                    raise DesktopError("Invalid app command.")
+                if "request_id" in payload and not self.request_id(request_id):
+                    raise DesktopError("Invalid app command.")
+                if "image" in payload and not isinstance(reference, dict):
+                    raise DesktopError("Invalid image attachment.")
+                native = getattr(self.worker, "backend", None) == "decision-native"
+                if reference is not None and not native:
+                    raise DesktopError("This Decision worker does not support image attachments.")
+                answers = validate_desktop_inputs(
+                    payload.get("text"),
+                    payload.get("question"),
+                    payload.get("answers"),
+                    image=native and reference is not None,
+                )
             except DecisionInputError as error:
+                self.discard_decision_attachment(reference)
                 raise DesktopError(str(error)) from None
-            self.start(self.decide, "deciding", "Evaluating decision…", payload["text"], payload["question"], answers)
+            except DesktopError:
+                self.discard_decision_attachment(reference)
+                raise
+            with self.lock:
+                if reference is not None and self.job is not None and self.job.is_alive():
+                    self.discard_decision_attachment(reference)
+                    self.emit(
+                        "error",
+                        message="Wait for the current operation or choose Stop.",
+                        **({"request_id": request_id} if request_id else {}),
+                    )
+                    return True
+            self.start(
+                self.decide,
+                "deciding",
+                "Evaluating decision…",
+                payload["text"],
+                payload["question"],
+                answers,
+                reference,
+                request_id,
+                request_id=request_id,
+            )
         elif command == "reset":
             with self.lock:
                 if self.job is not None:
@@ -3487,14 +4037,21 @@ def serve(desktop):
             line = bytes(pending)
             pending.clear()
             chunk = chunk[newline + 1 :]
+            payload = None
             try:
                 check_json_structure(line)
                 if headroom and headroom > available_memory_bytes():
                     raise DesktopError("Available memory is too low for this app command. Try a smaller request.")
-                if not desktop.dispatch(json.loads(line)):
+                payload = json.loads(line)
+                if not desktop.dispatch(payload):
                     return
             except DesktopError as error:
-                desktop.emit("error", message=str(error))
+                request_id = payload.get("request_id") if isinstance(payload, dict) else None
+                desktop.emit(
+                    "error",
+                    message=str(error),
+                    **({"request_id": request_id} if desktop.request_id(request_id) else {}),
+                )
             except Exception:
                 desktop.emit("error", message="Invalid app command.")
 
@@ -3503,6 +4060,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--score-worker", type=Path)
+    parser.add_argument("--decide-worker", type=Path)
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--attachment-root", type=Path)
     args = parser.parse_args(argv)
@@ -3515,7 +4073,11 @@ def main(argv=None):
     signal.signal(signal.SIGINT, interrupted)
     try:
         desktop = Desktop(
-            args.worker, args.data_dir, score_executable=args.score_worker, attachment_root=args.attachment_root
+            args.worker,
+            args.data_dir,
+            score_executable=args.score_worker,
+            attachment_root=args.attachment_root,
+            decide_executable=args.decide_worker,
         )
         serve(desktop)
         return 0

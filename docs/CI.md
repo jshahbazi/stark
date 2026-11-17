@@ -124,6 +124,7 @@ uv run --no-project --python 3.13.13 python -m unittest \
   scripts/test_install.py scripts/test_install_app.py scripts/test_stark_cli.py \
   scripts/test_build_distribution.py scripts/test_build_menubar.py scripts/test_sign_distribution.py \
   scripts/test_apple_credentials.py scripts/test_build_dmg.py scripts/test_release_version.py scripts/test_app_update.py
+uv run --no-project --python 3.13.13 python -m unittest scripts/test_pi_client_resources.py scripts/test_pi_connection.py
 ```
 
 The native beginner-flow checks use isolated preferences and synthetic model

@@ -11,6 +11,10 @@ name = "stark-score"
 path = "src/main.rs"
 
 [[bin]]
+name = "stark-decide"
+path = "src/decide_main.rs"
+
+[[bin]]
 name = "stark-score-digest"
 path = "probes/score_digest.rs"
 

@@ -18,6 +18,7 @@ on:
       - 'apps/menu-bar/**'
       - 'scripts/build_distribution.py'
       - 'scripts/build_menubar.py'
+      - 'scripts/pi_client_resources.py'
       - 'scripts/install_app.py'
       - 'scripts/verify_distribution.py'
       - 'scripts/stark'

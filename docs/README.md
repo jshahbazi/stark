@@ -10,6 +10,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Menu bar app](../apps/menu-bar/README.md) | Building, updating and using the app, Connections, where the app keeps state |
 | [Converter guide](../tools/converter/README.md) | `stark convert` usage, every option and limit, supported models, MLX and GGUF routes, offline replay, errors |
 | [Model-family support](MODEL_SUPPORT.md) | Family downloads, saved-model removal, mode/format coverage and installation checks |
+| [Decider Flash v1.3](DECIDER.md) | Dedicated native decision scoring with images, preparation, limits and reference validation |
 | [Model image status](MODEL_IMAGE_STATUS.md) | All registered families and pinned checkpoint entries, image implementation/validation status, text optimization gaps and remaining work |
 | [Default-image text parity worklist](IMAGE_DEFAULT_PARITY_PLAN.md) | Prioritized family/artifact work and mandatory future-model gates for cache correctness, text performance and supported text MTP with images loaded |
 | [Tool-calling coverage](TOOL_CALLING.md) | Supported tool formats, checkpoint evidence, import status and remaining parser work |
@@ -24,6 +25,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Edge0-145B plan](EDGE0_PLAN.md) | Local non-commercial model-path/chat loading with an 8K limit; near-capacity observation 13.74 prefill / 10.87 decode tok/s, MTP unavailable; prefix reuse, tools and product admission unfinished |
 | [Gemma 3 images](GEMMA3_IMAGES.md) | Source-bound SigLIP image artifacts, 4B/12B/27B admission, exact processor semantics and qualification boundaries |
 | [Recursive Flint](FLINT.md) | Official INT4 preparation, native text execution, limits and reference checks |
+| [Ripple-65B Preview](RIPPLE.md) | Native Rust/Metal architecture, pinned Q4_K_M and Q8_0 preparation, precision and validation limits |
 | [Trained Qwen checkpoints](QWEN_TRAINED_CHECKPOINTS.md) | Converting and testing fine-tuned Qwen3 4B and Qwen3.8 4B checkpoints |
 | [Local API](LOCAL_API.md) | The loopback OpenAI-style chat API: authentication, endpoints, parameters, limits, error codes, tested clients |
 
@@ -42,9 +44,11 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | Page | What it covers |
 | --- | --- |
 | [Contributing](../CONTRIBUTING.md) | Toolchains, local checks, test layout, running a model-bound smoke test, where validation records go |
+| [Manual desktop user simulation](USER_SIMULATION.md) | Explicitly invoked OpenWork, OpenCode Desktop and Pi project-building workflow, independent acceptance checks and aggregate reporting |
 | [Adding model support](MODEL_ONBOARDING.md) | Required tool-calling assessment, prefix reuse, artifact qualification and lifecycle checks for each new inference path |
 | [Model changes and experiments](model-experiments/README.md) | Attempt ledger, image-support retrospective, failed approaches, promotion decisions and a template for future correctness/performance work |
 | [Technical guide](TECHNICAL_OVERVIEW.md) | Components, engine module layout, feature flags, Python package layout, the app control protocol |
+| [Codex, Claude and Pi integration plan](AGENT_CLIENT_INTEGRATION_PLAN.md) | Advanced Connections Pi setup, external protocol adapters, authentication and qualification gates; guarded Pi has bounded real Qwen3-4B evidence |
 | [CI and security checks](CI.md) | Workflows, what they cover and do not cover, dependency gates, caches, local equivalents |
 | [Releasing](RELEASING.md) | Signed and prebuilt release workflows, verification on a receiving Mac, DMG handling |
 | [Cargo troubleshooting](CARGO_TROUBLESHOOTING.md) | Repairing a corrupted registry cache |

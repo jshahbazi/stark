@@ -8,6 +8,7 @@ import sys
 import threading
 from types import SimpleNamespace
 
+import httpx2 as httpx
 import numpy as np
 import pytest
 from huggingface_hub.utils._xet_progress_reporting import XetDownloadProgressReporter
@@ -134,6 +135,48 @@ def test_progress_failure_event_is_allowlisted_and_content_free():
         progress.failure("private exception text")
 
 
+@pytest.mark.parametrize("status", [401, 403, 404, 408, 429, 500, 502, 503, 504])
+def test_network_failure_classification_uses_status_not_private_text(status):
+    request = httpx.Request("GET", "https://example.invalid/private")
+    error = httpx.HTTPStatusError("private", request=request, response=httpx.Response(status, request=request))
+    expected = "network_unavailable" if status in {408, 429, 500, 502, 503, 504} else "conversion_failed"
+    assert converter_failure_category(error) == expected
+
+
+def test_wrapped_transport_failure_and_terminal_errors():
+    error = RuntimeError("private")
+    error.__cause__ = httpx.ConnectError("private")
+    assert converter_failure_category(error) == "network_unavailable"
+    error.__cause__.__cause__ = error  # A malformed chain must remain bounded.
+    assert converter_failure_category(error) == "network_unavailable"
+    terminal = PermissionError("private")
+    terminal.__cause__ = error
+    assert converter_failure_category(terminal) == "permission_denied"
+    assert converter_failure_category(TimeoutError("private")) == "network_unavailable"
+
+
+@pytest.mark.parametrize(
+    "cause,category",
+    [
+        (PermissionError(13, "private"), "permission_denied"),
+        (OSError(28, "private"), "disk_full"),
+        (UnsupportedConversion("private"), "unsupported_format_or_config"),
+    ],
+)
+@pytest.mark.parametrize("wrapper", [RuntimeError, httpx.ConnectError])
+def test_wrapped_terminal_failure_does_not_retry_older_network_context(cause, category, wrapper):
+    outer = wrapper("private")
+    outer.__cause__ = cause
+    cause.__context__ = httpx.ConnectError("private")
+    assert converter_failure_category(outer) == category
+
+
+def test_untyped_cyclic_failure_chain_is_bounded():
+    outer, inner = RuntimeError("private"), RuntimeError("private")
+    outer.__cause__, inner.__cause__ = inner, outer
+    assert converter_failure_category(outer) == "conversion_failed"
+
+
 class ProgressHub(Hub):
     def __init__(self, repositories, *, cached=(), resume=()):
         super().__init__(repositories)
@@ -194,7 +237,7 @@ def test_selected_file_totals_include_cache_resume_and_exclude_unselected_files(
     assert capsys.readouterr() == ("", "")
 
 
-def test_xet_counts_reconstruction_once_with_progress_globally_disabled(monkeypatch, capsys):
+def test_xet_estimates_progress_from_transfers_when_reconstruction_lags(monkeypatch, capsys):
     monkeypatch.setenv("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     events = []
     download = DownloadProgress(ProgressReporter(events.append, interval=0))
@@ -215,12 +258,35 @@ def test_xet_counts_reconstruction_once_with_progress_globally_disabled(monkeypa
                     total_bytes=100,
                 )
             )
-    assert [event["completed_bytes"] for event in events] == [0, 0, 20, 40, 100]
+    assert [event["completed_bytes"] for event in events] == [0, 0, 20, 60, 60, 99, 100, 100]
     assert events[-1]["state"] == "running"
     download.complete()
     assert events[-1]["state"] == "complete"
     assert_private(events)
     assert capsys.readouterr() == ("", "")
+
+
+def test_transfer_estimate_handles_resume_retries_and_reconstruction_without_double_counting():
+    events = []
+    download = DownloadProgress(ProgressReporter(events.append, interval=0))
+    key = ("private-repository", PIN, "private-file")
+    download.sizes[key] = 1000
+    download.selected = {key}
+    bar = download.bar_class(key)(total=1000, initial=200)
+    bar.update_transfer(300)
+    assert events[-1]["completed_bytes"] == 500
+    bar.update(300)
+    assert events[-1]["completed_bytes"] == 500
+    bar.update_transfer(-500)
+    bar.update_transfer(100)
+    assert events[-1]["completed_bytes"] == 500
+    bar.update_transfer(5000)
+    assert events[-1]["completed_bytes"] == 990
+    assert events[-1]["state"] == "running"
+    bar.update(500)
+    assert events[-1]["completed_bytes"] == 1000
+    assert all(event["state"] == "running" for event in events)
+    assert_private(events)
 
 
 def test_snapshot_progress_captures_reconstruction_and_transfer_not_file_counts(monkeypatch, capsys):
@@ -334,26 +400,33 @@ def test_snapshot_resume_reset_does_not_double_count_discarded_partial_bytes():
     assert_private(events)
 
 
-def test_completed_files_progress_has_fixed_total_and_separate_network_bytes():
-    events, completed = [], [25]
+def test_native_progress_estimates_transfers_above_cached_baseline_without_double_counting():
+    events, completed = [], [250]
     capture = SnapshotDownloadProgress(
-        ProgressReporter(events.append, interval=0), 100, completed_files=lambda: completed[0]
+        ProgressReporter(events.append, interval=0), 1000, completed_files=lambda: completed[0]
     )
     bars = capture.bar_class()
     capture.close()
-    assert events[-1]["completed_bytes"] == 25 and events[-1]["total_bytes"] == 100
+    assert events[-1]["completed_bytes"] == 250 and events[-1]["total_bytes"] == 1000
     with bars(name=capture.BAR_NAME) as reconstruction:
-        reconstruction.update(70)  # Buffered/partial file is not complete.
-    assert events[-1]["completed_bytes"] == 25
-    with bars(name=capture.TRANSFER_BAR_NAME) as transfer:
+        reconstruction.update(700)  # Partial allocations do not establish progress.
+    assert events[-1]["completed_bytes"] == 250
+    with bars(name=capture.TRANSFER_BAR_NAME, initial=250) as transfer:
+        transfer.update(100)
+        assert events[-1]["completed_bytes"] == 350
+        assert events[-1]["transferred_bytes"] == 100
+        completed[0] = 500
+        capture.close()
+        assert events[-1]["completed_bytes"] == 500
         transfer.update(200)
-    assert events[-1]["transferred_bytes"] == 200
-    assert events[-1]["completed_bytes"] == 25
-    completed[0] = 75
-    with bars(total=3) as files:
-        files.update(1)  # Hub completed-file callback also covers cache hits.
-    assert events[-1]["completed_bytes"] == 75
-    assert events[-1]["total_bytes"] == 100
+        assert events[-1]["completed_bytes"] == 550  # Do not add current completed files twice.
+        transfer.update(5000)  # Retransfers/overhead cannot claim completion.
+    assert events[-1]["completed_bytes"] == 992
+    assert events[-1]["total_bytes"] == 1000 and events[-1]["state"] == "running"
+    completed[0] = 1000
+    capture.close()
+    assert events[-1]["completed_bytes"] == 1000
+    assert_private(events)
 
 
 def test_locked_hub_snapshot_routes_live_bytes_to_private_progress(tmp_path, monkeypatch, capsys):

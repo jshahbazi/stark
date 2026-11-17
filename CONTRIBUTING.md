@@ -28,6 +28,14 @@ Run commands from the repository root. Keep dependencies locked: `Cargo.lock`, `
 
 `tools/data_exporter`, `tools/gpu_trace` and `tools/model_compare` are inherited from Uzu and are not part of the product.
 
+Pi Connections uses an immutable public resource snapshot pinned from the
+separate `stark-agent-clients` repository. Clean builds use the checked-in
+snapshot without a private checkout. `--pi-client-source` optionally verifies a
+source checkout against the same lock; see the [menu bar guide](apps/menu-bar/README.md#pi-in-connections).
+For Pi setup changes run `scripts/test_pi_connection.py`,
+`scripts/test_pi_client_resources.py` and the native window checks, together with
+the integration repository's `npm test`.
+
 ## Local checks
 
 The repository policy check is the first thing CI runs and the first thing to run locally:
@@ -49,9 +57,10 @@ HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false uv run --project tools/converter -
 Build the workers separately so the scorer's `optimized` features never unify into the generator:
 
 ```sh
-cargo +1.98.1 build --release --locked -p stark-generate
-cargo +1.98.1 build --release --locked -p stark-score --features optimized
-cargo +1.98.1 build --release --locked -p stark-template
+cargo +1.98.1 build --release --locked -p stark-generate --bin stark-generate
+cargo +1.98.1 build --release --locked -p stark-score --bin stark-score --features optimized
+cargo +1.98.1 build --release --locked -p stark-template --bin stark-template
+cargo +1.98.1 build --release --locked -p stark-score --bin stark-decide
 ```
 
 The `stark-template` helper is required for chat and decision rendering; there
@@ -83,6 +92,14 @@ cargo +nightly-2026-10-01 test --locked -p stark-engine --no-default-features --
 Nothing in this run needs a model or the network. The ignored `test_metadata_loading` test and the model-loading benchmark read a converted model from `STARK_TEST_MODEL_PATH`; point it at a directory such as the one the smoke test below produces and add `--include-ignored` (or `--bench`, see `crates/stark-engine/unit/BENCHMARKS.md`). Kernel changes should be accompanied by a run of this suite and, where a kernel feeds the scorer, by the [scoring parity](docs/validation/SCORING_PARITY.md) replay.
 
 ## Run a model-bound smoke test
+
+The dedicated `stark-decide` worker and its model-bound upstream comparison are
+described in [Decider Flash v1.3](docs/DECIDER.md).
+
+For an explicitly invoked project-building test through OpenWork, OpenCode
+Desktop and Pi, use `$stark-user-test` and the
+[manual desktop user simulation](docs/USER_SIMULATION.md). It uses real app UI
+and independent project checks. It is not a CI or scheduled live test.
 
 CI never loads a model. After changing the engine, a worker, or the converter, check the real path once:
 

@@ -39,12 +39,17 @@ def host_resources(**changes):
     }
 
 
-def test_every_catalogue_native_source_has_a_separate_bound_plan():
+def test_fixed_native_sources_have_a_bound_plan_or_explicit_exclusion():
     recipes = guided.native_recipes()
-    assert {recipe.native_choice for recipe in recipes} == {
-        choice for choice in hybrid.SOURCES if native_catalog.allowed_choice(choice)
-    }
-    assert "edge0-145b-q3k" not in {recipe.native_choice for recipe in recipes}
+    # Ripple's manual text imports do not establish the source-bound memory
+    # and tool-workflow profiles required by Guided setup. BF16 is preparation
+    # only; the two quantized catalog choices are also deliberately excluded.
+    unprofiled = {"ripple-q8", "ripple-q4-k-m", "ripple-bf16"}
+    assert unprofiled <= set(hybrid.SOURCES)
+    # Edge0 is a local-evaluation source without a native catalog install path.
+    uncatalogued = {choice for choice in hybrid.SOURCES if not native_catalog.allowed_choice(choice)}
+    assert "edge0-145b-q3k" in uncatalogued
+    assert {recipe.native_choice for recipe in recipes} == set(hybrid.SOURCES) - unprofiled - uncatalogued
     assert len({recipe.id for recipe in recipes}) == len(recipes)
     for recipe in recipes:
         source = hybrid.SOURCES[recipe.native_choice]
@@ -140,7 +145,7 @@ def test_fresh_qwen_recommendation_requires_setup_disk_but_reuse_does_not(disk_g
     assert reused["items"][0]["installed_ids"] == ["installed-copy"]
 
 
-def test_fresh_and_installed_qwen_recommendations_share_available_memory_boundary():
+def test_qwen_recommendations_use_physical_capacity_not_current_free_memory():
     recipe = next(recipe for recipe in guided.native_recipes() if recipe.native_choice == "qwen38-mlx-serve-mixed")
     base = host_resources(
         physical_memory_bytes=128 * GIB,
@@ -149,18 +154,22 @@ def test_fresh_and_installed_qwen_recommendations_share_available_memory_boundar
         free_disk_bytes=256 * GIB,
         download_free_disk_bytes=0,
     )
+    expected = [recipe.id]
     for installed in ({}, {recipe.id: ["installed-copy"]}):
-        at_threshold = guided.recommendation_report(
-            base, installed, candidates=[recipe], benchmarks=guided.load_registry()
-        )
-        below_threshold = guided.recommendation_report(
-            {**base, "available_memory_bytes": recipe.runtime_memory - 1},
-            installed,
-            candidates=[recipe],
-            benchmarks=guided.load_registry(),
-        )
-        assert [item["id"] for item in at_threshold["items"]] == [recipe.id]
-        assert below_threshold["items"] == []
+        for available in (0, None, 2 * GIB, recipe.runtime_memory - 1, recipe.runtime_memory):
+            report = guided.recommendation_report(
+                {**base, "available_memory_bytes": available},
+                installed,
+                candidates=[recipe],
+                benchmarks=guided.load_registry(),
+            )
+            assert [item["id"] for item in report["items"]] == expected
+
+    # The install route still has a small preparation headroom floor. A fresh
+    # worker start separately enforces the model's full startup working set.
+    assert not guided.installation_allowed(recipe, {**base, "available_memory_bytes": 0})
+    assert not guided.execution_allowed(recipe, {**base, "available_memory_bytes": recipe.runtime_memory - 1})
+    assert guided.execution_allowed(recipe, {**base, "available_memory_bytes": recipe.runtime_memory})
 
 
 def test_native_uses_only_library_disk_and_keeps_missing_gpu_fail_closed():
@@ -264,9 +273,7 @@ def test_native_sources_are_considered_offline_without_catalog_candidates(tmp_pa
         report = [json.loads(line) for line in host.output.getvalue().splitlines()][-1]["report"]
         assert report["items"][0]["repo"] == hybrid.SOURCES["flint-int4"]["weights_repo"]
         assert "Native hybrid" in report["message"]
-        assert report["catalog_search"]["candidates_considered"] == len(guided.RECIPES) + sum(
-            native_catalog.allowed_choice(choice) for choice in hybrid.SOURCES
-        )
+        assert report["catalog_search"]["candidates_considered"] == len(guided.RECIPES) + len(guided.native_recipes())
     finally:
         host.stop(quiet=True)
 
@@ -311,7 +318,7 @@ def test_fresh_native_qwen_recommendations_have_source_bound_memory_plans(tmp_pa
         host.stop(quiet=True)
 
 
-def test_existing_matching_but_unqualified_copy_keeps_conservative_memory_plan(tmp_path, monkeypatch):
+def test_existing_matching_but_unqualified_copy_is_offered_with_conservative_memory_plan(tmp_path, monkeypatch):
     choice = "qwen38-mlx-serve-mixed"
     host = Desktop(tmp_path / "unused-worker", tmp_path / "library", io.StringIO())
     path = tmp_path / "incomplete-installed-copy"
@@ -358,7 +365,8 @@ def test_existing_matching_but_unqualified_copy_keeps_conservative_memory_plan(t
         assert candidate.runtime_memory == 111 * GIB
         assert captured["installed"][candidate.id] == ["matching-copy"]
         report = [json.loads(line) for line in host.output.getvalue().splitlines()][-1]["report"]
-        assert candidate.id not in {item["id"] for item in report["items"]}
+        item = next(item for item in report["items"] if item["id"] == candidate.id)
+        assert item["runtime_memory_bytes_estimate"] == candidate.runtime_memory
     finally:
         host.stop(quiet=True)
 

@@ -199,15 +199,16 @@ class LocalSigningTests(unittest.TestCase):
         runtime = app / "Contents/Resources/runtime"
         make_runtime(runtime)
         (runtime / "share/stark/VERSION").write_text("fixture\n")
-        (runtime / "libexec/stark-generate").write_bytes(b"compiled worker")
+        workers = ("stark-generate", "stark-score", "stark-template", "stark-decide")
+        for worker in workers:
+            (runtime / "libexec" / worker).write_bytes(("compiled " + worker).encode())
         manifest = {
             "source": {"revision": "a" * 40, "dirty": True},
             "base_runtime": {"manifest_sha256": "c" * 64},
             "executable_before_signing_sha256": builder.sha256(executable),
             "overlays_sha256": {
-                "libexec/stark-generate": builder.sha256(
-                    runtime / "libexec/stark-generate"
-                )
+                "libexec/" + worker: builder.sha256(runtime / "libexec" / worker)
+                for worker in workers
             },
             "signature": "local ad-hoc; no Developer ID signature or notarization",
         }
@@ -231,7 +232,15 @@ class LocalSigningTests(unittest.TestCase):
                     (runtime, self.identity, keychain),
                 )
                 events.append("native")
-                (runtime / "libexec/stark-generate").write_bytes(b"signed worker")
+                for worker in (
+                    "stark-generate",
+                    "stark-score",
+                    "stark-template",
+                    "stark-decide",
+                ):
+                    (runtime / "libexec" / worker).write_bytes(
+                        ("signed " + worker).encode()
+                    )
 
             def command(arguments, _stage):
                 if "--sign" in arguments:
@@ -288,10 +297,16 @@ class LocalSigningTests(unittest.TestCase):
             self.assertEqual(
                 manifest["signed_application"]["application_version"], "0.0.0"
             )
-            self.assertEqual(
-                manifest["signed_overlays_sha256"]["libexec/stark-generate"],
-                builder.sha256(runtime / "libexec/stark-generate"),
-            )
+            for worker in (
+                "stark-generate",
+                "stark-score",
+                "stark-template",
+                "stark-decide",
+            ):
+                self.assertEqual(
+                    manifest["signed_overlays_sha256"]["libexec/" + worker],
+                    builder.sha256(runtime / "libexec" / worker),
+                )
             self.assertNotEqual(
                 manifest["signed_overlays_sha256"], original["overlays_sha256"]
             )
@@ -365,8 +380,14 @@ class RuntimeVerificationTests(unittest.TestCase):
             make_runtime(runtime)
             (runtime / "app/Stark.app").mkdir(parents=True)
             (runtime / "app/Stark.app/payload").write_bytes(b"old application")
+            header = runtime / "libexec/python/include/python3.13/Python.h"
+            header.parent.mkdir(parents=True)
+            header.write_bytes(b"unused development header")
             manifest_path = runtime / builder.RUNTIME_MANIFEST
             manifest = json.loads(manifest_path.read_text())
+            manifest["files_sha256"][header.relative_to(runtime).as_posix()] = (
+                builder.sha256(header)
+            )
             manifest["files_sha256"]["app/Stark.app/payload"] = builder.sha256(
                 runtime / "app/Stark.app/payload"
             )
@@ -377,6 +398,8 @@ class RuntimeVerificationTests(unittest.TestCase):
             excluded = builder.copy_runtime_for_application(runtime, embedded, manifest)
             self.assertEqual(excluded, ["app"])
             self.assertFalse((embedded / "app").exists())
+            self.assertFalse((embedded / "libexec/python/include").exists())
+            self.assertTrue(header.exists())
             self.assertEqual(manifest_path.read_bytes(), parent_manifest)
             derived = builder.verify_runtime(embedded)
             self.assertEqual(
@@ -409,6 +432,34 @@ class RuntimeVerificationTests(unittest.TestCase):
             ),
         ):
             builder.verify_worker(Path("score-worker"), "score")
+
+    def test_decide_worker_probe_requires_fixed_reply_and_distinct_failure_code(self):
+        valid = subprocess.CompletedProcess(
+            [], 1, b'{"ready":false,"error":"invalid_arguments"}\n'
+        )
+        with patch.object(builder.subprocess, "run", return_value=valid) as probe:
+            builder.verify_worker(Path("decide-worker"), "decide")
+        self.assertEqual(probe.call_args.args[0], ["decide-worker"])
+        for invalid in (
+            subprocess.CompletedProcess([], 0, valid.stdout),
+            subprocess.CompletedProcess([], 1, b'{"ready":true}\n'),
+            subprocess.CompletedProcess([], 1, b'{"ready":false,"error":"other"}\n'),
+            subprocess.CompletedProcess([], 1, b"not JSON"),
+        ):
+            with (
+                self.subTest(reply=invalid.stdout),
+                patch.object(builder.subprocess, "run", return_value=invalid),
+                self.assertRaisesRegex(
+                    builder.BuildError, "^decide_worker_self_check_failed$"
+                ),
+            ):
+                builder.verify_worker(Path("decide-worker"), "decide")
+
+    def test_missing_decide_worker_has_its_own_preflight_failure(self):
+        with self.assertRaisesRegex(
+            builder.BuildError, "^decide_worker_self_check_failed$"
+        ):
+            builder.verify_worker(Path("/definitely/missing/stark-decide"), "decide")
 
     def test_template_worker_probe_checks_native_renderer_protocol(self):
         valid = subprocess.CompletedProcess(
@@ -1364,6 +1415,8 @@ print(String(data: try! JSONSerialization.data(withJSONObject: result), encoding
                             "Desktop*.swift",
                             "OpenWork*.swift",
                             "OpenCode*.swift",
+                            "PiConnectionController.swift",
+                            "ConnectionClipboard.swift",
                         )
                         for path in sorted(
                             (builder.ROOT / "apps/menu-bar/Sources").glob(pattern)

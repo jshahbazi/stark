@@ -25,6 +25,67 @@ def normalize_chat_template(source):
     return GENERATION_BLOCK_TAG.sub("", source)
 
 
+MAX_NAMED_TEMPLATES = 64
+NAMED_TEMPLATE_DEFAULT = "default"
+
+
+class NamedTemplateError(ValueError):
+    """A named chat-template list outside the supported form; carries no source text."""
+
+
+def is_named_template_list(value):
+    """Whether `value` has the Hugging Face named-list shape (not whether it is admitted)."""
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(
+            isinstance(item, dict) and isinstance(item.get("name"), str) and isinstance(item.get("template"), str)
+            for item in value
+        )
+    )
+
+
+def select_named_chat_template(value):
+    """Return the `default` entry of a Hugging Face named chat-template list and its record.
+
+    Transformers renders the `default` entry when no template name is given.
+    Only a bounded list of `{"name": str, "template": str}` objects with unique
+    names that include `default` is accepted; every other entry is retained by
+    hash only and is never selected. The record holds names and SHA-256 hashes,
+    never template text.
+    """
+    if not isinstance(value, list) or not 0 < len(value) <= MAX_NAMED_TEMPLATES:
+        raise NamedTemplateError("named_template_shape")
+    hashes = {}
+    names = []
+    for item in value:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"name", "template"}
+            or type(item["name"]) is not str
+            or type(item["template"]) is not str
+            or not item["name"]
+        ):
+            raise NamedTemplateError("named_template_shape")
+        if item["name"] in hashes:
+            raise NamedTemplateError("named_template_duplicate")
+        try:
+            hashes[item["name"]] = hashlib.sha256(item["template"].encode("utf-8")).hexdigest()
+        except UnicodeEncodeError:
+            raise NamedTemplateError("named_template_shape") from None
+        names.append(item["name"])
+    if NAMED_TEMPLATE_DEFAULT not in hashes:
+        raise NamedTemplateError("named_template_default_missing")
+    selected = next(item["template"] for item in value if item["name"] == NAMED_TEMPLATE_DEFAULT)
+    return selected, {
+        "form": "named_list",
+        "selected": NAMED_TEMPLATE_DEFAULT,
+        "names": names,
+        "templates_sha256": hashes,
+        "tool_templates": "unreviewed",
+    }
+
+
 def chat_template_environment():
     """Keep admission and actual rendering on the same language settings."""
     return ImmutableSandboxedEnvironment(extensions=["jinja2.ext.loopcontrols"], trim_blocks=True, lstrip_blocks=True)

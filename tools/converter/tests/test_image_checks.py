@@ -546,8 +546,13 @@ def test_memory_preflight_rejects_insufficient_observed_budget(worker, monkeypat
     (worker.model_path / "model.safetensors").write_bytes(b"synthetic weights")
     config = {"artifact_contract": {"schema_version": 3, "family": {"profile": FAMILY_PROFILE, "version": 1}}}
     monkeypatch.setattr(image_checks.psutil, "virtual_memory", lambda: SimpleNamespace(available=1))
-    with pytest.raises(image_checks.ImageCheckError, match="available memory"):
+    with pytest.raises(image_checks.ImageCheckError, match="available memory") as failure:
         image_checks.preflight_family_memory(worker.model_path, config)
+    message = str(failure.value)
+    assert "(RAM)" in message and "Estimated RAM needed: 0.5 GB; available now: 0.0 GB" in message
+    assert "without making another disk copy" in message and "then retry" in message
+    monkeypatch.setattr(image_checks.psutil, "virtual_memory", lambda: SimpleNamespace(available=1024**3))
+    image_checks.preflight_family_memory(worker.model_path, config)
 
 
 def test_memory_preflight_is_observation_only_and_does_not_run_for_text(worker, monkeypatch):

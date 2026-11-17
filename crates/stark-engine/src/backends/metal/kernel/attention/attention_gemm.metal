@@ -82,7 +82,7 @@ struct AttentionGemmLayout {
 };
 
 template <typename T, uint BK, uint BD, bool USE_MXU, bool SOURCE_SCORE_SCALE>
-VARIANTS(T, float, bfloat)
+VARIANTS(T, float, half, bfloat)
 VARIANTS(BK, 16, 32)
 VARIANTS(BD, 64, 128, 256)
 VARIANTS(USE_MXU, false, true)

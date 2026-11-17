@@ -16,6 +16,7 @@ struct CatalogModelRow: View {
     let downloaded: Bool
     let busy: Bool
     let showsRepositoryLink: Bool
+    var downloadProgress: InstallProgress? = nil
     var score: (value: Double, task: String)? = nil
     var exceedsMemory = false
     let download: () -> Void
@@ -55,6 +56,9 @@ struct CatalogModelRow: View {
                     }
                     HStack { Spacer(minLength: 0); controls }
                 }
+            }
+            if let progress = downloadProgress {
+                InstallStageView(title: "Download", phase: "download", progress: progress)
             }
             if let reason = item.unavailableReason {
                 Text(reason).font(.caption).foregroundStyle(.secondary)

@@ -129,12 +129,14 @@ class LocalAPI:
         port: int = 8000,
         max_connections: int = 16,
         status: Callable[[], dict[str, Any]] | None = None,
+        decide: Callable[..., dict[str, Any]] | None = None,
         cancellable: bool = False,
         request_timeout: float = 300,
         write_timeout: float = 10,
     ):
         self._models = models
         self._complete = complete
+        self._decide = decide
         self._port = port
         self._max_connections = max_connections
         self._server: _BoundedHTTPServer | None = None
@@ -465,7 +467,8 @@ class LocalAPI:
                 reserved_parse = 0
                 try:
                     client_id = self._guard(cancelled)
-                    if self.path != "/v1/chat/completions":
+                    decision = self.path in {"/v1/decisions", "/v1/systemone"} and api._decide is not None
+                    if self.path != "/v1/chat/completions" and not decision:
                         raise APIError(404, "Not found", "not_found")
                     if "Transfer-Encoding" in self.headers:
                         raise APIError(411, "Chunked requests are not supported", "length_required")
@@ -518,13 +521,17 @@ class LocalAPI:
                     if "stream" in payload and not isinstance(payload["stream"], bool):
                         raise APIError(400, "stream must be a boolean", "invalid_request")
                     streaming = payload.get("stream", False)
+                    if decision and "stream" in payload:
+                        raise APIError(400, "Decision requests do not support stream.", "unsupported_parameter")
                     self._check_client_cancelled(client_id, cancelled)
                     self.request.settimeout(api._write_timeout)
                     if api._cancellable:
                         cancelled.last_activity = time.monotonic()
                         monitor = threading.Thread(target=self._monitor_peer, args=(cancelled,), daemon=True)
                         monitor.start()
-                    if not streaming:
+                    if decision:
+                        result = api._decide(payload, cancelled) if api._cancellable else api._decide(payload)
+                    elif not streaming:
                         result = (
                             api._complete(payload, None, cancelled) if api._cancellable else api._complete(payload)
                         )
@@ -636,6 +643,8 @@ class LocalAPI:
 
             @staticmethod
             def _contains_image(payload):
+                if isinstance(payload.get("images"), list) and payload["images"]:
+                    return True
                 messages = payload.get("messages")
                 return isinstance(messages, list) and any(
                     isinstance(message, dict)

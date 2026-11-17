@@ -868,8 +868,11 @@ def test_preparation_cli_uses_and_closes_private_progress_pipe(tmp_path, monkeyp
         assert len(sinks) == 1 and sinks[0].descriptor is None
         os.close(write_descriptor)
         write_descriptor = None
-        event = json.loads(os.read(read_descriptor, 65536))
-        assert event == {"phase": "download", "state": "running", "completed_bytes": 0, "total_bytes": None}
+        events = [json.loads(line) for line in os.read(read_descriptor, 65536).splitlines()]
+        expected = [{"phase": "download", "state": "running", "completed_bytes": 0, "total_bytes": None}]
+        if failure:
+            expected.append({"phase": "failure", "category": "conversion_failed"})
+        assert events == expected
         captured = capsys.readouterr()
         assert captured.out == ("" if failure else '{"status": "prepared"}\n')
         assert "private upstream exception" not in captured.err
@@ -932,7 +935,7 @@ def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_w
             controller.epoch,
         )
         assert controller.converter is None
-        assert failure_category is None
+        assert failure_category == (None if weight_bytes == 4 else "conversion_failed")
         assert controller.models == [] and controller.worker is None
         events = [json.loads(line) for line in controller.output.getvalue().splitlines()]
         assert all(event["event"] in {"progress", "status"} for event in events)
@@ -942,7 +945,7 @@ def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_w
             event["event"] == "progress"
             and event.get("phase") == "download"
             and event.get("state") == "running"
-            and event.get("completed_bytes") == 0
+            and event.get("completed_bytes") == min(8, weight_bytes * 99 // 100)
             and event.get("transferred_bytes") == 8
             for event in events
         )

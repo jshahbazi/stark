@@ -1,7 +1,8 @@
 """Private, content-free byte progress for model installation.
 
 Only phase names, fixed states and numeric counts leave this module. Download
-counts describe source bytes available locally, including reusable cached bytes.
+counts estimate source-download progress, including reusable cached bytes and
+network activity when file reconstruction lags.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import httpx2 as httpx
 from huggingface_hub.utils import tqdm as hf_tqdm
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -26,23 +28,50 @@ CONVERTER_FAILURE_CATEGORIES = frozenset(
         "unsupported_format_or_config",
         "invalid_checkpoint",
         "conversion_failed",
+        "network_unavailable",
     }
 )
 
 
 def converter_failure_category(error: BaseException) -> str:
     """Map failures to a fixed, content-free diagnostic category."""
-    error_name = type(error).__name__
-    error_number = getattr(error, "errno", None)
-    if error_number in {errno.ENOSPC, getattr(errno, "EDQUOT", -1)}:
-        return "disk_full"
-    if isinstance(error, PermissionError) or error_number in {errno.EPERM, errno.EACCES}:
-        return "permission_denied"
-    if error_name == "UnsupportedConversion":
-        return "unsupported_format_or_config"
-    if error_name == "ConversionError":
-        return "invalid_checkpoint"
-    return "conversion_failed"
+    # Hub may wrap a transport error in LocalEntryNotFoundError. Inspect only
+    # typed causes, never exception text (which can contain URLs or secrets).
+    seen = set()
+    current = error
+    transient = False
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        error_name = type(current).__name__
+        error_number = getattr(current, "errno", None)
+        if error_number in {errno.ENOSPC, getattr(errno, "EDQUOT", -1)}:
+            return "disk_full"
+        if isinstance(current, PermissionError) or error_number in {errno.EPERM, errno.EACCES}:
+            return "permission_denied"
+        if error_name == "UnsupportedConversion":
+            return "unsupported_format_or_config"
+        if error_name == "ConversionError":
+            return "invalid_checkpoint"
+        response = getattr(current, "response", None)
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int):
+            if status in {408, 429, 500, 502, 503, 504}:
+                transient = True
+            else:
+                return "conversion_failed"  # Access and missing files require user action.
+        if isinstance(
+            current,
+            (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError, ConnectionError, TimeoutError),
+        ) or getattr(current, "errno", None) in {
+            errno.ENETDOWN,
+            errno.ENETUNREACH,
+            errno.EHOSTUNREACH,
+            errno.ECONNRESET,
+            errno.ETIMEDOUT,
+        }:
+            transient = True
+        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
+    return "network_unavailable" if transient else "conversion_failed"
 
 
 class FDProgressSink:
@@ -169,6 +198,7 @@ class DownloadProgress:
             def __init__(self, *args, total=None, initial=0, **kwargs):
                 self.total = total if type(total) is int and total >= 0 else owner.sizes.get(key)
                 self.n = initial if type(initial) is int and initial >= 0 else 0
+                self.transferred = self.n
                 owner.count(key, self.n, self.total)
 
             def update(self, amount=1):
@@ -176,11 +206,18 @@ class DownloadProgress:
                     self.n = max(0, self.n + amount)
                     owner.count(key, self.n, self.total)
 
-            def update_transfer(self, _amount=1):
-                # HF Xet discovers this method and uses a single bar. File
-                # reconstruction is the source-byte count; network transfers
-                # are a separate counter and must not be added to it.
-                pass
+            def update_transfer(self, amount=1):
+                if type(amount) is not int:
+                    return
+                with owner.lock:
+                    self.transferred = max(0, self.transferred + amount)
+                    estimate = self.transferred
+                    if self.total is not None:
+                        # Transfers can exceed file size (retries/Xet overhead).
+                        # Leave completion to reconstruction and validation.
+                        estimate = min(estimate, self.total * 99 // 100)
+                    # Both counters describe the same file; never sum them.
+                    owner.count(key, max(self.n, estimate), self.total)
 
             def set_postfix_str(self, *_args, **_kwargs):
                 pass
@@ -257,8 +294,9 @@ class SnapshotDownloadProgress:
     Reconstruction bytes are capped by the caller's independently pinned
     maximum. Transfer bytes count positive received-byte updates, including
     retransmissions, and have no source-size cap or denominator.
-    With a completed-files reader, its count replaces reconstruction progress
-    and the pinned maximum becomes the fixed completion denominator.
+    With a completed-files reader, cached files plus live transfers estimate
+    progress against the pinned maximum. Completed files establish a lower
+    bound; transfer estimates stay below completion until files are ready.
     """
 
     BAR_NAME = "huggingface_hub.snapshot_download"
@@ -271,6 +309,7 @@ class SnapshotDownloadProgress:
         self.max_bytes = max_bytes
         self.completed_files = completed_files
         self.completed_file_bytes = 0
+        self.initial_completed_bytes = min(max_bytes, max(0, completed_files())) if completed_files is not None else 0
         self.completed_bytes = 0
         self._reconstruction_raw_bytes = 0
         self.transferred_bytes = 0
@@ -298,7 +337,9 @@ class SnapshotDownloadProgress:
         with self.lock:
             if self.completed_files is not None:
                 self.completed_file_bytes = min(self.max_bytes, max(self.completed_file_bytes, self.completed_files()))
-                self.completed_bytes = self.completed_file_bytes
+                remaining = self.max_bytes - self.initial_completed_bytes
+                estimate = self.initial_completed_bytes + min(self.transferred_bytes, remaining * 99 // 100)
+                self.completed_bytes = max(self.completed_file_bytes, estimate)
             self.progress.emit(
                 "download",
                 "running",

@@ -85,6 +85,24 @@ def test_catalogue_is_read_only_and_stale_family_results_cannot_publish(host, mo
     assert len(events(host)) == before and host.catalog_entries == {}
 
 
+def test_stopping_catalogue_download_preserves_choices_and_fences_installation(host, monkeypatch):
+    host.catalog_request_id, host.catalog_family_id = "request", "qwen3"
+    monkeypatch.setattr(host, "run_catalog_check", lambda *_args: report())
+    host.load_catalog("qwen3", "request", host.catalog_generation)
+    entries = host.catalog_entries.copy()
+    generation, epoch = host.catalog_generation, host.epoch
+    host.install_epoch = epoch
+    host.install_progress = {"download": {"state": "running", "completed_bytes": 40, "total_bytes": 100}}
+    assert host.dispatch({"command": "stop", "preserve_catalog": True})
+    assert host.epoch == epoch + 1 and host.install_epoch is None
+    assert host.catalog_request_id == "request" and host.catalog_family_id == "qwen3"
+    assert host.catalog_generation == generation and host.catalog_entries == entries
+    assert events(host)[-1]["state"] == "idle"
+    assert any(event.get("phase") == "download" and event.get("state") == "cancelled" for event in events(host))
+    host.dispatch({"command": "stop"})
+    assert host.catalog_entries == {} and host.catalog_request_id is None
+
+
 @pytest.mark.parametrize(
     "kind",
     [
@@ -272,9 +290,12 @@ def test_unavailable_catalogue_item_explains_the_reason_and_cannot_start_downloa
     assert host.job is None
 
 
-def test_glm_catalogue_download_uses_only_the_offered_pinned_native_choice(host, monkeypatch):
-    item = native_catalog.catalog_item()
-    host.catalog_request_id, host.catalog_family_id = "request", native_catalog.FAMILY_ID
+@pytest.mark.parametrize(
+    "family,choice", [("glm5_next", "glm53-q2"), ("ricursive", "ripple-q8"), ("ricursive", "ripple-q4-k-m")]
+)
+def test_native_catalogue_download_uses_only_the_offered_pinned_native_choice(host, monkeypatch, family, choice):
+    item = native_catalog.catalog_item(choice)
+    host.catalog_request_id, host.catalog_family_id = "request", family
     host.catalog_entries = {item["id"]: item}
     called = []
     monkeypatch.setattr(host, "start", lambda *args, **kwargs: called.append((args, kwargs)))
@@ -287,7 +308,7 @@ def test_glm_catalogue_download_uses_only_the_offered_pinned_native_choice(host,
     }
     host.install_catalog(payload)
     args, kwargs = called[0]
-    assert args[3:] == ("native", "glm53-q2", "text", "text", "install", item["revision"])
+    assert args[3:] == ("native", choice, "text", "text", "install", item["revision"])
     assert kwargs == {"request_id": "install"}
     for change in ({"revision": "f" * 40}, {"repo": "untrusted/Replacement"}, {"artifact_modes": ["vision-language"]}):
         host.catalog_entries[item["id"]] = {**item, **change}
@@ -446,16 +467,59 @@ def test_glm_download_retries_reuse_owned_partial_shards(host, native_download, 
     assert attempts[0] == attempts[1] and len(host.models) == 1
 
 
-def test_glm_registry_failure_keeps_completed_download_for_retry(host, native_download, monkeypatch):
-    persist = host.persist
-    monkeypatch.setattr(host, "persist", lambda: (_ for _ in ()).throw(OSError("synthetic registry failure")))
+def test_glm_transient_download_failure_retries_owned_stage_and_partial_data(host, native_download, monkeypatch):
+    snapshot = hybrid_prepare.snapshot_download
+    prepare = host.run_converter
+    attempts = []
+
+    def interrupted(repo, **options):
+        if repo == native_download["weights_repo"]:
+            root = Path(options["local_dir"])
+            attempts.append(root)
+            partial = root / "UD-Q2_K_XL" / "model-0.gguf"
+            if len(attempts) == 1:
+                partial.parent.mkdir(parents=True)
+                partial.write_bytes(b"partial")
+                raise TimeoutError("synthetic network interruption")
+            assert partial.read_bytes() == b"partial"
+        return snapshot(repo, **options)
+
+    monkeypatch.setattr(hybrid_prepare, "snapshot_download", interrupted)
+
+    def transient_run(command, environment, epoch):
+        try:
+            return prepare(command, environment, epoch)
+        except TimeoutError:
+            return 1, "network_unavailable"
+
+    monkeypatch.setattr(host, "run_converter", transient_run)
+    monkeypatch.setattr(module, "DOWNLOAD_RETRY_INITIAL_SECONDS", 0.001)
     args = (host.epoch, "native", "glm53-q2", "text", "text", "install", native_download["weights_revision"])
-    with pytest.raises(OSError):
+    host.install(*args)
+
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+    assert len(host.models) == 1
+    assert module.model_valid(Path(host.models[0]["path"]))
+
+
+@pytest.mark.parametrize("failure", ["persist", "image_check"])
+def test_glm_registry_failure_keeps_completed_download_for_retry(host, native_download, monkeypatch, failure):
+    persist = host.persist
+    check = host.check_family_install
+    if failure == "persist":
+        monkeypatch.setattr(host, "persist", lambda: (_ for _ in ()).throw(OSError("synthetic registry failure")))
+    else:
+        monkeypatch.setattr(
+            host, "check_family_install", lambda *_args: (_ for _ in ()).throw(DesktopError("Insufficient RAM"))
+        )
+    args = (host.epoch, "native", "glm53-q2", "text", "text", "install", native_download["weights_revision"])
+    with pytest.raises((OSError, DesktopError)):
         host.install(*args)
     assert host.models == [] and list(host.model_dir.iterdir()) == []
     cached = list((host.data_dir / "native-downloads").glob("*/model"))
     assert len(cached) == 1 and module.model_valid(cached[0])
     monkeypatch.setattr(host, "persist", persist)
+    monkeypatch.setattr(host, "check_family_install", check)
     monkeypatch.setattr(host, "run_converter", lambda *_args: pytest.fail("redownloaded complete pinned model"))
     host.install(*args)
     assert len(host.models) == 1 and not cached[0].exists()

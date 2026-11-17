@@ -2,11 +2,13 @@
 
 import io
 import json
+import os
 import threading
 import time
 
 import pytest
 
+from stark_convert import desktop as desktop_module
 from stark_convert import guided_discovery
 from stark_convert import guided_models as guided
 from stark_convert.desktop import Desktop, DesktopError
@@ -126,7 +128,10 @@ def test_discover_uses_capped_concurrent_family_windows_and_hides_exceptions(mon
             return {
                 "status": "ready",
                 "has_more": True,
-                "items": [{"id": "duplicate", "family": family}, {"id": family}],
+                "items": [
+                    {"id": "duplicate", "family": family, "downloadable": True},
+                    {"id": family, "downloadable": True},
+                ],
             }
         finally:
             with lock:
@@ -135,7 +140,10 @@ def test_discover_uses_capped_concurrent_family_windows_and_hides_exceptions(mon
     result = guided_discovery.discover(catalog=catalog)
     assert peak <= 3
     assert len(calls) == len(families)
-    assert all(kwargs == {"planning": True, "deadline_seconds": 10, "limit": 30} for _, kwargs in calls)
+    assert all(
+        kwargs == {"planning": True, "deadline_seconds": 10, "limit": 30, "ranking_task": "general"}
+        for _, kwargs in calls
+    )
     assert result["bounded_scan"] is True and result["incomplete"] is True
     assert result["families_checked"] == len(families) - 1
     assert result["failed_families"] == 1
@@ -161,14 +169,17 @@ def test_discover_reaches_downloadable_model_after_unavailable_page(monkeypatch)
             return {"status": "ready", "has_more": True, "next_offset": 30, "items": [unavailable]}
         return {"status": "ready", "has_more": True, "next_offset": 60, "items": [available]}
 
-    result = guided_discovery.discover(catalog=catalog)
+    result = guided_discovery.discover(catalog=catalog, task="coding")
 
     assert calls == [
-        ("llama", {"planning": True, "deadline_seconds": 10, "limit": 30}),
-        ("llama", {"planning": True, "deadline_seconds": 4, "limit": 30, "offset": 30}),
+        ("llama", {"planning": True, "deadline_seconds": 10, "limit": 30, "ranking_task": "coding"}),
+        (
+            "llama",
+            {"planning": True, "deadline_seconds": 4, "limit": 30, "ranking_task": "coding", "offset": 30},
+        ),
     ]
-    assert result["items"] == [unavailable, available]
-    assert guided.recipe_from_catalog(result["items"][1]) is not None
+    assert result["items"] == [available]
+    assert guided.recipe_from_catalog(result["items"][0]) is not None
     assert result["incomplete"] is True and result["failed_families"] == 0
 
 
@@ -211,8 +222,80 @@ def test_family_discovery_retains_rows_when_later_page_fails():
 
     report = guided_discovery._discover_family(catalog, "llama")
 
-    assert report == {"status": "error", "has_more": True, "items": [unavailable]}
+    assert report == {"status": "error", "has_more": True, "items": []}
     assert "sentinel" not in repr(report)
+
+
+def test_discovery_item_and_timeout_bounds_cover_all_conditional_family_waves(monkeypatch):
+    families = [{"family_id": f"family-{index}", "modes": {"text": {"status": "conditional"}}} for index in range(19)]
+    monkeypatch.setattr(guided_discovery, "support_matrix", lambda: {"families": families})
+
+    maximum_items, timeout_seconds = guided_discovery.discovery_bounds()
+
+    assert maximum_items == 19 * 30
+    assert timeout_seconds == 7 * guided_discovery.FAMILY_SECONDS + 10
+
+
+def test_discovery_accepts_thirty_downloadable_rows_from_all_nineteen_families(monkeypatch):
+    families = [{"family_id": f"family-{index}", "modes": {"text": {"status": "conditional"}}} for index in range(19)]
+    monkeypatch.setattr(guided_discovery, "support_matrix", lambda: {"families": families})
+
+    def catalog(family, **_options):
+        family_index = int(family.removeprefix("family-"))
+        return {
+            "status": "ready",
+            "has_more": True,
+            "next_offset": 30,
+            "items": [
+                catalog_item(
+                    identifier=f"{family_index * 30 + item_index:032x}",
+                    repo=f"example/model-{family_index}-{item_index}",
+                )
+                for item_index in range(30)
+            ],
+        }
+
+    report = guided_discovery.discover(catalog=catalog)
+
+    maximum_items, _timeout_seconds = guided_discovery.discovery_bounds()
+    assert report["families_checked"] == 19
+    assert len(report["items"]) == maximum_items == 570
+    assert report["failed_families"] == 0
+    assert report["incomplete"] is True
+
+
+def test_unavailable_pages_do_not_fill_the_cross_family_payload(monkeypatch):
+    families = [{"family_id": f"family-{index}", "modes": {"text": {"status": "conditional"}}} for index in range(19)]
+    monkeypatch.setattr(guided_discovery, "support_matrix", lambda: {"families": families})
+    calls = []
+
+    def catalog(family, *, offset=0, **_options):
+        calls.append((family, offset))
+        family_index = int(family.removeprefix("family-"))
+        return {
+            "status": "ready",
+            "has_more": True,
+            "next_offset": offset + 30,
+            "items": [
+                {
+                    **catalog_item(
+                        identifier=f"{family_index * 300 + offset + item_index:032x}",
+                        repo=f"example/model-{family_index}-{offset + item_index}",
+                    ),
+                    "downloadable": False,
+                }
+                for item_index in range(30)
+            ],
+        }
+
+    report = guided_discovery.discover(catalog=catalog)
+
+    assert len(calls) == 19 * guided_discovery.MAX_FAMILY_PAGES
+    assert report["items"] == []
+    assert report["families_checked"] == 19
+    assert report["failed_families"] == 0
+    assert report["incomplete"] is True
+    assert len(json.dumps(report).encode()) < 2048
 
 
 def test_family_discovery_caps_metadata_pages_even_with_immediate_responses(monkeypatch):
@@ -240,14 +323,17 @@ def test_catalog_recipe_binds_dynamic_revision_and_rejects_forged_or_unplannable
     assert guided.recipe_from_catalog({**item, "planning": {**item["planning"], "status": "unavailable"}}) is None
 
 
-@pytest.mark.parametrize("partial_failure", [False, True])
-def test_discovery_keeps_partial_family_candidates_and_marks_failures_for_retry(monkeypatch, partial_failure):
+@pytest.mark.parametrize(
+    "downloadable,partial_failure",
+    [(True, False), (True, True), (False, True)],
+)
+def test_discovery_keeps_partial_failure_state_without_unavailable_rows(monkeypatch, downloadable, partial_failure):
     monkeypatch.setattr(
         guided_discovery,
         "support_matrix",
         lambda: {"families": [{"family_id": "qwen3", "modes": {"text": {"status": "conditional"}}}]},
     )
-    candidate = catalog_item()
+    candidate = {**catalog_item(), "downloadable": downloadable}
 
     def partial_catalog(_family, **_kwargs):
         return {
@@ -259,7 +345,7 @@ def test_discovery_keeps_partial_family_candidates_and_marks_failures_for_retry(
         }
 
     report = guided_discovery.discover(catalog=partial_catalog)
-    assert report["items"] == [candidate]
+    assert report["items"] == ([candidate] if downloadable else [])
     assert report["incomplete"] is True
     # Normal bounded windows may be cached. Failed metadata within that window
     # must set failed_families so the desktop's next Check again retries it.
@@ -301,7 +387,7 @@ def test_background_discovery_adds_candidate_and_stale_refresh_cannot_publish(de
     candidate = catalog_item()
     started, release = threading.Event(), threading.Event()
 
-    def discover(_generation):
+    def discover(_generation, _task):
         started.set()
         release.wait(2)
         return {"items": [candidate], "incomplete": False}
@@ -336,23 +422,25 @@ def test_background_discovery_adds_candidate_and_stale_refresh_cannot_publish(de
 def test_failed_partial_discovery_is_retried_instead_of_cached(desktop, monkeypatch):
     calls, published = [], []
     partial = {"items": [catalog_item()], "incomplete": True, "failed_families": 1}
-    monkeypatch.setattr(desktop, "run_guided_discovery", lambda generation: calls.append(generation) or partial)
+    monkeypatch.setattr(
+        desktop, "run_guided_discovery", lambda generation, task: calls.append((generation, task)) or partial
+    )
     monkeypatch.setattr(desktop, "publish_guided_models", lambda *args: published.append(args[4]))
     generation = desktop.guided_discovery_generation
     args = ("everyday", "balanced", hardware(), {"excluded_model_ids": set(), "excluded_recipe_ids": set()})
     desktop.load_guided_models(*args, "first", generation)
     desktop.load_guided_models(*args, "second", generation)
-    assert calls == [generation, generation]
+    assert calls == [(generation, "general"), (generation, "general")]
     assert published == ["first", "second"]
-    assert desktop.guided_catalog_cache is None
+    assert desktop.guided_catalog_cache == {}
 
 
 def test_normal_bounded_discovery_without_failed_families_is_cached(desktop, monkeypatch):
     calls, published = [], []
     bounded = {"items": [catalog_item()], "incomplete": True, "failed_families": 0}
 
-    def discover(generation):
-        calls.append(generation)
+    def discover(generation, task):
+        calls.append((generation, task))
         return bounded
 
     monkeypatch.setattr(desktop, "run_guided_discovery", discover)
@@ -361,9 +449,69 @@ def test_normal_bounded_discovery_without_failed_families_is_cached(desktop, mon
     args = ("everyday", "balanced", hardware(), {"excluded_model_ids": set(), "excluded_recipe_ids": set()})
     desktop.load_guided_models(*args, "first", generation)
     desktop.load_guided_models(*args, "second", generation)
-    assert calls == [generation]
+    assert calls == [(generation, "general")]
     assert published == ["first", "second"]
-    assert desktop.guided_catalog_cache[1] is bounded
+    assert desktop.guided_catalog_cache["general"][1] is bounded
+
+
+def test_discovery_subprocess_receives_task_argument(desktop, monkeypatch):
+    calls = []
+    wait_timeouts = []
+    items = [{"id": f"{index:032x}"} for index in range(570)]
+
+    class Child:
+        pid = 1
+
+        def __init__(self, descriptor, writer):
+            self.stdout = os.fdopen(descriptor, "rb", buffering=0)
+            self.writer = writer
+
+        def wait(self, timeout=None):
+            wait_timeouts.append(timeout)
+            self.writer.join(timeout)
+            assert not self.writer.is_alive()
+            return 0
+
+        def poll(self):
+            return 0
+
+    def popen(command, **_kwargs):
+        calls.append(command)
+        read_fd, write_fd = os.pipe()
+
+        def send():
+            with os.fdopen(write_fd, "wb") as output:
+                output.write(json.dumps({"schema_version": 1, "items": items}).encode())
+
+        writer = threading.Thread(target=send, daemon=True)
+        writer.start()
+        return Child(read_fd, writer)
+
+    monkeypatch.setattr(desktop_module.subprocess, "Popen", popen)
+    monkeypatch.setattr(desktop_module.time, "monotonic", lambda: 100)
+    result = desktop.run_guided_discovery(desktop.guided_discovery_generation, "coding")
+
+    assert calls[0][-3:] == ["stark_convert.guided_discovery", "--task", "coding"]
+    assert result == {"schema_version": 1, "items": items}
+    assert wait_timeouts == [guided_discovery.discovery_bounds()[1]]
+
+
+def test_discovery_cache_is_separate_for_general_and_coding_tasks(desktop, monkeypatch):
+    calls = []
+    reports = {
+        task: {"items": [catalog_item(identifier=task[0] * 32)], "failed_families": 0}
+        for task in ("general", "coding")
+    }
+    monkeypatch.setattr(desktop, "run_guided_discovery", lambda generation, task: calls.append(task) or reports[task])
+    monkeypatch.setattr(desktop, "publish_guided_models", lambda *args: None)
+    generation = desktop.guided_discovery_generation
+    excluded = {"excluded_model_ids": set(), "excluded_recipe_ids": set()}
+
+    for task in ("general", "coding", "general", "coding"):
+        desktop.load_guided_models(task, "quality", hardware(), excluded, task, generation)
+
+    assert calls == ["general", "coding"]
+    assert set(desktop.guided_catalog_cache) == {"general", "coding"}
 
 
 def test_stale_failed_discovery_does_not_publish_fallback(desktop, monkeypatch):
@@ -373,7 +521,7 @@ def test_stale_failed_discovery_does_not_publish_fallback(desktop, monkeypatch):
         desktop.cancel_guided_discovery()
         return {"items": [catalog_item()], "incomplete": True, "failed_families": 1}
 
-    monkeypatch.setattr(desktop, "run_guided_discovery", stale_failure)
+    monkeypatch.setattr(desktop, "run_guided_discovery", lambda generation, _task: stale_failure(generation))
     monkeypatch.setattr(desktop, "publish_guided_models", lambda *args: published.append(args))
     generation = desktop.guided_discovery_generation
     desktop.load_guided_models(
@@ -385,7 +533,7 @@ def test_stale_failed_discovery_does_not_publish_fallback(desktop, monkeypatch):
         generation,
     )
     assert published == []
-    assert desktop.guided_catalog_cache is None
+    assert desktop.guided_catalog_cache == {}
 
 
 def test_installed_model_checks_do_not_hold_generation_lock_or_publish_after_cancellation(desktop, monkeypatch):

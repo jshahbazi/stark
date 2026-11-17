@@ -19,6 +19,10 @@ HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 # percentages or measured quality guarantees for quantized Stark artifacts.
 SPEED_MINIMUM_SCORE = {"general": 40, "coding": 35}
 SPEED_WEIGHT_BUDGET_DIVISOR = 4
+# Editorial distance on each task's cached relative scale, not a percentage
+# quality guarantee. Do not fill alternatives with distant/unknown
+# scores or multiple exports of the same parent.
+MAX_ALTERNATIVE_SCORE_GAP = 10
 
 
 def speed_policy(task, preference, physical_bytes):
@@ -34,6 +38,19 @@ def speed_policy(task, preference, physical_bytes):
 
 def _number(value):
     return type(value) in (int, float) and math.isfinite(value)
+
+
+def _alternatives(ordered, records, model_id):
+    if not ordered:
+        return []
+    minimum = records[model_id(ordered[0])]["score"] - MAX_ALTERNATIVE_SCORE_GAP
+    selected, parents = [], set()
+    for recipe in ordered:
+        parent = model_id(recipe)
+        if records[parent]["score"] >= minimum and parent not in parents:
+            selected.append(recipe)
+            parents.add(parent)
+    return selected
 
 
 class LeaderboardSnapshot:
@@ -91,12 +108,14 @@ class LeaderboardSnapshot:
     def rank(self, ordered, task, preference, physical_bytes, model_id):
         bucket, records = self.for_host(task, physical_bytes)
         used = set()
-        if preference == "quality":
+        if preference == "quality" and task in {"general", "coding"}:
             scored = [recipe for recipe in ordered if model_id(recipe) in records]
             # Stable sort retains resource preference and deterministic ties.
             scored.sort(key=lambda recipe: -records[model_id(recipe)]["score"])
-            used = {recipe.id for recipe in scored}
-            ordered = scored + [recipe for recipe in ordered if recipe.id not in used]
+            selected = _alternatives(scored, records, model_id)
+            used = {recipe.id for recipe in selected}
+            # With no comparable scores, retain one explicitly unknown fallback.
+            ordered = selected if scored else ordered[:1]
         elif preference == "speed" and task in SPEED_MINIMUM_SCORE:
             policy = speed_policy(task, preference, physical_bytes)
             # All offers, including alternatives, must meet both limits. Missing
@@ -115,6 +134,7 @@ class LeaderboardSnapshot:
                     recipe.weight_bytes,
                 )
             )
+            ordered = _alternatives(ordered, records, model_id)
             used = {recipe.id for recipe in ordered}
         return ordered, bucket, records, used
 

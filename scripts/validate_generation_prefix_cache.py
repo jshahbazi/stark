@@ -488,13 +488,23 @@ def paragraph(rng, sentences, words=(8, 20)):
     )
 
 
+SESSION_KINDS = ("tools", "user-assistant")
+
+
 class Session:
     """A deterministic synthetic agent conversation."""
 
-    def __init__(self, seed, tools=24, instruction_paragraphs=40):
+    def __init__(self, seed, tools=24, instruction_paragraphs=40, session_kind="tools"):
+        if session_kind not in SESSION_KINDS:
+            raise ValueError("unknown session kind")
         rng = random.Random(seed)
         self.seed = seed
+        self.user_assistant = session_kind == "user-assistant"
         self.tools = [tool_definition(rng, index) for index in range(tools)]
+        if self.user_assistant:
+            # The opt-in kind declares no tools and never adds tool calls or
+            # results. The same generator state keeps the system/user text.
+            self.tools = []
         system = "\n\n".join(paragraph(rng, 4) for _ in range(instruction_paragraphs))
         self.messages = [
             {"role": "system", "content": system},
@@ -529,6 +539,13 @@ class Session:
         )
         self.step += 1
 
+    def add_follow_up(self, sentences):
+        """Grow by a tool step, or by a user turn for the user/assistant kind."""
+        if self.user_assistant:
+            self.add_user_turn(sentences)
+        else:
+            self.add_tool_step(sentences)
+
     def add_user_turn(self, sentences):
         rng = random.Random(self.seed * 104729 + self.step)
         self.messages.append({"role": "assistant", "content": paragraph(rng, 2)})
@@ -538,7 +555,7 @@ class Session:
     def render(self, template, codec, messages=None):
         return template.render(
             messages=messages if messages is not None else self.messages,
-            tools=self.tools,
+            tools=None if self.user_assistant else self.tools,
             add_generation_prompt=True,
             enable_thinking=False,
             bos_token=codec.get("bos_token") or "",
@@ -556,15 +573,18 @@ def build_turns(
     tools=24,
     instruction_paragraphs=40,
     follow_up_sentences=(40, 25, 80),
+    session_kind="tools",
 ):
     """Return token IDs for a first turn of about `first_tokens` and three follow-ups."""
-    session = Session(seed, tools=tools, instruction_paragraphs=instruction_paragraphs)
+    session = Session(
+        seed, tools=tools, instruction_paragraphs=instruction_paragraphs, session_kind=session_kind
+    )
     while len(worker.tokenize(session.render(template, codec))) < first_tokens - 400:
-        session.add_tool_step(result_sentences=12)
+        session.add_follow_up(12)
     turns = [worker.tokenize(session.render(template, codec))]
     for grow in (
-        lambda: session.add_tool_step(follow_up_sentences[0]),
-        lambda: session.add_tool_step(follow_up_sentences[1]),
+        lambda: session.add_follow_up(follow_up_sentences[0]),
+        lambda: session.add_follow_up(follow_up_sentences[1]),
         lambda: session.add_user_turn(follow_up_sentences[2]),
     ):
         grow()
@@ -846,11 +866,16 @@ def run_cases(worker, steps, args, tools, parser, *, scopes=None, expectation=No
 
 
 def session_options(args):
-    return {
+    options = {
         "tools": args.tools,
         "instruction_paragraphs": args.instruction_paragraphs,
         "follow_up_sentences": args.follow_up_sentences,
     }
+    # Recorded only when opted in, so default records are unchanged.
+    session_kind = getattr(args, "session_kind", "tools")
+    if session_kind != "tools":
+        options["session_kind"] = session_kind
+    return options
 
 
 def preflight_sessions(args, template, codec):
@@ -861,12 +886,15 @@ def preflight_sessions(args, template, codec):
     renders = 0
     for seed in seeds:
         session = Session(
-            seed, tools=args.tools, instruction_paragraphs=args.instruction_paragraphs
+            seed,
+            tools=args.tools,
+            instruction_paragraphs=args.instruction_paragraphs,
+            session_kind=getattr(args, "session_kind", "tools"),
         )
         session.render(template, codec)
         renders += 1
         for sentences in args.follow_up_sentences[:2]:
-            session.add_tool_step(sentences)
+            session.add_follow_up(sentences)
             session.render(template, codec)
             renders += 1
         session.add_user_turn(args.follow_up_sentences[2])
@@ -1131,6 +1159,13 @@ def main():
     parser.add_argument("--context", type=int, default=40960)
     parser.add_argument("--first-tokens", type=int, default=18560)
     parser.add_argument("--tools", type=int, default=24)
+    parser.add_argument(
+        "--session-kind",
+        choices=SESSION_KINDS,
+        default="tools",
+        help="Synthetic history: tool calls and results (default), or opt-in user/assistant turns only, "
+        "for templates without tool roles. --tools is then unused",
+    )
     parser.add_argument("--instruction-paragraphs", type=int, default=40)
     parser.add_argument(
         "--follow-up-sentences", type=int, nargs=3, default=(40, 25, 80)

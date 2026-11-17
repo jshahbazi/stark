@@ -1,0 +1,3 @@
+:root { --sl-color-accent-low: #302913; --sl-color-accent: #c9a34b; --sl-color-accent-high: #eedca9; --sl-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+:root[data-theme='light'] { --sl-color-accent-low: #f8efdc; --sl-color-accent: #785817; --sl-color-accent-high: #49330b; }
+.sl-markdown-content { line-height: 1.75; }

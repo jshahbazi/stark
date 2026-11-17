@@ -75,6 +75,11 @@ pub struct DecoderEncodeOutput<B: Backend> {
 }
 
 impl<B: Backend> Decoder<B> {
+    /// Activation, KV-cache and readout dtype selected at load.
+    pub fn data_type(&self) -> DataType {
+        self.data_type
+    }
+
     pub(crate) fn embedding(&self) -> &Embedding<B> {
         &self.embedding
     }
@@ -381,6 +386,53 @@ impl<B: Backend> Decoder<B> {
         state: &mut TransformerState<B>,
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<DecoderEncodeOutput<B>, DecoderError<B>> {
+        self.encode_with_features_internal(
+            token_ids,
+            replacement,
+            batch_dim,
+            output_range,
+            hidden_feature_layer_indices,
+            state,
+            command_buffer,
+            true,
+        )
+    }
+
+    /// Decider readouts use a small independent head at a protocol marker.
+    /// Return the normalized marker row without allocating vocabulary logits.
+    pub(crate) fn encode_decision_hidden(
+        &self,
+        token_ids: impl BufferRef<Backend = B>,
+        replacement: Option<EmbeddingReplacement<'_>>,
+        batch_dim: &BatchTopology,
+        marker: u32,
+        state: &mut TransformerState<B>,
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, DecoderError<B>> {
+        let output = self.encode_with_features_internal(
+            token_ids,
+            replacement,
+            batch_dim,
+            Some((marker..marker + 1).into()),
+            None,
+            state,
+            command_buffer,
+            false,
+        )?;
+        output.final_hidden.ok_or_else(|| InvalidInput("missing decision marker output").into())
+    }
+
+    fn encode_with_features_internal(
+        &self,
+        token_ids: impl BufferRef<Backend = B>,
+        replacement: Option<EmbeddingReplacement<'_>>,
+        batch_dim: &BatchTopology,
+        output_range: Option<Range<u32>>,
+        hidden_feature_layer_indices: Option<&[u32]>,
+        state: &mut TransformerState<B>,
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        project_logits: bool,
+    ) -> Result<DecoderEncodeOutput<B>, DecoderError<B>> {
         // Validate byte spans before lookup, upload or transformer dispatch.
         if batch_dim.image_span().is_some() && (!self.bidirectional_image_attention || replacement.is_none()) {
             return Err(InvalidInput("image attention block lacks admitted embedding replacement").into());
@@ -488,7 +540,7 @@ impl<B: Backend> Decoder<B> {
             )
             .map_err(DecoderError::Backend)?;
 
-        let logits = if let Some(output_range) = output_range {
+        let logits = if let Some(output_range) = output_range.filter(|_| project_logits) {
             let output = transformer_output.output.as_ref().expect("decoder output range requires transformer output");
             Some(self.embedding.encode_readout(
                 output_range.end - output_range.start,
@@ -501,7 +553,7 @@ impl<B: Backend> Decoder<B> {
         } else {
             None
         };
-        let final_hidden = if hidden_feature_layer_indices.is_none() {
+        let final_hidden = if project_logits && hidden_feature_layer_indices.is_none() {
             None
         } else {
             transformer_output.output
