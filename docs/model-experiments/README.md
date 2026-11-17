@@ -1,5 +1,7 @@
 # Model change and experiment ledger
 
+- [20261117-FLASHSPEED-02–05 · Flash Next runtime experiments](2026-11-17-flashnext-speed-experiments.md) records three opt-in prototypes and GDN round profiling. A 2,048-token grid saves 2,048 tokens on two growing prompts with matching emitted outputs. Both kernel component controls are exact. Cold MoE timing varies by length, and host drift prevents estimating the end-to-end HC gain from the decode comparison.
+
 - [20261117-FLASHSPEED-01 · Flash Next prefill and decode review](../benchmarks/2026-11-17-flashnext-speed-review.md) records 41 installed Lily Q4-XL HTTP requests, prefix displacement across interleaved workloads, equal-length MTP controls and proposed kernel experiments.
 
 - [20261117-LILYSTART-01–03: Lily startup mode and memory admission](2026-11-17-lily-startup-mode-memory.md): default non-Decider starts select Chat; expected startup failures retain recovery guidance; exact pinned Lily separates selected-residency headroom from its unchanged full planning estimate. Native readiness and fresh automatic image checks pass; no new native precision or performance qualification.

@@ -12,6 +12,8 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Flash Next runtime experiments (2026-11-17).** A [source-matched native screening](../model-experiments/2026-11-17-flashnext-speed-experiments.md) measures 1,024-, 2,048- and 4,096-token grids, grouped MoE prefill and exact-verifier HC down reuse on Lily Q4-XL. The 2,048 grid reuses 2,048 additional tokens on both growing prompts. Kernel timings are exploratory and the candidates are opt-in. The earlier installed-worker cache-displacement and MTP observations still apply to their own run.
+
 **Flash Next prefill and decode review (2026-11-17).** The [installed Lily Q4-XL study](2026-11-17-flashnext-speed-review.md) measures cache reuse across growing and interleaved requests and compares MTP on/off for 96-token sampled and greedy outputs. The report identifies separate cold-prefill and exact-verifier kernel experiments.
 
 **Decider HTTP latency diagnosis (2026-11-16).** The
