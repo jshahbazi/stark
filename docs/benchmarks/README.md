@@ -12,6 +12,14 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Decider HTTP latency diagnosis (2026-11-16).** The
+[source-bound profile](2026-11-16-decider-http-latency.md) measures native Decision
+HTTP medians of 1.106, 4.939 and 19.299 seconds at 80, 400 and 1,360 input
+positions. Native forward time dominates; request encoding takes roughly
+13–15 ms. A signed local build passes separate text/image transport controls.
+This is bounded diagnosis with no speedup candidate and does not supersede
+earlier numerical qualification or the other application's workload timings.
+
 **Lily projection-reuse adoption (2026-11-16).** The user accepted the modest
 long-context benefit below. Group-64 verifier projections now share packed
 weights by default on the implementation branch. Final component controls pass

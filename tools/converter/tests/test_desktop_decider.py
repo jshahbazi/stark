@@ -1,5 +1,6 @@
 """Desktop native-Decision routing and private attachment lifecycle controls."""
 
+import base64
 import io
 import json
 import math
@@ -16,7 +17,7 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 from stark_convert.chat import ChatCancelled
 from stark_convert.decider import SOURCE_REPO, SOURCE_REVISION
 from stark_convert.decider_install import FAMILY_ID
-from stark_convert.desktop import Desktop, DesktopError, model_valid
+from stark_convert.desktop import Desktop, DesktopError, api_model_id, model_valid
 from stark_convert.local_api import APIError
 from stark_convert.model_catalog import family_catalog
 
@@ -88,7 +89,7 @@ def artifact(tmp_path, monkeypatch):
     return path
 
 
-def fake_worker(tmp_path, behavior="normal"):
+def fake_worker(tmp_path, behavior="normal", dispatch_marker=None):
     path = tmp_path / f"decide-worker-{behavior}"
     path.write_text(
         f"#!{sys.executable}\n"
@@ -100,7 +101,12 @@ def fake_worker(tmp_path, behavior="normal"):
         " r=json.loads(line)\n"
         " if r['operation']=='reset_cache':\n"
         "  print(json.dumps({'ok':True,'cache_cleared':True}),flush=True);continue\n"
-        f" if {behavior!r}=='wait':time.sleep(30)\n"
+        + (
+            f" if r['operation']=='decide':Path({str(dispatch_marker)!r}).write_text('dispatched')\n"
+            if dispatch_marker is not None
+            else ""
+        )
+        + f" if {behavior!r}=='wait':time.sleep(30)\n"
         f" if {behavior!r}=='fail':raise SystemExit(3)\n"
         " images=r.get('images',[])\n"
         " if images and (len(images)!=1 or not Path(images[0]).is_file() or "
@@ -108,8 +114,7 @@ def fake_worker(tmp_path, behavior="normal"):
         "  print(json.dumps({'ok':False,'error':'invalid_image_request'}),flush=True);continue\n"
         f" if {behavior!r}=='overflow' and images:\n"
         "  print(json.dumps({'ok':False,'error':'decider_context_overflow'}),flush=True);continue\n"
-        " n=r['option_counts'][0]\n"
-        " result={'ok':True,'logits':[[float(i*2) for i in range(n)]],"
+        " result={'ok':True,'logits':[[float(i*2) for i in range(n)] for n in r['option_counts']],"
         "'input_tokens':len(r['input_token_ids'])+(63 if images else 0),'cache_hit':False}\n"
         f" if {behavior!r}=='malformed':result['logits']=[[float('nan')]*n]\n"
         " print(json.dumps(result),flush=True)\n"
@@ -175,6 +180,19 @@ def request(image=None, text="State", request_id="request-1"):
     return payload
 
 
+def api_request(state="State", *, model=None, questions=None, images=None):
+    payload = {
+        "state": state,
+        "questions": questions
+        or {"choice": {"type": "choice", "instructions": "Pick one", "criteria": {"first": None, "second": None}}},
+    }
+    if model is not None:
+        payload["model"] = model
+    if images is not None:
+        payload["images"] = images
+    return payload
+
+
 def test_prepared_local_import_and_decision_native_ready(desktop):
     instance, _ = desktop
     assert instance.models[0]["artifact_mode"] == "decision"
@@ -227,8 +245,8 @@ def test_api_chat_rejects_native_decider_before_switching_or_closing_it(desktop)
     instance, _ = desktop
     identifier = run(instance)
     worker = instance.worker
-    assert instance.api_models() == []
-    assert instance.api_status()["model_loaded"] is False
+    assert instance.api_models()[0]["capabilities"]["decisions"] is True
+    assert instance.api_status()["model_loaded"] is True
     with pytest.raises(APIError) as rejected:
         instance.api_complete({"model": identifier, "messages": [{"role": "user", "content": "fixture"}]})
     assert rejected.value.status == 400 and rejected.value.code == "mode_not_supported"
@@ -242,6 +260,215 @@ def test_api_chat_rejects_native_decider_before_switching_or_closing_it(desktop)
     instance.dispatch(request(request_id="after-api-rejection"))
     finish(instance)
     assert any(x["event"] == "decision" and x.get("request_id") == "after-api-rejection" for x in events(instance))
+
+
+def test_api_decision_supports_all_question_types_and_preserves_order(desktop):
+    instance, _ = desktop
+    identifier = run(instance)
+    questions = {
+        "binary": {"type": "noul", "instructions": "True or false?"},
+        "rank": {"type": "choice", "instructions": "Choose", "criteria": {"z": None, "a": None}},
+        "score": {"type": "score", "criteria": ["low", "mid", "high"]},
+    }
+    result = instance.api_decide(api_request(model=identifier, questions=questions))
+    assert result["model"] == api_model_id(instance.models[0])
+    assert list(result["answers"]) == list(questions)
+    assert result["answers"]["binary"]["type"] == "noul"
+    assert result["answers"]["binary"]["noul"] == pytest.approx(1 / (1 + math.exp(-1)))
+    assert result["answers"]["rank"]["choice"] == "a"
+    assert result["answers"]["score"]["legend"] == {"0": "low", "1": "mid", "2": "high"}
+    assert result["answers"]["score"]["score"] == pytest.approx((math.e + 2 * math.e**2) / (1 + math.e + math.e**2))
+    assert result["usage"]["sequences"] == 3
+    assert result["usage"]["input_tokens"] > 0
+
+
+def test_api_decision_images_are_staged_and_cleaned(desktop):
+    instance, _ = desktop
+    run(instance)
+    media = instance.worker.media.root
+    url = "data:image/png;base64," + base64.b64encode(PNG).decode("ascii")
+    result = instance.api_decide(api_request(images=[{"url": url}]))
+    assert result["answers"]["choice"]["choice"] == "second"
+    assert not list(media.iterdir())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"state": "x", "questions": {}},
+        {"state": "x", "questions": {"bad": {"type": "unknown"}}},
+        {"state": "x", "questions": {"too-many": {"type": "noul"}}, "extra": True},
+    ],
+)
+def test_api_decision_invalid_request_preserves_worker(desktop, payload):
+    instance, _ = desktop
+    run(instance)
+    worker = instance.worker
+    with pytest.raises(APIError) as error:
+        instance.api_decide(payload)
+    assert error.value.status == 400
+    assert instance.worker is worker and worker.process.poll() is None
+    assert instance.job is None and instance.api_queue == []
+
+
+def test_api_decision_wrong_model_preserves_worker(desktop):
+    instance, _ = desktop
+    run(instance)
+    worker = instance.worker
+    with pytest.raises(APIError) as error:
+        instance.api_decide(api_request(model="wrong"))
+    assert error.value.status == 404 and error.value.code == "model_not_found"
+    assert instance.worker is worker and worker.process.poll() is None
+
+
+def test_api_decisions_share_fifo_queue_and_cancel_waiter(desktop, tmp_path):
+    instance, _ = desktop
+    instance.decide_executable = fake_worker(tmp_path, "wait")
+    run(instance)
+    worker, child = instance.worker, instance.worker.process
+    first_error, second_error = [], []
+    second_cancelled = threading.Event()
+
+    def call(cancelled, errors):
+        try:
+            instance.api_decide(api_request(), cancelled=cancelled)
+        except APIError as error:
+            errors.append(error.code)
+
+    first = threading.Thread(target=call, args=(threading.Event(), first_error))
+    first.start()
+    deadline = time.monotonic() + 2
+    while instance.job is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    second = threading.Thread(target=call, args=(second_cancelled, second_error))
+    second.start()
+    deadline = time.monotonic() + 2
+    while len(instance.api_queue) != 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(instance.api_queue) == 1
+    second_cancelled.set()
+    second.join(timeout=2)
+    assert second_error == ["request_cancelled"]
+    assert instance.worker is worker and child.poll() is None
+    instance.stop(quiet=True)
+    first.join(timeout=5)
+    assert first_error
+    assert instance.api_queue == [] and instance.job is None
+
+
+def test_api_decision_queue_full_and_timeout(desktop):
+    instance, _ = desktop
+    run(instance)
+    instance.api_queue_limit = 1
+    instance.api_queue.append(object())
+    with pytest.raises(APIError) as full:
+        instance.api_decide(api_request())
+    assert full.value.code == "queue_full"
+    instance.api_queue.clear()
+    instance.api_queue_timeout = 0
+    instance.job = threading.current_thread()
+    with pytest.raises(APIError) as timeout:
+        instance.api_decide(api_request())
+    assert timeout.value.code == "queue_timeout"
+    instance.job = None
+    assert instance.api_queue == []
+
+
+def test_stop_fences_active_and_queued_api_decisions(desktop, tmp_path):
+    instance, _ = desktop
+    instance.decide_executable = fake_worker(tmp_path, "wait")
+    run(instance)
+    outcomes = []
+
+    def call():
+        try:
+            instance.api_decide(api_request())
+            outcomes.append("reply")
+        except APIError as error:
+            outcomes.append(error.code)
+
+    active = threading.Thread(target=call)
+    active.start()
+    deadline = time.monotonic() + 2
+    while instance.job is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    queued = threading.Thread(target=call)
+    queued.start()
+    deadline = time.monotonic() + 2
+    while len(instance.api_queue) != 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    instance.stop(quiet=True)
+    active.join(timeout=5)
+    queued.join(timeout=5)
+    assert "reply" not in outcomes
+    assert "model_changed" in outcomes
+    assert instance.worker is None and instance.job is None and instance.api_queue == []
+
+
+def test_running_api_decision_cancellation_reaps_worker_without_reply(desktop, tmp_path):
+    instance, _ = desktop
+    dispatch_marker = tmp_path / "decision-dispatched"
+    instance.decide_executable = fake_worker(tmp_path, "wait", dispatch_marker)
+    identifier = run(instance)
+    child = instance.worker.process
+    cancelled = threading.Event()
+    outcomes = []
+
+    def call():
+        try:
+            instance.api_decide(api_request(model=identifier), cancelled=cancelled)
+            outcomes.append("reply")
+        except APIError as error:
+            outcomes.append(error.code)
+
+    thread = threading.Thread(target=call)
+    thread.start()
+    deadline = time.monotonic() + 2
+    while not dispatch_marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert dispatch_marker.exists(), "native worker must receive decide before active cancellation"
+    cancelled.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert child.poll() is not None and instance.worker is None
+    assert "reply" not in outcomes and "request_cancelled" in outcomes
+    assert instance.job is None and instance.api_queue == []
+
+
+def test_api_decision_cancelled_before_native_dispatch_preserves_worker(desktop):
+    instance, _ = desktop
+    run(instance)
+    worker = instance.worker
+    child = worker.process
+    entered, release = threading.Event(), threading.Event()
+    original = worker.decide_request
+
+    def pause_before_dispatch(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=2)
+        return original(*args, **kwargs)
+
+    worker.decide_request = pause_before_dispatch
+    cancelled = threading.Event()
+    outcomes = []
+
+    def call():
+        try:
+            instance.api_decide(api_request(), cancelled=cancelled)
+            outcomes.append("reply")
+        except APIError as error:
+            outcomes.append(error.code)
+
+    thread = threading.Thread(target=call)
+    thread.start()
+    assert entered.wait(timeout=2)
+    cancelled.set()
+    release.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert outcomes == ["request_cancelled"]
+    assert instance.worker is worker and child.poll() is None
+    assert instance.job is None and instance.api_queue == []
 
 
 def test_ordered_choices_use_checkpoint_temperature(desktop):

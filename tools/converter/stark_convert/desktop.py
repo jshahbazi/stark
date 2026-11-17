@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 from jinja2.exceptions import TemplateError
 
+from .api_decisions import run_decision
 from .api_request import parse_chat_request
 from .api_tools import (
     ToolTextStream,
@@ -3304,6 +3305,7 @@ class Desktop:
                 api_key=key,
                 port=port,
                 status=self.api_status,
+                decide=self.api_decide,
                 cancellable=True,
             )
             details = replacement.start()
@@ -3390,9 +3392,30 @@ class Desktop:
     def _api_models(self):
         """Read discovery under self.lock without starting a worker."""
         with self.lock:
-            if self.active_model is None or self.active_mode != "chat":
+            native_decision = getattr(self.worker, "backend", None) == "decision-native"
+            if self.active_model is None or (self.active_mode != "chat" and not native_decision):
                 return []
             model = next(m for m in self.models if m["id"] == self.active_model)
+            if native_decision:
+                return [
+                    {
+                        "id": api_model_id(model),
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "stark",
+                        "name": model["name"],
+                        "context_length": self.worker.max_input_tokens,
+                        "context_capacity_known": True,
+                        "max_output_tokens": 0,
+                        "tool_calling": False,
+                        "capabilities": {
+                            "decisions": True,
+                            "images": self.worker.images,
+                            "mtp": mtp_capabilities(None),
+                        },
+                        "defaults": {"mtp": False},
+                    }
+                ]
             capability, enabled = self.mtp_settings()
             return [
                 {
@@ -3414,10 +3437,11 @@ class Desktop:
         self.api_models()
         with self.lock:
             capability, enabled = self.mtp_settings()
+            native_decision = bool(self.worker and getattr(self.worker, "backend", None) == "decision-native")
             return {
                 "status": "ok",
                 "resource_budget": self.resource_budget_summary(),
-                "model_loaded": self.active_model is not None and self.active_mode == "chat",
+                "model_loaded": self.active_model is not None and (self.active_mode == "chat" or native_decision),
                 "busy": self.job is not None,
                 "queued_requests": len(self.api_queue),
                 "queue_limit": self.api_queue_limit,
@@ -3433,11 +3457,13 @@ class Desktop:
                     else "unverified"
                 ),
                 "capabilities": {
-                    "chat_completions": True,
-                    "streaming": True,
+                    "chat_completions": not native_decision,
+                    "decisions": native_decision,
+                    "streaming": not native_decision,
                     "sampling": ["temperature", "top_p", "top_k", "min_p", "seed"],
                     "stop_sequences": bool(self.active_mode == "chat" and self.worker and self.worker.stop_sequences),
-                    "cancellation": bool(self.active_mode == "chat" and self.worker and self.worker.cancellation),
+                    "cancellation": native_decision
+                    or bool(self.active_mode == "chat" and self.worker and self.worker.cancellation),
                     "tool_calling": bool(self.active_mode == "chat" and tool_parser_for(self.codec)),
                     "tool_parser": tool_parser_for(self.codec) if self.active_mode == "chat" else None,
                     "tool_choices": ["auto", "none", "required", "function"]
@@ -3445,8 +3471,7 @@ class Desktop:
                     else [],
                     "structured_output": False,
                     "images": bool(
-                        self.context_capacity_known
-                        and self.active_mode == "chat"
+                        (native_decision or self.context_capacity_known and self.active_mode == "chat")
                         and self.worker
                         and getattr(self.worker, "images", False)
                     ),
@@ -3455,6 +3480,35 @@ class Desktop:
                     "mtp": capability,
                 },
             }
+
+    def api_decide(self, payload, cancelled=None):
+        return run_decision(self, payload, cancelled)
+
+    def reserve_api_request(self, epoch, identifier, cancelled):
+        """Claim the shared FIFO worker slot while holding self.lock."""
+        if len(self.api_queue) >= self.api_queue_limit:
+            raise APIError(429, "Stark's request queue is full. Retry shortly.", "queue_full")
+        ticket = object()
+        self.api_queue.append(ticket)
+        deadline = time.monotonic() + self.api_queue_timeout
+        try:
+            while self.job is not None or self.api_queue[0] is not ticket:
+                if cancelled.is_set():
+                    raise cancellation_error(cancelled)
+                if self.api_closing or self.epoch != epoch:
+                    raise APIError(503, "Model changed or stopped while this request waited.", "model_changed")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise APIError(429, "Request queue wait expired. Retry shortly.", "queue_timeout")
+                self.api_condition.wait(min(0.1, remaining))
+            if cancelled.is_set():
+                raise cancellation_error(cancelled)
+            if self.api_closing or self.epoch != epoch or self.active_model != identifier:
+                raise APIError(503, "Model changed or stopped while this request waited.", "model_changed")
+        finally:
+            self.api_queue.remove(ticket)
+            self.api_condition.notify_all()
+        self.job = threading.current_thread()
 
     def api_complete(self, payload, on_delta=None, cancelled=None):
         """Run one chat completion for the HTTP API and return the response body.
@@ -3524,29 +3578,7 @@ class Desktop:
             enabled_mtp = (default_mtp and request["image"] is None) if request["mtp"] is None else request["mtp"]
             drafts = self.resolve_request_mtp(enabled_mtp, capability, request["image"])
             epoch, identifier, worker = self.epoch, self.active_model, self.worker
-            if len(self.api_queue) >= self.api_queue_limit:
-                raise APIError(429, "Stark's request queue is full. Retry shortly.", "queue_full")
-            ticket = object()
-            self.api_queue.append(ticket)
-            deadline = time.monotonic() + self.api_queue_timeout
-            try:
-                while self.job is not None or self.api_queue[0] is not ticket:
-                    if cancelled.is_set():
-                        raise cancellation_error(cancelled)
-                    if self.api_closing or self.epoch != epoch:
-                        raise APIError(503, "Model changed or stopped while this request waited.", "model_changed")
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise APIError(429, "Request queue wait expired. Retry shortly.", "queue_timeout")
-                    self.api_condition.wait(min(0.1, remaining))
-                if cancelled.is_set():
-                    raise cancellation_error(cancelled)
-                if self.api_closing or self.epoch != epoch or self.active_model != identifier:
-                    raise APIError(503, "Model changed or stopped while this request waited.", "model_changed")
-            finally:
-                self.api_queue.remove(ticket)
-                self.api_condition.notify_all()
-            self.job = threading.current_thread()
+            self.reserve_api_request(epoch, identifier, cancelled)
             estimate_key = self.estimate_key(
                 context=self.api_context,
                 sampling=request["sampling"],
