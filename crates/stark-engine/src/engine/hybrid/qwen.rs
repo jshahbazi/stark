@@ -1175,7 +1175,7 @@ impl Geometry {
                 // owners can still be retained. Charge three bounded arenas.
                 #[cfg(feature = "metal")]
                 {
-                    (decode_graph::EDGE0_GRAPH_SCRATCH_BYTES.checked_mul(3)?, decode_graph::EDGE0_PREFILL_BATCH)
+                    (decode_graph::EDGE0_GRAPH_SCRATCH_BYTES.checked_mul(3)?, decode_graph::edge0_prefill_batch())
                 }
                 #[cfg(not(feature = "metal"))]
                 {
@@ -1323,7 +1323,7 @@ impl QwenModel {
         let mut bytes = g.execution_workspace(context_tokens, attention, graph)?;
         #[cfg(feature = "metal")]
         let batch = if graph && g.edge0_metal {
-            decode_graph::EDGE0_PREFILL_BATCH
+            decode_graph::edge0_prefill_batch()
         } else {
             1
         };

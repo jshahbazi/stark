@@ -15,6 +15,9 @@ use crate::engine::hybrid::{
 };
 
 pub(super) const MAX_BATCH: usize = 8;
+/// Token schedules may encode larger batches; their kernels take eight token
+/// rows per dispatch, and the grouped schedule stays within `MAX_BATCH`.
+pub(super) const MAX_TOKENS: usize = crate::engine::hybrid::weight_metal::EDGE0_TOKEN_BATCH_LIMIT;
 pub(super) const SEGMENT_SCRATCH: usize = 64 * 1024 * 1024;
 
 pub(super) fn new_graph() -> Result<DecodeGraph> {
@@ -56,7 +59,7 @@ fn plan_routes(
     experts: usize,
     mut label: impl FnMut(usize) -> Result<usize>,
 ) -> Result<RoutePlan> {
-    if selected.is_empty() || selected.len() > MAX_BATCH || active == 0 || active > experts {
+    if selected.is_empty() || selected.len() > MAX_TOKENS || active == 0 || active > experts {
         return Err(Error::Invalid("Edge0 grouped route dimensions"));
     }
     let mut plan = RoutePlan {
@@ -90,7 +93,7 @@ pub(super) fn concatenate(
     rows: &[DeviceVector],
 ) -> Result<DeviceVector> {
     let width = rows.first().ok_or(Error::Invalid("Edge0 empty device batch"))?.len;
-    if rows.len() > MAX_BATCH || rows.iter().any(|row| row.len != width) {
+    if rows.len() > MAX_TOKENS || rows.iter().any(|row| row.len != width) {
         return Err(Error::Invalid("Edge0 device batch geometry"));
     }
     let output = graph.scratch(width.checked_mul(rows.len()).ok_or(Error::Invalid("Edge0 batch overflow"))?)?;
@@ -112,7 +115,7 @@ fn routes(
     experts: usize,
     selected: usize,
 ) -> Result<(Vec<Vec<usize>>, DeviceVector)> {
-    if !(1..=MAX_BATCH).contains(&tokens)
+    if !(1..=MAX_TOKENS).contains(&tokens)
         || experts == 0
         || experts > 512
         || selected == 0
@@ -150,7 +153,14 @@ pub(super) fn encode(
     controls: &Controls,
     tokens: usize,
 ) -> Result<DeviceVector> {
-    if !g.edge0 || !(1..=MAX_BATCH).contains(&tokens) || inputs.len != tokens * g.dim {
+    let schedule = DecodeGraph::edge0_schedule();
+    // Only token schedules encode more than the grouped kernels' eight rows.
+    let limit = if schedule.token_rows() {
+        MAX_TOKENS
+    } else {
+        MAX_BATCH
+    };
+    if !g.edge0 || !(1..=limit).contains(&tokens) || inputs.len != tokens * g.dim {
         return Err(Error::Invalid("Edge0 graph latent batch"));
     }
     graph.begin_projection_level()?;
@@ -167,15 +177,33 @@ pub(super) fn encode(
     let (selected, probabilities) = routes(graph, weights, scores, tokens, g.experts, g.active_experts)?;
 
     let plan = plan_routes(&selected, g.active_experts, g.experts, |expert| weights.edge0_group(layer, expert))?;
-    let schedule = DecodeGraph::edge0_schedule();
     let (_, expanded) = if schedule == Edge0Schedule::Grouped {
         expand_grouped(graph, weights, layer, inputs, g, controls, tokens, plan)?
     } else {
         let direct = expand_direct(graph, weights, layer, inputs, g, controls, tokens, &plan, schedule.token_rows())?;
         if schedule.verify() {
-            let grouped = expand_grouped(graph, weights, layer, inputs, g, controls, tokens, plan)?;
-            graph.edge0_require_identical(&direct.0, &grouped.0)?;
-            graph.edge0_require_identical(&direct.1, &grouped.1)?;
+            // The grouped schedule is the reference, eight tokens at a time.
+            let latent_width = LATENT_WIDTH as usize;
+            for first in (0..tokens).step_by(MAX_BATCH) {
+                let count = MAX_BATCH.min(tokens - first);
+                let plan = plan_routes(&selected[first..first + count], g.active_experts, g.experts, |expert| {
+                    weights.edge0_group(layer, expert)
+                })?;
+                let grouped = expand_grouped(
+                    graph,
+                    weights,
+                    layer,
+                    &inputs.slice(first * g.dim, count * g.dim)?,
+                    g,
+                    controls,
+                    count,
+                    plan,
+                )?;
+                let (slot, slots) = (first * g.active_experts, count * g.active_experts);
+                graph
+                    .edge0_require_identical(&direct.0.slice(slot * latent_width, slots * latent_width)?, &grouped.0)?;
+                graph.edge0_require_identical(&direct.1.slice(slot * g.dim, slots * g.dim)?, &grouped.1)?;
+            }
         }
         direct
     };
@@ -236,7 +264,7 @@ fn expand_direct(
     for (&group, jobs) in &plan.group_jobs {
         // Token rows no route of this group selects stay unwritten and unread.
         let projected = graph.scratch(tokens * latent_width)?;
-        let mut written = [false; MAX_BATCH];
+        let mut written = vec![false; tokens];
         let rows = jobs.iter().map(|&(token, _)| token).filter(|&token| !std::mem::replace(&mut written[token], true));
         let matrix = Edge0Matrix::ProjectionDown {
             layer,
@@ -501,7 +529,7 @@ mod tests {
         assert!(plan_routes(&[vec![0, 0]], 2, 2, |_| Ok(0)).is_err());
         assert!(plan_routes(&[vec![2]], 1, 2, |_| Ok(0)).is_err());
         assert!(plan_routes(&[vec![0]], 1, 2, |_| Ok(PROJECTION_GROUPS)).is_err());
-        assert!(plan_routes(&vec![vec![0]; MAX_BATCH + 1], 1, 2, |_| Ok(0)).is_err());
+        assert!(plan_routes(&vec![vec![0]; MAX_TOKENS + 1], 1, 2, |_| Ok(0)).is_err());
         let plan = plan_routes(&vec![vec![1, 0]; MAX_BATCH], 2, 2, |_| Ok(0)).unwrap();
         assert!(plan.expert_jobs.values().all(|jobs| jobs.len() == MAX_BATCH));
         assert_eq!(plan.group_jobs[&0].len(), 2 * MAX_BATCH);

@@ -520,8 +520,20 @@ impl Weights {
                 graph.edge0_packed_split(&mapped, format, rows, columns, input, tokens)?
             };
             if schedule.verify() && tokens > 1 {
-                let grouped = graph.edge0_packed_batch(&mapped, format, rows, columns, input, tokens)?;
-                graph.edge0_require_identical(&output, &grouped)?;
+                // The original batched kernel is the reference, eight tokens
+                // at a time for the larger batches of the token schedule.
+                for first in (0..tokens).step_by(8) {
+                    let count = 8.min(tokens - first);
+                    let grouped = graph.edge0_packed_batch(
+                        &mapped,
+                        format,
+                        rows,
+                        columns,
+                        &input.slice(first * columns, count * columns)?,
+                        count,
+                    )?;
+                    graph.edge0_require_identical(&output.slice(first * rows, count * rows)?, &grouped)?;
+                }
             }
             output
         };

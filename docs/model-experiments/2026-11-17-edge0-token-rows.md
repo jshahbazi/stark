@@ -195,4 +195,9 @@ per arm.
 
 ## Follow-up history
 
-None.
+- 2026-11-17: [attempt 23](2026-11-17-edge0-prefill-batches.md) adds an
+  opt-in selector for prefill batches of 16, 24 or 32 tokens under the
+  `tokens` schedule and changes eight of the nine files above. The hashes in
+  this record bind the source state of commit
+  `603b957d70b361579f2a023e5dc73fcf34bfafb0`. At the default of eight tokens
+  the selector values of this attempt keep their behavior.

@@ -87,6 +87,28 @@ fn row_offsets(
         .collect()
 }
 
+/// The checks of `geometry` for a contiguous token batch that may exceed
+/// eight tokens; token kernels then take several dispatches.
+fn batch_geometry(
+    rows: usize,
+    columns: usize,
+    tokens: usize,
+    input: &DeviceVector,
+) -> Result<()> {
+    input.validate()?;
+    if rows == 0
+        || rows > 1_000_000
+        || columns == 0
+        || columns > 65_536
+        || !(1..=EDGE0_TOKEN_BATCH_LIMIT).contains(&tokens)
+        || columns.checked_mul(tokens) != Some(input.len)
+        || rows.checked_mul(tokens).is_none_or(|count| count > 8_000_000)
+    {
+        return Err(Error::Invalid("Edge0 token batch geometry"));
+    }
+    Ok(())
+}
+
 fn distinct(rows: &[usize]) -> bool {
     let mut sorted = rows.to_vec();
     sorted.sort_unstable();
@@ -95,8 +117,8 @@ fn distinct(rows: &[usize]) -> bool {
 
 impl DecodeGraph {
     /// Token-batched schedule for a contiguous token batch, with one scan of
-    /// the caller-supplied rows. Formats without a format-constant kernel
-    /// keep the original batched kernel.
+    /// the caller-supplied rows. A batch above eight tokens takes one
+    /// dispatch per eight.
     pub fn edge0_packed_tokens(
         &mut self,
         matrix: &MappedMatrix,
@@ -106,10 +128,12 @@ impl DecodeGraph {
         input: &DeviceVector,
         tokens: usize,
     ) -> Result<DeviceVector> {
-        let MatrixFormat::Packed(8 | 11 | 20) = format else {
+        // Float formats keep the original batched kernel up to its eight
+        // tokens. Larger batches use the float token kernels, which match it.
+        if !matches!(format, MatrixFormat::Packed(8 | 11 | 20)) && tokens <= TOKENS {
             return self.edge0_packed_batch_selected(matrix, format, rows, columns, input, tokens, true);
-        };
-        geometry(rows, columns, tokens, input)?;
+        }
+        batch_geometry(rows, columns, tokens, input)?;
         let output = self.scratch(rows * tokens)?;
         self.check_finite(input)?;
         let ordered = (0..tokens).collect::<Vec<_>>();
@@ -130,7 +154,7 @@ impl DecodeGraph {
         input: &DeviceVector,
         tokens: usize,
     ) -> Result<DeviceVector> {
-        geometry(rows, columns, tokens, input)?;
+        batch_geometry(rows, columns, tokens, input)?;
         let output = self.scratch(rows * tokens)?;
         let ordered = (0..tokens).collect::<Vec<_>>();
         self.edge0_packed_tokens_into(matrix, format, rows, columns, input, &ordered, &output, &ordered, None)?;

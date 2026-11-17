@@ -7,6 +7,12 @@
 mod edge0_metal;
 
 pub(super) const EDGE0_PREFILL_BATCH: usize = edge0_metal::MAX_BATCH;
+
+/// Tokens of one ordinary prefill batch: eight, or the larger batch the token
+/// schedule selects. Wide-output and MTP batches keep `EDGE0_PREFILL_BATCH`.
+pub(super) fn edge0_prefill_batch() -> usize {
+    DecodeGraph::edge0_prefill_tokens()
+}
 // Request accounting conservatively charges three coexisting segment caps.
 pub(super) const EDGE0_GRAPH_SCRATCH_BYTES: usize = edge0_metal::SEGMENT_SCRATCH;
 
@@ -891,7 +897,8 @@ impl State {
         let start = model.position;
         if !g.edge0_metal
             || count == 0
-            || count > edge0_metal::MAX_BATCH
+            || count > edge0_prefill_batch()
+            || (wide_output.is_some() && count > EDGE0_PREFILL_BATCH)
             || tokens.iter().any(|&token| token as usize >= g.vocab)
             || start.checked_add(count).is_none_or(|end| end > g.context)
             || (readout && count != 1)
@@ -1496,7 +1503,7 @@ pub(super) fn prefill(
         None => State::new(model)?,
     };
     let result = (|| {
-        for batch in tokens.chunks(edge0_metal::MAX_BATCH) {
+        for batch in tokens.chunks(edge0_prefill_batch()) {
             for _ in batch {
                 before_token()?;
             }

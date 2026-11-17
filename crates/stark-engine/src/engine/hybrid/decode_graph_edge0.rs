@@ -80,6 +80,24 @@ fn schedule() -> Edge0Schedule {
     })
 }
 
+/// Largest token batch any Edge0 schedule encodes in one graph segment.
+pub(crate) const EDGE0_TOKEN_BATCH_LIMIT: usize = 32;
+
+/// Ordinary prefill batch size, fixed once per process. The token schedule
+/// admits `STARK_EDGE0_PREFILL_TOKENS` of 16, 24 or 32 so that more rows of a
+/// batch select the same expert; every other schedule keeps eight, the limit
+/// of its kernels.
+fn prefill_tokens() -> usize {
+    static TOKENS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *TOKENS.get_or_init(|| {
+        let requested = std::env::var("STARK_EDGE0_PREFILL_TOKENS").ok().and_then(|value| value.parse().ok());
+        match requested {
+            Some(tokens @ (16 | 24 | 32)) if schedule().token_stages() => tokens,
+            _ => 8,
+        }
+    })
+}
+
 fn single_kernel(kind: u32) -> Option<&'static str> {
     match kind {
         8 => Some("edge0_graph_q8_single"),
@@ -238,6 +256,10 @@ impl DecodeGraph {
 
     pub fn edge0_schedule() -> Edge0Schedule {
         schedule()
+    }
+
+    pub fn edge0_prefill_tokens() -> usize {
+        prefill_tokens()
     }
 
     /// Diagnostic verification for the route schedule selector. Both views
@@ -523,7 +545,7 @@ impl DecodeGraph {
             || width > 65_536
             || selected == 0
             || selected > 512
-            || !(1..=8).contains(&tokens)
+            || !(1..=EDGE0_TOKEN_BATCH_LIMIT).contains(&tokens)
             || width.checked_mul(selected).and_then(|n| n.checked_mul(tokens)) != Some(experts.len)
             || selected * tokens != probabilities.len
             || width * tokens != shared.len

@@ -1,5 +1,12 @@
 # Benchmarks
 
+[Edge0 larger prefill token batches, 2026-11-17](2026-11-17-edge0-prefill-batches.md):
+an opt-in selector raises the token schedule's prefill batch from 8 to 16, 24
+or 32 tokens with unchanged per-token arithmetic; same-binary observed prefill
+41.49 tok/s at 8 tokens, 48.26 at 16 and 54.18 at 32, with matching outputs.
+Default 8, local non-commercial evaluation; strict timing qualification
+remains open.
+
 [Edge0 token-batched prefill rows, 2026-11-17](2026-11-17-edge0-token-rows.md):
 an opt-in schedule shares one weight decode across the token rows of a matrix
 with unchanged per-token F32 reductions; same-binary observed prefill 19.43 to

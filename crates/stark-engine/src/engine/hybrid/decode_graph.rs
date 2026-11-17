@@ -21,7 +21,7 @@ mod batch;
 
 #[path = "decode_graph_edge0.rs"]
 mod edge0;
-pub(crate) use edge0::Edge0Schedule;
+pub(crate) use edge0::{EDGE0_TOKEN_BATCH_LIMIT, Edge0Schedule};
 
 #[path = "decode_graph_edge0_mtp.rs"]
 mod edge0_mtp;

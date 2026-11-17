@@ -56,6 +56,11 @@ hyper-connection and mixer output projections; `token-routes` covers route and
 trunk rows only, and `verify-tokens` rejects any differing bit. Same-binary
 observations improve prefill from 19.43 to 39.30 tok/s and decode from 13.97 to
 14.90 tok/s against the direct schedule. These values default off as well.
+With that schedule, `STARK_EDGE0_PREFILL_TOKENS` of 16, 24 or 32 raises the
+ordinary prefill batch so more rows share an expert dispatch
+([larger batches](benchmarks/2026-11-17-edge0-prefill-batches.md)): observed
+prefill is 41.49 tok/s at 8 tokens, 48.26 at 16 and 54.18 at 32. It defaults
+to 8.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
 records the intake and prerequisites. The

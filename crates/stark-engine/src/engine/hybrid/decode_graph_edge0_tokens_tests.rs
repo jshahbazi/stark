@@ -387,6 +387,94 @@ fn edge0_token_rows_match_generic_one_token_projection_bitwise() {
     }
 }
 
+/// A token batch above eight takes several dispatches. The original batched
+/// kernel, eight tokens at a time, supplies the expected bits.
+#[stark_test]
+fn edge0_token_batches_above_eight_match_eight_token_batches_bitwise() {
+    let (rows, columns) = (11, 512);
+    for kind in [0, 1, 8, 11, 20, 30] {
+        let format = MatrixFormat::Packed(kind);
+        let mapped = if matches!(kind, 0 | 1 | 30) {
+            floats(kind, rows, columns, 29)
+        } else {
+            packed(kind, rows, columns, 29)
+        };
+        for count in [9usize, 16, 17, 32] {
+            let input = (0..count * columns).map(|i| ((i * 19 % 53) as f32 - 26.0) * 0.023).collect::<Vec<_>>();
+            let source = DecodeGraph::upload(&input).unwrap();
+            let mut graph = DecodeGraph::new().unwrap();
+            let batched = graph.edge0_packed_tokens(&mapped, format, rows, columns, &source, count).unwrap();
+            let unscanned = graph.edge0_matvec_tokens(&mapped, format, rows, columns, &source, count).unwrap();
+            let mut pairs = vec![(batched.clone(), unscanned)];
+            for first in (0..count).step_by(8) {
+                let tokens = 8.min(count - first);
+                let reference = graph
+                    .edge0_packed_batch_selected(
+                        &mapped,
+                        format,
+                        rows,
+                        columns,
+                        &source.slice(first * columns, tokens * columns).unwrap(),
+                        tokens,
+                        false,
+                    )
+                    .unwrap();
+                pairs.push((reference, batched.slice(first * rows, tokens * rows).unwrap()));
+            }
+            for (expected, actual) in &pairs {
+                graph.edge0_require_identical(expected, actual).unwrap();
+            }
+            let outputs = pairs.iter().flat_map(|(left, right)| [left.clone(), right.clone()]).collect::<Vec<_>>();
+            let values = graph.finish(&outputs).unwrap();
+            for pair in values.chunks_exact(2) {
+                assert_eq!(bits(&pair[0]), bits(&pair[1]), "Edge0 larger token batch changed an F32 result");
+                assert!(pair[0].iter().any(|value| *value != 0.0), "Edge0 larger token batch fixture is degenerate");
+            }
+        }
+        let beyond = DecodeGraph::upload(&vec![0.25; (EDGE0_TOKEN_BATCH_LIMIT + 1) * columns]).unwrap();
+        let mut graph = DecodeGraph::new().unwrap();
+        assert!(
+            graph.edge0_packed_tokens(&mapped, format, rows, columns, &beyond, EDGE0_TOKEN_BATCH_LIMIT + 1).is_err()
+        );
+        assert!(
+            graph.edge0_matvec_tokens(&mapped, format, rows, columns, &beyond, EDGE0_TOKEN_BATCH_LIMIT + 1).is_err()
+        );
+        graph.finish(&[]).unwrap();
+    }
+
+    // The ordered route reduction is per token; sixteen tokens must equal two
+    // batches of eight.
+    let (width, selected, tokens) = (64usize, 3usize, 16usize);
+    let upload = |len: usize, step: usize| {
+        DecodeGraph::upload(&(0..len).map(|i| ((i * step % 37) as f32 - 18.0) * 0.019).collect::<Vec<_>>()).unwrap()
+    };
+    let experts = upload(tokens * selected * width, 7);
+    let probabilities = upload(tokens * selected, 11);
+    let shared = upload(tokens * width, 13);
+    let gate = upload(tokens, 17);
+    let mut graph = DecodeGraph::new().unwrap();
+    let whole = graph.edge0_weighted_sum(&experts, &probabilities, &shared, &gate, width, selected, tokens).unwrap();
+    let mut outputs = vec![whole.clone()];
+    for first in [0usize, 8] {
+        let reference = graph
+            .edge0_weighted_sum(
+                &experts.slice(first * selected * width, 8 * selected * width).unwrap(),
+                &probabilities.slice(first * selected, 8 * selected).unwrap(),
+                &shared.slice(first * width, 8 * width).unwrap(),
+                &gate.slice(first, 8).unwrap(),
+                width,
+                selected,
+                8,
+            )
+            .unwrap();
+        graph.edge0_require_identical(&whole.slice(first * width, 8 * width).unwrap(), &reference).unwrap();
+        outputs.push(reference);
+    }
+    let values = graph.finish(&outputs).unwrap();
+    assert_eq!(bits(&values[0][..8 * width]), bits(&values[1]));
+    assert_eq!(bits(&values[0][8 * width..]), bits(&values[2]));
+}
+
 /// GPU seconds of one command holding `encode`'s dispatches.
 fn gpu_seconds(encode: impl FnOnce(&mut DecodeGraph)) -> f64 {
     let mut graph = DecodeGraph::new().unwrap();

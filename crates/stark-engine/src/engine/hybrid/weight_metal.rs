@@ -24,7 +24,8 @@ type PipelineCache = Mutex<HashMap<MatrixFormat, PipelineState>>;
 #[path = "decode_graph.rs"]
 mod decode_graph;
 pub(super) use decode_graph::{
-    DecodeGraph, DeviceVector, Edge0Schedule, GroupedExpertRoutes, PendingDecodeGraph, ScratchHeap,
+    DecodeGraph, DeviceVector, EDGE0_TOKEN_BATCH_LIMIT, Edge0Schedule, GroupedExpertRoutes, PendingDecodeGraph,
+    ScratchHeap,
 };
 
 #[cfg(test)]
