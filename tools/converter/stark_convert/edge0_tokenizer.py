@@ -22,8 +22,14 @@ UPSTREAM_FILES = {
 }
 _BYTE_LEVEL = {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": False, "use_regex": False}
 _BPE_OPTIONS = {
-    "type": "BPE", "dropout": None, "unk_token": None, "continuing_subword_prefix": "",
-    "end_of_word_suffix": "", "fuse_unk": False, "byte_fallback": False, "ignore_merges": False,
+    "type": "BPE",
+    "dropout": None,
+    "unk_token": None,
+    "continuing_subword_prefix": "",
+    "end_of_word_suffix": "",
+    "fuse_unk": False,
+    "byte_fallback": False,
+    "ignore_merges": False,
 }
 
 
@@ -41,9 +47,14 @@ def _sha256(data: bytes) -> str:
 
 def _upstream_bytes(name: str, *, offline: bool = False) -> bytes:
     size, digest = UPSTREAM_FILES[name]
-    path = Path(hf_hub_download(
-        repo_id=UPSTREAM_REPO, filename=name, revision=UPSTREAM_REVISION, local_files_only=offline,
-    ))
+    path = Path(
+        hf_hub_download(
+            repo_id=UPSTREAM_REPO,
+            filename=name,
+            revision=UPSTREAM_REVISION,
+            local_files_only=offline,
+        )
+    )
     # Hub snapshots may link their content-addressed blob; verify response bytes.
     if not path.is_file() or path.stat().st_size != size:
         raise ValueError("Pinned upstream tokenizer metadata identity mismatch")
@@ -113,8 +124,10 @@ def _compare(directory: Path, gguf: dict, upstream: dict[str, bytes]) -> dict:
     files = {
         name: _read(directory / "tokenizer" / name, limit)
         for name, limit in (
-            ("tokenizer.json", 64_000), ("vocab.json", 16_000_000),
-            ("merges.txt", 16_000_000), ("token_type.json", 4_000_000),
+            ("tokenizer.json", 64_000),
+            ("vocab.json", 16_000_000),
+            ("merges.txt", 16_000_000),
+            ("token_type.json", 4_000_000),
         )
     }
     descriptor = _json(files["tokenizer.json"])
@@ -169,8 +182,10 @@ def _compare(directory: Path, gguf: dict, upstream: dict[str, bytes]) -> dict:
         failures.append("shipped_gguf_token_ids_mismatch")
     if shipped_merges != _merges(gguf.get("tokenizer.ggml.merges")):
         failures.append("shipped_gguf_merge_order_mismatch")
-    if any(descriptor.get(key) != expected or gguf.get(f"tokenizer.ggml.{key}") != expected
-           for key, expected in (("model", "gpt2"), ("pre", "qwen35"))):
+    if any(
+        descriptor.get(key) != expected or gguf.get(f"tokenizer.ggml.{key}") != expected
+        for key, expected in (("model", "gpt2"), ("pre", "qwen35"))
+    ):
         failures.append("unsupported_tokenizer_kind")
     if descriptor.get("add_bos_token") is not False or gguf.get("tokenizer.ggml.add_bos_token") is not False:
         failures.append("bos_insertion_mismatch")
@@ -187,8 +202,11 @@ def _compare(directory: Path, gguf: dict, upstream: dict[str, bytes]) -> dict:
             upstream_special_mismatches.append(gguf_name)
     if upstream_special_mismatches:
         failures.append("upstream_special_ids_mismatch")
-    mismatch_ids = [token_id for token_id, expected in expected_types.items()
-                    if token_id >= len(types) or types[token_id] != expected]
+    mismatch_ids = [
+        token_id
+        for token_id, expected in expected_types.items()
+        if token_id >= len(types) or types[token_id] != expected
+    ]
     if mismatch_ids:
         failures.append("upstream_token_types_mismatch")
     absent_ids = [token_id for token, token_id in shipped_vocab.items() if token not in hf_vocab]
@@ -206,10 +224,13 @@ def _compare(directory: Path, gguf: dict, upstream: dict[str, bytes]) -> dict:
     pattern = descriptor.get("pre_pattern")
     if not isinstance(pattern, str):
         raise ValueError("Missing Edge0 pre-tokenizer pattern")
-    expected_pre = {"type": "Sequence", "pretokenizers": [
-        {"type": "Split", "pattern": {"Regex": pattern}, "behavior": "Isolated", "invert": False},
-        _BYTE_LEVEL,
-    ]}
+    expected_pre = {
+        "type": "Sequence",
+        "pretokenizers": [
+            {"type": "Split", "pattern": {"Regex": pattern}, "behavior": "Isolated", "invert": False},
+            _BYTE_LEVEL,
+        ],
+    }
     if hf.get("pre_tokenizer") != expected_pre:
         failures.append("upstream_pretokenizer_mismatch")
     if config.get("pretokenize_regex") != pattern or config.get("add_prefix_space") is not False:
@@ -228,21 +249,34 @@ def _compare(directory: Path, gguf: dict, upstream: dict[str, bytes]) -> dict:
         witness = "\u0027\u017fa"
         upstream_pieces = upstream_split.pre_tokenize_str(witness)
         shipped_pieces = shipped_split.pre_tokenize_str(witness)
-        witnesses.append({"sha256": _sha256(witness.encode()), "equivalent": upstream_pieces == shipped_pieces,
-                          "upstream_piece_count": len(upstream_pieces), "shipped_piece_count": len(shipped_pieces)})
+        witnesses.append(
+            {
+                "sha256": _sha256(witness.encode()),
+                "equivalent": upstream_pieces == shipped_pieces,
+                "upstream_piece_count": len(upstream_pieces),
+                "shipped_piece_count": len(shipped_pieces),
+            }
+        )
         if upstream_pieces != shipped_pieces and "upstream_pretokenizer_mismatch" not in failures:
             failures.append("upstream_pretokenizer_mismatch")
     return {
         "equivalent": not failures,
         "failures": failures,
-        "upstream": {"repo_id": UPSTREAM_REPO, "revision": UPSTREAM_REVISION,
-                     "files": {name: {"bytes": len(data), "sha256": _sha256(data)}
-                               for name, data in upstream.items()}},
-        "shipped_files": {f"tokenizer/{name}": {"bytes": len(data), "sha256": _sha256(data)}
-                          for name, data in files.items()},
-        "counts": {"shipped_vocab": len(shipped_vocab), "upstream_vocab_with_added": len(hf_vocab),
-                   "merges": len(shipped_merges), "token_type_mismatches": len(mismatch_ids),
-                   "shipped_ids_absent_upstream": len(absent_ids)},
+        "upstream": {
+            "repo_id": UPSTREAM_REPO,
+            "revision": UPSTREAM_REVISION,
+            "files": {name: {"bytes": len(data), "sha256": _sha256(data)} for name, data in upstream.items()},
+        },
+        "shipped_files": {
+            f"tokenizer/{name}": {"bytes": len(data), "sha256": _sha256(data)} for name, data in files.items()
+        },
+        "counts": {
+            "shipped_vocab": len(shipped_vocab),
+            "upstream_vocab_with_added": len(hf_vocab),
+            "merges": len(shipped_merges),
+            "token_type_mismatches": len(mismatch_ids),
+            "shipped_ids_absent_upstream": len(absent_ids),
+        },
         "token_type_mismatch_id_ranges": _ranges(mismatch_ids),
         "shipped_ids_absent_upstream_ranges": _ranges(absent_ids),
         "absent_upstream_all_gguf_unused": all(
@@ -278,7 +312,9 @@ def prepare_tokenizer(directory: Path, gguf_metadata: dict, *, offline: bool = F
         if not (directory / name).exists():
             (directory / name).write_bytes(data)
         derived[name] = {
-            "sha256": _sha256(data), "bytes": len(data), "derivation": "byte-identical-after-tokenizer-equivalence",
+            "sha256": _sha256(data),
+            "bytes": len(data),
+            "derivation": "byte-identical-after-tokenizer-equivalence",
             "source": {"repo_id": UPSTREAM_REPO, "revision": UPSTREAM_REVISION, "path": name, "sha256": _sha256(data)},
         }
     return {"derived_metadata": derived, "tokenizer_equivalence": report}

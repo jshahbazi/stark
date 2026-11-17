@@ -42,5 +42,10 @@ line-length = 119
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.format]
+# The Edge0 tokenizer admission profile pins this module's SHA-256, so its
+# validated bytes are not reformatted.
+exclude = ["stark_convert/edge0_native_tokenizer.py"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

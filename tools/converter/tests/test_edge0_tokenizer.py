@@ -13,33 +13,70 @@ from stark_convert import edge0_tokenizer as tokenizer
 def metadata(tmp_path, monkeypatch):
     byte_level = {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": False, "use_regex": False}
     pattern = r"[\p{L}\p{M}]+"
-    added = {"id": 4, "content": "<|end|>", "lstrip": False, "rstrip": False,
-             "normalized": False, "single_word": False, "special": True}
+    added = {
+        "id": 4,
+        "content": "<|end|>",
+        "lstrip": False,
+        "rstrip": False,
+        "normalized": False,
+        "single_word": False,
+        "special": True,
+    }
     model_vocab = {"a": 0, "b": 1, "ab": 2, "ba": 3}
     hf = {
-        "version": "1.0", "truncation": None, "padding": None, "normalizer": None,
-        "pre_tokenizer": {"type": "Sequence", "pretokenizers": [
-            {"type": "Split", "pattern": {"Regex": pattern}, "behavior": "Isolated", "invert": False},
-            byte_level,
-        ]},
-        "post_processor": byte_level, "decoder": byte_level, "added_tokens": [added],
-        "model": {"type": "BPE", "dropout": None, "unk_token": None, "continuing_subword_prefix": "",
-                  "end_of_word_suffix": "", "fuse_unk": False, "byte_fallback": False, "ignore_merges": False,
-                  "vocab": model_vocab, "merges": [["a", "b"], ["b", "a"]]},
+        "version": "1.0",
+        "truncation": None,
+        "padding": None,
+        "normalizer": None,
+        "pre_tokenizer": {
+            "type": "Sequence",
+            "pretokenizers": [
+                {"type": "Split", "pattern": {"Regex": pattern}, "behavior": "Isolated", "invert": False},
+                byte_level,
+            ],
+        },
+        "post_processor": byte_level,
+        "decoder": byte_level,
+        "added_tokens": [added],
+        "model": {
+            "type": "BPE",
+            "dropout": None,
+            "unk_token": None,
+            "continuing_subword_prefix": "",
+            "end_of_word_suffix": "",
+            "fuse_unk": False,
+            "byte_fallback": False,
+            "ignore_merges": False,
+            "vocab": model_vocab,
+            "merges": [["a", "b"], ["b", "a"]],
+        },
     }
     config = {
         "added_tokens_decoder": {"4": {k: v for k, v in added.items() if k != "id"}},
-        "bos_token": "<|end|>", "eos_token": "<|end|>", "pad_token": "<|end|>",
-        "pretokenize_regex": pattern, "add_prefix_space": False, "add_bos_token": False,
+        "bos_token": "<|end|>",
+        "eos_token": "<|end|>",
+        "pad_token": "<|end|>",
+        "pretokenize_regex": pattern,
+        "add_prefix_space": False,
+        "add_bos_token": False,
     }
     vocab = model_vocab | {"<|end|>": 4}
-    descriptor = {"model": "gpt2", "pre": "qwen35", "vocab_size": 5, "n_merges": 2,
-                  "special_ids": {f"tokenizer.ggml.{name}_token_id": 4 for name in ("bos", "eos", "padding")},
-                  "add_bos_token": False, "pre_pattern": pattern}
+    descriptor = {
+        "model": "gpt2",
+        "pre": "qwen35",
+        "vocab_size": 5,
+        "n_merges": 2,
+        "special_ids": {f"tokenizer.ggml.{name}_token_id": 4 for name in ("bos", "eos", "padding")},
+        "add_bos_token": False,
+        "pre_pattern": pattern,
+    }
     gguf = {
-        "tokenizer.ggml.model": "gpt2", "tokenizer.ggml.pre": "qwen35",
-        "tokenizer.ggml.tokens": list(vocab), "tokenizer.ggml.token_type": [1, 1, 1, 1, 3],
-        "tokenizer.ggml.merges": ["a b", "b a"], "tokenizer.ggml.add_bos_token": False,
+        "tokenizer.ggml.model": "gpt2",
+        "tokenizer.ggml.pre": "qwen35",
+        "tokenizer.ggml.tokens": list(vocab),
+        "tokenizer.ggml.token_type": [1, 1, 1, 1, 3],
+        "tokenizer.ggml.merges": ["a b", "b a"],
+        "tokenizer.ggml.add_bos_token": False,
         **descriptor["special_ids"],
     }
     source = {"tokenizer.json": hf, "tokenizer_config.json": config}
@@ -98,17 +135,22 @@ def test_unused_padding_does_not_silently_extend_upstream_vocabulary(metadata):
     assert "upstream_token_ids_mismatch" in report["failures"]
 
 
-@pytest.mark.parametrize("mutation,category", [
-    (lambda g, s: g["tokenizer.ggml.merges"].reverse(), "shipped_gguf_merge_order_mismatch"),
-    (lambda g, s: s["tokenizer.json"]["model"]["merges"].reverse(), "upstream_merge_order_mismatch"),
-    (lambda g, s: s["tokenizer.json"].update(normalizer={"type": "NFC"}), "upstream_normalizer_mismatch"),
-    (lambda g, s: s["tokenizer_config.json"].update(bos_token=None), "upstream_special_ids_mismatch"),
-    (lambda g, s: s["tokenizer.json"]["model"].update(byte_fallback=True), "unsupported_bpe_semantics"),
-    (lambda g, s: s["tokenizer.json"]["pre_tokenizer"]["pretokenizers"][1].update(use_regex=True),
-     "upstream_pretokenizer_mismatch"),
-    (lambda g, s: g.update({"tokenizer.ggml.bos_token_id": 0}), "shipped_gguf_special_ids_mismatch"),
-    (lambda g, s: g["tokenizer.ggml.tokens"].reverse(), "shipped_gguf_token_ids_mismatch"),
-])
+@pytest.mark.parametrize(
+    "mutation,category",
+    [
+        (lambda g, s: g["tokenizer.ggml.merges"].reverse(), "shipped_gguf_merge_order_mismatch"),
+        (lambda g, s: s["tokenizer.json"]["model"]["merges"].reverse(), "upstream_merge_order_mismatch"),
+        (lambda g, s: s["tokenizer.json"].update(normalizer={"type": "NFC"}), "upstream_normalizer_mismatch"),
+        (lambda g, s: s["tokenizer_config.json"].update(bos_token=None), "upstream_special_ids_mismatch"),
+        (lambda g, s: s["tokenizer.json"]["model"].update(byte_fallback=True), "unsupported_bpe_semantics"),
+        (
+            lambda g, s: s["tokenizer.json"]["pre_tokenizer"]["pretokenizers"][1].update(use_regex=True),
+            "upstream_pretokenizer_mismatch",
+        ),
+        (lambda g, s: g.update({"tokenizer.ggml.bos_token_id": 0}), "shipped_gguf_special_ids_mismatch"),
+        (lambda g, s: g["tokenizer.ggml.tokens"].reverse(), "shipped_gguf_token_ids_mismatch"),
+    ],
+)
 def test_discrepancies_block_preparation(metadata, mutation, category):
     directory, gguf, source = metadata
     # Avoid accidental aliasing of byte-level nodes in this synthetic fixture.
@@ -173,5 +215,11 @@ def test_pinned_upstream_hash_is_enforced(tmp_path, monkeypatch):
     monkeypatch.setattr(tokenizer, "hf_hub_download", download)
     with pytest.raises(ValueError, match="identity mismatch"):
         tokenizer._upstream_bytes("tokenizer.json", offline=True)
-    assert calls == [{"repo_id": tokenizer.UPSTREAM_REPO, "filename": "tokenizer.json",
-                      "revision": tokenizer.UPSTREAM_REVISION, "local_files_only": True}]
+    assert calls == [
+        {
+            "repo_id": tokenizer.UPSTREAM_REPO,
+            "filename": "tokenizer.json",
+            "revision": tokenizer.UPSTREAM_REVISION,
+            "local_files_only": True,
+        }
+    ]

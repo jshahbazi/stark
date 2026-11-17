@@ -59,8 +59,7 @@ def test_edge0_evaluation_preparation_does_not_enable_catalog_installation(tmp_p
     assert native_catalog.source_for(choice) is None
     assert not native_catalog.allowed_choice(choice)
     assert all(
-        item["repo"] != "Edge0/Edge0-145B-q3k"
-        for item in native_catalog.catalog_items(native_catalog.QWEN_FAMILY_ID)
+        item["repo"] != "Edge0/Edge0-145B-q3k" for item in native_catalog.catalog_items(native_catalog.QWEN_FAMILY_ID)
     )
     with pytest.raises(desktop_module.DesktopError, match="pinned native catalogue"):
         with desktop_module.native_download_stage(tmp_path, choice):

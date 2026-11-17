@@ -24,8 +24,7 @@ def edge0_evaluation_model(tmp_path, monkeypatch):
     }
     receipt = {
         "files": {
-            name: {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
-            for name, data in payloads.items()
+            name: {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()} for name, data in payloads.items()
         }
     }
     receipt_data = json.dumps(receipt).encode()

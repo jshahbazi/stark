@@ -18,11 +18,21 @@ def metadata():
     tokens = [chr(byte if byte in visible else extra[byte]) for byte in range(256)]
     tokens += ["ab", "<|im_end|>", "<tool_call>", "[PAD259]"]
     vocab = {token: i for i, token in enumerate(tokens)}
-    return {"tokens": tokens, "vocab": vocab, "types": [1] * 257 + [3, 4, 5], "merges": ["a b"],
-            "descriptor": {"model": "gpt2", "pre": "qwen35", "add_bos_token": False,
-                           "vocab_size": len(tokens), "n_merges": 1,
-                           "pre_pattern": r"(?:'[sS])|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}|\s+",
-                           "special_ids": {f"tokenizer.ggml.{k}_token_id": 257 for k in ("bos", "eos", "padding")}}}
+    return {
+        "tokens": tokens,
+        "vocab": vocab,
+        "types": [1] * 257 + [3, 4, 5],
+        "merges": ["a b"],
+        "descriptor": {
+            "model": "gpt2",
+            "pre": "qwen35",
+            "add_bos_token": False,
+            "vocab_size": len(tokens),
+            "n_merges": 1,
+            "pre_pattern": r"(?:'[sS])|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}|\s+",
+            "special_ids": {f"tokenizer.ggml.{k}_token_id": 257 for k in ("bos", "eos", "padding")},
+        },
+    }
 
 
 def test_classes_decode_and_unused_is_not_literal_special(metadata):
@@ -83,16 +93,21 @@ def test_boundary_corpus_includes_separately_registered_witness(metadata):
 def test_sealed_inputs_are_checked_before_candidate(tmp_path, monkeypatch, metadata):
     directory = tmp_path / "tokenizer"
     directory.mkdir()
-    data = {"tokenizer.json": json.dumps(metadata["descriptor"]).encode(),
-            "vocab.json": json.dumps(metadata["vocab"]).encode(),
-            "token_type.json": json.dumps(metadata["types"]).encode(), "merges.txt": b"a b\n"}
+    data = {
+        "tokenizer.json": json.dumps(metadata["descriptor"]).encode(),
+        "vocab.json": json.dumps(metadata["vocab"]).encode(),
+        "token_type.json": json.dumps(metadata["types"]).encode(),
+        "merges.txt": b"a b\n",
+    }
     identities = {}
     for name, value in data.items():
         (directory / name).write_bytes(value)
         identities[f"tokenizer/{name}"] = {"size": len(value), "sha256": hashlib.sha256(value).hexdigest()}
     monkeypatch.setattr(native, "EDGE0_FILES", identities)
-    gguf = {f"tokenizer.ggml.{k}": metadata[v] for k, v in (
-        ("tokens", "tokens"), ("token_type", "types"), ("merges", "merges"))}
+    gguf = {
+        f"tokenizer.ggml.{k}": metadata[v]
+        for k, v in (("tokens", "tokens"), ("token_type", "types"), ("merges", "merges"))
+    }
     gguf.update(metadata["descriptor"]["special_ids"])
     assert native.sealed_metadata(tmp_path, gguf) == metadata
     gguf["tokenizer.ggml.token_type"] = [1] * len(metadata["tokens"])
@@ -110,18 +125,22 @@ def test_comparison_requires_preregistered_corpus(metadata):
 
 @pytest.fixture
 def small_unicode():
-    return {"properties": {"L": [[65, 90], [97, 122]], "M": [[0x301, 0x301]],
-                           "N": [[48, 57]], "s": [[9, 13], [32, 32]]}}
+    return {
+        "properties": {"L": [[65, 90], [97, 122]], "M": [[0x301, 0x301]], "N": [[48, 57]], "s": [[9, 13], [32, 32]]}
+    }
 
 
-@pytest.mark.parametrize("pattern,text,expected", [
-    (r"[\p{L}\p{M}]+", "a\u03011!", ["a\u0301"]),
-    (r"[^\s\p{L}\p{M}\p{N}]+", "a\u0301 1!", ["!"]),
-    (r"\p{N}+", "a123!", ["123"]),
-    (r"[\S]+", " a1!\t", ["a1!"]),
-    (r"\s+(?!\S)", "   a", ["  "]),
-    (r"\[\p{L}\]", "[a][1]", ["[a]"]),
-])
+@pytest.mark.parametrize(
+    "pattern,text,expected",
+    [
+        (r"[\p{L}\p{M}]+", "a\u03011!", ["a\u0301"]),
+        (r"[^\s\p{L}\p{M}\p{N}]+", "a\u0301 1!", ["!"]),
+        (r"\p{N}+", "a123!", ["123"]),
+        (r"[\S]+", " a1!\t", ["a1!"]),
+        (r"\s+(?!\S)", "   a", ["  "]),
+        (r"\[\p{L}\]", "[a][1]", ["[a]"]),
+    ],
+)
 def test_property_expansion_respects_scope_and_complement(small_unicode, pattern, text, expected):
     expanded = native.expanded_pattern(pattern, small_unicode)
     assert not any(value in expanded for value in (r"\p{L}", r"\p{M}", r"\p{N}", r"\s", r"\S"))
@@ -142,16 +161,26 @@ def test_unhandled_regex_semantics_are_rejected(small_unicode, pattern):
 def test_sixth_control_restores_original_properties(metadata, small_unicode):
     program = native.candidate_program(metadata, unicode_asset=small_unicode)
     mutants = dict(native.negative_programs(program, metadata=metadata))
-    assert set(mutants) == {"nfc", "unicode_casefold_regex", "control_types", "vocab_ids", "merge_order",
-                            "implicit_unicode_properties"}
+    assert set(mutants) == {
+        "nfc",
+        "unicode_casefold_regex",
+        "control_types",
+        "vocab_ids",
+        "merge_order",
+        "implicit_unicode_properties",
+    }
     pattern = mutants["implicit_unicode_properties"]["pre_tokenizer"]["pretokenizers"][0]["pattern"]["Regex"]
     assert pattern == metadata["descriptor"]["pre_pattern"]
 
 
 def test_unicode_candidate_requires_exhaustive_bound_proof(metadata, small_unicode):
     with pytest.raises(ValueError, match="exhaustive source-bound membership proof"):
-        native.compare_candidate(metadata, None, registered_corpus_sha256=native.corpus_identity(metadata)["sha256"],
-                                 unicode_asset=small_unicode)
+        native.compare_candidate(
+            metadata,
+            None,
+            registered_corpus_sha256=native.corpus_identity(metadata)["sha256"],
+            unicode_asset=small_unicode,
+        )
 
 
 def test_casefold_control_needs_boundary_check_even_when_ids_match(metadata):
