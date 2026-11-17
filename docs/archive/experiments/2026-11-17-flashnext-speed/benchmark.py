@@ -29,6 +29,7 @@ GREEDY = {"mode": "greedy"}
 SAMPLED = {"mode": "stochastic", "temperature": 1.0, "top_k": 20, "top_p": 0.95}
 SEED = 42
 CACHE_PAIRS = {8700: 7700, 13288: 12288, 32768: 31768}
+ASSISTANT_FRAME = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
 
 def hash_file(path):
@@ -80,7 +81,7 @@ def validate(reply, prompt_count, limit, drafts, reused, verifier):
     ids = reply.get("generated_token_ids")
     sampled = reply.get("sampled_tokens")
     finish = reply.get("finish_reason")
-    if not isinstance(ids, list) or not ids or not isinstance(reply.get("text"), str):
+    if not isinstance(ids, list) or not isinstance(reply.get("text"), str):
         raise ValueError("missing_output")
     if (reply.get("input_tokens") != prompt_count or reply.get("reused_input_tokens") != reused
             or type(sampled) is not int or sampled != len(ids) + (finish == "eos")
@@ -100,12 +101,19 @@ def validate(reply, prompt_count, limit, drafts, reused, verifier):
             or (drafts and sampled > drafts + 1 and not counts["proposed"])
             or (not drafts and any((*counts.values(), *stage_times.values())))):
         raise ValueError("invalid_mtp_acknowledgement")
-    native = timings(reply, ("prefill_seconds", "decode_seconds"))
+    native = timings(reply, ("prefill_seconds",))
+    if sampled > 1:
+        native.update(timings(reply, ("decode_seconds",)))
+    elif reply.get("decode_seconds") is None:
+        native["decode_seconds"] = None
+    else:
+        raise ValueError("unexpected_single_sample_decode_time")
     return {
         **native, "sampled_tokens": sampled, "output_tokens": len(ids), "finish": finish,
         "generated_sha256": digest_ids(ids),
         "text_sha256": hashlib.sha256(reply["text"].encode()).hexdigest(),
-        "native_decode_tok_s": (len(ids) - 1) / native["decode_seconds"] if native["decode_seconds"] else None,
+        "native_decode_tok_s": (len(ids) - 1) / native["decode_seconds"]
+        if len(ids) > 1 and native["decode_seconds"] else None,
         "mtp_counts": counts, "mtp_seconds": stage_times,
     }
 
@@ -133,8 +141,7 @@ def decode_suffix(worker):
     suffix = (
         "\nEnd of source excerpt. Write a detailed implementation guide for a Rust work queue. "
         "Cover ownership, cancellation, backpressure, shutdown, race conditions, and tests. "
-        "Give at least six sections with practical examples."
-        "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        "Give at least six sections with practical examples." + ASSISTANT_FRAME
     )
     tokens = worker.tokenize(suffix)
     if not tokens:
@@ -198,7 +205,13 @@ def run(args, output, profile):
         record(output, {"type": "ready", "chunk": chunk, "verifier": verifier,
                         "image_profile": image.get("family_profile"), "host": host_snapshot(worker.process.pid)})
         a, b = make_vectors(worker, corpus.decode("utf-8"), lengths, ready["vocab_size"])
+        frame = worker.tokenize(ASSISTANT_FRAME)
+        if not 0 < len(frame) < min(lengths):
+            raise ValueError("invalid_assistant_frame")
         comparable = {}
+
+        def framed(vector, length):
+            return vector[:length - len(frame)] + frame
 
         def observe(case, ids, repetition, *, limit=12, drafts=0, reused=0, scope=None,
                     sampling=GREEDY):
@@ -232,22 +245,24 @@ def run(args, output, profile):
         if args.suite in ("all", "prefill"):
             for length in prefill_lengths:
                 for repetition in range(args.reps + 1):
-                    observe(f"cold-{length}", a[:length], repetition)
+                    observe(f"cold-{length}", framed(a, length), repetition)
         if args.suite in ("all", "cache"):
             for long in cache_lengths:
                 short = CACHE_PAIRS[long]
+                first, extended = framed(a, short), framed(a, long)
+                boundary = (short - 1) // chunk * chunk
+                reused = boundary if extended[:boundary] == first[:boundary] else 0
+                full_reuse = (long - 1) // chunk * chunk
                 for repetition in range(args.reps + 1):
                     scope = hashlib.sha256(f"{short}-{repetition}".encode()).hexdigest()[:32]
-                    reused = (short - 1) // chunk * chunk
-                    full_reuse = (long - 1) // chunk * chunk
-                    observe(f"cache-{short}-start", a[:short], repetition, scope=scope)
-                    observe(f"cache-{long}-append", a[:long], repetition, scope=scope, reused=reused)
+                    observe(f"cache-{short}-start", first, repetition, scope=scope)
+                    observe(f"cache-{long}-append", extended, repetition, scope=scope, reused=reused)
                     if not args.no_interleave:
-                        observe(f"cache-{long}-interleave", b[:long], repetition, scope=scope)
-                        observe(f"cache-{long}-return", a[:long], repetition, scope=scope)
-                    observe(f"cache-{long}-repeat", a[:long], repetition, scope=scope, reused=full_reuse)
+                        observe(f"cache-{long}-interleave", framed(b, long), repetition, scope=scope)
+                        observe(f"cache-{long}-return", extended, repetition, scope=scope)
+                    observe(f"cache-{long}-repeat", extended, repetition, scope=scope, reused=full_reuse)
                     if args.suite == "cache" or long not in prefill_lengths:
-                        observe(f"cache-{long}-cold-control", a[:long], repetition)
+                        observe(f"cache-{long}-cold-control", extended, repetition)
         if args.suite in ("all", "decode"):
             suffix = decode_suffix(worker)
             for length in decode_lengths:
