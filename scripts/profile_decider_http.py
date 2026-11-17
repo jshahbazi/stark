@@ -15,6 +15,7 @@ import json
 import os
 import platform
 import plistlib
+import re
 import secrets
 import shutil
 import statistics
@@ -265,6 +266,14 @@ def api_call(
                 raise ProfileError("http_request_failed")
             # Parse but deliberately discard response content, including probabilities.
             json.load(response)
+    except urllib.error.HTTPError as error:
+        try:
+            code = json.load(error).get("error", {}).get("code", "unknown")
+        except (ValueError, AttributeError):
+            code = "unknown"
+        if not isinstance(code, str) or re.fullmatch(r"[a-z_]{1,80}", code) is None:
+            code = "unknown"
+        raise ProfileError(f"http_{error.code}_{code}") from None
     except (urllib.error.URLError, TimeoutError, ValueError):
         raise ProfileError("http_request_failed") from None
 
@@ -434,6 +443,10 @@ def run(args) -> dict:
                             "encode_seconds": encode_timings[-1],
                             **phase,
                         }
+                    )
+                    print(
+                        f"Decider HTTP sample completed: size {word_count}, call {repetition + 1}.",
+                        flush=True,
                     )
             measured = aggregate_rows(rows, warmups=1)
             image_smoke = None
