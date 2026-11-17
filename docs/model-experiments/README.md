@@ -1,5 +1,7 @@
 # Model change and experiment ledger
 
+- [20261117-FLASHSPEED-08–10 · Flash Next midpoint feasibility and kernel screening](2026-11-17-flashnext-kernel-and-prefix-follow-up.md) finds that one 2,048 midpoint covers all 38 incremental reuse hits in the Pi trace. Midpoint execution remains untested. Fixed-4,096 MTP2 screens preserve all outputs and work across both selectors. The grouped SwiGLU and Q8 HC down timing effects miss their preset gates.
+
 - [20261117-FLASHSPEED-07 · Flash Next fresh coding prompts](2026-11-17-flashnext-fresh-coding-grid.md) records 18 matched pairs at 8K, 12K and 32K with exact two-draft MTP. All 36 measured requests are fresh and match output and verifier work. The 2,048 grid adds 12.0%, 14.1% and 15.9% median first-token time, missing the 5% limit in both launch orders. Keep 4,096 as the default.
 
 - [20261117-FLASHSPEED-06 · Flash Next grid on Pi](2026-11-17-flashnext-coding-agent-grid.md) records 16 actual Pi sessions with exact two-draft MTP on Lily Q4-XL. All 76 native request pairs match output and verifier work. The 2,048 grid is faster on all 38 requests that gain reuse. The cold-prompt and full-session acceptance evidence leaves 4,096 as the default.

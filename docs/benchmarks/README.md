@@ -12,6 +12,8 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Flash Next kernel and prefix follow-up (2026-11-17).** The [fixed-grid MTP2 screens](../model-experiments/2026-11-17-flashnext-kernel-and-prefix-follow-up.md) compare grouped SwiGLU fusion and Q8 HC down reuse on fresh 8K, 12K and 32K prompts. All 12 pairs match output and MTP work. Neither selector meets its timing gate. The prior Pi trace supports evaluating one 2,048 midpoint snapshot while keeping 4,096 physical chunks.
+
 **Flash Next grid on fresh coding prompts (2026-11-17).** The [counterbalanced native A/B](../model-experiments/2026-11-17-flashnext-fresh-coding-grid.md) matches output and MTP2 work in all 18 pairs at 8K, 12K and 32K. The 2,048 grid adds 12.0%, 14.1% and 15.9% median first-token time. This closes the cold comparison at those lengths and supports retaining 4,096 as the default. The Pi warm-prefix evidence retains its separate scope.
 
 **Flash Next grid on real Pi sessions (2026-11-17).** The [counterbalanced 16-session A/B](../model-experiments/2026-11-17-flashnext-coding-agent-grid.md) holds text output and MTP2 work across all 76 matched native requests. The 2,048 grid reduces first-token time by a median 57.1% where it reuses extra tokens and reduces accepted Pi turn time by a median 5.0%. Short cold prompts and two fully accepted pairs leave 4,096 as the default.
