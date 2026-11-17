@@ -14,6 +14,12 @@ The main menu and playground model headings show the readable model name. Hover 
 
 The menu offers **Guided setup** in Beginner mode or **Manage Models** in Advanced mode, plus a **Start model** action when a model can be started and a **Stop model** action while one is starting or running. Beginner setup can be reopened from the menu; **Adjust Setup** returns to its choices so you can revisit earlier steps. Guide steps explain their prerequisites, and returning to a parent window preserves the guide for later.
 
+Starting a saved model selects **Chat**, including after a previous model used
+**Decision**. Native Decider artifacts select **Decision** and disable Chat.
+Vision-language artifacts disable Decision. Text artifacts can still use
+Decision when it is explicitly selected in the Playground. **Start model**
+resumes a stopped model's previous compatible mode.
+
 Guided setup opens at 700 × 800 points, capped to the available screen, so the work choices and **Continue** action fit together on larger displays. The preference step uses the same footer for **Find a model**. Each action stays in a fixed footer at the bottom right when the window is shortened. When choosing another model, **Keep current model** remains in the same footer.
 
 The main menu and playground show **GPU memory** as a percentage and compact usage bar beside the status in both modes. Green indicates usage below 75% of Metal's recommended memory budget, orange starts at 75%, and red starts at 90%. Whole percentages round down so the label agrees with the color thresholds. Hover for the allocated bytes and budget. It refreshes about once a second, including during model loading and requests. Apple silicon uses shared memory; the percentage measures the model worker's Metal resource allocation against the device's recommended working-set size, excluding CPU-only allocations and other applications. This budget is a performance guideline. The bar fills at 100%; percentages above the budget remain visible. If the budget is unavailable, the readout shows allocated bytes with an empty neutral bar. A dash means no measurement is available. Stop clears the readout.
@@ -215,6 +221,12 @@ disk copy. Their memory preflight reports estimated RAM needed and currently
 available RAM; stop other models or close memory-heavy apps before retrying a
 memory failure. The estimate includes working memory and does not guarantee
 that every later allocation will fit.
+
+For the pinned Lily q4-xl artifact, preflight requires 80.14 GB of observed
+available RAM for selected weights, states and workspace, and 88.73 GB of
+physical RAM including its 8 GiB contingency. The full planning estimate is
+preserved. Native allocation limits and automatic image execution checks still
+apply on startup.
 
 The source tabs start with **Hugging Face**, selected by default, followed by
 **Local Folder**.

@@ -1670,7 +1670,9 @@ final class EngineController: ObservableObject {
     var activeModel: InstalledModel? { models.first { $0.id == loadedID } }
     var activeName: String { activeModel?.name ?? "No model running" }
     var selectedDecisionOnly: Bool { models.first { $0.id == selectedID }?.decisionOnly == true }
+    var selectedChatOnly: Bool { models.first { $0.id == selectedID }?.artifactMode == .visionLanguage }
     var canUseChatMode: Bool { !selectedDecisionOnly && !(loadedID == selectedID && decisionModel) }
+    var canUseDecisionMode: Bool { !selectedChatOnly && !(loadedID == selectedID && supportsImages && !decisionModel) }
     var defaultMTPEnabled: Bool {
         if mtpVerificationPolicy.hasPrefix("gemma4-") { return false }
         guard let display = activeModel?.display else { return true }
@@ -1687,8 +1689,10 @@ final class EngineController: ObservableObject {
 
     func startModel() {
         guard canStartModel, let model = startableModel else { return }
-        if let stoppedModel, stoppedModel.id == model.id { changeMode(stoppedModel.mode) }
-        runModel(id: model.id)
+        let resuming = stoppedModel?.id == model.id
+        selectedID = model.id
+        if let stoppedModel, resuming { changeMode(stoppedModel.mode) }
+        runModel(id: model.id, preservingMode: resuming)
     }
     var gpuMemoryFraction: Double? {
         guard let bytes = gpuMemoryBytes, let budget = gpuMemoryBudgetBytes, budget > 0 else { return nil }
@@ -2499,10 +2503,13 @@ final class EngineController: ObservableObject {
     }
 
     @discardableResult
-    func run() -> Bool {
+    func run(preservingMode: Bool = false) -> Bool {
         guard !selectedID.isEmpty, !busy else { return false }
         if selectedDecisionOnly {
             mode = .decision
+            UserDefaults.standard.set(mode.rawValue, forKey: "playgroundMode")
+        } else if selectedChatOnly || !preservingMode {
+            mode = .chat
             UserDefaults.standard.set(mode.rawValue, forKey: "playgroundMode")
         }
         // A new run becomes the restart target even if loading later fails.
@@ -2520,14 +2527,14 @@ final class EngineController: ObservableObject {
     }
 
     @discardableResult
-    func runModel(id: String) -> Bool {
+    func runModel(id: String, preservingMode: Bool = false) -> Bool {
         guard !busy, models.contains(where: { $0.id == id }) else { return false }
         selectedID = id
         if modelReady {
             UserDefaults.standard.set(id, forKey: "selectedModel")
             return true
         }
-        return run()
+        return run(preservingMode: preservingMode)
     }
 
     func canStopModel(id: String) -> Bool {
@@ -2547,6 +2554,10 @@ final class EngineController: ObservableObject {
             errorMessage = "This model evaluates decisions. Choose another model to use Chat."
             return
         }
+        guard updated != .decision || canUseDecisionMode else {
+            errorMessage = "This image-capable model supports Chat. Choose another model to use Decision."
+            return
+        }
         let reload = !loadedID.isEmpty
         mode = updated
         clearInstallSupport()
@@ -2555,7 +2566,7 @@ final class EngineController: ObservableObject {
         clearConversation()
         clearDecision()
         gpuMemoryBytes = nil
-        if reload { run() }
+        if reload { run(preservingMode: true) }
     }
 
     private func shortModelName(_ source: String) -> String? {
@@ -3981,7 +3992,7 @@ struct PlaygroundView: View {
                 Button("Connect to...", action: connection).disabled(engine.decisionModel)
                 Picker("Mode", selection: Binding(get: { engine.mode }, set: engine.changeMode)) {
                     ForEach(PlaygroundMode.allCases) {
-                        Text($0.title).tag($0).disabled($0 == .chat && !engine.canUseChatMode)
+                        Text($0.title).tag($0).disabled($0 == .chat ? !engine.canUseChatMode : !engine.canUseDecisionMode)
                     }
                 }.pickerStyle(.segmented).frame(width: 180).disabled(engine.busy)
                     .accessibilityLabel("Chat or Decision mode")

@@ -2496,44 +2496,54 @@ class Desktop:
         codec, template = (None, None) if vision or native_decision else load_template(Path(model["path"]))
         if mode == "decision" and vision:
             raise DesktopError("Vision-language artifacts support Chat mode only.")
-        with self.lock:
-            if epoch != self.epoch:
-                return
-            if not automatic:
-                self.playground_mode = mode
+        worker = None
+        try:
+            with self.lock:
+                if epoch != self.epoch:
+                    return
+                if not automatic:
+                    self.playground_mode = mode
 
-            def on_gpu_memory(source, amount):
-                self.report_gpu_memory(epoch, identifier, self.playground_mode or mode, source, amount)
+                def on_gpu_memory(source, amount):
+                    self.report_gpu_memory(epoch, identifier, self.playground_mode or mode, source, amount)
 
-            worker = (
-                DesktopDeciderWorker(
-                    self.decide_executable,
-                    Path(model["path"]),
-                    self.timeout,
-                    gpu_memory_callback=on_gpu_memory,
+                worker = (
+                    DesktopDeciderWorker(
+                        self.decide_executable,
+                        Path(model["path"]),
+                        self.timeout,
+                        gpu_memory_callback=on_gpu_memory,
+                    )
+                    if native_decision
+                    else ScoreWorker(
+                        self.score_executable,
+                        Path(model["path"]),
+                        self.timeout,
+                        gpu_memory_callback=on_gpu_memory,
+                    )
+                    if mode == "decision"
+                    else Worker(
+                        self.executable,
+                        Path(model["path"]),
+                        self.timeout,
+                        gpu_memory_callback=on_gpu_memory,
+                    )
                 )
-                if native_decision
-                else ScoreWorker(
-                    self.score_executable,
-                    Path(model["path"]),
-                    self.timeout,
-                    gpu_memory_callback=on_gpu_memory,
-                )
-                if mode == "decision"
-                else Worker(
-                    self.executable,
-                    Path(model["path"]),
-                    self.timeout,
-                    gpu_memory_callback=on_gpu_memory,
-                )
-            )
-            self.worker = worker
-            if mode == "chat":
-                worker.image_check_dir = self.data_dir / "image-checks"
-                worker.image_check_progress = lambda: self.status("loading", "Loading model…", epoch)
-        ready = worker.read()
-        if vision:
-            codec, template = load_template(Path(model["path"]), expected_hashes=worker.image_input)
+                self.worker = worker
+                if mode == "chat":
+                    worker.image_check_dir = self.data_dir / "image-checks"
+                    worker.image_check_progress = lambda: self.status("loading", "Loading model…", epoch)
+            ready = worker.read()
+            if vision:
+                codec, template = load_template(Path(model["path"]), expected_hashes=worker.image_input)
+        except ChatError as error:
+            if worker is not None:
+                with self.lock:
+                    if self.worker is worker:
+                        self.close_worker(expected=worker)
+                    else:
+                        worker.close()
+            raise DesktopError(str(error)) from None
         if mode == "decision":
             if ready.get("ready") is not True or (
                 ready.get("mode") != "decider"
