@@ -1,0 +1,242 @@
+{
+  "admission": {
+    "decision": {
+      "alternatives": [],
+      "architecture": null,
+      "family_id": null,
+      "family_name": null,
+      "message": "This model architecture has no implemented converter.",
+      "mode": "decision",
+      "model_kind": null,
+      "modes": {
+        "decision": "unsupported",
+        "text": "unsupported",
+        "vision-language": "unsupported"
+      },
+      "pending_checks": [],
+      "qualification": {
+        "calibration": "not_assessed",
+        "scope": "checkpoint_and_build",
+        "status": "not_assessed"
+      },
+      "reasons": [
+        "unsupported_architecture"
+      ],
+      "schema_version": 1,
+      "status": "unsupported",
+      "warnings": []
+    },
+    "text": {
+      "alternatives": [],
+      "architecture": null,
+      "family_id": null,
+      "family_name": null,
+      "message": "This model architecture has no implemented converter.",
+      "mode": "text",
+      "model_kind": null,
+      "modes": {
+        "decision": "unsupported",
+        "text": "unsupported",
+        "vision-language": "unsupported"
+      },
+      "pending_checks": [],
+      "qualification": {
+        "calibration": "not_assessed",
+        "scope": "checkpoint_and_build",
+        "status": "not_assessed"
+      },
+      "reasons": [
+        "unsupported_architecture"
+      ],
+      "schema_version": 1,
+      "status": "unsupported",
+      "warnings": []
+    },
+    "vision-language": {
+      "alternatives": [],
+      "architecture": null,
+      "family_id": null,
+      "family_name": null,
+      "message": "This model architecture has no implemented converter.",
+      "mode": "vision-language",
+      "model_kind": null,
+      "modes": {
+        "decision": "unsupported",
+        "text": "unsupported",
+        "vision-language": "unsupported"
+      },
+      "pending_checks": [],
+      "qualification": {
+        "calibration": "not_assessed",
+        "scope": "checkpoint_and_build",
+        "status": "not_assessed"
+      },
+      "reasons": [
+        "unsupported_architecture"
+      ],
+      "schema_version": 1,
+      "status": "unsupported",
+      "warnings": []
+    }
+  },
+  "equation_controls": {
+    "cases": 4,
+    "conclusion": "Sinkhorn/order and no-tie selection order match; normalization factors differ; full HC/MoE untested",
+    "hc_normalization_max_abs_differences": [
+      3.790359350757968,
+      1.044466551174747,
+      2.009564041394185e-06,
+      4.1439472298065994e-08
+    ],
+    "router_selection_matches": 4,
+    "scope": "float64 synthetic equation study only; no actual Rust/Metal/PyTorch functions executed",
+    "seed": 20261117,
+    "sinkhorn_max_abs_error": 0.0,
+    "sparse_max_vs_mean_counterexample": true
+  },
+  "geometry": {
+    "failed": [],
+    "passed": 222,
+    "total": 222
+  },
+  "header_bytes": 4466328,
+  "header_manifest_sha256": "89d228ea5518913cadbd0edd495080010b2fd3059634009b26ea00980d82d0ad",
+  "initial_schema_assumption_trial": {
+    "disposition": "invalid FFN name assumptions; corrected using pinned source and headers",
+    "geometry": {
+      "failed": [
+        "layer_0_dense",
+        "layer_1_dense",
+        "layer_2_dense",
+        "layer_3_experts",
+        "layer_3_shared",
+        "layer_4_experts",
+        "layer_4_shared",
+        "layer_5_experts",
+        "layer_5_shared",
+        "layer_6_experts",
+        "layer_6_shared",
+        "layer_7_experts",
+        "layer_7_shared",
+        "layer_8_experts",
+        "layer_8_shared",
+        "layer_9_experts",
+        "layer_9_shared",
+        "layer_10_experts",
+        "layer_10_shared",
+        "layer_11_experts",
+        "layer_11_shared",
+        "layer_12_experts",
+        "layer_12_shared",
+        "layer_13_experts",
+        "layer_13_shared",
+        "layer_14_experts",
+        "layer_14_shared",
+        "layer_15_experts",
+        "layer_15_shared",
+        "layer_16_experts",
+        "layer_16_shared",
+        "layer_17_experts",
+        "layer_17_shared",
+        "layer_18_experts",
+        "layer_18_shared",
+        "layer_19_experts",
+        "layer_19_shared",
+        "layer_20_experts",
+        "layer_20_shared",
+        "layer_21_experts",
+        "layer_21_shared",
+        "layer_22_experts",
+        "layer_22_shared",
+        "layer_23_experts",
+        "layer_23_shared",
+        "layer_24_experts",
+        "layer_24_shared",
+        "layer_25_experts",
+        "layer_25_shared",
+        "layer_26_experts",
+        "layer_26_shared",
+        "layer_27_experts",
+        "layer_27_shared",
+        "layer_28_experts",
+        "layer_28_shared",
+        "layer_29_experts",
+        "layer_29_shared",
+        "layer_30_experts",
+        "layer_30_shared",
+        "layer_31_experts",
+        "layer_31_shared",
+        "layer_32_experts",
+        "layer_32_shared",
+        "layer_33_experts",
+        "layer_33_shared",
+        "layer_34_experts",
+        "layer_34_shared",
+        "layer_35_experts",
+        "layer_35_shared",
+        "layer_36_experts",
+        "layer_36_shared",
+        "layer_37_experts",
+        "layer_37_shared",
+        "layer_38_experts",
+        "layer_38_shared",
+        "layer_39_experts",
+        "layer_39_shared",
+        "layer_40_experts",
+        "layer_40_shared",
+        "layer_41_experts",
+        "layer_41_shared",
+        "layer_42_experts",
+        "layer_42_shared",
+        "layer_43_experts",
+        "layer_43_shared",
+        "layer_44_experts",
+        "layer_44_shared"
+      ],
+      "passed": 135,
+      "total": 222
+    },
+    "header_manifest_sha256": "89d228ea5518913cadbd0edd495080010b2fd3059634009b26ea00980d82d0ad"
+  },
+  "inventory": {
+    "elements_by_dtype": {
+      "BF16": 36810548414,
+      "F32": 11008
+    },
+    "payload_bytes": 73621140860,
+    "tensor_count": 34270
+  },
+  "memory": {
+    "bf16_backbone_cache_bytes_256k": 27179089920,
+    "bf16_backbone_cache_bytes_per_token": 103680,
+    "scope": "analytical payload only; excludes MTP caches, scratch, allocator and transient copies",
+    "source_weight_bytes": 73621140860
+  },
+  "metadata_sha256": {
+    "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "chat_template.jinja": "7f2308665efc243d7b871980b29601146e9f59cc695710bfda2675c0b118b1b5",
+    "config.json": "85fbcacea3fad938480da93eb85ca79f3067c23d0bedd0a55a437b42fe373a03",
+    "configuration_maxwell_moe.py": "59388b6e90e7b2c2fb480a118aaa420824e7fae26dfe0bed83f2e38dca7f15ec",
+    "generation_config.json": "3227fca2f5308750afba5f87300ae9a3a82e5dbdac241e1d362c033ab110392a",
+    "model.safetensors.index.json": "af4308d6cb2f8f7aafa9d16b5a055f21e94f78117ef4eee5ae97e16d171446a4",
+    "modeling_maxwell_moe.py": "034d039e294a686e571af70a01b728eafe023a7cf86ec2f35f59fd8626bc3121",
+    "tokenizer_config.json": "9091919a567b00749c3632e58591d9c3a0140473d203feecc258e291febd6eb5"
+  },
+  "mtp_tensor_count": 799,
+  "qualification": "not run; no converter, runtime capability, native build or installed artifact added",
+  "repo": "maxwell-model/Maxwell-V1-Flash",
+  "revision": "ca536c4380e0600d6aebdb808d2ce65ec724161b",
+  "run_identity": {
+    "attempt_id": "20261117-MAXWELL-01",
+    "executed_date": "2026-11-17",
+    "stark_base_commit": "fb7b6771576a89d11f5409f0f23745064f5cc3b2",
+    "tool_sha256": {
+      "scripts/probe_maxwell_compatibility.py": "5745265fd63bbb59172282021c3de22be2476ea2c2c0e0bcbfc912d0bde6267d",
+      "scripts/test_probe_maxwell_compatibility.py": "ac221e022101ff2ee0cea5a18f025ac84842895993c16be137476dffba1feb5e",
+      "tools/converter/uv.lock": "df7711726b1ed7e235ded21b9e6e1cbe130924be4d2c580d5d6bd9005248f8d5"
+    }
+  },
+  "schema_version": 1,
+  "scope": "metadata and header structure only; no tensor payload read or upstream Python executed",
+  "shards": 35
+}
