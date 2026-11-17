@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import traceback
 
 ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -118,7 +119,7 @@ def make_vectors(worker, corpus, lengths, vocab_size):
     )
     vectors = []
     for seed in seeds:
-        result = worker.request({"operation": "tokenize", "text": seed + corpus, "add_special_tokens": False})
+        result = worker.request({"operation": "tokenize", "text": "<|im_start|>user\n" + seed + corpus})
         ids = result.get("token_ids")
         if ("error" in result or not isinstance(ids, list) or len(ids) < max(lengths)
                 or any(type(token) is not int or not 0 <= token < vocab_size for token in ids)):
@@ -127,6 +128,19 @@ def make_vectors(worker, corpus, lengths, vocab_size):
     if vectors[0][:1024] == vectors[1][:1024]:
         raise ValueError("interleaved_corpus_prefix_matches")
     return vectors
+
+
+def decode_suffix(worker):
+    suffix = (
+        "\nEnd of source excerpt. Write a detailed implementation guide for a Rust work queue. "
+        "Cover ownership, cancellation, backpressure, shutdown, race conditions, and tests. "
+        "Give at least six sections with practical examples."
+        "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    )
+    tokens = worker.tokenize(suffix)
+    if not tokens:
+        raise ValueError("invalid_decode_suffix")
+    return tokens
 
 
 def run(args, output, profile):
@@ -141,7 +155,7 @@ def run(args, output, profile):
 
     tracked = [path for path in args.model.iterdir() if path.is_file() and
                (path.suffix in (".json", ".safetensors") or path.name == "ngram_table.bin")]
-    identities = {path: file_identity(path) for path in tracked}
+    identities = {path: file_identity(path) for path in sorted(tracked)}
     weights = [path for path in tracked if path.suffix == ".safetensors"]
     if len(weights) != 55 or sum(path.stat().st_size for path in weights) != 106905155192:
         raise ValueError("unexpected_lily_weight_layout")
@@ -233,15 +247,21 @@ def run(args, output, profile):
                     if args.suite == "cache" or long not in prefill_lengths:
                         observe(f"cache-{long}-cold-control", a[:long], repetition)
         if args.suite in ("all", "decode"):
+            suffix = decode_suffix(worker)
             for length in decode_lengths:
+                if len(suffix) >= length:
+                    raise ValueError("decode_prefix_too_short")
+                ids = a[:length - len(suffix)] + suffix
                 for repetition in range(args.reps + 1):
                     order = (2,) if args.no_decode_off else (0, 2)
                     if repetition % 2:
                         order = order[::-1]
                     for drafts in order:
-                        observe(f"decode-{length}", a[:length], repetition, limit=args.decode_tokens,
+                        observe(f"decode-{length}", ids, repetition, limit=args.decode_tokens,
                                 drafts=drafts, sampling=SAMPLED)
-    if any(file_identity(path) != identity for path, identity in identities.items()):
+    changed = [path.name for path, identity in identities.items() if file_identity(path) != identity]
+    if changed:
+        record(output, {"type": "model_identity_change", "files": changed})
         raise ValueError("model_files_changed")
     record(output, {"type": "complete", "host": host_snapshot(), "model_identity_unchanged": True})
 
@@ -277,7 +297,9 @@ def main():
         try:
             run(args, stream, profile)
         except (Exception, SystemExit) as error:
-            record(stream, {"type": "failure", "exception_type": type(error).__name__})
+            location = traceback.extract_tb(error.__traceback__)[-1]
+            record(stream, {"type": "failure", "exception_type": type(error).__name__,
+                            "source": Path(location.filename).name, "line": location.lineno})
             print("Native benchmark failed. See the private measurement file.", file=sys.stderr)
             return 1
     print("Native benchmark complete.", flush=True)
