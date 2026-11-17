@@ -1,0 +1,13 @@
+# Flash Next prefill grid on Pi coding sessions
+
+**20261117-FLASHSPEED-06 · November 17, 2026 · Default decision study**
+
+The [bounded native screen](2026-11-17-flashnext-speed-experiments.md) found that 2,048-token chunks can preserve more of a growing prompt than the current 4,096-token chunks. This study tests whether that improves actual coding-agent work with MTP enabled on the pinned Lily Q4-XL artifact.
+
+## Prespecified comparison
+
+Use the installed Pi CLI with its Stark stream guard and the real Stark Desktop HTTP backend and Rust/Metal worker. Keep one worker resident. Give Pi a fresh profile and task checkout per session. Use the four fixed three-turn synthetic Python tasks, with new fixtures for both launches. Run each task twice per grid in opposite order, eight pairs and sixteen sessions. Keep the image tower and draft head loaded, use text requests, cap each completion at 1,024 tokens and fix the worker context to 40,960. Request two exact drafts using Stark's MTP setting. Use temperature 0.6, top-k 20, top-p 0.95 and seed 42 for each request.
+
+Pi may read, search, edit and write in its fixture. An independent grader evaluates behavior after every user turn. There is no shell tool, package installation, provider fallback or interleaving. Record native first-token time, reused input, actual verifier work, worker wall time and Pi's full turn time separately. Clear the prefix before each fresh session. Predict each subsequent hit from the actual rendered input IDs, immediately previous native request, context and scope. Record counts and digests only. Do not persist prompts, native input vectors, tool results, completions, credentials or raw diagnostics.
+
+For promotion on this pinned generation route, require exact cache hit accounting, positive MTP work for sustained outputs, no new acceptance failures among baseline passes, and at least six successful pairs. Require at least 10% median paired improvement on eligible follow-up native prefill with six faster pairs where the sessions have comparable work, at least 5% median total accepted Pi turn-time improvement, and at most a 5% cold-prefill regression under matched work. Keep unpaired observations and the reasons they cannot prove a gain. Treat the four tasks as workload coverage and their repeated runs as order controls. Shared worker launches and repeated fixtures do not produce independent population samples. If observed host variation or different trajectories prevent matched cold/warm comparisons, leave the default decision unqualified. An actual production switch also needs lifecycle and image regressions and a separately verified artifact-scoped selector.
