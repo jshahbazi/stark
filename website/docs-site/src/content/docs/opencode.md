@@ -13,10 +13,14 @@ The managed connection applies to OpenCode Desktop. A standalone or Homebrew CLI
 
 1. Open **Connections → Apps** in Stark.
 2. Choose **Connect** on the OpenCode Desktop row. Stark opens Desktop if needed and configures its connection.
-3. In OpenCode, open a project and select **Stark** and the running model.
-4. If Connections shows **Allow** and **Deny** for a new engine, review it and choose **Allow** to connect.
+3. If Connections shows **Allow** and **Deny** for a new engine, review it and choose **Allow** to connect.
+4. Open a project in OpenCode, then choose **Open OpenCode Desktop** in Stark.
 
-Stark approves each verified engine instance. An update or a new engine after login can require approval again.
+Open OpenCode Desktop makes Stark's running model the default for new sessions
+and switches active sessions to it for subsequent turns. Inactive historical
+sessions keep their previous explicit choice. Stark approves each verified
+engine instance; an update or a new engine after login can require approval
+again.
 
 ## Verify the connection
 
@@ -24,7 +28,7 @@ Send a short chat request. Then ask OpenCode to explain one small source file an
 
 ## If the model is missing
 
-Check the running model in Stark and any pending approval in Connections. If the picker still does not update, quit OpenCode, run `opencode service stop` in a terminal, reopen Desktop and approve the new engine.
+Check the running model in Stark and any pending approval in Connections, then choose **Open OpenCode Desktop** again. If the model still does not appear, quit OpenCode, run `opencode service stop` in a terminal, reopen Desktop and approve the new engine.
 
 Stopping the background service interrupts sessions using that engine. Save ongoing work first.
 

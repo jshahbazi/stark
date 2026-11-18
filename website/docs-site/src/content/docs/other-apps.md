@@ -3,6 +3,17 @@ title: "Connect another application"
 description: "Configure a native client with Stark's local API settings."
 ---
 
+## Open Pi with Stark
+
+1. Run a Chat model with tool support in Stark.
+2. Open **Connections → Apps → Pi** and choose **Set Up Pi**.
+3. Choose Terminal or iTerm2 under **Open in**, then choose **Open Pi**.
+
+Open Pi stays disabled until setup matches the running model. Stark verifies
+Keychain access before opening the selected terminal, then launches Pi with
+Stark's provider and model in the chosen working folder. The API key is read
+from macOS Keychain; no clipboard paste or hidden prompt is needed.
+
 ## Configure the provider
 
 1. Run a model in **Chat** mode in Stark.

@@ -27,9 +27,10 @@ changing the pages. Run the repository policy check before committing.
   a source build containing Ripple support.
 
 - The homepage introduces the app, shows its three product screenshots, gives a
-  short setup path and explains the OpenWork/OpenCode connections and local
-  processing. The new beginner flow offers General Work → OpenWork or Coding →
-  OpenCode, followed by Quality (the default) or Speed.
+  short setup path and explains the one-click OpenWork/OpenCode launch flows,
+  Pi's Terminal/iTerm2 setup and local processing. The new beginner flow offers
+  General Work → OpenWork or Coding → OpenCode, followed by Quality (the
+  default) or Speed.
 - Technical details covers the local API, featured models, memory examples,
   context reuse and three benchmark studies. Its tabs and copy control work
   without external services; content remains readable without JavaScript.

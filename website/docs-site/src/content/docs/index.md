@@ -9,7 +9,10 @@ Stark runs open-weight language models on Apple silicon Macs. The menu bar app d
 
 Follow [Install Stark and run your first model](/docs/install/). You will finish with a model loaded and a response in Playground.
 
-Once that works, you can [connect OpenWork](/docs/openwork/) for file tasks, [connect OpenCode Desktop](/docs/opencode/) for coding, or [send an API request](/docs/first-request/) from your own program.
+Once that works, you can [connect and open OpenWork](/docs/openwork/) for file
+tasks, [connect and open OpenCode Desktop](/docs/opencode/) for coding, [open a
+configured Pi session](/docs/other-apps/#open-pi-with-stark), or [send an API
+request](/docs/first-request/) from your own program.
 
 ## How the pieces fit together
 

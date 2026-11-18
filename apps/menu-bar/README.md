@@ -84,10 +84,10 @@ Detection includes Pi's managed Node, compatible installed nvm versions, and
 Homebrew/system locations. It does not source interactive shell startup files.
 
 Choose **Open Pi**. The button stays visible but is disabled until Pi has been
-set up for the currently running Stark model. Terminal opens directly into the
-connected profile; Pi obtains the API key from the Keychain command saved
+set up for the currently running Stark model. The selected terminal opens
+directly into the connected profile; Pi obtains the API key from the Keychain command saved
 during setup, so no clipboard paste or hidden prompt is needed. Stark checks
-that access before opening Terminal, so any required Keychain approval happens
+that access before opening the terminal, so any required Keychain approval happens
 before Pi starts. The **Open in** menu lists installed Terminal and iTerm2 apps
 and remembers the choice for later Open Pi actions.
 Stark finds Pi automatically and creates or reuses the private working folder
@@ -242,13 +242,14 @@ name when recorded, so saved versions can be distinguished. Installation uses
 Add from Source. Entered source and image options remain in memory when switching
 tabs or reopening the window. Switching tabs preserves an active installation;
 its progress and cancellation remain accessible. Completion stays in management.
-The search bar above the model tabs searches installed models immediately and,
+The universal search above the model tabs searches installed models immediately and,
 after a short pause, runs one bounded search across the Hugging Face catalog.
 Matching catalog rows use the same immutable-revision and tensor admission
 checks as family browsing; unsupported formats stay hidden. The search returns
 up to 30 Hub matches plus matching fixed native catalog entries, and keeps
 working if the live search fails but a pinned catalog entry matches. Search text
-stays within the current browsing session. Versioned Qwen searches follow the
+stays within the current browsing session. Search starts automatically; pressing
+Return while the field is focused does not close Manage Models. Versioned Qwen searches follow the
 release line: **Qwen3** excludes 3.5, 3.6 and 3.8 models, while each later
 release line is matched from its repository or declared base model. Once a
 family is open, its search still filters only that loaded family without
@@ -660,7 +661,7 @@ ready, and the previous model remains installed.
 
 ## Connect another application
 
-Select **Connections** in the menu or playground window. The shared model header identifies the model running in Chat mode and its current availability. **Apps** groups OpenWork and OpenCode Desktop in one list, with separate connection status and controls for each app. Choose **Connect** to set one up. Once connected, **Open OpenWork** creates a task in its current workspace and binds Stark's running model; **Open OpenCode Desktop** selects that model in active OpenCode sessions and as the default for new sessions before opening the app. The Open buttons require a running chat model with tools and a known context limit. Choose **Manage** to reveal **Reconnect** and **Disconnect**. A pending OpenCode engine keeps its own **Allow** and **Deny** prompt. API startup and Keychain recovery messages remain visible when setup needs attention.
+Select **Connections** in the menu or playground window. The shared model header identifies the model running in Chat mode and its current availability. **Apps** groups OpenWork and OpenCode Desktop in one list, with separate connection status and controls for each app. Choose **Connect** to set one up. Once connected, **Open OpenWork** opens or focuses the app, waits for model discovery, and creates a task in its current workspace with Stark's running model. **Open OpenCode Desktop** opens or focuses Desktop, waits for the verified model, switches active sessions, and sets the running model as the default for new sessions. The Open buttons require a running chat model with tools and a known context limit. Choose **Manage** to reveal **Reconnect** and **Disconnect**. A pending OpenCode engine keeps its own **Allow** and **Deny** prompt. API startup and Keychain recovery messages remain visible when setup needs attention.
 
 For other applications, select **Connect your own app**, choose an OpenAI-compatible provider in the client and copy the **Base URL**, **API key** and **Model ID** individually. **Advanced settings** contains the saved listening port, API retry and key-regeneration controls, **Copy All as JSON**, **Copy curl Example** and API capability details. Model IDs use the Hugging Face repository ID (`owner/model`) for Hugging Face installs and the model name for local installs. Existing installations expose these names automatically.
 
