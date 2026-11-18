@@ -121,6 +121,80 @@ def test_blocked_support_never_downloads_or_disturbs_running_model(host, status)
         host.worker = None
 
 
+@pytest.mark.parametrize("status", ["conditional", "unsupported", "inconclusive"])
+def test_source_compatibility_check_never_downloads_or_installs(host, status):
+    host.run_support_check = lambda *_args: support_report(status=status)
+    host.run_converter = lambda *_args: pytest.fail("compatibility check reached the weight downloader")
+
+    host.check_source(host.epoch, "huggingface", "example/model", support_mode="text", support_request_id="check")
+
+    report = next(event for event in emitted(host) if event["event"] == "model_support")
+    assert report["request_id"] == "check" and report["report"]["status"] == status
+    assert host.models == [] and not host.registry.exists()
+    assert not list(host.model_dir.glob(".install-*"))
+    assert emitted(host)[-1]["state"] == ("ready" if host.worker else "idle")
+
+
+def test_prepared_local_artifact_compatibility_check_only_inspects_structure(host, tmp_path):
+    model = text_artifact(tmp_path / "prepared")
+    host.run_support_check = lambda *_args: pytest.fail("prepared artifact ran metadata discovery")
+    host.check_family_install = lambda *_args: pytest.fail("compatibility check loaded the model")
+
+    host.check_source(host.epoch, "local", str(model), support_mode="text", support_request_id="check")
+
+    report = next(event for event in emitted(host) if event["event"] == "model_support")["report"]
+    assert report["status"] == "conditional"
+    assert report["mode"] == "text"
+    assert report["message"].endswith("can be added.")
+    assert host.models == [] and not host.registry.exists()
+
+
+def test_prepared_local_artifact_install_reports_visible_completion(host, tmp_path):
+    model = text_artifact(tmp_path / "prepared")
+
+    host.install(host.epoch, "local", str(model), support_mode="text", support_request_id="install")
+
+    events = emitted(host)
+    assert next(event for event in events if event["event"] == "installed")["message"] == "Model added to Installed."
+    assert any(
+        event.get("event") == "status" and event.get("message") == "Adding prepared model…"
+        for event in events
+    )
+    assert events[-1]["state"] == "idle" and events[-1]["message"] == "Model installed"
+
+
+def test_cancelled_source_check_preserves_running_worker(host):
+    started = threading.Event()
+    existing = SimpleNamespace(close=lambda: None)
+    host.worker, host.active_model, host.active_mode = existing, "existing", "chat"
+
+    def pending_check(_command, _environment, epoch):
+        started.set()
+        while host.epoch == epoch:
+            time.sleep(0.01)
+        return None
+
+    host.run_support_check = pending_check
+    host.start(
+        host.check_source,
+        "checking",
+        "Checking model compatibility…",
+        "huggingface",
+        "example/model",
+        None,
+        "text",
+        "check",
+        request_id="check",
+    )
+    assert started.wait(timeout=1)
+    host.cancel_source_check("check")
+
+    assert host.worker is existing and host.active_model == "existing"
+    assert host.current_state == "ready" and host.source_check_request_id is None
+    assert all(event.get("event") != "model_support" for event in emitted(host))
+    host.worker = None
+
+
 @pytest.mark.parametrize("change", ["epoch", "mode", "revision", "repo", "empty"])
 def test_stale_or_mismatched_support_cannot_start_download(host, change):
     def preflight(*_args):

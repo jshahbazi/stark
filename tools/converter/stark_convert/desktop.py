@@ -418,7 +418,8 @@ class Desktop:
 
     The app sends one JSON command per line on stdin (``list``, ``install``, ``run``,
     ``stop``, ``quit``, ``generate``, ``decide``, ``reset``, ``configure``, ``support``,
-    ``catalog``, ``catalog_search``, ``catalog_cancel``, ``install_catalog``, ``remove_model``) and receives
+    ``check_model_source``, ``cancel_model_source_check``, ``catalog``, ``catalog_search``,
+    ``catalog_cancel``, ``install_catalog``, ``remove_model``) and receives
     one JSON event per line on ``output`` (``models``, ``status``, ``progress``,
     ``installed``, ``ready``, ``configured``, ``reply``, ``decision``, ``connection``,
     ``error``, ``model_families``, ``model_support``, ``model_catalog``,
@@ -471,6 +472,7 @@ class Desktop:
         self.install_epoch = None
         self.install_progress = {}
         self.install_request_id = None
+        self.source_check_request_id = None
         self.guided_install_request_id = None
         self.install_cancelled = None
         self.install_committing = False
@@ -1713,6 +1715,33 @@ class Desktop:
             except MediaError:
                 raise DesktopError("Cannot clear private image storage. Quit and reopen Stark.") from None
 
+    def cancel_source_check(self, request_id):
+        if not self.request_id(request_id):
+            raise DesktopError("Choose the model compatibility check to cancel.")
+        with self.lock:
+            if (
+                self.current_state != "checking"
+                or self.source_check_request_id != request_id
+                or self.job is None
+            ):
+                raise DesktopError("This model compatibility check has already finished.")
+            self.epoch += 1
+            self.source_check_request_id = None
+            converter, job = self.converter, self.job
+            self.api_condition.notify_all()
+        self.terminate_converter(converter)
+        if job is not threading.current_thread():
+            job.join(timeout=5)
+        with self.lock:
+            if self.converter is converter:
+                self.converter = None
+            if self.job is job and (not job.is_alive()):
+                self.job = None
+            self.status(
+                "ready" if self.worker else "idle",
+                "Model compatibility check cancelled",
+            )
+
     def start(self, function, state, message, *args, request_id=None, guided_install=False):
         with self.lock:
             if self.job is not None and self.job.is_alive():
@@ -1724,6 +1753,7 @@ class Desktop:
                 return
             epoch = self.epoch
             installing = state == "installing"
+            checking = state == "checking"
             if installing:
                 self.download_retry_wake.clear()
                 self.download_interrupted_epoch = None
@@ -1732,6 +1762,8 @@ class Desktop:
                 self.install_cancelled = threading.Event()
                 self.install_committing = False
                 self.begin_install_progress(epoch, args[0])
+            if checking:
+                self.source_check_request_id = request_id
             self.status(state, message, epoch)
 
             def execute():
@@ -1796,6 +1828,8 @@ class Desktop:
                             self.guided_install_request_id = None
                             self.install_cancelled = None
                             self.install_committing = False
+                        if checking and self.source_check_request_id == request_id:
+                            self.source_check_request_id = None
                         if self.job is current:
                             self.job = None
                             self.api_condition.notify_all()
@@ -2136,6 +2170,7 @@ class Desktop:
         request_id,
         expected_revision=None,
         metadata_profile=None,
+        check_only=False,
     ):
         native_decision = selected_mode == "decision"
         command = [sys.executable, "-I", "-B", "-m"]
@@ -2170,9 +2205,15 @@ class Desktop:
         if kind == "local" and not native_decision:
             command.append("--offline")
         environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
-        self.status("installing", "Checking model family before downloading weights…", epoch)
+        self.status(
+            "checking" if check_only else "installing",
+            "Checking model family before downloading weights…",
+            epoch,
+        )
         report = (
-            self.run_install_support_check(command, environment, epoch)
+            self.run_support_check(command, environment, epoch)
+            if check_only
+            else self.run_install_support_check(command, environment, epoch)
             if kind == "huggingface"
             else self.run_support_check(command, environment, epoch)
         )
@@ -2196,9 +2237,28 @@ class Desktop:
                 if report["status"] == "conditional":
                     raise DesktopError("Cannot pin this model's source revision. Retry the support check.")
             self.emit("model_support", epoch, request_id=request_id, report=report)
-            if report["status"] != "conditional":
+            if report["status"] != "conditional" and not check_only:
                 raise DesktopError(report["message"])
             return revision
+
+    def check_source(
+        self,
+        epoch,
+        kind,
+        source,
+        artifact_mode=None,
+        support_mode=None,
+        support_request_id=None,
+    ):
+        self.install(
+            epoch,
+            kind,
+            source,
+            artifact_mode,
+            support_mode,
+            support_request_id,
+            check_only=True,
+        )
 
     def install(
         self,
@@ -2210,6 +2270,7 @@ class Desktop:
         support_request_id=None,
         expected_revision=None,
         guided_recipe_id=None,
+        check_only=False,
     ):
         self.check_install_cancelled(epoch)
         guided_recipe = self.bound_guided_recipe(guided_recipe_id) if guided_recipe_id is not None else None
@@ -2315,6 +2376,48 @@ class Desktop:
             )
         if selected_mode != "vision-language" and purpose == "vision-language":
             raise DesktopError("Enable image input when converting this checkpoint.")
+        if check_only:
+            if converted:
+                modes = dict.fromkeys(("text", "decision", "vision-language"), "unsupported")
+                modes[selected_mode] = "conditional"
+                report = {
+                    "schema_version": 1,
+                    "status": "conditional",
+                    "mode": purpose,
+                    "message": "This prepared Stark model has a valid structure and can be added.",
+                    "reasons": ["prepared_artifact"],
+                    "warnings": ["Native loading and execution are checked when the model is used."],
+                    "pending_checks": ["native_execution"],
+                    "modes": modes,
+                    "source": {"repo": None, "revision": None, "metadata_sha256": {}, "metadata_sources": []},
+                }
+                with self.lock:
+                    if epoch != self.epoch:
+                        return
+                    self.emit("model_support", epoch, request_id=support_request_id, report=report)
+                    self.status(
+                        "ready" if self.worker else "idle",
+                        "This prepared model can be added",
+                        epoch,
+                    )
+                return
+            self.check_install_support(
+                epoch,
+                kind,
+                str(path) if kind == "local" else source,
+                selected_mode,
+                purpose,
+                support_request_id,
+                check_only=True,
+            )
+            with self.lock:
+                if epoch == self.epoch:
+                    self.status(
+                        "ready" if self.worker else "idle",
+                        "Model compatibility check finished",
+                        epoch,
+                    )
+            return
         with self.lock:
             if epoch != self.epoch:
                 return
@@ -2349,10 +2452,13 @@ class Desktop:
                     epoch,
                     model={k: previous[k] for k in ("id", "name", "path")},
                     tool_support=model_tool_support(previous["path"]),
+                    message="This model is already installed.",
                     support_request_id=support_request_id,
                 )
                 self.status("ready" if self.worker else "idle", "Model already installed", epoch)
                 return
+        if converted:
+            self.status("installing", "Adding prepared model…", epoch)
         identifier = uuid.uuid4().hex
         staging = self.model_dir / (".install-" + identifier)
         resources = ExitStack()
@@ -2504,6 +2610,7 @@ class Desktop:
                     epoch,
                     model={k: model[k] for k in ("id", "name", "path")},
                     tool_support=model_tool_support(model["path"]),
+                    message="Model added to Installed.",
                     support_request_id=support_request_id,
                     **({"request_id": support_request_id} if guided_recipe is not None else {}),
                 )
@@ -3969,6 +4076,10 @@ class Desktop:
                 request_id,
                 request_id=request_id,
             )
+        elif command == "cancel_model_source_check":
+            if set(payload) != {"command", "support_request_id"}:
+                raise DesktopError("Choose the model compatibility check to cancel.")
+            self.cancel_source_check(payload["support_request_id"])
         elif command in ("stop", "quit"):
             self.stop(preserve_catalog=command == "stop" and payload.get("preserve_catalog") is True)
             return command != "quit"
@@ -4004,6 +4115,40 @@ class Desktop:
                     payload["source"].strip(),
                     artifact_mode,
                 )
+        elif command == "check_model_source":
+            if set(payload) != {
+                "command",
+                "source",
+                "kind",
+                "artifact_mode",
+                "support_mode",
+                "support_request_id",
+            }:
+                raise DesktopError("Choose a complete model source to check.")
+            source, kind = payload.get("source"), payload.get("kind")
+            artifact_mode = payload.get("artifact_mode")
+            support_mode = payload.get("support_mode")
+            request_id = payload.get("support_request_id")
+            if (
+                not isinstance(source, str)
+                or not source.strip()
+                or kind not in {"huggingface", "local"}
+                or artifact_mode not in (None, "text", "vision-language", "decision")
+                or support_mode not in ("text", "decision", "vision-language")
+                or not self.request_id(request_id)
+            ):
+                raise DesktopError("Choose a valid model source to check.")
+            self.start(
+                self.check_source,
+                "checking",
+                "Checking model compatibility…",
+                kind,
+                source.strip(),
+                artifact_mode,
+                support_mode,
+                request_id,
+                request_id=request_id,
+            )
         elif (
             command == "generate"
             and isinstance(payload.get("text"), str)

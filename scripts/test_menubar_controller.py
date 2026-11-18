@@ -1020,6 +1020,52 @@ extension EngineController {
                 requested["support_mode"] as? String == "vision-language" &&
                 UUID(uuidString: requested["support_request_id"] as? String ?? "") != nil &&
                 engine.downloadProgress.state == "waiting"
+        case "source-compatibility-check":
+            engine.checkSource(source: "  example/model  ", kind: "huggingface")
+            let requested = command()
+            guard requested["command"] as? String == "check_model_source",
+                  requested["source"] as? String == "example/model",
+                  requested["kind"] as? String == "huggingface",
+                  requested["artifact_mode"] is NSNull,
+                  requested["support_mode"] as? String == "decision",
+                  engine.state == "checking", engine.installSupportIsPreview else { return false }
+            engine.apply(supportEvent(requested))
+            guard engine.installSupportReport?.status == .conditional else { return false }
+            engine.apply(["event": "status", "state": "ready", "message": "Compatible"])
+            guard engine.canInstallSource else { return false }
+            engine.checkSource(source: "example/unsupported", kind: "huggingface")
+            let blocked = command()
+            engine.apply(supportEvent(blocked, status: "unsupported"))
+            engine.apply(["event": "status", "state": "ready", "message": "Unsupported"])
+            guard engine.installSupportReport?.status == .unsupported &&
+                !engine.canInstallSource && engine.installSupportIsPreview &&
+                engine.downloadProgress.state == "waiting" else { return false }
+            engine.checkSource(source: "example/slow", kind: "huggingface")
+            _ = command()
+            engine.cancelSourceCheck()
+            let cancellation = command()
+            engine.apply(["event": "status", "state": "ready", "message": "Compatibility check cancelled"])
+            return cancellation["command"] as? String == "cancel_model_source_check" &&
+                cancellation["support_request_id"] is String &&
+                engine.loadedID == "fixture-model" && engine.state == "ready"
+        case "prepared-local-install-completion":
+            engine.install(
+                source: "/private/models/fixture-prepared",
+                kind: "local"
+            )
+            let requested = command()
+            engine.apply([
+                "event": "installed",
+                "support_request_id": requested["support_request_id"]!,
+                "message": "Model added to Installed.",
+                "model": ["id": "prepared-model", "name": "Fixture prepared", "path": "/private/models/fixture-prepared"],
+            ])
+            guard engine.installSuccessMessage == "Model added to Installed.",
+                  engine.selectedID == "prepared-model", engine.state == "installing" else { return false }
+            engine.apply(["event": "status", "state": "idle", "message": "Model installed"])
+            guard engine.installSuccessMessage == "Model added to Installed." else { return false }
+            engine.resetInstallProgress(kind: "local")
+            return engine.installSuccessMessage == nil
         case "text-install-default":
             engine.install(source: "Qwen/Qwen3-0.6B", kind: "huggingface")
             let requested = command()
@@ -3305,6 +3351,12 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_vision_install_is_explicit_opt_in(self):
         self.exercise("vision-install-opt-in")
+
+    def test_source_compatibility_check_gates_install_without_downloading(self):
+        self.exercise("source-compatibility-check")
+
+    def test_prepared_local_install_has_visible_completion(self):
+        self.exercise("prepared-local-install-completion")
 
     def test_existing_install_keeps_default_mode(self):
         self.exercise("text-install-default")
