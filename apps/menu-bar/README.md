@@ -244,10 +244,12 @@ Matching catalog rows use the same immutable-revision and tensor admission
 checks as family browsing; unsupported formats stay hidden. The search returns
 up to 30 Hub matches plus matching fixed native catalog entries, and keeps
 working if the live search fails but a pinned catalog entry matches. Search text
-stays within the current browsing session. Once a family is open, its search
-still filters only that loaded family without another request. Sort choices are
-remembered between app launches. The family overview uses compact, full-width
-rows in a single column.
+stays within the current browsing session. Versioned Qwen searches follow the
+release line: **Qwen3** excludes 3.5, 3.6 and 3.8 models, while each later
+release line is matched from its repository or declared base model. Once a
+family is open, its search still filters only that loaded family without
+another request. Sort choices are remembered between app launches. The family
+overview uses compact, full-width rows in a single column.
 
 **Top Models** shows the ten ranked families from the November 14, 2026
 llmbench shared-benchmark calculation, in descending coding-index order. Each

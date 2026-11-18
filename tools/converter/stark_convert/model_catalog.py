@@ -1559,8 +1559,39 @@ def _search_matches(query, fields):
         return "".join(character for character in value.casefold() if character.isalnum())
 
     terms = [normalized(term) for term in query.split() if normalized(term)]
+    if "qwen3" in terms and not any(
+        re.search(r"(?i)(?<![a-z0-9])qwen[-_. ]*3(?![0-9]|\.[0-9]|_[0-9])", field)
+        for field in fields
+    ):
+        return False
     text = normalized(" ".join(fields))
     return not terms or all(term in text for term in terms)
+
+
+def _qwen_search_release(query):
+    match = re.match(r"(?i)^qwen[-_. ]*3(?:\.([0-9]+))?(?=$|[\s-])", query)
+    if match is None:
+        return None
+    return "3." + match.group(1) if match.group(1) is not None else "3"
+
+
+def _qwen_search_match(release, family, repo, info):
+    if release == "3":
+        return family == "qwen3"
+    if family != "qwen3_5":
+        return False
+    values = [repo]
+    tags = _field(info, "tags", [])
+    if isinstance(tags, list):
+        values.extend(tag for tag in tags if isinstance(tag, str))
+    card = _field(info, "cardData")
+    if isinstance(card, dict):
+        base_model = card.get("base_model")
+        if isinstance(base_model, str):
+            values.append(base_model)
+        elif isinstance(base_model, list):
+            values.extend(value for value in base_model if isinstance(value, str))
+    return any(re.search(rf"(?i)qwen[-_. ]*{re.escape(release)}(?![0-9])", value) for value in values)
 
 
 def _search_fixed_items(query):
@@ -1637,6 +1668,7 @@ def search_catalog(
         if definition["model_kind"] == "language"
         and any(definition["modes"][mode]["status"] == "conditional" for mode in ("text", "vision-language"))
     }
+    qwen_release = _qwen_search_release(query)
 
     def route(entry):
         repo = _repo(_field(entry, "id"))
@@ -1662,6 +1694,8 @@ def search_catalog(
                 )
             family = _config_family(config)
             if family not in definitions:
+                return "skip", None
+            if qwen_release is not None and not _qwen_search_match(qwen_release, family, repo, info):
                 return "skip", None
             return "matched", (family, (repo, revision, info))
         except Exception:

@@ -725,6 +725,14 @@ enum ModelBrowserSearch {
         let query = query.replacingOccurrences(of: "(?i)\\b([48])[-_ ]*bits?\\b", with: "$1bit", options: .regularExpression)
         let terms = query.split(whereSeparator: \.isWhitespace).map { normalized(String($0)) }.filter { !$0.isEmpty }
         guard !terms.isEmpty else { return true }
+        if terms.contains("qwen3"), !fields.contains(where: {
+            $0.range(
+                of: #"(?i)(?<![a-z0-9])qwen[-_. ]*3(?![0-9]|\.[0-9]|_[0-9])"#,
+                options: .regularExpression
+            ) != nil
+        }) {
+            return false
+        }
         let text = fields.map(normalized).joined(separator: " ")
         return terms.allSatisfy { text.contains($0) }
     }

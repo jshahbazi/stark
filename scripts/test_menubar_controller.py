@@ -2055,7 +2055,10 @@ extension EngineController {
                 ModelBrowserSearch.matches("  - .  ", fields: []) &&
                 ModelBrowserSearch.matches("4 bit", fields: ["4-bit"]) &&
                 !ModelBrowserSearch.matches("4 bit", fields: ["14B", "8-bit"]) &&
-                !ModelBrowserSearch.matches("AB", fields: ["A", "B"])
+                !ModelBrowserSearch.matches("AB", fields: ["A", "B"]) &&
+                ModelBrowserSearch.matches("Qwen3", fields: ["Qwen3-4B"]) &&
+                !ModelBrowserSearch.matches("Qwen3", fields: ["Qwen3.5-4B"]) &&
+                !ModelBrowserSearch.matches("Qwen3", fields: ["qwen3_5"])
         case "catalog-browser-name-and-size-sort":
             let raw = [
                 groupedCatalogItem("unknown", repo: "owner/Unknown", name: "Unknown", group: "1", groupName: "Unknown", publisher: "owner", size: nil),
