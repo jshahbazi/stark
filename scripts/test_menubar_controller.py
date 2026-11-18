@@ -1113,9 +1113,11 @@ extension EngineController {
                   TopModelRanking.entries.allSatisfy({ entry in rows.contains(where: { $0.id == entry.id }) }),
                   TopModelRanking.matching("qwen").map(\.rank) == [1, 3, 4, 5],
                   TopModelRanking.matching("no-such-family").isEmpty,
-                  TopModelRanking.matching("").map(\.rank) == Array(1...10) else { return false }
+                  TopModelRanking.matching("").map(\.rank) == Array(1...10),
+                  TopModelRanking.entries.first(where: { $0.id == "qwen3_5" })?.searchChoices.map(\.query) ==
+                      ["Qwen3.5", "Qwen3.6-27B", "Qwen3.8-27B"] else { return false }
             return rows.map(\.name) == ["Decider Flash v1.3", "Flint", "Gemma 2", "Gemma 3", "Gemma 3 images", "Gemma 4", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
-                "Mistral", "OLMo 3", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.5 MoE", "Qwen3.8 Flash Next", "Ripple-65B Preview", "SmolLM3"] &&
+                "Mistral", "OLMo 3", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5 / 3.8", "Qwen3.5 MoE", "Qwen3.8 Flash Next", "Ripple-65B Preview", "SmolLM3"] &&
                 !rows.contains(where: { $0.id == "modernbert" })
         case "models-display-event":
             engine.apply(["event": "models", "models": [
@@ -1861,7 +1863,14 @@ extension EngineController {
             let refresh = commands().last!
             engine.apply(partial(refresh, ["fresh"]))
             engine.apply(catalogReply(refresh, status: "error"))
-            return engine.catalog?.status == .error && engine.catalog?.items.isEmpty == true && !engine.catalogLoading
+            guard engine.catalog?.status == .ready,
+                  engine.catalog?.items.map(\.id) == ["fresh"],
+                  engine.catalogError == "Fixture catalog message",
+                  !engine.catalogLoading else { return false }
+            engine.retryModelCatalog()
+            let freshRetry = commands().last!
+            return freshRetry["command"] as? String == "catalog" &&
+                freshRetry["family_id"] as? String == "qwen3"
         case "catalog-pagination-auto-drains-positive-empty-and-duplicate-pages":
             engine.requestModelCatalog(familyID: "qwen3")
             let first = command()
@@ -2046,7 +2055,10 @@ extension EngineController {
                 ModelBrowserSearch.matches("  - .  ", fields: []) &&
                 ModelBrowserSearch.matches("4 bit", fields: ["4-bit"]) &&
                 !ModelBrowserSearch.matches("4 bit", fields: ["14B", "8-bit"]) &&
-                !ModelBrowserSearch.matches("AB", fields: ["A", "B"])
+                !ModelBrowserSearch.matches("AB", fields: ["A", "B"]) &&
+                ModelBrowserSearch.matches("Qwen3", fields: ["Qwen3-4B"]) &&
+                !ModelBrowserSearch.matches("Qwen3", fields: ["Qwen3.5-4B"]) &&
+                !ModelBrowserSearch.matches("Qwen3", fields: ["qwen3_5"])
         case "catalog-browser-name-and-size-sort":
             let raw = [
                 groupedCatalogItem("unknown", repo: "owner/Unknown", name: "Unknown", group: "1", groupName: "Unknown", publisher: "owner", size: nil),

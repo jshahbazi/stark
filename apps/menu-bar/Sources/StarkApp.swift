@@ -725,6 +725,14 @@ enum ModelBrowserSearch {
         let query = query.replacingOccurrences(of: "(?i)\\b([48])[-_ ]*bits?\\b", with: "$1bit", options: .regularExpression)
         let terms = query.split(whereSeparator: \.isWhitespace).map { normalized(String($0)) }.filter { !$0.isEmpty }
         guard !terms.isEmpty else { return true }
+        if terms.contains("qwen3"), !fields.contains(where: {
+            $0.range(
+                of: #"(?i)(?<![a-z0-9])qwen[-_. ]*3(?![0-9]|\.[0-9]|_[0-9])"#,
+                options: .regularExpression
+            ) != nil
+        }) {
+            return false
+        }
         let text = fields.map(normalized).joined(separator: " ")
         return terms.allSatisfy { text.contains($0) }
     }
@@ -1070,16 +1078,45 @@ struct ModelRemovalConfirmation: Identifiable {
 // Frozen shared-benchmark calculation; provenance and limitations:
 // docs/benchmarks/2026-11-14-catalog-coding-ranking.md
 struct TopModelRanking: Identifiable {
+    struct SearchChoice: Identifiable {
+        let title: String
+        let query: String
+        var id: String { query }
+    }
+
     let id: String
     let name: String
     let index: Double
     let modelCount: Int
     let benchmarkCount: Int
+    let searchChoices: [SearchChoice]
+
+    init(id: String, name: String, index: Double, modelCount: Int, benchmarkCount: Int,
+         searchChoices: [SearchChoice]? = nil) {
+        self.id = id
+        self.name = name
+        self.index = index
+        self.modelCount = modelCount
+        self.benchmarkCount = benchmarkCount
+        self.searchChoices = searchChoices ?? [
+            SearchChoice(title: Self.searchableName(name), query: Self.searchableName(name))
+        ]
+    }
+
+    private static func searchableName(_ name: String) -> String {
+        name.replacingOccurrences(of: " dense", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: " text", with: "", options: .caseInsensitive)
+    }
 
     static let entries: [Self] = [
         .init(id: "qwen4_exp", name: "Qwen3.8 Flash Next", index: 100.0, modelCount: 1, benchmarkCount: 5),
         .init(id: "glm5_next", name: "GLM-5.3 Flash", index: 97.3, modelCount: 1, benchmarkCount: 8),
-        .init(id: "qwen3_5", name: "Qwen3.5 / 3.8 dense", index: 61.1, modelCount: 6, benchmarkCount: 18),
+        .init(id: "qwen3_5", name: "Qwen3.5 / 3.8 dense", index: 61.1, modelCount: 6, benchmarkCount: 18,
+              searchChoices: [
+                  .init(title: "Qwen3.5 dense", query: "Qwen3.5"),
+                  .init(title: "Qwen3.6 dense", query: "Qwen3.6-27B"),
+                  .init(title: "Qwen3.8 dense", query: "Qwen3.8-27B"),
+              ]),
         .init(id: "qwen3", name: "Qwen3 dense", index: 48.3, modelCount: 3, benchmarkCount: 6),
         .init(id: "qwen2", name: "Qwen2 dense", index: 41.0, modelCount: 6, benchmarkCount: 17),
         .init(id: "phi3", name: "Phi-3 dense", index: 34.9, modelCount: 1, benchmarkCount: 4),
@@ -1916,7 +1953,7 @@ final class EngineController: ObservableObject {
             let addedItems = result.items.contains { !catalogPageKnownIDs.contains($0.id) }
             if result.status == .ready {
                 catalog = FamilyModelCatalog(page: result, previous: pendingOffset > 0 ? catalog : nil)
-            } else if pendingOffset == 0 { catalog = result }
+            } else if pendingOffset == 0, shown == nil { catalog = result }
             catalogLoading = false; pendingCatalogOffset = nil
             catalogError = result.status == .ready ? nil : (result.message.isEmpty ? "Could not load these models. Try again." : result.message)
             if result.status == .ready, result.nextOffset != nil, loadRemainingCatalog || !addedItems {
@@ -2769,6 +2806,15 @@ final class EngineController: ObservableObject {
         }
     }
 
+    func retryModelCatalog() {
+        guard let familyID = catalogFamilyID else { return }
+        if catalog?.familyID == familyID, catalog?.status == .ready, catalog?.nextOffset != nil {
+            requestMoreModelCatalog()
+        } else {
+            requestModelCatalog(familyID: familyID)
+        }
+    }
+
     func cancelModelCatalog() {
         if let requestID = catalogRequestID, catalogInstallation?.catalogRequestID != requestID {
             send(["command": "catalog_cancel", "request_id": requestID])
@@ -3536,33 +3582,52 @@ struct ModelsView: View {
             if TopModelRanking.matching("").isEmpty { noSearchResults("No matching top families") }
             ForEach(TopModelRanking.matching("")) { entry in
                 let family = families?.first(where: { $0.id == entry.id })
-                Button {
-                    guard let family else { return }
-                    selectedFamily = family; catalogQuery = ""; catalogQuantization = .all
-                    engine.requestModelCatalog(familyID: family.id)
-                } label: {
-                    HStack(spacing: 10) {
-                        Text("\(entry.rank)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).frame(width: 22)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(entry.name).font(.callout.weight(.medium))
-                            HStack(spacing: 10) {
-                                Text("Based on \(entry.modelCount) reference \(entry.modelCount == 1 ? "model" : "models")")
-                                Text("\(entry.benchmarkCount) shared benchmarks")
-                                    .help("Distinct benchmark results used in comparisons involving this family's reference models. Each benchmark counts once across the family; coverage varies by model.")
-                            }.font(.caption).foregroundStyle(.secondary)
+                if entry.searchChoices.count > 1 {
+                    Menu {
+                        ForEach(entry.searchChoices) { choice in
+                            Button(choice.title) { openTopModelSearch(choice) }
                         }
-                        Spacer(minLength: 0)
-                        Text(entry.index, format: .number.precision(.fractionLength(1)))
-                            .font(.callout.monospacedDigit().weight(.semibold))
-                        Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
-                    }.frame(maxWidth: .infinity, minHeight: 38, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 4)
-                        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 7))
-                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(.quaternary, lineWidth: 1))
-                }.buttonStyle(.plain).disabled(family == nil)
-                    .help(family == nil ? "Family browsing will be available when Stark is ready." : "Browse \(entry.name) models")
-                    .accessibilityLabel("Rank \(entry.rank), \(entry.name), coding index \(entry.index.formatted(.number.precision(.fractionLength(1)))), based on \(entry.modelCount) reference \(entry.modelCount == 1 ? "model" : "models"), \(entry.benchmarkCount) shared benchmarks")
+                    } label: {
+                        topModelRow(entry)
+                    }.buttonStyle(.plain).disabled(family == nil)
+                        .help(family == nil ? "Family browsing will be available when Stark is ready." : "Choose which \(entry.name) models to search")
+                        .accessibilityLabel("Rank \(entry.rank), \(entry.name), coding index \(entry.index.formatted(.number.precision(.fractionLength(1)))), based on \(entry.modelCount) reference \(entry.modelCount == 1 ? "model" : "models"), \(entry.benchmarkCount) shared benchmarks, choose a search")
+                } else if let choice = entry.searchChoices.first {
+                    Button { openTopModelSearch(choice) } label: {
+                        topModelRow(entry)
+                    }.buttonStyle(.plain).disabled(family == nil)
+                        .help(family == nil ? "Family browsing will be available when Stark is ready." : "Browse \(entry.name) models")
+                        .accessibilityLabel("Rank \(entry.rank), \(entry.name), coding index \(entry.index.formatted(.number.precision(.fractionLength(1)))), based on \(entry.modelCount) reference \(entry.modelCount == 1 ? "model" : "models"), \(entry.benchmarkCount) shared benchmarks")
+                }
             }
         }
+    }
+
+    private func openTopModelSearch(_ choice: TopModelRanking.SearchChoice) {
+        selectedFamily = nil
+        catalogQuery = ""; catalogQuantization = .all
+        universalQuery = choice.query
+    }
+
+    private func topModelRow(_ entry: TopModelRanking) -> some View {
+        HStack(spacing: 10) {
+            Text("\(entry.rank)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.name).font(.callout.weight(.medium))
+                HStack(spacing: 10) {
+                    Text("Based on \(entry.modelCount) reference \(entry.modelCount == 1 ? "model" : "models")")
+                    Text("\(entry.benchmarkCount) shared benchmarks")
+                        .help("Distinct benchmark results used in comparisons involving this family's reference models. Each benchmark counts once across the family; coverage varies by model.")
+                }.font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            Text(entry.index, format: .number.precision(.fractionLength(1)))
+                .font(.callout.monospacedDigit().weight(.semibold))
+            Image(systemName: entry.searchChoices.count > 1 ? "chevron.down" : "chevron.right")
+                .font(.caption).foregroundStyle(.secondary)
+        }.frame(maxWidth: .infinity, minHeight: 38, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 4)
+            .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(.quaternary, lineWidth: 1))
     }
 
     private func noSearchResults(_ title: String) -> some View {
@@ -3762,7 +3827,7 @@ struct ModelsView: View {
                 } else if let message = engine.catalogError {
                     Text(message).font(.callout).foregroundStyle(.secondary)
                     Text("The list is incomplete. Models already found are still available.").font(.caption).foregroundStyle(.secondary)
-                    Button("Retry remaining models") { engine.requestMoreModelCatalog() }.disabled(engine.busy)
+                    Button("Retry remaining models") { engine.retryModelCatalog() }.disabled(engine.busy)
                 } else if catalog.nextOffset != nil {
                     if !catalogQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Text("Search filters the models loaded so far.").font(.caption).foregroundStyle(.secondary)
@@ -3783,7 +3848,7 @@ struct ModelsView: View {
             VStack(spacing: 10) {
                 Text(engine.catalog?.status == .offline ? "You’re offline" : "Couldn’t load models").font(.headline)
                 if let message = engine.catalogError { Text(message).font(.callout).foregroundStyle(.secondary) }
-                Button("Retry") { engine.requestModelCatalog(familyID: family.id) }
+                Button("Retry") { engine.retryModelCatalog() }
             }.frame(maxWidth: .infinity, minHeight: 220)
         }
     }

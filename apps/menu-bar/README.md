@@ -244,20 +244,26 @@ Matching catalog rows use the same immutable-revision and tensor admission
 checks as family browsing; unsupported formats stay hidden. The search returns
 up to 30 Hub matches plus matching fixed native catalog entries, and keeps
 working if the live search fails but a pinned catalog entry matches. Search text
-stays within the current browsing session. Once a family is open, its search
-still filters only that loaded family without another request. Sort choices are
-remembered between app launches. The family overview uses compact, full-width
-rows in a single column.
+stays within the current browsing session. Versioned Qwen searches follow the
+release line: **Qwen3** excludes 3.5, 3.6 and 3.8 models, while each later
+release line is matched from its repository or declared base model. Once a
+family is open, its search still filters only that loaded family without
+another request. Sort choices are remembered between app launches. The family
+overview uses compact, full-width rows in a single column.
 
 **Top Models** shows the ten ranked families from the November 14, 2026
 llmbench shared-benchmark calculation, in descending coding-index order. Each
 row shows its original rank, relative index, **Based on N reference models**
 and a separate shared-benchmark count. Benchmarks count once across the family
-when used in a retained comparison; individual model coverage varies. Search
-preserves that order; selecting a row opens the existing family catalog, with
-Back returning to the ranking. The snapshot remains visible before the backend
-is ready; browsing is enabled when that family is available. It does not fetch
-leaderboard data at runtime. See the [calculation and provenance](../../docs/benchmarks/2026-11-14-catalog-coding-ranking.md)
+when used in a retained comparison; individual model coverage varies. The
+ranked rows stay in snapshot order; selecting a row places a search-friendly
+family name in the universal search and searches installed models and the model
+catalog. The combined Qwen3.5 / 3.8 ranking entry offers separate Qwen3.5,
+Qwen3.6 and Qwen3.8 dense searches because the shared architecture label is not
+a useful Hugging Face query. Clearing that search returns to the ranking. The
+snapshot remains visible before the backend is ready; browsing is enabled when
+that family is available. It does not fetch leaderboard data at runtime. See
+the [calculation and provenance](../../docs/benchmarks/2026-11-14-catalog-coding-ranking.md)
 for model coverage, attribution and the relative index's limitations.
 
 Family rows use llmbench's model-level coding summary score. The catalog displays
