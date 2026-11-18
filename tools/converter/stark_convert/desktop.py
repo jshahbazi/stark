@@ -2555,12 +2555,11 @@ class Desktop:
             with self.lock:
                 if epoch != self.epoch or self.worker is not worker:
                     raise DesktopError("Image checks were interrupted by a model change.")
-                if (
-                    ready.get("ready") is not True
-                    or ready.get("mode") != "text-generation-v1"
-                    or worker.images is not True
-                    or worker.image_verification != "locally_tested"
-                ):
+                if ready.get("ready") is not True or ready.get("mode") != "text-generation-v1":
+                    raise DesktopError(
+                        "Stark could not load this model for image validation. Check model compatibility and memory."
+                    )
+                if worker.images is not True or worker.image_verification != "locally_tested":
                     raise DesktopError("This model did not pass local image execution checks.")
                 return "locally_tested"
         except ChatError as error:
