@@ -60,8 +60,7 @@ def _insufficient_memory(required: int, available: int) -> ImageCheckError:
         else "Cannot determine available RAM to run the image model check. "
     )
     return ImageCheckError(
-        reason + "The check loads the model from its current folder without making another disk copy. "
-        "Stop other models or close memory-heavy apps, then retry."
+        reason + "Stop other models or close memory-heavy apps, then retry."
     )
 
 
