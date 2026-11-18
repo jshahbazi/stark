@@ -2,8 +2,10 @@
 
 The Top Models tab displays the ten family entries approved after the
 November 14, 2026 shared-benchmark experiment. Its static data is owned by
-`TopModelRanking` in `apps/menu-bar/Sources/StarkApp.swift`. It does not change
-Model Catalog sorting or perform network requests to update rankings.
+`TopModelRanking` in `apps/menu-bar/Sources/StarkApp.swift`. It remains a
+historical family-level comparison frozen at this capture. Model Catalog and
+Beginner instead use llmbench's later official coding and non-coding summary
+scores from the packaged snapshot. None performs network ranking requests.
 
 ## Source and attribution
 

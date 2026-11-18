@@ -1,6 +1,8 @@
 """Reference scores order a family catalogue without benchmarking or admitting any row."""
 
 import io
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -10,52 +12,40 @@ from test_model_catalog import PIN
 
 from stark_convert import catalog_ranking, native_catalog
 from stark_convert import model_catalog as catalog
-from stark_convert.catalog_ranking import ReferenceScores
+from stark_convert.catalog_ranking import CatalogReferenceScores
 from stark_convert.desktop import Desktop
-from stark_convert.recommendation_leaderboard import GIB, LeaderboardSnapshot
+from stark_convert.recommendation_benchmarks import load_registry
+from stark_convert.recommendation_leaderboard import GIB, LeaderboardSnapshot, load_snapshot
 
 CONFIG = {"model_type": "qwen3", "torch_dtype": "float16"}
 PACKED = {"model_type": "qwen3", "quantization": {"group_size": 64, "bits": 4}}
+ROOT = Path(__file__).resolve().parents[3]
 
 
-def scores():
-    def bucket(task, ram, rows):
-        return {
-            "task": task,
-            "ram_gb": ram,
-            "url": "https://whatmodel.sh/?fixture",
-            "sha256": "0" * 64,
-            "models": rows,
-        }
-
+def catalog_indexes():
     snapshot = LeaderboardSnapshot(
         {
-            "schema_version": 1,
-            "captured": "2026-11-11",
-            "model_repositories": {
-                "big-70b": "maker/Big-70B",
-                "small-4b": "maker/Small-4B",
-                "coder-7b": "maker/Coder-7B",
-                "twin-one": "one/Twin",
-                "twin-two": "two/Twin",
+            "schema_version": 2,
+            "captured": "2026-11-17",
+            "generated_at": "2026-11-17T21:02:32Z",
+            "source_url": "https://llmbench.site/",
+            "data_url": "https://llmbench.site/data/",
+            "summary_url": "https://llmbench.site/downloads/llmbench-summary-scores.csv",
+            "method_url": "https://llmbench.site/summary/",
+            "source_files_sha256": {
+                "llmbench-summary-scores.csv": "0" * 64,
+                "llmbench-models.csv": "0" * 64,
             },
-            "buckets": [
-                bucket("general", 16, [{"id": "small-4b", "score": 50.5}]),
-                bucket(
-                    "general",
-                    128,
-                    [
-                        {"id": "big-70b", "score": 70},
-                        {"id": "small-4b", "score": 50.5},
-                        {"id": "twin-one", "score": 40},
-                        {"id": "twin-two", "score": 41},
-                    ],
-                ),
-                bucket("coding", 128, [{"id": "coder-7b", "score": 60}, {"id": "small-4b", "score": 30}]),
+            "models": [
+                {"id": "big-70b", "repo": "maker/Big-70B", "coding": 70, "noncoding": 70},
+                {"id": "small-4b", "repo": "maker/Small-4B", "coding": 50.5, "noncoding": 50.5},
+                {"id": "coder-7b", "repo": "maker/Coder-7B", "coding": 80},
+                {"id": "twin-one", "repo": "one/Twin", "coding": 40, "noncoding": 40},
+                {"id": "twin-two", "repo": "two/Twin", "coding": 41, "noncoding": 41},
             ],
         }
     )
-    return ReferenceScores(snapshot, {("exporter/Reviewed", PIN): "maker/Big-70B"})
+    return CatalogReferenceScores(snapshot, {("exporter/Reviewed", PIN): "maker/Big-70B"})
 
 
 @pytest.fixture(autouse=True)
@@ -64,37 +54,74 @@ def isolated_catalog(monkeypatch):
     monkeypatch.setattr(catalog, "_catalog_seeds", lambda _family: [])
     monkeypatch.setattr(catalog, "get_model", lambda _repo: None)
     monkeypatch.setattr(catalog, "_verify_hub_layout", lambda *args: dict.fromkeys(args[-1]))
-    monkeypatch.setattr(catalog_ranking, "reference_scores", scores)
+    monkeypatch.setattr(catalog_ranking, "catalog_reference_scores", catalog_indexes)
 
 
-def test_score_belongs_to_the_exact_model_or_a_reviewed_export():
-    ranking = scores()
+def test_catalog_uses_model_level_llmbench_coding_indexes():
+    ranking = catalog_indexes()
 
     exact = ranking.reference("maker/Small-4B", PIN, "BF16", [], "Small-4B")
     assert exact == {
         "model_id": "maker/Small-4B",
         "relationship": "benchmarked_model",
-        "general": 50.5,
-        "coding": 30,
-        "source_url": "https://whatmodel.sh/model/small-4b",
-        "captured": "2026-11-11",
+        "general": None,
+        "coding": 50.5,
+        "source_url": "https://llmbench.site/summary/",
+        "captured": "2026-11-17",
     }
-    coding_only = ranking.reference("maker/Coder-7B", PIN, "BF16", [], "Coder-7B")
-    assert (coding_only["general"], coding_only["coding"]) == (None, 60)
-    assert coding_only["source_url"].endswith("/coder-7b")
-
     reviewed = ranking.reference("exporter/Reviewed", PIN, "4-bit", [], "Reviewed")
-    assert (reviewed["model_id"], reviewed["relationship"]) == ("maker/Big-70B", "reviewed_export")
-    # A reviewed binding covers one revision only.
+    assert reviewed["model_id"] == "maker/Big-70B" and reviewed["coding"] == 70
     assert ranking.reference("exporter/Reviewed", "b" * 40, "4-bit", [], "Reviewed") is None
 
 
+def test_packaged_catalog_indexes_cover_reviewed_qwen_exports():
+    ranking = CatalogReferenceScores(load_snapshot(), load_registry().bindings)
+
+    dense = ranking.reference(
+        "Jundot/Qwen3.8-27B-oQ4e-mtp",
+        "7dd276b77fcb27c982ebd8d8a434539345713fea",
+        "Lily q4-xl",
+        [],
+        "Qwen3.8-27B-oQ4e-mtp",
+    )
+    flash = ranking.reference(
+        "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl",
+        "0f94842e3682b49acace4daeb4cf2e65a6f94f83",
+        "Lily q4-xl",
+        [],
+        "Qwen3.8-Flash-Next-lily-q4-xl",
+    )
+
+    assert dense == {
+        "model_id": "Qwen/Qwen3.8-27B",
+        "relationship": "reviewed_export",
+        "general": None,
+        "coding": 46.67,
+        "source_url": "https://llmbench.site/summary/",
+        "captured": "2026-11-17",
+    }
+    assert flash["model_id"] == "Qwen/Qwen3.8-Flash-Next" and flash["coding"] == 53.86
+
+
+def test_packaged_catalog_indexes_match_the_attributed_llmbench_snapshot():
+    package_path = ROOT / "tools/converter/stark_convert/llmbench_catalog_ranking.json"
+    package = json.loads(package_path.read_bytes())
+
+    assert package["generated_at"] == "2026-11-17T21:02:32Z"
+    assert package["source_files_sha256"] == {
+        "llmbench-summary-scores.csv": "16f1757328eb8477daf2d81aa0e1ae78fc23a7e580df803ad6bae2420e512665",
+        "llmbench-models.csv": "9fa830d4ab41feab7721fb3258b53ec179962f6c21a3604a60dde4e3adcaa9ae",
+    }
+    assert sum("coding" in row for row in package["models"]) == 88
+    assert sum("noncoding" in row for row in package["models"]) == 45
+
+
 def test_quantized_export_shows_its_declared_or_named_parent_score():
-    ranking = scores()
+    ranking = catalog_indexes()
     declared = ["base_model:quantized:maker/Big-70B", "base_model:maker/Big-70B", "mlx"]
 
     by_tag = ranking.reference("exporter/Anything-q4", PIN, "4-bit", declared, "Anything-q4")
-    assert (by_tag["model_id"], by_tag["relationship"], by_tag["general"]) == (
+    assert (by_tag["model_id"], by_tag["relationship"], by_tag["coding"]) == (
         "maker/Big-70B",
         "declared_quantization",
         70,
@@ -116,7 +143,7 @@ def test_quantized_export_shows_its_declared_or_named_parent_score():
 
 
 def test_full_precision_derivatives_never_inherit_a_score():
-    ranking = scores()
+    ranking = catalog_indexes()
     tags = ["base_model:quantized:maker/Big-70B", "base_model:finetune:maker/Big-70B"]
 
     assert ranking.reference("tuner/Big-70B-Tuned", PIN, "BF16", tags, "Big-70B-Tuned") is None
@@ -125,20 +152,20 @@ def test_full_precision_derivatives_never_inherit_a_score():
     assert ranking.reference("exporter/Small-4B-4bit", PIN, "4-bit", [], "Small-4B-4bit") is None
 
 
-def test_priority_prefers_scored_models_from_a_list_this_machine_can_use():
-    ranking = scores()
+def test_priority_prefers_llmbench_indexed_models_for_coding_only():
+    ranking = catalog_indexes()
 
     assert ranking.priority("maker/Small-4B", [], 16 * GIB) == (True, 50.5)
-    assert ranking.priority("maker/Big-70B", [], 16 * GIB) == (False, 70)
+    assert ranking.priority("maker/Big-70B", [], 16 * GIB) == (True, 70)
     assert ranking.priority("maker/Big-70B", [], 128 * GIB) == (True, 70)
-    assert ranking.priority("maker/Big-70B", [], None) == (False, 70)
+    assert ranking.priority("maker/Big-70B", [], None) == (True, 70)
     assert ranking.priority("exporter/Small-4B-MLX-4bit", [], 16 * GIB) == (True, 50.5)
     assert ranking.priority("exporter/X", ["base_model:quantized:maker/Big-70B"], 128 * GIB) == (True, 70)
-    assert ranking.priority("maker/Coder-7B", [], 128 * GIB) == (False, 60)
-    assert ranking.priority("maker/Big-70B", [], 128 * GIB, task="coding") is None
-    assert ranking.priority("maker/Coder-7B", [], 128 * GIB, task="coding") == (True, 60)
+    assert ranking.priority("maker/Coder-7B", [], 128 * GIB) == (True, 80)
+    assert ranking.priority("maker/Big-70B", [], 128 * GIB, task="coding") == (True, 70)
+    assert ranking.priority("maker/Coder-7B", [], 128 * GIB, task="coding") == (True, 80)
     assert ranking.priority(
-        "exporter/X", ["base_model:quantized:maker/Big-70B"], 128 * GIB, task="general", exact_first=True
+        "exporter/X", ["base_model:quantized:maker/Big-70B"], 128 * GIB, task="coding", exact_first=True
     ) == (False, True, 70)
     assert ranking.priority("maker/Big-70B", [], 128 * GIB, task="general", exact_first=True) == (True, True, 70)
     assert ranking.priority("someone/Unknown", ["base_model:finetune:maker/Big-70B"], 128 * GIB) is None
@@ -167,12 +194,13 @@ def test_scored_sources_are_inspected_and_reported_first(tmp_path):
     third = catalog.family_catalog("qwen3", hub=hub, limit=2, offset=second["next_offset"], physical_memory=128 * GIB)
     assert [item["repo"] for item in third["items"]] == ["someone/Second"] and third["next_offset"] is None
 
-    # A smaller machine sees the model from its own RAM list, and that model's export, first.
+    # The browse index has no RAM-specific bucket. Candidate inspection stays
+    # source-score ordered; the rendered rows still place machine fit first.
     small = catalog.family_catalog("qwen3", hub=hub, limit=2, physical_memory=16 * GIB)
-    assert sorted(item["repo"] for item in small["items"]) == ["exporter/Small-4B-4bit", "maker/Small-4B"]
+    assert sorted(item["repo"] for item in small["items"]) == ["maker/Big-70B", "maker/Small-4B"]
 
     rows = {item["repo"]: item.get("reference_score") for report in (first, second, third) for item in report["items"]}
-    assert rows["maker/Big-70B"]["relationship"] == "benchmarked_model" and rows["maker/Big-70B"]["general"] == 70
+    assert rows["maker/Big-70B"]["relationship"] == "benchmarked_model" and rows["maker/Big-70B"]["coding"] == 70
     assert rows["exporter/Small-4B-4bit"]["relationship"] == "named_quantization"
     assert rows["exporter/Small-4B-4bit"]["model_id"] == "maker/Small-4B"
     assert rows["someone/Popular"] is None and rows["someone/Second"] is None
@@ -193,7 +221,7 @@ def test_score_does_not_prioritize_a_source_without_safetensors_or_change_admiss
     everything = catalog.family_catalog("qwen3", hub=hub, physical_memory=128 * GIB)
     (unavailable,) = [item for item in everything["items"] if item["repo"] == "maker/Big-70B"]
     # The score is shown, but the row stays unavailable for its own reason.
-    assert unavailable["downloadable"] is False and unavailable["reference_score"]["general"] == 70
+    assert unavailable["downloadable"] is False and unavailable["reference_score"]["coding"] == 70
 
 
 def test_failed_listing_keeps_scored_sources_found_before_the_failure(tmp_path, monkeypatch):
@@ -223,7 +251,7 @@ def test_guided_planning_scan_is_not_reordered_or_scored(tmp_path):
     assert all(event[2]["limit"] == 100 for event in requests(hub, "list"))
 
 
-def test_guided_planning_prioritizes_task_scores_inside_bounded_window(tmp_path):
+def test_guided_planning_only_prioritizes_llmbench_coding_inside_bounded_window(tmp_path):
     hub = ListingHub()
     files = ["config.json", "model.safetensors"]
     order = [f"someone/Popular-{index:02d}" for index in range(35)] + ["maker/Big-70B", "maker/Coder-7B"]
@@ -242,7 +270,7 @@ def test_guided_planning_prioritizes_task_scores_inside_bounded_window(tmp_path)
     general_repos = {item["repo"] for item in general["items"]}
     coding_repos = {item["repo"] for item in coding["items"]}
     assert "maker/Big-70B" in general_repos and "maker/Coder-7B" not in general_repos
-    assert "maker/Coder-7B" in coding_repos and "maker/Big-70B" not in coding_repos
+    assert "maker/Coder-7B" in coding_repos and "maker/Big-70B" in coding_repos
     assert len(general_repos) == len(coding_repos) == 30
     assert all("reference_score" not in item for item in general["items"] + coding["items"])
     assert all(item["downloadable"] for item in general["items"] + coding["items"])
@@ -261,7 +289,7 @@ def test_guided_exact_parent_precedes_inferred_exports_within_candidate_limit(tm
     hub.discovered["qwen3"] = order
 
     report = catalog.family_catalog(
-        "qwen3", hub=hub, limit=30, planning=True, physical_memory=128 * GIB, ranking_task="general"
+        "qwen3", hub=hub, limit=30, planning=True, physical_memory=128 * GIB, ranking_task="coding"
     )
 
     repos = {item["repo"] for item in report["items"]}
@@ -279,7 +307,7 @@ def test_guided_registry_seeds_do_not_crowd_out_scored_discovery(tmp_path, monke
     hub.discovered["qwen3"] = ["maker/Big-70B"]
     hub.listing["maker/Big-70B"] = listed(["config.json", "model.safetensors"])
 
-    report = catalog.family_catalog("qwen3", hub=hub, limit=1, planning=True, ranking_task="general")
+    report = catalog.family_catalog("qwen3", hub=hub, limit=1, planning=True, ranking_task="coding")
     assert [item["repo"] for item in report["items"]] == ["maker/Big-70B"]
 
 
@@ -303,7 +331,7 @@ def test_overlapping_hub_queries_cannot_shrink_the_priority_window(tmp_path):
         hub.listing[repo] = listed(["config.json", "model.safetensors"])
     hub.discovered["qwen3"] = order
     hub.searched["Qwen3"] = order
-    report = catalog.family_catalog("qwen3", hub=hub, limit=1, planning=True, ranking_task="general")
+    report = catalog.family_catalog("qwen3", hub=hub, limit=1, planning=True, ranking_task="coding")
     assert [item["repo"] for item in report["items"]] == ["maker/Big-70B"]
 
 
@@ -324,10 +352,10 @@ def reference(**changes):
     return {
         "model_id": "maker/Small-4B",
         "relationship": "named_quantization",
-        "general": 50.5,
-        "coding": None,
-        "source_url": "https://whatmodel.sh/model/small-4b",
-        "captured": "2026-11-11",
+        "general": None,
+        "coding": 50.5,
+        "source_url": "https://llmbench.site/summary/",
+        "captured": "2026-11-17",
         **changes,
     }
 
@@ -347,7 +375,7 @@ def with_reference(value):
 
 def test_backend_passes_a_well_formed_reference_score(host):
     assert host.catalog_report(with_reference(reference()), "qwen3")["items"][0]["reference_score"] == reference()
-    coding = reference(general=None, coding=44, relationship="benchmarked_model")
+    coding = reference(coding=44, relationship="benchmarked_model")
     assert host.catalog_report(with_reference(coding), "qwen3")["items"][0]["reference_score"] == coding
 
 
@@ -355,15 +383,16 @@ def test_backend_passes_a_well_formed_reference_score(host):
     "value",
     [
         "50.5",
-        reference(general=None, coding=None),
-        reference(general="50"),
-        reference(general=True),
+        reference(coding=None),
+        reference(coding="50"),
+        reference(coding=True),
         reference(general=float("inf")),
-        reference(coding=5000),
+        reference(general=50.5),
+        reference(coding=5000, general=None),
         reference(relationship="similar_name"),
         reference(model_id="not a repository"),
         reference(source_url="https://example.com/model/small-4b"),
-        reference(source_url="https://whatmodel.sh/model/../admin"),
+        reference(source_url="https://llmbench.site/other"),
         reference(captured="yesterday"),
         reference(extra=1),
         {key: value for key, value in reference().items() if key != "captured"},

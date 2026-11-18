@@ -13,7 +13,7 @@ from test_model_catalog import PIN, Hub
 from test_qwen38_external import RangeHub
 from test_streaming import qwen_fixture
 
-from stark_convert import catalog_cache, cli, hub_headers, qwen38_external
+from stark_convert import catalog_cache, cli, hub_headers, native_catalog, qwen38_external
 from stark_convert import model_catalog as catalog
 from stark_convert.desktop import Desktop
 from stark_convert.streaming import ConversionError
@@ -498,6 +498,34 @@ def test_cli_streams_rows_before_the_report_and_passes_the_cache_directory(tmp_p
     assert cli.main() != 0
 
 
+def test_cli_streams_universal_catalog_search(tmp_path, monkeypatch, capsys):
+    called = {}
+    result = {
+        **page_report(),
+        "family_id": "search",
+        "items": [{**page_report()["items"][0], "family_id": "qwen3"}],
+    }
+
+    def search_catalog(query, **options):
+        called.update(options, query=query)
+        options["on_item"](result["items"][0])
+        return result
+
+    monkeypatch.setattr(catalog, "search_catalog", search_catalog)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["stark-convert", "--search-models", "Qwen coder", "--catalog-stream", "--catalog-cache-dir", str(tmp_path)],
+    )
+
+    assert cli.main() == 0
+    partial, final = map(json.loads, capsys.readouterr().out.splitlines())
+    assert partial == {"partial_items": result["items"]}
+    assert final == result
+    assert called["query"] == "Qwen coder"
+    assert called["cache_dir"] == tmp_path
+
+
 @pytest.fixture
 def host(tmp_path):
     value = Desktop(tmp_path / "unused-worker", tmp_path / "library", io.StringIO())
@@ -553,6 +581,69 @@ def test_malformed_streamed_row_fails_the_page_closed(host, monkeypatch):
 
     (event,) = [event for event in emitted(host) if event["event"] == "model_catalog"]
     assert event["report"]["status"] == "error" and event["report"]["items"] == [] and host.catalog_entries == {}
+
+
+def test_desktop_publishes_and_installs_universal_search_rows(host, monkeypatch):
+    host.catalog_request_id, host.catalog_family_id = "request", "search"
+    final = {
+        **page_report(),
+        "family_id": "search",
+        "items": [{**page_report()["items"][0], "family_id": "qwen3"}],
+    }
+    commands, installs = [], []
+
+    def check(command, _environment, _generation, on_partial):
+        commands.append(command)
+        on_partial(final["items"])
+        return final
+
+    monkeypatch.setattr(host, "run_catalog_check", check)
+    monkeypatch.setattr(host, "start", lambda *args, **kwargs: installs.append((args, kwargs)))
+    host.load_catalog_search("Qwen", "request", host.catalog_generation)
+
+    assert "--search-models" in commands[0]
+    event = emitted(host)[-1]
+    assert event["event"] == "model_catalog"
+    assert event["family_id"] == "search"
+    host.install_catalog(
+        {
+            "catalog_request_id": "request",
+            "entry_id": final["items"][0]["id"],
+            "artifact_mode": "text",
+            "support_request_id": "support",
+        }
+    )
+    assert installs[0][0][3:5] == ("huggingface", final["items"][0]["repo"])
+
+
+def test_desktop_preserves_fixed_native_identity_from_universal_search(host, monkeypatch):
+    item = {**native_catalog.catalog_item(), "family_id": native_catalog.FAMILY_ID}
+    report = {
+        "schema_version": 1,
+        "family_id": "search",
+        "status": "ready",
+        "message": "Choose a model to download.",
+        "items": [item],
+        "offset": 0,
+        "has_more": False,
+        "next_offset": None,
+    }
+    host.catalog_request_id, host.catalog_family_id = "request", "search"
+    host.catalog_report(report, "search")
+    host.catalog_entries[item["id"]] = item
+    installs = []
+    monkeypatch.setattr(host, "start", lambda *args, **kwargs: installs.append((args, kwargs)))
+
+    host.install_catalog(
+        {
+            "catalog_request_id": "request",
+            "entry_id": item["id"],
+            "artifact_mode": "text",
+            "support_request_id": "support",
+        }
+    )
+
+    assert installs[0][0][3:5] == ("native", native_catalog.CHOICE)
 
 
 def test_catalogue_child_lines_are_read_as_they_arrive(host):

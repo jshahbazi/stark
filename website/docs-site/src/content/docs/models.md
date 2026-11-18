@@ -9,7 +9,7 @@ Use **Beginner → Guided setup** for an initial recommendation. Stark checks mo
 
 Recommendations help narrow the catalog. They do not establish that a model will handle every task well. Try a small example of your actual work before committing to a large download or long task.
 
-Newer development builds offer **Quality** and **Speed** priorities. Their rankings use a bundled whatmodel.sh snapshot and parent-model scores. Those scores do not measure every quantized export. See the [recommendation policy](https://github.com/jshahbazi/stark/blob/main/docs/MODEL_RECOMMENDATIONS.md) for that build's rules.
+Newer development builds offer **Quality** and **Speed** priorities. Coding uses llmbench's coding summary score for parent models; General Work uses its separate non-coding summary score. These scores do not measure every quantized export. See the [recommendation policy](https://github.com/jshahbazi/stark/blob/main/docs/MODEL_RECOMMENDATIONS.md) for that build's rules.
 
 ## Decide what you need
 

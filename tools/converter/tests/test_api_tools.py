@@ -14,6 +14,7 @@ from stark_convert.api_tools import (
     QWEN3_4B_TEMPLATE_SHA256,
     QWEN3_TEMPLATE_SHA256,
     QWEN35_XML_TEMPLATE_SHA256,
+    QWEN38_OFFICIAL_TEMPLATE_SHA256,
     QWEN38_XML_TEMPLATE_SHA256,
     ToolTextStream,
     bounded_json,
@@ -1003,11 +1004,13 @@ def test_xml_source_hash_fast_path_is_exact_and_flavor_specific(monkeypatch):
     import stark_convert.api_tools as api_tools
 
     assert QWEN38_XML_TEMPLATE_SHA256 == "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+    assert QWEN38_OFFICIAL_TEMPLATE_SHA256 == "61c5db6e90356e85fb2ccfd0466fddf3b2a5c6058b20b195a37d7b01de97c8b8"
     assert QWEN35_XML_TEMPLATE_SHA256 == "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
     # Synthetic programs exercise the exact hash gate without redistributing
     # checkpoint templates whose license terms have not been established here.
     for constant, source, parser in [
         ("QWEN38_XML_TEMPLATE_SHA256", "synthetic Lily template <tool_call>", "qwen38-xml-v1"),
+        ("QWEN38_OFFICIAL_TEMPLATE_SHA256", "synthetic official Qwen3.8 template <tool_call>", "qwen38-xml-v1"),
         ("QWEN35_XML_TEMPLATE_SHA256", "synthetic Jev template <tool_call>", "qwen35-xml-v1"),
     ]:
         monkeypatch.setattr(api_tools, constant, hashlib.sha256(source.encode()).hexdigest())

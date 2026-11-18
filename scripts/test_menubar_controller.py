@@ -2065,27 +2065,27 @@ extension EngineController {
             return ModelBrowserSort.nameDescending.precedes("Same", id: "a", size: nil, "Same", id: "b", size: nil)
         case "catalog-browser-top-rated-sort":
             let gigabyte: Int64 = 1_000_000_000
-            func rated(_ id: String, group: String, bytes: Int64?, general: Double? = nil, coding: Double? = nil,
+            func rated(_ id: String, group: String, bytes: Int64?, coding: Double? = nil,
                        downloadable: Bool = true, relationship: String = "benchmarked_model") -> [String: Any] {
                 var item = groupedCatalogItem(id, repo: "owner/" + id, name: id, group: group, groupName: "Group " + group,
                                               publisher: "owner")
                 item["weight_bytes"] = bytes as Any? ?? NSNull()
-                if general != nil || coding != nil {
+                if coding != nil {
                     item["reference_score"] = [
                         "model_id": "parent/" + id, "relationship": relationship,
-                        "general": general as Any? ?? NSNull(), "coding": coding as Any? ?? NSNull(),
-                        "source_url": "https://whatmodel.sh/model/" + id, "captured": "2026-11-11"]
+                        "general": NSNull(), "coding": coding as Any? ?? NSNull(),
+                        "source_url": "https://llmbench.site/summary/", "captured": "2026-11-17"]
                 }
                 if !downloadable { item["downloadable"] = false; item["unavailable_reason"] = "Fixture reason" }
                 return item
             }
             let raw = [
                 rated("unscored", group: "1", bytes: 1 * gigabyte),
-                rated("mid", group: "2", bytes: 4 * gigabyte, general: 50, coding: 60),
-                rated("best-full", group: "3", bytes: 30 * gigabyte, general: 70, coding: 40),
-                rated("best-small", group: "3", bytes: 8 * gigabyte, general: 70, coding: 40, relationship: "named_quantization"),
-                rated("huge", group: "4", bytes: 200 * gigabyte, general: 90),
-                rated("blocked", group: "5", bytes: 2 * gigabyte, general: 95, downloadable: false),
+                rated("mid", group: "2", bytes: 4 * gigabyte, coding: 60),
+                rated("best-full", group: "3", bytes: 30 * gigabyte, coding: 40),
+                rated("best-small", group: "3", bytes: 8 * gigabyte, coding: 40, relationship: "named_quantization"),
+                rated("huge", group: "4", bytes: 200 * gigabyte, coding: 90),
+                rated("blocked", group: "5", bytes: 2 * gigabyte, coding: 95, downloadable: false),
                 rated("coder", group: "6", bytes: 3 * gigabyte, coding: 80)
             ]
             guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: raw)) else { return false }
@@ -2095,19 +2095,17 @@ extension EngineController {
             }
             // Fits and downloadable first by score, the smaller download breaking a tie; unscored rows follow,
             // then models too large for this Mac, then rows that cannot be downloaded.
-            // A coding-only score does not rank on the general scale.
-            guard rows(.ratingGeneral, memory) == ["best-small", "best-full", "mid", "unscored", "coder", "huge", "blocked"],
-                  rows(.ratingCoding, memory) == ["coder", "mid", "best-small", "best-full", "unscored", "huge", "blocked"],
-                  rows(.ratingGeneral, nil) == ["huge", "best-small", "best-full", "mid", "unscored", "coder", "blocked"],
-                  rows(.ratingGeneral, UInt64(8) * 1024 * 1024 * 1024) ==
-                      ["mid", "unscored", "coder", "huge", "best-small", "best-full", "blocked"],
+            guard rows(.ratingCoding, memory) == ["coder", "mid", "best-small", "best-full", "unscored", "huge", "blocked"],
+                  rows(.ratingCoding, nil) == ["huge", "coder", "mid", "best-small", "best-full", "unscored", "blocked"],
+                  rows(.ratingCoding, UInt64(8) * 1024 * 1024 * 1024) ==
+                      ["coder", "mid", "unscored", "huge", "best-small", "best-full", "blocked"],
                   rows(.sizeAscending, memory).count == 7 else { return false }
             guard let export = catalog.items.first(where: { $0.id == "best-small" })?.referenceScore,
                   let coder = catalog.items.first(where: { $0.id == "coder" })?.referenceScore,
                   export.relationship == .namedQuantization, export.modelID == "parent/best-small",
-                  export.score(for: .ratingGeneral)?.value == 70, export.score(for: .ratingCoding)?.value == 40,
+                  export.score(for: .ratingGeneral) == nil, export.score(for: .ratingCoding)?.value == 40,
                   coder.score(for: .ratingGeneral) == nil, coder.score(for: .sizeAscending)?.value == 80,
-                  coder.score(for: .sizeAscending)?.task == "coding",
+                  coder.score(for: .sizeAscending)?.task == "coding score",
                   catalog.items.first(where: { $0.id == "unscored" })?.referenceScore == nil,
                   catalog.items.first(where: { $0.id == "huge" })?.fits(physicalMemory: memory) == false,
                   catalog.items.first(where: { $0.id == "huge" })?.fits(physicalMemory: nil) == true else { return false }
@@ -2120,7 +2118,7 @@ extension EngineController {
                   CatalogQuantizationFilter.tabs(for: supported).count == 2 else { return false }
             // A malformed score rejects its row instead of ranking by a guess.
             var malformed = raw[1]
-            for change in [["general": "50"], ["general": NSNull(), "coding": NSNull()], ["relationship": "guessed"],
+            for change in [["coding": "50"], ["general": NSNull(), "coding": NSNull()], ["relationship": "guessed"],
                            ["source_url": "https://example.com/model/mid"], ["extra": 1], ["general": true]] as [[String: Any]] {
                 var reference = raw[1]["reference_score"] as! [String: Any]
                 change.forEach { reference[$0.key] = $0.value }
@@ -2280,7 +2278,10 @@ extension EngineController {
             guard ModelBrowserPreferences.load(.saved, defaults: preferences) == .nameAscending,
                   !ModelBrowserScope.saved.sorts.contains(where: \.isRating),
                   !ModelBrowserScope.families.sorts.contains(where: \.isRating),
-                  ModelBrowserScope.catalog.sorts.prefix(2) == [.ratingGeneral, .ratingCoding] else { return false }
+                  ModelBrowserScope.catalog.sorts.first == .ratingCoding,
+                  !ModelBrowserScope.catalog.sorts.contains(.ratingGeneral) else { return false }
+            preferences.set(ModelBrowserSort.ratingGeneral.rawValue, forKey: ModelBrowserScope.catalog.preferenceKey)
+            guard ModelBrowserPreferences.load(.catalog, defaults: preferences) == .ratingCoding else { return false }
             ModelBrowserPreferences.save(.sizeDescending, for: .saved, defaults: preferences)
             ModelBrowserPreferences.save(.nameDescending, for: .families, defaults: preferences)
             ModelBrowserPreferences.save(.nameAscending, for: .catalog, defaults: preferences)
