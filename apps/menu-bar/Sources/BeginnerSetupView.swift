@@ -166,11 +166,14 @@ struct BeginnerSetupView: View {
             if let unavailable = choice.availabilityMessage {
                 notice(unavailable, symbol: "exclamationmark.triangle", color: .orange)
             }
+            if let warning = choice.diskSpaceWarning {
+                notice(warning, symbol: "externaldrive.badge.exclamationmark", color: .orange)
+            }
             if snapshot.modelReady, snapshot.runningModelID != installed {
                 notice("\(snapshot.runningModelName) stays installed while you prepare this model. You’ll choose when to switch.", symbol: "checkmark.circle")
             }
             HStack {
-                if choice.availabilityMessage != nil {
+                if choice.availabilityMessage != nil || choice.diskSpaceWarning != nil {
                     Button("Check models again") { requestChoices() }.buttonStyle(.borderedProminent)
                 } else if installed != nil {
                     Button(startLabel(choice)) { start(choice) }.buttonStyle(.borderedProminent)
@@ -184,9 +187,11 @@ struct BeginnerSetupView: View {
                 else { Button("Change task") { session.stage = .task } }
             }
             if session.choices(in: snapshot).count > 1 {
-                DisclosureGroup("See another option", isExpanded: $showAlternatives) {
+                let otherChoices = session.choices(in: snapshot).filter { $0.id != choice.id }
+                DisclosureGroup(otherChoices.count == 1 ? "See another option" : "See \(otherChoices.count) other options",
+                                isExpanded: $showAlternatives) {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(session.choices(in: snapshot).filter { $0.id != choice.id }) { alternative in
+                        ForEach(otherChoices) { alternative in
                             Button {
                                 session.selectedChoiceID = alternative.id
                                 showAlternatives = false
@@ -202,6 +207,7 @@ struct BeginnerSetupView: View {
                         }
                     }.padding(.top, 8)
                 }.font(.caption)
+                    .onAppear { if choice.diskSpaceWarning != nil { showAlternatives = true } }
             }
             Text("Runs locally on your Mac.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -234,6 +240,9 @@ struct BeginnerSetupView: View {
             if let unavailable = choice.availabilityMessage {
                 notice(unavailable, symbol: "exclamationmark.triangle", color: .orange)
             }
+            if let warning = choice.diskSpaceWarning {
+                notice(warning, symbol: "externaldrive.badge.exclamationmark", color: .orange)
+            }
             if ownInstallation {
                 if snapshot.installPhase == .downloading { progress(snapshot.downloadFraction, label: "Downloading model") }
                 if snapshot.installPhase == .preparing { progress(snapshot.preparationFraction, label: "Preparing for your Mac") }
@@ -248,7 +257,7 @@ struct BeginnerSetupView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             HStack {
-                if choice.availabilityMessage != nil {
+                if choice.availabilityMessage != nil || choice.diskSpaceWarning != nil {
                     Button("Check models again") { requestChoices() }.buttonStyle(.borderedProminent)
                 } else if installed != nil {
                     Button(starting ? "Starting…" : startLabel(choice)) { start(choice) }

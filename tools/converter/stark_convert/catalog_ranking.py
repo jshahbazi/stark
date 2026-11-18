@@ -1,8 +1,9 @@
 """Reference scores that order a family catalogue.
 
-Scores come from the bundled whatmodel.sh snapshot and describe parent models.
-A quantized export may show its parent's score for ordering only; no export is
-benchmarked here and a score never grants compatibility or a download.
+Browsing uses the bundled llmbench coding score, while guided planning uses the
+selected task's coding or non-coding score. A quantized export may show its
+parent's score for ordering only; no export is benchmarked here and a score
+never grants compatibility or a download.
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ from functools import lru_cache
 from .recommendation_benchmarks import load_registry
 from .recommendation_leaderboard import load_snapshot
 
-TASKS = ("general", "coding")
 # How a catalogue row relates to the model the score was published for.
 BENCHMARKED_MODEL = "benchmarked_model"
 REVIEWED_EXPORT = "reviewed_export"
@@ -23,23 +23,17 @@ _DECLARED = "base_model:quantized:"
 _EXPORT_SUFFIXES = ("-mlx-4bit", "-mlx-8bit", "-4bit", "-8bit", "-4-bit", "-8-bit")
 
 
-class ReferenceScores:
+class CatalogReferenceScores:
     def __init__(self, snapshot, bindings):
-        self.snapshot = snapshot
         self.captured = snapshot.captured
+        self.source_url = snapshot.source_url
         self.bindings = dict(bindings)
-        # A parent's score is the same in every RAM list that contains it, so
-        # the largest list wins and smaller ones only add missing parents.
-        self.rows = {}
-        for task, _ram in sorted(snapshot.buckets, key=lambda key: -key[1]):
-            for repo, row in snapshot.buckets[task, _ram][1].items():
-                self.rows.setdefault(repo, {}).setdefault(task, row)
+        self.rows = snapshot.rows
         self.names = {}
         for repo in self.rows:
             self.names.setdefault(repo.split("/", 1)[1].casefold(), set()).add(repo)
 
     def _named(self, repo, base_name):
-        """Find the one scored model whose name an export's name extends."""
         owner, name = repo.split("/", 1)
         if not isinstance(base_name, str) or not base_name or base_name.casefold() == name.casefold():
             return None
@@ -56,7 +50,6 @@ class ReferenceScores:
         if repo in self.rows:
             return repo, BENCHMARKED_MODEL
         if not quantized:
-            # A fine-tune, merge or re-upload has its own weights and no score.
             return None, None
         declared = {tag[len(_DECLARED) :] for tag in tags if isinstance(tag, str) and tag.startswith(_DECLARED)}
         if len(declared) == 1 and next(iter(declared)) in self.rows:
@@ -65,57 +58,45 @@ class ReferenceScores:
         return (named, NAMED_QUANTIZATION) if named is not None else (None, None)
 
     def reference(self, repo, revision, quantization, tags, base_name):
-        """Return the reference score record for a checked catalogue row, or ``None``."""
         tags = tags if isinstance(tags, (list, tuple)) else ()
         parent, relationship = self._parent(repo, revision, tags, base_name, quantization != "BF16")
         rows = self.rows.get(parent)
-        if not rows:
+        if not rows or "coding" not in rows:
             return None
-        row = rows.get("general") or rows["coding"]
         return {
             "model_id": parent,
             "relationship": relationship,
-            **{task: rows[task]["score"] if task in rows else None for task in TASKS},
-            "source_url": "https://whatmodel.sh/model/" + row["id"],
+            "general": None,
+            "coding": rows["coding"]["score"],
+            "source_url": self.source_url,
             "captured": self.captured,
         }
 
     def priority(self, repo, tags, physical_memory=None, *, task=None, revision=None, exact_first=False):
-        """Order an unchecked entry; ``exact_first`` adds an exact-source tier.
-
-        The export format is unknown before inspection, so common export
-        suffixes stand in for it here. Only ordering depends on this guess; a
-        displayed score is decided after inspection by :meth:`reference`.
-        """
         tags = tags if isinstance(tags, (list, tuple)) else ()
         name = repo.split("/", 1)[1]
         folded = name.casefold()
         base_name = next((name[: -len(suffix)] for suffix in _EXPORT_SUFFIXES if folded.endswith(suffix)), None)
         parent, relationship = self._parent(repo, revision, tags, base_name, True)
-        rows = self.rows.get(parent)
-        if not rows:
+        selected_task = "coding" if task is None else task
+        if selected_task not in {"general", "coding"} or parent not in self.rows:
             return None
-        selected_task = task
-        if task is None:
-            task = "general" if "general" in rows else "coding"
-        if task not in TASKS or task not in rows:
+        row = self.rows[parent].get(selected_task)
+        if row is None:
             return None
-        score = rows[task]["score"]
-        _bucket, hosted = self.snapshot.for_host(selected_task or "general", physical_memory)
+        score = row["score"]
         if exact_first:
-            exact = relationship in {BENCHMARKED_MODEL, REVIEWED_EXPORT}
-            return exact, parent in hosted, score
-        return parent in hosted, score
+            return relationship in {BENCHMARKED_MODEL, REVIEWED_EXPORT}, True, score
+        return True, score
 
 
 @lru_cache(maxsize=1)
-def reference_scores():
+def catalog_reference_scores():
     try:
         bindings = load_registry().bindings
     except Exception:
-        # Reviewed bindings are optional evidence; their absence only removes scores.
         bindings = {}
-    return ReferenceScores(load_snapshot(), bindings)
+    return CatalogReferenceScores(load_snapshot(), bindings)
 
 
 def host_memory():

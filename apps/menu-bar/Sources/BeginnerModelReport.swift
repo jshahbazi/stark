@@ -17,12 +17,13 @@ struct BeginnerModelReport {
 
         init?(_ raw: [String: Any]) {
             let names = ["livecodebench": "LiveCodeBench", "bfcl": "BFCL", "ifeval": "IFEval",
-                         "whatmodel_general": "whatmodel.sh · General Work", "whatmodel_coding": "whatmodel.sh · Coding"]
+                         "llmbench_coding": "llmbench · Coding score",
+                         "llmbench_noncoding": "llmbench · Non-coding score"]
             guard let key = raw["benchmark"] as? String, let name = names[key],
                   raw["evidence_kind"] as? String == "upstream_reference",
                   let text = BeginnerMetadata.string(raw["score"], limit: 32),
                   let value = Double(text), value.isFinite,
-                  key.hasPrefix("whatmodel_") || (0...100).contains(value),
+                  key.hasPrefix("llmbench_") || (0...100).contains(value),
                   let used = raw["used_for_ranking"] as? NSNumber,
                   CFGetTypeID(used) == CFBooleanGetTypeID() else { return nil }
             self.name = name
@@ -31,13 +32,13 @@ struct BeginnerModelReport {
             formatter.usesGroupingSeparator = false
             score = formatter.string(from: NSNumber(value: value)) ?? text
             usedForRanking = used.boolValue
-            if key.hasPrefix("whatmodel_"), let date = raw["captured"] as? String,
+            if key.hasPrefix("llmbench_"), let date = raw["captured"] as? String,
                date.range(of: "\\A[0-9]{4}-[0-9]{2}-[0-9]{2}\\z", options: .regularExpression) != nil {
                 capturedDate = date
             } else { capturedDate = nil }
-            if key.hasPrefix("whatmodel_"),
+            if key.hasPrefix("llmbench_"),
                let source = BeginnerMetadata.string(raw["source_url"], limit: 512),
-               source.range(of: "\\Ahttps://whatmodel[.]sh/model/[a-z0-9-]+\\z", options: .regularExpression) != nil {
+               source == "https://llmbench.site/summary/" {
                 sourceURL = URL(string: source)
             } else if let model = BeginnerMetadata.string(raw["model_id"], limit: 256),
                model.range(of: "\\A[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*\\z",
@@ -48,8 +49,8 @@ struct BeginnerModelReport {
 
         var recommendation: String {
             switch name {
-            case "whatmodel.sh · General Work": return "Cached General Work score: \(score). Parent-model reference; this quantization was not evaluated."
-            case "whatmodel.sh · Coding": return "Cached Coding score: \(score). Parent-model reference; this quantization was not evaluated."
+            case "llmbench · Coding score": return "Cached coding score: \(score). Parent-model reference; this quantization was not evaluated."
+            case "llmbench · Non-coding score": return "Cached non-coding score: \(score). Parent-model reference; this quantization was not evaluated."
             case "LiveCodeBench": return "Recommended for coding using published benchmark results."
             case "BFCL": return "Recommended using published tool-use results."
             default: return "Recommended using published instruction-following results."
@@ -76,6 +77,7 @@ struct BeginnerModelReport {
         let qualification: String
         let caveats: [String]
         let recommendationReason: String
+        let diskSpaceWarning: String?
         let benchmarkDetails: [String]
         let benchmarkReference: BenchmarkReference?
         let prefersSpeed: Bool
@@ -134,6 +136,10 @@ struct BeginnerModelReport {
             } else {
                 recommendationReason = "A starting model checked for this setup. Review its answers and any actions in OpenWork."
             }
+            if let warning = raw["disk_space_warning"], !(warning is NSNull) {
+                guard let parsed = BeginnerMetadata.string(warning, limit: 512) else { return nil }
+                diskSpaceWarning = parsed
+            } else { diskSpaceWarning = nil }
         }
 
         func beginnerSummary(availableMemoryBytes: Int64?) -> String {
@@ -141,6 +147,7 @@ struct BeginnerModelReport {
             if prefersSpeed { summary = "Selected within a speed budget for your Mac using published model scores. Actual speed varies." }
             else if let reference = benchmarkReference, reference.usedForRanking { summary = reference.recommendation }
             if benchmarkReference == nil { summary += " No benchmark result is recorded." }
+            if let diskSpaceWarning { summary += " " + diskSpaceWarning }
             if let availableMemoryBytes, availableMemoryBytes < startupBytes {
                 summary += " Free up memory before starting."
             }
@@ -151,11 +158,11 @@ struct BeginnerModelReport {
             var lines = ["Estimated memory: " + ByteCountFormatter.string(fromByteCount: runtimeBytes, countStyle: .memory)]
             if let benchmarkReference {
                 lines.append(benchmarkReference.name + ": " + benchmarkReference.score
-                             + (benchmarkReference.name.hasPrefix("whatmodel.sh") ? "" : "/100"))
+                             + (benchmarkReference.name.hasPrefix("llmbench") ? "" : "/100"))
                 lines.append(benchmarkReference.usedForRanking
                     ? (benchmarkReference.capturedDate.map { "Cached \($0). " } ?? "")
-                        + (benchmarkReference.name.hasPrefix("whatmodel.sh")
-                           ? "Parent-model score; this quantization was not evaluated by this ranking."
+                        + (benchmarkReference.name.hasPrefix("llmbench")
+                           ? "Parent-model llmbench summary score; this quantization was not evaluated by this ranking."
                            : "Published model score; local results may vary.")
                     : "Reference only; it did not determine this choice.")
             }

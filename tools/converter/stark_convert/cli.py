@@ -838,6 +838,10 @@ def main() -> int:
     )
     parser.add_argument("--family-models", help="Browse compatible model-family downloads without fetching weights")
     parser.add_argument(
+        "--search-models",
+        help="Search compatible Hugging Face models and the fixed catalog without fetching weights",
+    )
+    parser.add_argument(
         "--catalog-offset",
         type=int,
         default=0,
@@ -870,16 +874,27 @@ def main() -> int:
     progress_sink = None
     progress = None
     try:
-        if sum((args.capabilities, args.list_families, args.preflight, args.family_models is not None)) > 1:
+        if (
+            sum(
+                (
+                    args.capabilities,
+                    args.list_families,
+                    args.preflight,
+                    args.family_models is not None,
+                    args.search_models is not None,
+                )
+            )
+            > 1
+        ):
             raise ValueError("conflicting_inspection_actions")
-        if args.family_models is not None:
-            from .model_catalog import family_catalog
+        if args.family_models is not None or args.search_models is not None:
+            from .model_catalog import family_catalog, search_catalog
 
             if not 0 <= args.catalog_offset <= 10_000_000:
                 raise ValueError("invalid_catalog_offset")
             logging.getLogger("huggingface_hub").setLevel(logging.CRITICAL)
             os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-            options = {"offset": args.catalog_offset, "offline": args.offline}
+            options = {"offline": args.offline}
             if args.catalog_cache_dir is not None:
                 options["cache_dir"] = args.catalog_cache_dir
             if args.catalog_stream:
@@ -888,7 +903,16 @@ def main() -> int:
                 options["on_item"] = lambda item: print(
                     json.dumps({"partial_items": [item]}, sort_keys=True), flush=True
                 )
-            print(json.dumps(family_catalog(args.family_models, **options), sort_keys=True))
+            if args.family_models is not None:
+                print(
+                    json.dumps(
+                        family_catalog(args.family_models, offset=args.catalog_offset, **options), sort_keys=True
+                    )
+                )
+            else:
+                if args.catalog_offset != 0:
+                    raise ValueError("invalid_catalog_offset")
+                print(json.dumps(search_catalog(args.search_models, **options), sort_keys=True))
             return 0
         if args.catalog_offset != 0:
             raise ValueError("catalog_offset_requires_family_models")

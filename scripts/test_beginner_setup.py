@@ -620,26 +620,35 @@ struct BeginnerChecks {
                 guard let reference = BeginnerModelReport.BenchmarkReference(invalid), reference.sourceURL == nil else { return false }
             }
             var cached = benchmark
-            cached["benchmark"] = "whatmodel_coding"
-            cached["score"] = "-2.5"
-            cached["captured"] = "2026-11-11"
-            cached["source_url"] = "https://whatmodel.sh/model/fixture-model"
+            cached["benchmark"] = "llmbench_coding"
+            cached["score"] = "91.2"
+            cached["captured"] = "2026-11-17"
+            cached["source_url"] = "https://llmbench.site/summary/"
             guard let reference = BeginnerModelReport.BenchmarkReference(cached),
-                  reference.score == "-2.5", reference.capturedDate == "2026-11-11",
-                  reference.sourceURL?.absoluteString == "https://whatmodel.sh/model/fixture-model",
-                  reference.recommendation.contains("Cached Coding score: -2.5"),
+                  reference.score == "91.2", reference.capturedDate == "2026-11-17",
+                  reference.sourceURL?.absoluteString == "https://llmbench.site/summary/",
+                  reference.recommendation.contains("Cached coding score: 91.2"),
                   reference.recommendation.contains("Parent-model reference"),
                   reference.recommendation.contains("this quantization was not evaluated") else { return false }
             var cachedRaw = raw
             cachedRaw["benchmarks"] = [cached]
             guard let cachedItem = BeginnerModelReport.Item(cachedRaw),
-                  cachedItem.beginnerSummary(availableMemoryBytes: nil).contains("Cached Coding score: -2.5"),
-                  cachedItem.beginnerDetails.contains("Cached 2026-11-11"),
+                  cachedItem.beginnerSummary(availableMemoryBytes: nil).contains("Cached coding score: 91.2"),
+                  cachedItem.beginnerDetails.contains("Cached 2026-11-17"),
                   !cachedItem.beginnerDetails.contains("/100") else { return false }
+            var noncoding = cached
+            noncoding["benchmark"] = "llmbench_noncoding"
+            noncoding["score"] = "45.96"
+            guard let noncodingReference = BeginnerModelReport.BenchmarkReference(noncoding),
+                  noncodingReference.recommendation.contains("Cached non-coding score: 46") else { return false }
             cachedRaw["selection_preference"] = "speed"
             guard let speedItem = BeginnerModelReport.Item(cachedRaw),
                   speedItem.beginnerSummary(availableMemoryBytes: nil).contains("speed budget for your Mac"),
                   speedItem.beginnerDetails.contains("this quantization was not evaluated") else { return false }
+            cachedRaw["disk_space_warning"] = "Not enough free disk space right now. Free about 512 MiB more."
+            guard let diskItem = BeginnerModelReport.Item(cachedRaw),
+                  diskItem.diskSpaceWarning?.contains("512 MiB") == true,
+                  diskItem.beginnerSummary(availableMemoryBytes: nil).contains("Not enough free disk space") else { return false }
             return true
         case "installed-space-presentation": return BeginnerSetupView.checkInstalledSpacePresentation()
         default: return false

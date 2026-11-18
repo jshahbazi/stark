@@ -1,5 +1,8 @@
 # whatmodel.sh snapshot data notices
 
+This directory is retained as source attribution for llmbench's compilation.
+Stark does not load a standalone whatmodel ranking for recommendations.
+
 Source checkout revision: `2769f5ba536d5d78fc70a772048512471a499802`.
 Source model catalogue: `data/models.json` (SHA-256 `b1a6b655bc71b6120842a5ad4c771cdc61918953a54827d08f32a88c36b79f56`).
 

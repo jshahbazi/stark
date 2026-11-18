@@ -56,14 +56,17 @@ def test_profiles_have_no_embedded_prompt_or_vocabulary():
         assert "system_prompt" not in entry["metadata"]
         assert "vocab" not in entry["metadata"]
         assert "stop_token_ids" not in json.dumps(entry["metadata"])
-    assert sum(entry["metadata_profile"] is not None for entry in models()) == 95
-    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 85
+    assert sum(entry["metadata_profile"] is not None for entry in models()) == 96
+    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 86
 
 
-def test_specialized_dense_profiles_do_not_promote_moe_or_later_generations():
+def test_specialized_dense_profiles_promote_only_supported_qwen35_architectures():
     assert {
         entry["repo"] for entry in models() if entry["adapter"] == "qwen3_5" and not entry["compressed_format"]
-    } == {f"Qwen/Qwen3.5-{size}" for size in ("0.8B", "2B", "4B", "9B", "27B")} | {"empero-ai/Qwen3.8-4B-Distill"}
+    } == {f"Qwen/Qwen3.5-{size}" for size in ("0.8B", "2B", "4B", "9B", "27B")} | {
+        "Qwen/Qwen3.8-27B",
+        "empero-ai/Qwen3.8-4B-Distill",
+    }
     assert {entry["repo"] for entry in models() if entry["adapter"] == "lfm2" and not entry["compressed_format"]} == {
         f"LiquidAI/LFM2-{size}" for size in ("350M", "700M", "1.2B", "2.6B")
     }
@@ -162,6 +165,9 @@ def test_mlx_profiles_bind_bit_width_without_promoting_other_packed_families():
         )
         assert entry["status"]["qualification"] == "pending"
     assert get_model("mlx-community/Qwen3.5-0.8B-MLX-4bit")["adapter"] == "qwen3_5"
+    assert get_model("Qwen/Qwen3.8-27B")["adapter"] == "qwen3_5"
+    assert get_model("Qwen/Qwen3.8-27B")["metadata_profile"] == "hf-generic"
+    assert get_model("Qwen/Qwen3.8-27B")["files"]["chat_template"]["filename"] == "chat_template.jinja"
     assert get_model("mlx-community/gemma-3-4b-it-4bit")["adapter"] is None
     assert get_model("mlx-community/gemma-3-27b-it-8bit")["adapter"] is None
 

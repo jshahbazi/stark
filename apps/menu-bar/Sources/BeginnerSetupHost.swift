@@ -172,7 +172,7 @@ struct BeginnerSetupHost: View {
                 downloadBytes: item.downloadBytes, installedBytes: item.installedBytes, setupBytes: item.setupBytes,
                 contextTokens: item.contextTokens, source: item.source, revision: item.revision,
                 qualification: item.beginnerDetails, benchmarkSourceURL: item.benchmarkReference?.sourceURL,
-                variantName: item.variantName)
+                diskSpaceWarning: item.diskSpaceWarning, variantName: item.variantName)
                 .resolvingInstalledCopy(as: item.installedIDs.first { id in engine.models.contains(where: { $0.id == id }) })
         }
         if let item = engine.beginnerInstallChoice,
@@ -183,7 +183,7 @@ struct BeginnerSetupHost: View {
                 downloadBytes: item.downloadBytes, installedBytes: item.installedBytes, setupBytes: item.setupBytes,
                 contextTokens: item.contextTokens, source: item.source, revision: item.revision,
                 qualification: item.beginnerDetails, benchmarkSourceURL: item.benchmarkReference?.sourceURL,
-                variantName: item.variantName))
+                diskSpaceWarning: item.diskSpaceWarning, variantName: item.variantName))
         }
         result.choicesLoading = engine.beginnerChoicesLoading
         result.choicesError = engine.beginnerChoicesError

@@ -69,6 +69,7 @@ struct BeginnerModelChoice: Identifiable, Equatable {
     var qualification = ""
     var benchmarkSourceURL: URL? = nil
     var availabilityMessage: String? = nil
+    var diskSpaceWarning: String? = nil
     var variantName = ""
 
     var repositoryURL: URL? {
@@ -81,12 +82,14 @@ struct BeginnerModelChoice: Identifiable, Equatable {
         var result = self
         result.installedModelID = modelID
         result.availabilityMessage = nil
+        result.diskSpaceWarning = nil
         return result
     }
 
     func resolvingInstalledCopy(as modelID: String?) -> BeginnerModelChoice {
         var result = self
         result.installedModelID = modelID
+        if modelID != nil { result.diskSpaceWarning = nil }
         if downloadBytes == 0 && modelID == nil {
             result.availabilityMessage = "This installed model is no longer available. Check models again to refresh your choices."
         }

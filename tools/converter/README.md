@@ -60,6 +60,18 @@ Browse download candidates for one family without fetching weights:
 uv run --project tools/converter --locked stark-convert --family-models qwen3_5
 ```
 
+Search across supported Hub families and fixed catalog entries:
+
+```sh
+uv run --project tools/converter --locked stark-convert --search-models "qwen coder"
+```
+
+Universal search checks at most 30 Hub results, routes their configuration to a
+supported family and applies that family's ordinary bounded catalog admission.
+Rows carry a `family_id`, allowing a caller to select the same pinned native or
+generic installation route. It is a bounded candidate search rather than an
+exhaustive Hub mirror.
+
 This visits known sources, then interleaves Hugging Face architecture-tag and
 model-name searches, deduplicating repositories. Each request checks up to 30
 candidates. Generic Safetensors candidates pass the same tensor planner used by
@@ -139,6 +151,7 @@ stark-convert [SOURCE] [options]
 | `--require-native-support` | | Require a stored named-build match for the exact output: load-only evidence for text mode, image execution evidence for vision mode. Requires BF16 and a catalog model |
 | `--list-families` | | Print the shared family/mode/format matrix without a source or download |
 | `--family-models FAMILY` | family ID, such as `qwen3_5` | Print one metadata-only page of compatible download candidates; no source or output directory required |
+| `--search-models QUERY` | model name or repository terms | Search up to 30 Hub candidates across supported families, plus matching fixed catalog entries; no weights are downloaded |
 | `--catalog-offset N` | nonnegative integer, default 0 | Continue `--family-models` at the preceding report's `next_offset`; counts candidates, including rejected sources |
 | `--preflight` | | Inspect selected source metadata and print a support report before weight download; creates no output |
 | `--support-mode MODE` | `text`, `decision`, `vision-language` | Check intended native use during preflight or conversion; preflight defaults to the artifact mode |
@@ -172,14 +185,14 @@ family. See [Ripple support and validation](../../docs/RIPPLE.md).
 
 ## Catalog coverage and qualification
 
-The declarative [catalog](stark_convert/catalog.json) records 110 reference model identities from the pinned Lalamo inventory plus ten Stark extensions. Adapters and metadata profiles cover 95 identities. A registered identity can remain planned when its configuration is outside the adapter's admitted semantics; the current catalog status and preflight result are authoritative:
+The declarative [catalog](stark_convert/catalog.json) records 110 reference model identities from the pinned Lalamo inventory plus ten Stark extensions. Adapters and metadata profiles cover 96 identities. A registered identity can remain planned when its configuration is outside the adapter's admitted semantics; the current catalog status and preflight result are authoritative:
 
 | Adapter | Implemented identities |
 | --- | --- |
 | Qwen3 | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-4B-Thinking-2507` |
 | Qwen3 MLX | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}-MLX-{4bit,8bit}`; affine groups 16/32/64/128 |
 | Qwen2 | `Qwen/Qwen2.5-Coder-{0.5B,1.5B,3B,7B,14B,32B}-Instruct`, `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` |
-| Qwen3.5 text | Dense `Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}`; extensions `empero-ai/Qwen3.8-4B-Distill` and `Jundot/Qwen3.8-27B-oQ4e-mtp`. Vision and floating auxiliary MTP tensors are omitted in text mode; a complete declared quantized MTP head is retained. MoE is unsupported |
+| Qwen3.5 / Qwen3.8 text | Dense `Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}` and the pinned official `Qwen/Qwen3.8-27B`; extensions `empero-ai/Qwen3.8-4B-Distill` and `Jundot/Qwen3.8-27B-oQ4e-mtp`. Vision and floating auxiliary MTP tensors are omitted in text mode; a complete declared quantized MTP head is retained. MoE is unsupported |
 | Qwen3.5 text MLX | `mlx-community/Qwen3.5-{0.8B,2B,4B,9B}-MLX-{4bit,8bit}`, `mlx-community/Qwen3.5-27B-{4bit,8bit}` |
 | LFM2 | Dense `LiquidAI/LFM2-{350M,700M,1.2B,2.6B}` |
 | LFM2 MLX | `mlx-community/LFM2-{350M,700M,1.2B,2.6B}-{4bit,8bit}` |

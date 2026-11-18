@@ -113,7 +113,7 @@ _FAMILY_DEFINITIONS = (
     ("phi3", "Phi-3 dense", "HFPhi3Config", ()),
     ("granite", "Granite dense", "HFGraniteConfig", ()),
     ("smollm3", "SmolLM3 dense", "HFSmolLM3Config", ()),
-    ("qwen3_5", "Qwen3.5 dense", "HFQwen35Config", ("qwen3_5_text",)),
+    ("qwen3_5", "Qwen3.5 / Qwen3.8 dense", "HFQwen35Config", ("qwen3_5_text",)),
     ("qwen3_5_moe", "Qwen3.5 MoE", "HFQwen35MoeConfig", ()),
     ("qwen4_exp", "Qwen3.8 Flash Next", "HFQwen38Config", ()),
     ("lfm2", "LFM2", "HFLFM2Config", ()),
@@ -955,6 +955,7 @@ def check_vision_processing_metadata(names, read) -> None:
     """Validate the selected small vision sidecars without fetching tensors."""
     from .vision_family import (
         _MAPPING_TEMPLATE_SHA256,
+        _OFFICIAL_QWEN38_TEMPLATE_SHA256,
         _PRESERVED_THINKING_TEMPLATE_SHA256,
         _TEMPLATE_SHA256,
         _THINKING_TEMPLATE_SHA256,
@@ -976,6 +977,7 @@ def check_vision_processing_metadata(names, read) -> None:
         _MAPPING_TEMPLATE_SHA256,
         _THINKING_TEMPLATE_SHA256,
         _PRESERVED_THINKING_TEMPLATE_SHA256,
+        _OFFICIAL_QWEN38_TEMPLATE_SHA256,
     }:
         raise UnsupportedConversion("Vision family tokenizer or template is outside the implemented profile")
     tokenizer_config = json.loads(read("tokenizer_config.json", 1024 * 1024), object_pairs_hook=_unique_object)

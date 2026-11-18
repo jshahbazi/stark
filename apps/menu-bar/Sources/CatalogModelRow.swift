@@ -31,7 +31,7 @@ struct CatalogModelRow: View {
     static func scoreExplanation(_ reference: CatalogReferenceScore, score: (value: Double, task: String)) -> String {
         let value = score.value.formatted(.number.precision(.fractionLength(0...1)))
         let subject = reference.relationship == .benchmarkedModel ? "this model" : reference.modelID
-        var text = "whatmodel.sh \(score.task) score \(value) for \(subject), from the \(reference.captured) snapshot."
+        var text = "llmbench \(score.task) \(value) for \(subject), from the \(reference.captured) snapshot."
         if reference.relationship != .benchmarkedModel {
             text += "\nThis quantized version was not benchmarked itself, and quantization can change quality."
         }
@@ -109,7 +109,7 @@ struct CatalogModelRow: View {
                     Text("Score " + value).font(.caption.monospacedDigit().weight(.medium)).lineLimit(1)
                 }
                 .help(Self.scoreExplanation(reference, score: score))
-                .accessibilityLabel("whatmodel.sh \(score.task) score \(value)")
+                .accessibilityLabel("llmbench \(score.task) \(value)")
             }
         }
     }

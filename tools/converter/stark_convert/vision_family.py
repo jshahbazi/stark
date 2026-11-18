@@ -47,6 +47,9 @@ _TEMPLATE_SHA256 = "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a182
 _MAPPING_TEMPLATE_SHA256 = "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67"
 _THINKING_TEMPLATE_SHA256 = "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
 _PRESERVED_THINKING_TEMPLATE_SHA256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+# Qwen/Qwen3.8-27B chat_template.jinja, revision
+# 37561816e66b5b9153b1b64c10968c18c1e6f4a0; Apache-2.0.
+_OFFICIAL_QWEN38_TEMPLATE_SHA256 = "af16f654968d47d09a6c604e00370b12dbc21f76456f59c9e98b82e84d9f6375"
 COMPONENT_FILES = ("model.safetensors", "tokenizer.json", "preprocessor_config.json", "chat_template.jinja")
 _METADATA_FILES = (
     "config.json",
@@ -152,6 +155,7 @@ def family_reasoning_profile(contract: dict) -> str:
     thinking = contract["source"]["hashes"]["chat_template.jinja"] in {
         _THINKING_TEMPLATE_SHA256,
         _PRESERVED_THINKING_TEMPLATE_SHA256,
+        _OFFICIAL_QWEN38_TEMPLATE_SHA256,
     }
     return "boolean_default_on" if thinking else "boolean_default_off"
 
@@ -486,6 +490,7 @@ def validate_family_source(snapshot: Any, dtype: str) -> dict:
         _MAPPING_TEMPLATE_SHA256,
         _THINKING_TEMPLATE_SHA256,
         _PRESERVED_THINKING_TEMPLATE_SHA256,
+        _OFFICIAL_QWEN38_TEMPLATE_SHA256,
     }:
         raise UnsupportedConversion("Vision family tokenizer or template is outside the implemented profile")
     tokenizer = recognized_family_tokenizer(payloads["tokenizer.json"])

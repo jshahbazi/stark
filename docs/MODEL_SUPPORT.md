@@ -61,7 +61,12 @@ also records the unsupported architecture contracts for DeepSeek V4.1, Kimi
 K3.1, Beam, Nemotron 3.5 Bolt and Gemma 4. Metadata discovery does not provide
 native execution or tool qualification for those models.
 
-Dense `qwen3_5` text conversion also admits the registered
+Dense `qwen3_5` conversion covers the shared Qwen3.5 and Qwen3.8 text and image
+family. The catalog pins the official complete `Qwen/Qwen3.8-27B` source at
+`37561816e66b5b9153b1b64c10968c18c1e6f4a0`; its BF16 image artifact and
+checkpoint-specific native run remain separately qualified gates.
+
+The same `qwen3_5` path admits the registered
 `Jundot/Qwen3.8-27B-oQ4e-mtp` extension. Its mixed affine 4/5/6/8-bit matrices
 are preserved without requantization. Uniform five/six-bit matrices retain
 their packed bytes when they use group size 64, BF16 and output-input layout.
@@ -222,31 +227,35 @@ The app's **Manage Models** window has **Installed**, **Model Catalog** and
 run models; Command-I selects Add from Source in the same window. The install form
 keeps its source and options when switching tabs. Active progress and cancellation
 remain accessible, and completion stays in management. Search filters the
-current view immediately and does not trigger another Hugging Face request.
+installed library immediately and then runs one bounded Hugging Face query
+across supported catalog families. Matching Hub repositories are routed from
+their metadata through the ordinary pinned family admission path; they never
+bypass header, layout or format checks. Results are debounced while typing and
+canceled when the query or management window changes. Family detail retains a
+separate local-only search over its loaded page.
 The menu and Playground show the running private version's saved name,
 quantization and stored weight-file size. Missing metadata is omitted.
 Search text is transient; sort choices persist independently for **Installed**,
 the family overview and family detail. The saved-model view sorts by name A–Z or
 Z–A, or total disk bytes from its visible versions ascending or descending. The
-family overview sorts by name A–Z or Z–A; family detail adds the two Top rated
-orders described below, name in either direction and model size ascending or
-descending. Unknown numeric values sort last
-in either direction. Choose a family to browse compatible models, sizes and
-quantizations and download a choice directly.
+family overview sorts by name A–Z or Z–A; family detail adds the coding score,
+name in either direction and model size ascending or descending. Unknown
+numeric values sort last in either direction. Choose a family to browse
+compatible models, sizes and quantizations and download a choice directly.
 
-Family detail opens on **Top rated (coding)**, with **Top rated (general)**
-beside it. Both use the bundled whatmodel.sh reference scores described in
+Family detail opens on **Coding score**. It uses the frozen llmbench summary
+scores described in
 [Beginner recommendation evidence](MODEL_RECOMMENDATIONS.md#catalogue-ordering).
 Rows that can be downloaded and whose weights fit this Mac's memory budget come
 first, then the higher score, then the smaller download; unscored rows follow
 scored ones, then models likely too large for this Mac, then unavailable rows.
-A group is placed by its best row. A scored row shows its score as a link to the
-source page, and its tooltip names the model the score belongs to. A row whose
+A group is placed by its best row. A scored row shows its score as a link to
+the source data, and its tooltip names the model the score belongs to. A row whose
 weights exceed 85% of physical memory less 2 GiB is marked as likely too large;
 that is a coarse check on weights alone, not a runtime plan. The catalogue also
 inspects sources with a reference score before the rest of the first 300
-listing positions, preferring models from the RAM list this Mac can use, so the
-first pages hold the best-rated candidates. A saved sort choice is kept.
+listing positions, so the first pages retain scored candidates. A saved sort
+choice is kept.
 
 **Hide Unsupported** is checked by default and the choice persists. It leaves
 out every row that cannot be downloaded: a weight format or quantization option
@@ -301,6 +310,14 @@ identifies the family. Each page inspects up to 30 distinct candidates and
 retains unsupported family variants with an **Unavailable** reason.
 **Load more models** follows the remaining pages automatically, preserving
 results already loaded. Failed pages can be retried at the same offset.
+
+The universal search sends a free-text Hub query, checks at most 30 returned
+repositories and reads only bounded configuration metadata before routing each
+supported architecture through its family catalog verifier. It also matches
+pinned native and Decision entries locally. The JSON report names the family on
+every row so the backend can preserve the exact native preparation or generic
+conversion route when the user downloads it. This is a bounded search over the
+returned candidates, not an exhaustive copy of Hugging Face.
 
 The Hub listing itself carries each repository's head revision, task tags and
 file names. A source whose listing already shows another task, no model
