@@ -707,3 +707,37 @@ def test_stock_default_thinking_template_requires_supported_configured_family(tm
     else:
         with pytest.raises(ChatError, match="chat metadata"):
             chat.load_template(tmp_path)
+
+
+def test_official_qwen38_template_reaches_configured_family_runtime(tmp_path, monkeypatch):
+    from stark_convert import chat, vision_family
+
+    raw_template = b"{%- generation %}{{ messages[0].content }}{%- endgeneration %}"
+    template = b"{{ messages[0].content }}"
+    original = hashlib.sha256
+    reviewed = vision_family._OFFICIAL_QWEN38_TEMPLATE_SHA256
+    monkeypatch.setattr(
+        chat.hashlib,
+        "sha256",
+        lambda data=b"": SimpleNamespace(hexdigest=lambda: reviewed) if data == raw_template else original(data),
+    )
+    monkeypatch.setattr(
+        chat,
+        "_ChatTemplate",
+        lambda source, **_kwargs: SimpleNamespace(
+            render=lambda **_kwargs: source.replace("{{ messages[0].content }}", "synthetic")
+        ),
+    )
+    config = {
+        "type": "Qwen35VisionLanguageModelConfig",
+        "token_codec_config": {"type": "ChatCodecConfig", "prompt_template": template.decode()},
+        "artifact_contract": {
+            "schema_version": 3,
+            "family": {"profile": CONFIGURED_FAMILY_PROFILE, "version": 2},
+        },
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    (tmp_path / "chat_template.jinja").write_bytes(raw_template)
+
+    _codec, compiled = chat.load_template(tmp_path)
+    assert compiled.render(messages=[{"content": "synthetic"}]) == "synthetic"

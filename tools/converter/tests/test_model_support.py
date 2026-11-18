@@ -438,6 +438,24 @@ def test_resolver_rechecks_small_vision_processing_before_any_weights(tmp_path):
     assert all(not event[2].endswith(".safetensors") for event in hub.events if event[0] == "download")
 
 
+def test_official_qwen38_template_is_admitted_for_dense_vision(monkeypatch):
+    from stark_convert import model_support, vision_family
+
+    template = b"synthetic reviewed official Qwen3.8 template"
+    monkeypatch.setattr(
+        vision_family,
+        "_OFFICIAL_QWEN38_TEMPLATE_SHA256",
+        hashlib.sha256(template).hexdigest(),
+    )
+    names = ("preprocessor_config.json", "chat_template.jinja", "tokenizer_config.json")
+    payloads = {
+        "preprocessor_config.json": json.dumps(vision_family._PROCESSOR).encode(),
+        "chat_template.jinja": template,
+        "tokenizer_config.json": b"{}",
+    }
+    model_support.check_vision_processing_metadata(names, lambda name, _maximum: payloads[name])
+
+
 @pytest.mark.parametrize("architecture", ["gemma2", "gemma3_text"])
 def test_known_untied_layout_exclusion_precedes_weights(tmp_path, architecture):
     root = files(tmp_path / "source", model_type=architecture)

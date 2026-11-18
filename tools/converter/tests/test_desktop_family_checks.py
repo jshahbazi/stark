@@ -63,7 +63,7 @@ def host(tmp_path, monkeypatch):
     attachments.mkdir(mode=0o700)
     desktop = Desktop(tmp_path / "worker", tmp_path / "library", io.StringIO(), attachment_root=attachments)
     instances = []
-    state = {"fail": False, "after_read": None, "before_create": None, "images": True}
+    state = {"fail": False, "after_read": None, "before_create": None, "images": True, "ready": True}
 
     def factory(_executable, path, _timeout, *, gpu_memory_callback=None):
         if state["before_create"] is not None:
@@ -80,7 +80,7 @@ def host(tmp_path, monkeypatch):
             if state["after_read"] is not None:
                 state["after_read"]()
             return {
-                "ready": True,
+                "ready": state["ready"],
                 "mode": "text-generation-v1",
                 "max_context_tokens": 8192,
                 "max_new_tokens": 4096,
@@ -178,6 +178,14 @@ def test_failed_converted_family_install_cleans_only_owned_output(host, tmp_path
     assert instances[0].closed and desktop.models == []
     assert list(desktop.model_dir.iterdir()) == []
     assert (source / "config.json").read_text() == "{}"
+
+
+def test_family_install_reports_native_load_failure_before_image_check_failure(host, tmp_path):
+    desktop, instances, state = host
+    state["ready"] = False
+    with pytest.raises(DesktopError, match="could not load this model"):
+        desktop.install(desktop.epoch, "local", str(artifact(tmp_path / "merged")))
+    assert instances[0].closed and desktop.models == []
 
 
 def test_deduplicated_family_install_rechecks_without_publishing_second_model(host, tmp_path):
