@@ -24,6 +24,7 @@ The obsolete inherited `Tests` workflow was removed. The remaining inherited `Re
 Hosted macOS jobs share five concurrent runners across the whole repository, and queued jobs start in order with no priority. A Signed release dispatched after a merge therefore waits behind every macOS job already queued. Two rules keep one runner free for it when no other branch is building:
 
 - Build does not run on pushes to `main`. The branch build covers the merged tree before the merge and the Signed release rebuilds and verifies the same commit. Dispatch Build on `main` under **Actions > Build > Run workflow** when a development bundle of `main` is needed.
+- Build and Signed release reuse a locked release-distribution Rust cache keyed by the runner, toolchain, Metal compiler, locks and native build inputs. They can seed a missing cache from the compatible optimized or default scoring CI cache, then retain the complete release target on `main`; Cargo remains responsible for recompiling every changed input.
 - The CI `cxx` job starts after `lifecycle`, so a CI run holds at most four macOS runners at once. The dependency is scheduling only: `cxx` still runs when `lifecycle` fails.
 
 Pull-request CI and branch builds from other branches still occupy runners. Dispatch a release before updating other open branches to avoid queueing behind them. When adding a macOS job, keep the peak for one CI run at four.

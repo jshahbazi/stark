@@ -36,6 +36,8 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     environment: macos-release
+    env:
+      CARGO_INCREMENTAL: '0'
     outputs:
       version: ${{ steps.release.outputs.version }}
     steps:
@@ -75,6 +77,14 @@ jobs:
           fi
           xcrun -sdk macosx metal --version
           rustup toolchain install 1.98.1 --profile minimal --no-self-update
+      - uses: ./.github/actions/rust-cache
+        if: inputs.existing_version == ''
+        with:
+          scope: release-distribution
+          metal: 'true'
+          restore-scopes: |
+            scoring-release-optimized
+            scoring-release-default
       - name: Build the combined CLI and menu bar distribution
         if: inputs.existing_version == ''
         run: |
@@ -182,6 +192,7 @@ jobs:
           name: stark-signed-${{ github.sha }}
           path: artifacts/signed-release/*
           if-no-files-found: error
+          compression-level: 0
           retention-days: 30
 
   publish:
