@@ -3214,6 +3214,7 @@ struct ModelsView: View {
     @State private var familiesSort = ModelBrowserPreferences.load(.families)
     @State private var catalogSort = ModelBrowserPreferences.load(.catalog)
     @State private var hideUnsupported = ModelBrowserPreferences.hidesUnsupported()
+    @FocusState private var searchFocused: Bool
 
     private var inventory: ModelsInventory {
         ModelsInventory(models: engine.models, loadedID: engine.modelControlID, registry: engine.modelFamilies,
@@ -3301,6 +3302,8 @@ struct ModelsView: View {
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     TextField(searchPrompt, text: queryBinding).textFieldStyle(.roundedBorder)
+                        .focused($searchFocused)
+                        .onSubmit {}
                         .accessibilityLabel(searchPrompt)
                     if !queryBinding.wrappedValue.isEmpty {
                         Button { queryBinding.wrappedValue = "" } label: { Image(systemName: "xmark.circle.fill") }
@@ -3413,7 +3416,8 @@ struct ModelsView: View {
                     Button("Retry", action: engine.retryInstallation)
                 }
                 Spacer()
-                Button("Done", action: onDone).keyboardShortcut(navigation.tab == .installModel ? nil : .defaultAction)
+                Button("Done", action: onDone)
+                    .keyboardShortcut(navigation.tab == .installModel || searchFocused ? nil : .defaultAction)
                 if navigation.tab == .installModel {
                     Button("Install") {
                         engine.install(source: navigation.installSource.trimmingCharacters(in: .whitespacesAndNewlines),

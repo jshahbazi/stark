@@ -209,6 +209,57 @@ extension ModelsView {
 }
 
 @MainActor
+private final class ModelSearchSubmitProbe {
+    var doneCount = 0
+}
+
+private func firstAppKitView<T: NSView>(of type: T.Type, in view: NSView) -> T? {
+    if let match = view as? T { return match }
+    for child in view.subviews {
+        if let match = firstAppKitView(of: type, in: child) { return match }
+    }
+    return nil
+}
+
+@MainActor
+func exerciseModelSearchSubmit() -> Bool {
+    _ = NSApplication.shared
+    let suite = "stark.model-search-submit-test." + UUID().uuidString
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let credentials = APICredentialStore(service: suite, storage: ForbiddenWindowCredentialStorage())
+    let engine = EngineController(apiCredentials: credentials, apiDefaults: defaults)
+    let navigation = ModelManagementState()
+    navigation.tab = .installed
+    let probe = ModelSearchSubmitProbe()
+    let view = ModelsView(engine: engine, navigation: navigation, onDone: { probe.doneCount += 1 }, onRun: { _ in })
+    let host = NSHostingView(rootView: view)
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 580),
+                          styleMask: [.titled], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.contentView = host
+    defer {
+        window.close()
+        engine.desktopConnections.shutdown()
+    }
+    for _ in 0..<3 {
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+    }
+    guard let searchField = firstAppKitView(of: NSTextField.self, in: host),
+          window.makeFirstResponder(searchField) else { return false }
+    for _ in 0..<3 {
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+    }
+    guard let enter = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+        timestamp: 0, windowNumber: window.windowNumber, context: nil,
+        characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false,
+        keyCode: 36), !window.performKeyEquivalent(with: enter) else { return false }
+    return probe.doneCount == 0
+}
+
+@MainActor
 func exerciseCatalogFamilyLayout() -> Bool {
     _ = NSApplication.shared
     let suite = "stark.catalog-window-test." + UUID().uuidString
@@ -610,6 +661,7 @@ struct WindowChecks {
         case "application-scan-threading": exit(AppDelegate.exerciseApplicationScanThreading() ? 0 : 1)
         case "advanced-options": exit(AppDelegate.exerciseAdvancedOptionsLayouts() ? 0 : 1)
         case "catalog-picker": exit(exerciseCatalogPickerLayouts() ? 0 : 1)
+        case "model-search-submit": exit(exerciseModelSearchSubmit() ? 0 : 1)
         case "catalog-family": exit(exerciseCatalogFamilyLayout() ? 0 : 1)
         case "running-model-name": exit(exerciseRunningModelNameLayout() ? 0 : 1)
         default: exit(2)
@@ -855,6 +907,9 @@ class WindowLifecycleTests(unittest.TestCase):
 
     def test_catalog_filters_fit_with_long_labels_and_each_selected_value(self):
         self.run_check("catalog-picker")
+
+    def test_model_search_enter_does_not_trigger_done(self):
+        self.run_check("model-search-submit")
 
     def test_qwen_family_content_stays_inside_manage_models_padding(self):
         self.run_check("catalog-family")
