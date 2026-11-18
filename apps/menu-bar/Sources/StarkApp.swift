@@ -1477,6 +1477,7 @@ final class EngineController: ObservableObject {
     @Published var errorMessage: String? {
         didSet { installErrorMessage = nil }
     }
+    @Published private(set) var installErrorMessage: String?
     @Published var apiBaseURL = ""
     @Published var apiKey = ""
     @Published var apiMessage = "Starting the local API…"
@@ -1571,7 +1572,6 @@ final class EngineController: ObservableObject {
     private var attachmentStaging: AttachmentStaging?
     private var attachmentSelection = UUID()
     private var pendingSupportRequestID: String?
-    private var installErrorMessage: String?
     private enum InstallRetryRequest {
         case source(String, String, String?)
         case catalog(String, String)
@@ -2167,15 +2167,18 @@ final class EngineController: ObservableObject {
             pendingSupportRequestID = nil
             let failedModelName = installOwned ? activeInstallModelName :
                 models.first { $0.id == (state == "loading" || loadedID.isEmpty ? selectedID : loadedID) }?.displayName
-            errorMessage = modelFailure(event["message"] as? String ?? "Unable to complete the operation.", name: failedModelName)
+            let failure = modelFailure(event["message"] as? String ?? "Unable to complete the operation.",
+                                       name: failedModelName)
             if installOwned {
-                installErrorMessage = errorMessage
+                installErrorMessage = failure
                 activeInstallRequestID = nil
                 endInstallProgress("failed")
                 if let failed = catalogInstallation {
-                    catalogInstallMessage = errorMessage; catalogInstallFailed = true; catalogInstallation = nil
+                    catalogInstallMessage = failure; catalogInstallFailed = true; catalogInstallation = nil
                     if catalogFamilyID == nil { send(["command": "catalog_cancel", "request_id": failed.catalogRequestID]) }
                 }
+            } else {
+                errorMessage = failure
             }
             discardPendingMessage()
             pendingOptions = nil
@@ -2981,15 +2984,19 @@ final class EngineController: ObservableObject {
     }
 
     private func clearInstallSupport() {
-        if let previous = installErrorMessage, errorMessage == previous { errorMessage = nil }
         installErrorMessage = nil
         pendingSupportRequestID = nil
         installSupportReport = nil
     }
 
+    func clearInstallFeedback() {
+        guard !busy else { return }
+        clearInstallSupport()
+        installRetryRequest = nil
+    }
+
     var canRetryInstallation: Bool {
-        guard !busy, installErrorMessage != nil, errorMessage == installErrorMessage,
-              let request = installRetryRequest else { return false }
+        guard !busy, installErrorMessage != nil, let request = installRetryRequest else { return false }
         switch request {
         case .source: return true
         case .catalog(let requestID, let id):
@@ -3916,7 +3923,7 @@ struct InstallView: View {
                 .padding(14)
                 .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
                 if engine.state == "installing" || engine.state == "error" { StatusLine(engine: engine) }
-                if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
+                if let error = engine.installErrorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             }
         }
     }
@@ -4555,6 +4562,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func finishManagingModels() {
+        engine.clearInstallFeedback()
         modelsWindow?.close()
     }
 
@@ -4564,7 +4572,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         guard let closing = notification.object as? NSWindow else { return }
-        if closing === modelsWindow { engine.cancelModelCatalog() }
+        if closing === modelsWindow {
+            engine.cancelModelCatalog()
+            engine.clearInstallFeedback()
+        }
         let parent = removeWindowParent(of: closing)
         guard !terminating, let parent else { return }
         if parent === menuPanel {

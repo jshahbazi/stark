@@ -56,8 +56,7 @@ class LeaderboardSnapshot:
             or not isinstance(source_hashes, dict)
             or set(source_hashes) != {"llmbench-summary-scores.csv", "llmbench-models.csv"}
             or any(not isinstance(value, str) or HEX64.fullmatch(value) is None for value in source_hashes.values())
-            or raw.get("summary_url")
-            != "https://llmbench.site/downloads/llmbench-summary-scores.csv"
+            or raw.get("summary_url") != "https://llmbench.site/downloads/llmbench-summary-scores.csv"
             or raw.get("method_url") != "https://llmbench.site/summary/"
         ):
             raise ValueError("Invalid llmbench provenance")

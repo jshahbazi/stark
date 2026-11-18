@@ -242,9 +242,10 @@ extension EngineController {
             guard engine.activeInstallRequestID == install["support_request_id"] as? String,
                   engine.activeInstallModelName == "Qwen3 8B", engine.busy else { return false }
             engine.apply(["event": "error", "request_id": "stale-request", "message": "Stale failure"])
-            guard engine.errorMessage == nil else { return false }
+            guard engine.errorMessage == nil, engine.installErrorMessage == nil else { return false }
             engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Download failed."])
-            guard engine.errorMessage == "Qwen3 8B: Download failed.", engine.activeInstallModelName == nil else { return false }
+            guard engine.errorMessage == nil, engine.installErrorMessage == "Qwen3 8B: Download failed.",
+                  engine.activeInstallModelName == nil else { return false }
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
             engine.apply(["event": "error", "message": "Generation failed."])
             guard engine.errorMessage == "Qwen3 4B: Generation failed." else { return false }
@@ -2685,22 +2686,26 @@ extension EngineController {
             engine.apply(["event": "model_support", "request_id": requested["support_request_id"]!, "report": report])
             engine.apply(["event": "error", "message": failure])
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
-            guard engine.errorMessage == "Unsupported: " + failure, engine.installSupportReport != nil else { return false }
+            guard engine.errorMessage == nil, engine.installErrorMessage == "Unsupported: " + failure,
+                  engine.installSupportReport != nil else { return false }
             engine.resetInstallProgress(kind: "huggingface")
-            guard engine.errorMessage == nil, engine.installSupportReport == nil, engine.loadedID == "fixture-model",
+            guard engine.errorMessage == nil, engine.installErrorMessage == nil, engine.installSupportReport == nil,
+                  engine.loadedID == "fixture-model",
                   engine.downloadProgress.state == "waiting" else { return false }
             engine.install(source: "fixture/metadata-unavailable", kind: "local")
             _ = command()
             engine.apply(["event": "error", "message": "Fixture support timeout without a report"])
             engine.apply(["event": "status", "state": "error", "message": "Operation failed"])
             engine.resetInstallProgress(kind: "local")
-            return engine.errorMessage == nil && engine.downloadProgress.state == "skipped"
+            return engine.errorMessage == nil && engine.installErrorMessage == nil &&
+                engine.downloadProgress.state == "skipped"
         case "install-error-runtime-retained":
             let failure = "Fixture failure shared by install and runtime"
             engine.install(source: "fixture/source", kind: "huggingface")
             _ = command()
             engine.apply(["event": "error", "message": failure])
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            guard engine.errorMessage == nil, engine.installErrorMessage == "Source: " + failure else { return false }
             // Even identical text from a later runtime error has different ownership.
             engine.apply(["event": "error", "message": failure])
             engine.resetInstallProgress(kind: "local")
@@ -2713,10 +2718,12 @@ extension EngineController {
             _ = command()
             engine.apply(["event": "error", "message": "Fixture install failure"])
             engine.resetInstallProgress(kind: "local")
-            guard engine.errorMessage == "Source: Fixture install failure", engine.downloadProgress.state == "failed" else { return false }
+            guard engine.errorMessage == nil, engine.installErrorMessage == "Source: Fixture install failure",
+                  engine.downloadProgress.state == "failed" else { return false }
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
             engine.resetInstallProgress(kind: "local")
-            return engine.errorMessage == nil && engine.downloadProgress.state == "skipped"
+            return engine.errorMessage == nil && engine.installErrorMessage == nil &&
+                engine.downloadProgress.state == "skipped"
         case "support-shutdown-fence":
             engine.apply(["event": "model_families", "report": familyRegistry()])
             engine.install(source: "fixture/source", kind: "huggingface")

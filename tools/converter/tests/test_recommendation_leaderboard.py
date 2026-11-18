@@ -90,8 +90,7 @@ def test_quality_uses_the_selected_tasks_scores_after_admission(task, expected):
         assert result["leaderboard_ranking"]["applied"]
         assert result["leaderboard_ranking"]["task"] == task
         assert all(
-            item["benchmarks"][0]["benchmark"]
-            == ("llmbench_coding" if task == "coding" else "llmbench_noncoding")
+            item["benchmarks"][0]["benchmark"] == ("llmbench_coding" if task == "coding" else "llmbench_noncoding")
             for item in result["items"]
         )
         assert all(item["benchmarks"][0]["used_for_ranking"] for item in result["items"])

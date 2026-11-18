@@ -42,6 +42,10 @@ enum SetupLayoutProbes {
     static let form = NSView()
 }
 
+extension EngineController {
+    func setWindowFixtureInstallError(_ message: String?) { installErrorMessage = message }
+}
+
 extension AppDelegate {
     @MainActor static func exerciseBeginnerInitialLayout() -> Bool {
         _ = NSApplication.shared
@@ -634,6 +638,25 @@ extension AppDelegate {
         return host.snapshot.runningModelName == "Window fixture chat model" && host.snapshot.runningModelVariantName.isEmpty
     }
 
+    static func exerciseInstallErrorScope() -> Bool {
+        let suite = "stark.install-error-scope-test." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let engine = EngineController(apiCredentials: APICredentialStore(service: suite, storage: ForbiddenWindowCredentialStorage()),
+                                      apiDefaults: defaults)
+        let host = BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork, openCode: engine.desktopConnections.openCode,
+            session: BeginnerSetupSession(), interface: StarkInterfacePreferences(defaults: defaults),
+            observation: BeginnerOpenWorkStatus(), openCodeObservation: BeginnerOpenWorkStatus(client: .openCode),
+            selectInterface: { _ in }, openChat: {})
+        defer { engine.desktopConnections.shutdown() }
+        engine.setWindowFixtureInstallError("Qwen3.8 27B: This model did not pass local image execution checks.")
+        guard engine.errorMessage == nil, host.snapshot.engineError == nil,
+              engine.installErrorMessage != nil else { return false }
+        engine.state = "ready"
+        engine.clearInstallFeedback()
+        return engine.installErrorMessage == nil && host.snapshot.engineError == nil
+    }
+
     static func exerciseApplicationScanThreading() -> Bool {
         _ = DesktopApplicationIdentity.candidates(.openWork)
         let finished = DispatchSemaphore(value: 0)
@@ -657,6 +680,7 @@ struct WindowChecks {
         case "connections": exit(AppDelegate.exerciseConnectionLayouts() ? 0 : 1)
         case "beginner-discovery": exit(AppDelegate.exerciseCurrentModelDiscovery() ? 0 : 1)
         case "beginner-identity": exit(AppDelegate.exerciseBeginnerInstalledModelIdentity() ? 0 : 1)
+        case "install-error-scope": exit(AppDelegate.exerciseInstallErrorScope() ? 0 : 1)
         case "beginner-queued-scan": exit(BeginnerOpenWorkStatus.queuedScanFixture() ? 0 : 1)
         case "application-scan-threading": exit(AppDelegate.exerciseApplicationScanThreading() ? 0 : 1)
         case "advanced-options": exit(AppDelegate.exerciseAdvancedOptionsLayouts() ? 0 : 1)
@@ -895,6 +919,9 @@ class WindowLifecycleTests(unittest.TestCase):
 
     def test_reopened_beginner_guide_uses_installed_name_and_version(self):
         self.run_check("beginner-identity")
+
+    def test_install_failure_does_not_reach_beginner_setup(self):
+        self.run_check("install-error-scope")
 
     def test_forced_scan_queues_callbacks_and_discards_stale_result(self):
         self.run_check("beginner-queued-scan")
