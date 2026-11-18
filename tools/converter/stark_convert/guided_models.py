@@ -725,9 +725,11 @@ def disk_space_shortfall(recipe, host, *, installed=False):
 def installation_allowed(recipe, host, *, installed=False):
     """Recheck capacity plus the small working allowance for preparation."""
     available = host.get("available_memory_bytes")
-    return recommendation_allowed(recipe, host, installed=installed) and (
-        installed or type(available) is int and available >= 2 * GIB
-    ) and disk_space_shortfall(recipe, host, installed=installed) == 0
+    return (
+        recommendation_allowed(recipe, host, installed=installed)
+        and (installed or type(available) is int and available >= 2 * GIB)
+        and disk_space_shortfall(recipe, host, installed=installed) == 0
+    )
 
 
 def _planning_budget(host):
