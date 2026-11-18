@@ -1070,16 +1070,45 @@ struct ModelRemovalConfirmation: Identifiable {
 // Frozen shared-benchmark calculation; provenance and limitations:
 // docs/benchmarks/2026-11-14-catalog-coding-ranking.md
 struct TopModelRanking: Identifiable {
+    struct SearchChoice: Identifiable {
+        let title: String
+        let query: String
+        var id: String { query }
+    }
+
     let id: String
     let name: String
     let index: Double
     let modelCount: Int
     let benchmarkCount: Int
+    let searchChoices: [SearchChoice]
+
+    init(id: String, name: String, index: Double, modelCount: Int, benchmarkCount: Int,
+         searchChoices: [SearchChoice]? = nil) {
+        self.id = id
+        self.name = name
+        self.index = index
+        self.modelCount = modelCount
+        self.benchmarkCount = benchmarkCount
+        self.searchChoices = searchChoices ?? [
+            SearchChoice(title: Self.searchableName(name), query: Self.searchableName(name))
+        ]
+    }
+
+    private static func searchableName(_ name: String) -> String {
+        name.replacingOccurrences(of: " dense", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: " text", with: "", options: .caseInsensitive)
+    }
 
     static let entries: [Self] = [
         .init(id: "qwen4_exp", name: "Qwen3.8 Flash Next", index: 100.0, modelCount: 1, benchmarkCount: 5),
         .init(id: "glm5_next", name: "GLM-5.3 Flash", index: 97.3, modelCount: 1, benchmarkCount: 8),
-        .init(id: "qwen3_5", name: "Qwen3.5 / 3.8 dense", index: 61.1, modelCount: 6, benchmarkCount: 18),
+        .init(id: "qwen3_5", name: "Qwen3.5 / 3.8 dense", index: 61.1, modelCount: 6, benchmarkCount: 18,
+              searchChoices: [
+                  .init(title: "Qwen3.5 dense", query: "Qwen3.5"),
+                  .init(title: "Qwen3.6 dense", query: "Qwen3.6-27B"),
+                  .init(title: "Qwen3.8 dense", query: "Qwen3.8-27B"),
+              ]),
         .init(id: "qwen3", name: "Qwen3 dense", index: 48.3, modelCount: 3, benchmarkCount: 6),
         .init(id: "qwen2", name: "Qwen2 dense", index: 41.0, modelCount: 6, benchmarkCount: 17),
         .init(id: "phi3", name: "Phi-3 dense", index: 34.9, modelCount: 1, benchmarkCount: 4),
@@ -3545,34 +3574,52 @@ struct ModelsView: View {
             if TopModelRanking.matching("").isEmpty { noSearchResults("No matching top families") }
             ForEach(TopModelRanking.matching("")) { entry in
                 let family = families?.first(where: { $0.id == entry.id })
-                Button {
-                    guard let family else { return }
-                    selectedFamily = nil
-                    catalogQuery = ""; catalogQuantization = .all
-                    universalQuery = family.name
-                } label: {
-                    HStack(spacing: 10) {
-                        Text("\(entry.rank)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).frame(width: 22)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(entry.name).font(.callout.weight(.medium))
-                            HStack(spacing: 10) {
-                                Text("Based on \(entry.modelCount) reference \(entry.modelCount == 1 ? "model" : "models")")
-                                Text("\(entry.benchmarkCount) shared benchmarks")
-                                    .help("Distinct benchmark results used in comparisons involving this family's reference models. Each benchmark counts once across the family; coverage varies by model.")
-                            }.font(.caption).foregroundStyle(.secondary)
+                if entry.searchChoices.count > 1 {
+                    Menu {
+                        ForEach(entry.searchChoices) { choice in
+                            Button(choice.title) { openTopModelSearch(choice) }
                         }
-                        Spacer(minLength: 0)
-                        Text(entry.index, format: .number.precision(.fractionLength(1)))
-                            .font(.callout.monospacedDigit().weight(.semibold))
-                        Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
-                    }.frame(maxWidth: .infinity, minHeight: 38, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 4)
-                        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 7))
-                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(.quaternary, lineWidth: 1))
-                }.buttonStyle(.plain).disabled(family == nil)
-                    .help(family == nil ? "Family browsing will be available when Stark is ready." : "Browse \(entry.name) models")
-                    .accessibilityLabel("Rank \(entry.rank), \(entry.name), coding index \(entry.index.formatted(.number.precision(.fractionLength(1)))), based on \(entry.modelCount) reference \(entry.modelCount == 1 ? "model" : "models"), \(entry.benchmarkCount) shared benchmarks")
+                    } label: {
+                        topModelRow(entry)
+                    }.buttonStyle(.plain).disabled(family == nil)
+                        .help(family == nil ? "Family browsing will be available when Stark is ready." : "Choose which \(entry.name) models to search")
+                        .accessibilityLabel("Rank \(entry.rank), \(entry.name), coding index \(entry.index.formatted(.number.precision(.fractionLength(1)))), based on \(entry.modelCount) reference \(entry.modelCount == 1 ? "model" : "models"), \(entry.benchmarkCount) shared benchmarks, choose a search")
+                } else if let choice = entry.searchChoices.first {
+                    Button { openTopModelSearch(choice) } label: {
+                        topModelRow(entry)
+                    }.buttonStyle(.plain).disabled(family == nil)
+                        .help(family == nil ? "Family browsing will be available when Stark is ready." : "Browse \(entry.name) models")
+                        .accessibilityLabel("Rank \(entry.rank), \(entry.name), coding index \(entry.index.formatted(.number.precision(.fractionLength(1)))), based on \(entry.modelCount) reference \(entry.modelCount == 1 ? "model" : "models"), \(entry.benchmarkCount) shared benchmarks")
+                }
             }
         }
+    }
+
+    private func openTopModelSearch(_ choice: TopModelRanking.SearchChoice) {
+        selectedFamily = nil
+        catalogQuery = ""; catalogQuantization = .all
+        universalQuery = choice.query
+    }
+
+    private func topModelRow(_ entry: TopModelRanking) -> some View {
+        HStack(spacing: 10) {
+            Text("\(entry.rank)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.name).font(.callout.weight(.medium))
+                HStack(spacing: 10) {
+                    Text("Based on \(entry.modelCount) reference \(entry.modelCount == 1 ? "model" : "models")")
+                    Text("\(entry.benchmarkCount) shared benchmarks")
+                        .help("Distinct benchmark results used in comparisons involving this family's reference models. Each benchmark counts once across the family; coverage varies by model.")
+                }.font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            Text(entry.index, format: .number.precision(.fractionLength(1)))
+                .font(.callout.monospacedDigit().weight(.semibold))
+            Image(systemName: entry.searchChoices.count > 1 ? "chevron.down" : "chevron.right")
+                .font(.caption).foregroundStyle(.secondary)
+        }.frame(maxWidth: .infinity, minHeight: 38, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 4)
+            .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(.quaternary, lineWidth: 1))
     }
 
     private func noSearchResults(_ title: String) -> some View {

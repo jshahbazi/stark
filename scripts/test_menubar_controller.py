@@ -1113,9 +1113,11 @@ extension EngineController {
                   TopModelRanking.entries.allSatisfy({ entry in rows.contains(where: { $0.id == entry.id }) }),
                   TopModelRanking.matching("qwen").map(\.rank) == [1, 3, 4, 5],
                   TopModelRanking.matching("no-such-family").isEmpty,
-                  TopModelRanking.matching("").map(\.rank) == Array(1...10) else { return false }
+                  TopModelRanking.matching("").map(\.rank) == Array(1...10),
+                  TopModelRanking.entries.first(where: { $0.id == "qwen3_5" })?.searchChoices.map(\.query) ==
+                      ["Qwen3.5", "Qwen3.6-27B", "Qwen3.8-27B"] else { return false }
             return rows.map(\.name) == ["Decider Flash v1.3", "Flint", "Gemma 2", "Gemma 3", "Gemma 3 images", "Gemma 4", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
-                "Mistral", "OLMo 3", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.5 MoE", "Qwen3.8 Flash Next", "Ripple-65B Preview", "SmolLM3"] &&
+                "Mistral", "OLMo 3", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5 / 3.8", "Qwen3.5 MoE", "Qwen3.8 Flash Next", "Ripple-65B Preview", "SmolLM3"] &&
                 !rows.contains(where: { $0.id == "modernbert" })
         case "models-display-event":
             engine.apply(["event": "models", "models": [
