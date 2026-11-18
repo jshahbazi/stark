@@ -60,6 +60,18 @@ Browse download candidates for one family without fetching weights:
 uv run --project tools/converter --locked stark-convert --family-models qwen3_5
 ```
 
+Search across supported Hub families and fixed catalog entries:
+
+```sh
+uv run --project tools/converter --locked stark-convert --search-models "qwen coder"
+```
+
+Universal search checks at most 30 Hub results, routes their configuration to a
+supported family and applies that family's ordinary bounded catalog admission.
+Rows carry a `family_id`, allowing a caller to select the same pinned native or
+generic installation route. It is a bounded candidate search rather than an
+exhaustive Hub mirror.
+
 This visits known sources, then interleaves Hugging Face architecture-tag and
 model-name searches, deduplicating repositories. Each request checks up to 30
 candidates. Generic Safetensors candidates pass the same tensor planner used by
@@ -139,6 +151,7 @@ stark-convert [SOURCE] [options]
 | `--require-native-support` | | Require a stored named-build match for the exact output: load-only evidence for text mode, image execution evidence for vision mode. Requires BF16 and a catalog model |
 | `--list-families` | | Print the shared family/mode/format matrix without a source or download |
 | `--family-models FAMILY` | family ID, such as `qwen3_5` | Print one metadata-only page of compatible download candidates; no source or output directory required |
+| `--search-models QUERY` | model name or repository terms | Search up to 30 Hub candidates across supported families, plus matching fixed catalog entries; no weights are downloaded |
 | `--catalog-offset N` | nonnegative integer, default 0 | Continue `--family-models` at the preceding report's `next_offset`; counts candidates, including rejected sources |
 | `--preflight` | | Inspect selected source metadata and print a support report before weight download; creates no output |
 | `--support-mode MODE` | `text`, `decision`, `vision-language` | Check intended native use during preflight or conversion; preflight defaults to the artifact mode |

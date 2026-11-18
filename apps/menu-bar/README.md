@@ -238,12 +238,16 @@ name when recorded, so saved versions can be distinguished. Installation uses
 Add from Source. Entered source and image options remain in memory when switching
 tabs or reopening the window. Switching tabs preserves an active installation;
 its progress and cancellation remain accessible. Completion stays in management.
-Search and sort settings are separate for
-**Installed**, the Model Catalog family overview and a family's detail view. Search filters
-the visible rows immediately; family search uses the current catalogue and does
-not fetch from Hugging Face again while you type. Search text stays within the
-current browsing session. Sort choices are remembered between app launches.
-The family overview uses compact, full-width rows in a single column.
+The search bar above the model tabs searches installed models immediately and,
+after a short pause, runs one bounded search across the Hugging Face catalog.
+Matching catalog rows use the same immutable-revision and tensor admission
+checks as family browsing; unsupported formats stay hidden. The search returns
+up to 30 Hub matches plus matching fixed native catalog entries, and keeps
+working if the live search fails but a pinned catalog entry matches. Search text
+stays within the current browsing session. Once a family is open, its search
+still filters only that loaded family without another request. Sort choices are
+remembered between app launches. The family overview uses compact, full-width
+rows in a single column.
 
 **Top Models** shows the ten ranked families from the November 14, 2026
 llmbench shared-benchmark calculation, in descending coding-index order. Each

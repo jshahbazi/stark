@@ -166,6 +166,38 @@ def test_live_compatible_fine_tune_has_pinned_download_identity_and_real_sizes(t
     assert [event[2] for event in hub.events if event[0] == "download"] == ["config.json"]
 
 
+def test_universal_catalog_search_routes_hub_matches_through_family_admission(tmp_path):
+    hub = Hub()
+    hub.add(tmp_path / "hub-qwen", "someone/Qwen-Coder", {"model_type": "qwen3", "torch_dtype": "float16"})
+    hub.add(tmp_path / "hub-llama", "someone/Llama-Coder", {"model_type": "llama", "torch_dtype": "float16"})
+    hub.add(tmp_path / "hub-other", "someone/Embedding", {"model_type": "modernbert"})
+    hub.searched["coder"] = ["someone/Qwen-Coder", "someone/Llama-Coder", "someone/Embedding"]
+
+    seen = []
+    report = catalog.search_catalog("coder", hub=hub, limit=3, on_item=seen.append)
+
+    assert report["status"] == "ready"
+    assert {item["repo"] for item in report["items"]} == {"someone/Qwen-Coder", "someone/Llama-Coder"}
+    assert {item["family_id"] for item in report["items"]} == {"qwen3", "llama"}
+    assert sorted(item["repo"] for item in seen) == sorted(item["repo"] for item in report["items"])
+
+
+def test_universal_catalog_search_keeps_pinned_matches_when_live_search_fails():
+    class OfflineHub:
+        def HfApi(self):
+            return self
+
+        def list_models(self, **kwargs):
+            raise OSError("offline")
+
+    report = catalog.search_catalog("Decider Flash", hub=OfflineHub())
+
+    assert report["status"] == "ready"
+    assert [(item["repo"], item["family_id"]) for item in report["items"]] == [
+        (catalog._DECIDER_REPO, catalog._DECIDER_FAMILY_ID)
+    ]
+
+
 def test_catalog_reuses_pinned_huggingface_disk_cache_across_requests(tmp_path):
     hub = Hub()
     hub.add(tmp_path, "someone/Stable", {"model_type": "qwen3", "torch_dtype": "float16"})

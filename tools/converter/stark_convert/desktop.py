@@ -417,7 +417,7 @@ class Desktop:
 
     The app sends one JSON command per line on stdin (``list``, ``install``, ``run``,
     ``stop``, ``quit``, ``generate``, ``decide``, ``reset``, ``configure``, ``support``,
-    ``catalog``, ``catalog_cancel``, ``install_catalog``, ``remove_model``) and receives
+    ``catalog``, ``catalog_search``, ``catalog_cancel``, ``install_catalog``, ``remove_model``) and receives
     one JSON event per line on ``output`` (``models``, ``status``, ``progress``,
     ``installed``, ``ready``, ``configured``, ``reply``, ``decision``, ``connection``,
     ``error``, ``model_families``, ``model_support``, ``model_catalog``,
@@ -680,6 +680,27 @@ class Desktop:
             daemon=True,
         ).start()
 
+    def start_catalog_search(self, query, request_id):
+        if (
+            not isinstance(query, str)
+            or query != query.strip()
+            or not 0 < len(query.encode()) <= 256
+            or any(ord(character) < 32 or ord(character) == 127 for character in query)
+            or not self.request_id(request_id)
+        ):
+            raise DesktopError("Enter a model name to search.")
+        self.cancel_catalog()
+        with self.lock:
+            self.catalog_request_id, self.catalog_family_id = request_id, "search"
+            self.catalog_active_offset = 0
+            generation = self.catalog_generation
+        threading.Thread(
+            target=self.load_catalog_search,
+            args=(query, request_id, generation),
+            name="stark-model-search",
+            daemon=True,
+        ).start()
+
     def run_catalog_check(self, command, environment, generation, on_partial=None):
         """Run one bounded catalogue child and return its report.
 
@@ -756,7 +777,7 @@ class Desktop:
             or not isinstance(value.get("message"), str)
             or not 0 < len(value["message"]) <= 2000
             or not isinstance(value.get("items"), list)
-            or len(value["items"]) > 30
+            or len(value["items"]) > (38 if family == "search" else 30)
             or type(value.get("has_more")) is not bool
         ):
             raise ValueError()
@@ -783,6 +804,12 @@ class Desktop:
         if value["status"] != "ready" and value["items"]:
             raise ValueError()
         ids = set()
+        search_families = {
+            item["family_id"]
+            for item in support_matrix()["families"]
+            if item["model_kind"] in {"language", "decision"}
+            and any(status["status"] == "conditional" for status in item["modes"].values())
+        }
         for item in value["items"]:
             if (
                 not isinstance(item, dict)
@@ -805,6 +832,10 @@ class Desktop:
                 or not set(item["artifact_modes"]) <= {"text", "vision-language", "decision"}
                 or item.get("default_artifact_mode") not in item["artifact_modes"]
             ):
+                raise ValueError()
+            if family == "search" and item.get("family_id") not in search_families:
+                raise ValueError()
+            if family != "search" and "family_id" in item:
                 raise ValueError()
             reason = item.get("unavailable_reason")
             if item["downloadable"]:
@@ -972,6 +1003,54 @@ class Desktop:
             }
         self.publish_catalog(report, family, request_id, generation, offset, partial=False)
 
+    def load_catalog_search(self, query, request_id, generation):
+        command = [
+            sys.executable,
+            "-I",
+            "-B",
+            "-m",
+            "stark_convert.cli",
+            "--search-models",
+            query,
+            "--catalog-stream",
+            "--catalog-cache-dir",
+            str(self.data_dir / "catalog-cache"),
+        ]
+        environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
+
+        def publish_rows(items):
+            rows = {
+                "schema_version": 1,
+                "family_id": "search",
+                "status": "ready",
+                "message": "Checking matching models.",
+                "items": items,
+                "offset": 0,
+                "has_more": False,
+                "next_offset": None,
+            }
+            self.publish_catalog(
+                self.catalog_report(rows, "search"), "search", request_id, generation, 0, partial=True
+            )
+
+        try:
+            report = self.run_catalog_check(command, environment, generation, publish_rows)
+            if report is None:
+                return
+            report = self.catalog_report(report, "search")
+        except Exception:
+            report = {
+                "schema_version": 1,
+                "family_id": "search",
+                "status": "error",
+                "items": [],
+                "has_more": False,
+                "offset": 0,
+                "next_offset": None,
+                "message": "Models could not be searched. Check your connection and try again.",
+            }
+        self.publish_catalog(report, "search", request_id, generation, 0, partial=False)
+
     def install_catalog(self, payload):
         with self.lock:
             if self.job is not None and self.job.is_alive():
@@ -988,10 +1067,12 @@ class Desktop:
             mode = payload.get("artifact_mode", item["default_artifact_mode"])
             if mode not in item["artifact_modes"]:
                 raise DesktopError("Choose an available model version.")
-            native_choice = native_source_choice(self.catalog_family_id, item)
-            fixed_native_ids = {native_item["id"] for native_item in native_catalog_items(self.catalog_family_id)}
+            family = item.get("family_id", self.catalog_family_id)
+            native_identity = {key: value for key, value in item.items() if key != "family_id"}
+            native_choice = native_source_choice(family, native_identity)
+            fixed_native_ids = {native_item["id"] for native_item in native_catalog_items(family)}
             if (
-                self.catalog_family_id in {NATIVE_FAMILY_ID, RIPPLE_FAMILY_ID} or item["id"] in fixed_native_ids
+                family in {NATIVE_FAMILY_ID, RIPPLE_FAMILY_ID} or item["id"] in fixed_native_ids
             ) and native_choice is None:
                 raise DesktopError("Refresh this family before downloading a model.")
             installed = self.catalog_installed_ids(item, mode)
@@ -3851,6 +3932,8 @@ class Desktop:
             self.cancel_install(payload)
         elif command == "catalog":
             self.start_catalog(payload.get("family_id"), payload.get("request_id"), payload.get("offset", 0))
+        elif command == "catalog_search":
+            self.start_catalog_search(payload.get("query"), payload.get("request_id"))
         elif command == "catalog_cancel":
             if not self.request_id(payload.get("request_id")):
                 raise DesktopError("Invalid model catalogue request.")

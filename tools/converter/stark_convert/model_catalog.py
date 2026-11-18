@@ -974,6 +974,7 @@ def family_catalog(
     on_item=None,
     physical_memory=None,
     ranking_task=None,
+    candidate_sources=None,
 ):
     """Return candidate downloads; actual installation must repeat pinned preflight.
 
@@ -1011,6 +1012,19 @@ def family_catalog(
     ):
         return report(family or "", "error", "This model family is not available in Stark.")
     if type(limit) is not int or not 1 <= limit <= MAX_ITEMS:
+        return report(family, "error", "The model catalogue request is invalid.")
+    if candidate_sources is not None and (
+        not isinstance(candidate_sources, list)
+        or not 1 <= len(candidate_sources) <= MAX_CANDIDATES
+        or any(
+            not isinstance(candidate, tuple)
+            or len(candidate) != 3
+            or _repo(candidate[0]) != candidate[0]
+            or candidate[1] is not None
+            and (not isinstance(candidate[1], str) or _REVISION.fullmatch(candidate[1]) is None)
+            for candidate in candidate_sources
+        )
+    ):
         return report(family, "error", "The model catalogue request is invalid.")
     if offline or os.environ.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes"}:
         return report(family, "offline", "Connect to the internet to browse models.")
@@ -1099,6 +1113,9 @@ def family_catalog(
 
         def repositories():
             nonlocal discovery_failed
+            if candidate_sources is not None:
+                yield from candidate_sources
+                return
             prioritize_seeds = planning and ranking is not None
             seed_entries = [
                 (seed, pins.get(seed) or native_items.get(seed, {}).get("revision"), None) for seed in seeds
@@ -1518,3 +1535,181 @@ def family_catalog(
         return result
     except Exception:
         return report(family, "error", "Models could not be loaded. Check your connection and try again.")
+
+
+def _config_family(config):
+    if not isinstance(config, dict):
+        return None
+    for scope in (config, config.get("text_config")):
+        if isinstance(scope, dict):
+            family = normalize_architecture(scope.get("model_type"))
+            if family is not None:
+                return family
+    return None
+
+
+def _search_matches(query, fields):
+    def normalized(value):
+        return "".join(character for character in value.casefold() if character.isalnum())
+
+    terms = [normalized(term) for term in query.split() if normalized(term)]
+    text = normalized(" ".join(fields))
+    return not terms or all(term in text for term in terms)
+
+
+def _search_fixed_items(query):
+    from .native_catalog import FAMILY_ID, FLINT_FAMILY_ID, QWEN_FAMILY_ID, RIPPLE_FAMILY_ID, catalog_items
+
+    fixed = []
+    for family in (FAMILY_ID, FLINT_FAMILY_ID, RIPPLE_FAMILY_ID, QWEN_FAMILY_ID):
+        for item in catalog_items(family):
+            if _search_matches(query, [family, item["repo"], item["name"], item["quantization"]]):
+                fixed.append({**item, "family_id": family})
+    decider = family_catalog(_DECIDER_FAMILY_ID)
+    for item in decider["items"]:
+        if _search_matches(query, [_DECIDER_FAMILY_ID, item["repo"], item["name"]]):
+            fixed.append({**item, "family_id": _DECIDER_FAMILY_ID})
+    return fixed
+
+
+def search_catalog(
+    query,
+    *,
+    hub=None,
+    limit=MAX_ITEMS,
+    offline=False,
+    deadline_seconds=80,
+    cache_dir=None,
+    on_item=None,
+):
+    """Search the Hub, then admit matching supported artifacts with family checks."""
+    if (
+        not isinstance(query, str)
+        or query != query.strip()
+        or not _string(query, MAX_SEARCH_QUERY_BYTES)
+        or type(limit) is not int
+        or not 1 <= limit <= MAX_ITEMS
+        or type(deadline_seconds) not in (int, float)
+        or not 0 < deadline_seconds <= 600
+    ):
+        return _report("search", "error", "Enter a model name to search.")
+    if offline or os.environ.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes"}:
+        return _report("search", "offline", "Connect to the internet to search Hugging Face models.")
+    if hub is None:
+        import huggingface_hub
+
+        hub = huggingface_hub
+
+    fixed = _search_fixed_items(query)
+    if on_item is not None:
+        for item in fixed:
+            on_item(item)
+    deadline = time.monotonic() + deadline_seconds
+    try:
+        api = hub.HfApi()
+        listing = list(
+            api.list_models(
+                search=query,
+                sort="downloads",
+                expand=["sha", "pipeline_tag", "tags", "siblings"],
+                limit=limit,
+            )
+        )
+    except Exception:
+        return _report(
+            "search",
+            "ready" if fixed else "error",
+            "The live Hugging Face search is unavailable. Pinned catalog matches are still shown."
+            if fixed
+            else "Models could not be searched. Check your connection and try again.",
+            fixed,
+        )
+
+    definitions = {
+        definition["family_id"]
+        for definition in support_matrix()["families"]
+        if definition["model_kind"] == "language"
+        and any(definition["modes"][mode]["status"] == "conditional" for mode in ("text", "vision-language"))
+    }
+
+    def route(entry):
+        repo = _repo(_field(entry, "id"))
+        if repo is None:
+            return "skip", None
+        try:
+            info = api.model_info(repo_id=repo, files_metadata=True, timeout=5)
+            if not _application_source(info, repo):
+                return "skip", None
+            revision = _field(info, "sha")
+            if not isinstance(revision, str) or _REVISION.fullmatch(revision) is None:
+                return "skip", None
+            config = _field(info, "config")
+            if not isinstance(config, dict):
+                names, sizes = _weight_inventory(info)
+                if "config.json" not in names:
+                    return "skip", None
+                size = sizes.get("config.json")
+                config = _json(
+                    _read_revision_metadata(
+                        hub, repo, "config.json", revision, MAX_CONFIG_BYTES, size if type(size) is int else None
+                    )
+                )
+            family = _config_family(config)
+            if family not in definitions:
+                return "skip", None
+            return "matched", (family, (repo, revision, info))
+        except Exception:
+            return "failed", None
+
+    routed, failures = {}, 0
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(route, entry) for entry in listing[:limit]]
+        for future in as_completed(futures):
+            state, result = future.result()
+            if state == "failed":
+                failures += 1
+                continue
+            if state != "matched":
+                continue
+            family, candidate = result
+            routed.setdefault(family, []).append(candidate)
+
+    accepted, family_failures = list(fixed), 0
+    known_ids = {item["id"] for item in accepted}
+    for family, candidates in routed.items():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            family_failures += 1
+            break
+        report = family_catalog(
+            family,
+            hub=hub,
+            limit=min(len(candidates), MAX_ITEMS),
+            deadline_seconds=min(80, remaining),
+            cache_dir=cache_dir,
+            candidate_sources=candidates,
+        )
+        if report["status"] != "ready":
+            family_failures += 1
+            continue
+        for item in report["items"]:
+            if item["id"] in known_ids:
+                continue
+            checked = {**item, "family_id": family}
+            accepted.append(checked)
+            known_ids.add(item["id"])
+            if on_item is not None:
+                on_item(checked)
+    accepted.sort(key=lambda item: (item["name"].casefold(), item["repo"].casefold(), item["revision"]))
+    if not accepted and (failures or family_failures):
+        return _report("search", "error", "Models could not be searched. Check your connection and try again.")
+    return _report(
+        "search",
+        "ready",
+        "Some model metadata could not be checked. Try again to refresh the search."
+        if failures or family_failures
+        else "Choose a model to download."
+        if accepted
+        else "No compatible models matched this search.",
+        accepted,
+    )

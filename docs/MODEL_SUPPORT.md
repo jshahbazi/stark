@@ -222,7 +222,12 @@ The app's **Manage Models** window has **Installed**, **Model Catalog** and
 run models; Command-I selects Add from Source in the same window. The install form
 keeps its source and options when switching tabs. Active progress and cancellation
 remain accessible, and completion stays in management. Search filters the
-current view immediately and does not trigger another Hugging Face request.
+installed library immediately and then runs one bounded Hugging Face query
+across supported catalog families. Matching Hub repositories are routed from
+their metadata through the ordinary pinned family admission path; they never
+bypass header, layout or format checks. Results are debounced while typing and
+canceled when the query or management window changes. Family detail retains a
+separate local-only search over its loaded page.
 The menu and Playground show the running private version's saved name,
 quantization and stored weight-file size. Missing metadata is omitted.
 Search text is transient; sort choices persist independently for **Installed**,
@@ -301,6 +306,14 @@ identifies the family. Each page inspects up to 30 distinct candidates and
 retains unsupported family variants with an **Unavailable** reason.
 **Load more models** follows the remaining pages automatically, preserving
 results already loaded. Failed pages can be retried at the same offset.
+
+The universal search sends a free-text Hub query, checks at most 30 returned
+repositories and reads only bounded configuration metadata before routing each
+supported architecture through its family catalog verifier. It also matches
+pinned native and Decision entries locally. The JSON report names the family on
+every row so the backend can preserve the exact native preparation or generic
+conversion route when the user downloads it. This is a bounded search over the
+returned candidates, not an exhaustive copy of Hugging Face.
 
 The Hub listing itself carries each repository's head revision, task tags and
 file names. A source whose listing already shows another task, no model

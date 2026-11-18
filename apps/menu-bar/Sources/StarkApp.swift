@@ -750,6 +750,7 @@ struct FamilyModelCatalog {
         let referenceScore: CatalogReferenceScore?
         /// The repository an export Stark cannot import says it was made from.
         let originalRepo: String?
+        let familyID: String?
 
         init?(_ raw: [String: Any]) {
             guard let id = SupportMetadata.string(raw["id"], maximum: 512),
@@ -791,6 +792,10 @@ struct FamilyModelCatalog {
                       parsed.lowercased() != repo.lowercased() else { return nil }
                 originalRepo = parsed
             } else { originalRepo = nil }
+            if let value = raw["family_id"], !(value is NSNull) {
+                guard let parsed = SupportMetadata.string(value, maximum: 128) else { return nil }
+                familyID = parsed
+            } else { familyID = nil }
         }
 
         /// Whether the weights alone fit the guide's memory budget: 85% of physical
@@ -837,7 +842,8 @@ struct FamilyModelCatalog {
               let familyID = SupportMetadata.string(raw["family_id"], maximum: 128),
               let status = (raw["status"] as? String).flatMap(Status.init(rawValue:)),
               let message = raw["message"] as? String, message.isEmpty || SupportMetadata.string(message) != nil,
-              let rawItems = raw["items"] as? [[String: Any]], rawItems.count <= 30,
+              let rawItems = raw["items"] as? [[String: Any]],
+              rawItems.count <= (familyID == EngineController.universalSearchFamilyID ? 38 : 30),
               let hasMore = SupportMetadata.boolean(raw["has_more"]) else { return nil }
         let items = rawItems.compactMap(Item.init)
         guard items.count == rawItems.count, Set(items.map(\.id)).count == items.count else { return nil }
@@ -1440,6 +1446,7 @@ struct GenerationTimingProgress {
 }
 
 final class EngineController: ObservableObject {
+    static let universalSearchFamilyID = "search"
     @Published var models: [InstalledModel] = []
     @Published var selectedID = UserDefaults.standard.string(forKey: "selectedModel") ?? "" {
         didSet { if selectedID != oldValue { clearDecisionAttachment(); clearDecision() } }
@@ -2720,6 +2727,32 @@ final class EngineController: ObservableObject {
         }
     }
 
+    func requestUniversalModelSearch(query: String) {
+        let value = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        cancelModelCatalog()
+        guard !value.isEmpty else { return }
+        guard value.utf8.count <= 256 else {
+            catalogError = "Keep the model search to 256 bytes or fewer."
+            return
+        }
+        let requestID = UUID().uuidString.lowercased()
+        catalogRequestID = requestID
+        catalogFamilyID = Self.universalSearchFamilyID
+        catalogLoading = true
+        pendingCatalogOffset = 0
+        catalogPageKnownIDs = []
+        if !send(["command": "catalog_search", "query": value, "request_id": requestID]) {
+            catalogLoading = false
+            pendingCatalogOffset = nil
+            catalogError = "Could not reach Stark. Reopen the app and try again."
+        }
+    }
+
+    func cancelUniversalModelSearch() {
+        guard catalogFamilyID == Self.universalSearchFamilyID else { return }
+        cancelModelCatalog()
+    }
+
     func requestMoreModelCatalog(loadRemaining: Bool = true) {
         guard !catalogLoading, (!busy || loadRemainingCatalog), let requestID = catalogRequestID, let familyID = catalogFamilyID,
               let catalog, catalog.familyID == familyID, catalog.status == .ready,
@@ -2742,7 +2775,10 @@ final class EngineController: ObservableObject {
     }
 
     func catalogItemIsDownloaded(_ item: FamilyModelCatalog.Item, artifactMode: ModelArtifactMode) -> Bool {
-        models.contains { item.installedIDs.contains($0.id) && $0.artifactMode == artifactMode }
+        models.contains {
+            ($0.display?.groupID == "repo:" + item.repo && $0.display?.sourceRevision == item.revision
+                || item.installedIDs.contains($0.id)) && $0.artifactMode == artifactMode
+        }
     }
 
     private func catalogProgressKey(_ item: FamilyModelCatalog.Item) -> String {
@@ -3205,9 +3241,9 @@ struct ModelsView: View {
     let onRun: (String) -> Void
     @State private var selectedFamily: ModelsInventory.Family?
     @State private var removalConfirmation: ModelRemovalConfirmation?
-    @State private var savedQuery = ""
-    @State private var topModelsQuery = ""
-    @State private var familiesQuery = ""
+    @State private var universalQuery = ""
+    @State private var universalSearchPending = false
+    @State private var universalSearchGeneration = 0
     @State private var catalogQuery = ""
     @State private var catalogQuantization = CatalogQuantizationFilter.all
     @State private var savedSort = ModelBrowserPreferences.load(.saved)
@@ -3218,7 +3254,7 @@ struct ModelsView: View {
 
     private var inventory: ModelsInventory {
         ModelsInventory(models: engine.models, loadedID: engine.modelControlID, registry: engine.modelFamilies,
-                        query: savedQuery, sort: savedSort)
+                        query: selectedFamily == nil ? universalQuery : "", sort: savedSort)
     }
 
     private var browserScope: ModelBrowserScope {
@@ -3240,24 +3276,20 @@ struct ModelsView: View {
     }
 
     private var searchPrompt: String {
-        if navigation.tab == .topModels && selectedFamily == nil { return "Search top families" }
         switch browserScope {
-        case .saved: return "Search downloaded models"
-        case .families: return "Search families"
+        case .saved, .families: return "Search installed models and the model catalog"
         case .catalog: return "Search models, sizes or quantizations"
         }
     }
 
     private var queryBinding: Binding<String> {
-        if navigation.tab == .topModels && selectedFamily == nil {
-            return Binding(get: { topModelsQuery }, set: { topModelsQuery = $0 })
-        }
-        let scope = browserScope
-        return Binding(get: {
-            switch scope { case .saved: return savedQuery; case .families: return familiesQuery; case .catalog: return catalogQuery }
-        }, set: { query in
-            switch scope { case .saved: savedQuery = query; case .families: familiesQuery = query; case .catalog: catalogQuery = query }
-        })
+        selectedFamily == nil
+            ? Binding(get: { universalQuery }, set: { universalQuery = $0 })
+            : $catalogQuery
+    }
+
+    private var hasUniversalSearch: Bool {
+        selectedFamily == nil && !universalQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var sortBinding: Binding<ModelBrowserSort> {
@@ -3271,8 +3303,26 @@ struct ModelsView: View {
     }
 
     private func visibleFamilies(_ families: [ModelsInventory.Family]) -> [ModelsInventory.Family] {
-        families.filter { ModelBrowserSearch.matches(familiesQuery, fields: [$0.name, $0.id]) }.sorted {
+        families.filter { ModelBrowserSearch.matches("", fields: [$0.name, $0.id]) }.sorted {
             familiesSort.precedes($0.name, id: $0.id, size: nil, $1.name, id: $1.id, size: nil)
+        }
+    }
+
+    private func updateUniversalSearch(_ query: String) {
+        universalSearchGeneration &+= 1
+        let generation = universalSearchGeneration
+        engine.cancelUniversalModelSearch()
+        guard navigation.tab != .installModel else {
+            universalSearchPending = false
+            return
+        }
+        let value = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        universalSearchPending = !value.isEmpty
+        guard !value.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            guard generation == universalSearchGeneration else { return }
+            universalSearchPending = false
+            engine.requestUniversalModelSearch(query: value)
         }
     }
 
@@ -3309,13 +3359,16 @@ struct ModelsView: View {
                         Button { queryBinding.wrappedValue = "" } label: { Image(systemName: "xmark.circle.fill") }
                             .buttonStyle(.plain).foregroundStyle(.secondary).help("Clear search").accessibilityLabel("Clear search")
                     }
-                    if navigation.tab != .topModels || selectedFamily != nil {
+                    if !hasUniversalSearch && (navigation.tab != .topModels || selectedFamily != nil) {
                         Picker("Sort", selection: sortBinding) {
                             ForEach(browserScope.sorts, id: \.self) { Text($0.title).tag($0) }
                         }.labelsHidden().frame(width: 178).accessibilityLabel("Sort models")
                     }
                 }
-                if selectedFamily == nil && navigation.tab == .download {
+                if hasUniversalSearch {
+                    Text("Results from your installed models and a bounded Hugging Face catalog search.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if selectedFamily == nil && navigation.tab == .download {
                     Label("Scroll to browse all model families", systemImage: "arrow.down")
                         .font(.caption).foregroundStyle(.secondary)
                 } else if selectedFamily != nil {
@@ -3333,7 +3386,8 @@ struct ModelsView: View {
                     }
                 }
                 ScrollView {
-                    if let family = selectedFamily { catalogContent(family) }
+                    if hasUniversalSearch { universalSearchContent(inventory) }
+                    else if let family = selectedFamily { catalogContent(family) }
                     else if navigation.tab == .topModels { topModelsContent(inventory.families) }
                     else if navigation.tab == .installed {
                         if engine.models.isEmpty { emptyState(navigation.tab) }
@@ -3429,14 +3483,23 @@ struct ModelsView: View {
             }
         }.padding(24).frame(width: 640, height: 580)
             .onAppear { selectedFamily = nil; catalogQuantization = .all }
-            .onChange(of: navigation.tab) { leaveFamily() }
+            .onAppear { updateUniversalSearch(universalQuery) }
+            .onChange(of: navigation.tab) {
+                leaveFamily()
+                updateUniversalSearch(universalQuery)
+            }
+            .onChange(of: universalQuery) { updateUniversalSearch($0) }
             .onChange(of: hideUnsupported) { ModelBrowserPreferences.saveHidesUnsupported(hideUnsupported) }
             .onChange(of: quantizationTabs) {
                 guard !engine.catalogLoading, engine.catalog?.status == .ready,
                       engine.catalog?.familyID == selectedFamily?.id else { return }
                 catalogQuantization = catalogQuantization.resolved(for: catalogItems)
             }
-            .onDisappear { engine.cancelModelCatalog() }
+            .onDisappear {
+                universalSearchGeneration &+= 1
+                universalSearchPending = false
+                engine.cancelModelCatalog()
+            }
             .alert(item: $removalConfirmation) { confirmation in
                 Alert(title: Text(confirmation.action.title + "?"), message: Text(confirmation.message),
                       primaryButton: .destructive(Text(confirmation.action.title)) {
@@ -3463,8 +3526,8 @@ struct ModelsView: View {
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 .help("Experimental relative index, not a pass percentage. Coverage and evaluation settings vary. Publisher results do not qualify Stark's quantized models. Phi-3's scored model is Phi-4 Mini.")
                 .padding(.bottom, 4)
-            if TopModelRanking.matching(topModelsQuery).isEmpty { noSearchResults("No matching top families") }
-            ForEach(TopModelRanking.matching(topModelsQuery)) { entry in
+            if TopModelRanking.matching("").isEmpty { noSearchResults("No matching top families") }
+            ForEach(TopModelRanking.matching("")) { entry in
                 let family = families?.first(where: { $0.id == entry.id })
                 Button {
                     guard let family else { return }
@@ -3500,6 +3563,46 @@ struct ModelsView: View {
             Text(title).font(.headline)
             Button("Clear search") { queryBinding.wrappedValue = "" }
         }.frame(maxWidth: .infinity, minHeight: 220)
+    }
+
+    private func universalSearchContent(_ inventory: ModelsInventory) -> some View {
+        let result = engine.catalog?.familyID == EngineController.universalSearchFamilyID ? engine.catalog : nil
+        let items = result?.status == .ready
+            ? CatalogBrowserInventory.listed(result?.items ?? [], hidingUnsupported: true)
+            : []
+        let catalogGroups = CatalogBrowserInventory(
+            items: items,
+            sort: catalogSort,
+            physicalMemory: ProcessInfo.processInfo.physicalMemory
+        ).groups
+        return LazyVStack(alignment: .leading, spacing: 8) {
+            if !inventory.groups.isEmpty {
+                Text("Installed").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                ForEach(inventory.groups) { group in modelGroup(group) }
+            }
+            if !catalogGroups.isEmpty {
+                if !inventory.groups.isEmpty { Divider().padding(.vertical, 6) }
+                Text("Model catalog").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                ForEach(catalogGroups) { group in catalogGroup(group) }
+            }
+            if universalSearchPending || engine.catalogLoading {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text("Searching installed models and Hugging Face…").foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, minHeight: 44)
+            } else if let message = engine.catalogError {
+                VStack(spacing: 7) {
+                    Text(result?.status == .offline ? "You’re offline" : "Couldn’t search the model catalog")
+                        .font(.headline)
+                    Text(message).font(.callout).foregroundStyle(.secondary)
+                    Button("Retry") {
+                        engine.requestUniversalModelSearch(query: universalQuery)
+                    }
+                }.frame(maxWidth: .infinity, minHeight: 120)
+            } else if inventory.groups.isEmpty && catalogGroups.isEmpty {
+                noSearchResults("No matching models")
+            }
+        }
     }
 
     private func modelGroup(_ group: ModelsInventory.Group) -> some View {
