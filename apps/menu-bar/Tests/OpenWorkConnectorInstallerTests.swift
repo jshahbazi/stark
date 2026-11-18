@@ -390,6 +390,26 @@ struct OpenWorkConnectorInstallerTests {
             let current = try fixture.ownedEntry()
             try fixture.write("{\"plugins\":[\(old),\(current)]}")
             try rejected(.conflict) { _ = try fixture.installer.install() }
+        case "default-model":
+            try fixture.write(#"{"model":{"providerID":"other","model":"saved"},"theme":"dark"}"#)
+            try check(try fixture.installer.install(selectingModelID: "fixture/chat-model"))
+            let selected = try JSONSerialization.jsonObject(with: Data(fixture.text().utf8)) as! [String: Any]
+            try check(selected["model"] as? String == "stark/fixture/chat-model")
+            try check(selected["theme"] as? String == "dark")
+            try check((selected["plugins"] as? [[String: Any]])?.count == 1)
+            let before = try Data(contentsOf: fixture.file)
+            try check(!(try fixture.installer.install(selectingModelID: "fixture/chat-model")))
+            try check(try Data(contentsOf: fixture.file) == before)
+            try check(try fixture.installer.install(selectingModelID: "fixture/next-model"))
+            try check((try fixture.text()).contains("\"stark/fixture/next-model\""))
+            for invalid in ["", "fixture#variant", "fixture\nmodel"] {
+                try rejected(.invalidConfiguration) {
+                    _ = try fixture.installer.install(selectingModelID: invalid)
+                }
+            }
+            try check(try fixture.installer.remove())
+            let afterRemoval = try JSONSerialization.jsonObject(with: Data(fixture.text().utf8)) as! [String: Any]
+            try check(afterRemoval["model"] as? String == "stark/fixture/next-model")
         case "remove-stale":
             let old = try fixture.ownedEntry(socket: "/private/tmp/stark-\(geteuid())-0123456789abcdef/openwork.sock",
                                              package: "file:///removed/Stark.app/Contents/Resources/OpenWorkConnector")

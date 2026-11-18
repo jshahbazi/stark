@@ -52,7 +52,7 @@ under Connections when their integrations become available.
 
 The Pi card implements manual setup: verify installed Pi 1.5.2, discover the
 running model, create a separate Stark-owned profile with the required guard,
-and open Terminal in an automatic private workspace. **Open Stark Pi** explicitly
+and open Terminal in an automatic private workspace. **Open Pi** explicitly
 copies the key for Terminal's hidden prompt and starts the connected profile.
 It requires no folder selection. **Change Working Folder…** optionally selects a
 project for new sessions; **Use Stark Workspace** restores the automatic folder

@@ -10,6 +10,14 @@ Decision requests share the GUI and chat FIFO worker queue. Invalid requests and
 
 Open **Connections** in Stark. **Apps** groups OpenWork and OpenCode Desktop with independent **Connect** buttons and status; **Manage** reveals each configured app's **Reconnect** and **Disconnect** actions. OpenCode's per-engine **Allow** and **Deny** prompt stays separate. The shared model header identifies the running model, independently of the Playground mode. API startup and credential-recovery messages remain visible when setup needs attention.
 
+The Advanced Connections **Apps** tab also provides **Open OpenWork** and
+**Open OpenCode Desktop** after approval. OpenWork creates a task in its
+current workspace and binds the currently running Stark model through its
+verified UI-control channel. OpenCode writes the current model as its public
+default and uses its verified local engine API to switch active sessions for
+subsequent turns before opening or focusing Desktop. Inactive historical
+sessions retain their explicit selections.
+
 The Advanced Connections **Apps** tab also includes **Pi**, with **Set Up Pi**
 and **Copy Key & Open Pi…**. This manual Pi 1.5.2 flow creates an isolated guarded
 profile and opens Terminal for a chosen folder. Its key is supplied through the

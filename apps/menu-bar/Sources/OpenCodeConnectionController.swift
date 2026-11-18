@@ -2,6 +2,10 @@ import AppKit
 import Darwin
 import Foundation
 
+private enum OpenCodeSessionSelectionError: Error {
+    case unavailable
+}
+
 /// OpenCode Desktop runs one detached engine that outlives the app window and
 /// can be shared with the terminal. Stark therefore approves each engine
 /// instance once: Connect approves the engine it verified while installing,
@@ -9,6 +13,7 @@ import Foundation
 final class OpenCodeConnectionController: ObservableObject {
     @Published private(set) var approved = false
     @Published private(set) var busy = false
+    @Published private(set) var opening = false
     @Published private(set) var message = "OpenCode is not connected."
     @Published private(set) var clientActive = false
     @Published private(set) var disconnectPending = false
@@ -65,6 +70,7 @@ final class OpenCodeConnectionController: ObservableObject {
     private var approvalLoading = false
     private var lastBaseURL = ""
     private var operation = UUID()
+    private var openOperation: UUID?
 
     init(service: String, storage: OpenCodeEngineApprovalStore? = nil,
          clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
@@ -218,13 +224,15 @@ final class OpenCodeConnectionController: ObservableObject {
     func deny() {
         guard let engine = pendingEngine, !closing else { return }
         pendingEngine = nil
+        openOperation = nil
+        opening = false
         if denied.count >= 16 { denied.removeAll() }
         denied.insert(engine.instanceID)
         message = "OpenCode engine denied. Choose Manage, then Reconnect to allow the current engine."
     }
 
     func connect() {
-        guard !busy, !closing, !disconnectPending, brokerPath() != nil, !apiSession.isEmpty,
+        guard !busy, !opening, !closing, !disconnectPending, brokerPath() != nil, !apiSession.isEmpty,
               let base = snapshot()["api_base_url"] as? String, !base.isEmpty else {
             message = "Start Stark's local API with Retry API, then connect OpenCode."
             return
@@ -262,6 +270,149 @@ final class OpenCodeConnectionController: ObservableObject {
                 guard let self, self.operation == identifier, !self.closing else { return }
                 guard error == nil else { self.busy = false; self.message = "Open OpenCode, then connect again."; return }
                 self.waitForApplication(baseURL: base, operation: identifier, attempt: 0)
+            }
+        }
+    }
+
+    func open(modelID: String, contextTokens: Int) {
+        guard approved, !busy, !opening, !closing, !disconnectPending, pendingEngine == nil,
+              !modelID.isEmpty, contextTokens > 0, brokerPath() != nil, !apiSession.isEmpty,
+              let base = snapshot()["api_base_url"] as? String, !base.isEmpty else {
+            if !approved || disconnectPending {
+                message = "Connect OpenCode in Stark before opening it with the running model."
+            } else if pendingEngine != nil {
+                message = "Allow OpenCode’s new engine, then open it again."
+            } else {
+                message = "Run a Stark model with tool support before opening OpenCode."
+            }
+            return
+        }
+        guard connectorDirectory != nil else {
+            message = "This Stark build is missing its OpenCode connector. Reinstall Stark."
+            return
+        }
+        let identifier = UUID()
+        opening = true
+        openOperation = identifier
+        message = "Opening OpenCode with Stark’s running model…"
+        if DesktopApplicationIdentity.running(.openCode, configurationRoot: DesktopConnectionTesting.profile) != nil {
+            selectModelForOpen(modelID: modelID, contextTokens: contextTokens, baseURL: base,
+                               operation: identifier, attempt: 0)
+            return
+        }
+        guard let url = DesktopConnectionTesting.application(.openCode)
+                ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: DesktopClient.openCode.bundleID),
+              DesktopClientPeer.verifyApplication(url, client: .openCode) else {
+            opening = false
+            openOperation = nil
+            message = "Install the official OpenCode macOS app, then open it again."
+            return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        if let profile = DesktopConnectionTesting.profile {
+            configuration.createsNewApplicationInstance = true
+            do { configuration.environment = try Self.testEnvironment(profile) }
+            catch {
+                opening = false
+                openOperation = nil
+                message = "The isolated connection test profile is unavailable."
+                return
+            }
+        }
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { [weak self] _, error in
+            DispatchQueue.main.async {
+                guard let self, self.openOperation == identifier, !self.closing else { return }
+                guard error == nil else {
+                    self.opening = false
+                    self.openOperation = nil
+                    self.message = "OpenCode could not open. Open it from Applications, then try again."
+                    return
+                }
+                self.selectModelForOpen(modelID: modelID, contextTokens: contextTokens, baseURL: base,
+                                        operation: identifier, attempt: 0)
+            }
+        }
+    }
+
+    private func selectModelForOpen(modelID: String, contextTokens: Int, baseURL: String,
+                                    operation: UUID, attempt: Int) {
+        guard openOperation == operation, !closing, opening else { return }
+        guard let application = DesktopApplicationIdentity.running(
+            .openCode, configurationRoot: DesktopConnectionTesting.profile
+        ) else {
+            guard attempt < 40 else {
+                opening = false
+                openOperation = nil
+                message = "OpenCode did not finish opening. Try again after its main window appears."
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.selectModelForOpen(modelID: modelID, contextTokens: contextTokens, baseURL: baseURL,
+                                         operation: operation, attempt: attempt + 1)
+            }
+            return
+        }
+        guard let engine = DesktopClientPeer.openCodeEngines(application: application).first,
+              let directory = Self.canonicalDirectory(engine.configDirectory),
+              isApproved(engine.process) else {
+            guard attempt < 40 else {
+                opening = false
+                openOperation = nil
+                message = "OpenCode’s background engine is not ready. Allow it when Stark asks, then try again."
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.selectModelForOpen(modelID: modelID, contextTokens: contextTokens, baseURL: baseURL,
+                                         operation: operation, attempt: attempt + 1)
+            }
+            return
+        }
+        guard hasDiscoveredModel(apiID: modelID, contextTokens: contextTokens) else {
+            guard attempt < 40 else {
+                opening = false
+                openOperation = nil
+                message = "OpenCode could not discover Stark’s running model. Reconnect it, then try again."
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.selectModelForOpen(modelID: modelID, contextTokens: contextTokens, baseURL: baseURL,
+                                         operation: operation, attempt: attempt + 1)
+            }
+            return
+        }
+        guard let connectorDirectory, let path = brokerPath() else {
+            opening = false
+            openOperation = nil
+            message = "Stark’s local connection stopped while OpenCode was opening. Retry the API, then open it again."
+            return
+        }
+        queue.async { [weak self] in
+            let result = Result {
+                try OpenWorkConnectorInstaller(configDirectory: directory, connectorDirectory: connectorDirectory,
+                                               socketPath: path, apiBaseURL: baseURL)
+                    .install(selectingModelID: modelID)
+                try Self.selectActiveSessions(engine: engine, modelID: modelID)
+            }
+            DispatchQueue.main.async {
+                guard let self, self.openOperation == operation, !self.closing else { return }
+                self.openOperation = nil
+                self.opening = false
+                if let running = NSRunningApplication(processIdentifier: application.process.pid) {
+                    running.activate()
+                }
+                switch result {
+                case .success:
+                    guard self.snapshot()["api_base_url"] as? String == baseURL else {
+                        self.message = "Stark’s port changed while OpenCode was opening. Try again."
+                        return
+                    }
+                    self.message = "OpenCode is ready with Stark’s running model selected in its active session."
+                case .failure(let error as OpenCodeSessionSelectionError):
+                    self.message = "OpenCode is open with Stark as its default, but Stark could not switch the active session. Select the running model in OpenCode’s model picker."
+                case .failure(let error):
+                    self.message = (error as? OpenWorkConnectorInstallError)?.message(DesktopClient.openCode.displayName)
+                        ?? "OpenCode could not select Stark’s running model. Reconnect it, then try again."
+                }
             }
         }
     }
@@ -354,7 +505,7 @@ final class OpenCodeConnectionController: ObservableObject {
     private static let engineStoppedMessage = "OpenCode's background engine stopped after connecting. Reopen OpenCode, then choose Allow when Stark asks about the new engine."
 
     func disconnect() {
-        guard !busy, !closing else { return }
+        guard !busy, !opening, !closing else { return }
         discoveryScope = UUID().uuidString
         observedModels.removeAll()
         observedPeer = nil
@@ -401,9 +552,104 @@ final class OpenCodeConnectionController: ObservableObject {
 
     func shutdown() {
         closing = true
+        openOperation = nil
+        opening = false
         discoveryScope = UUID().uuidString
         operation = UUID()
         capabilities.shutdown()
+    }
+
+    static func activeSessionIDs(from data: Data) -> [String]? {
+        guard data.count <= 1_048_576,
+              let reply = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              reply.count == 1,
+              let sessions = reply["data"] as? [String: Any],
+              sessions.count <= 16 else { return nil }
+        var ids: [String] = []
+        for (id, value) in sessions {
+            guard id.hasPrefix("ses"), id.utf8.count <= 512,
+                  let state = value as? [String: Any], state.count == 1,
+                  state["type"] as? String == "running" else { return nil }
+            ids.append(id)
+        }
+        return ids.sorted()
+    }
+
+    static func sessionModelRequest(modelID: String) -> Data? {
+        guard !modelID.isEmpty, modelID.utf8.count <= 1024, !modelID.contains("#"),
+              !modelID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            return nil
+        }
+        return try? JSONSerialization.data(
+            withJSONObject: ["model": ["id": modelID, "providerID": "stark"]],
+            options: [.sortedKeys, .withoutEscapingSlashes])
+    }
+
+    private static func selectActiveSessions(engine: OpenCodeEngine, modelID: String) throws {
+        guard engine.process.isCurrent, let executable = DesktopClientPeer.executable(engine.process.pid),
+              DesktopClientPeer.verify(pid: engine.process.pid, identifier: DesktopClient.openCode.engineIdentifier,
+                                       client: .openCode),
+              let environment = DesktopClientPeer.launchEnvironment(engine.process.pid, client: .openCode, engine: true),
+              environment.service,
+              let request = sessionModelRequest(modelID: modelID) else {
+            throw OpenCodeSessionSelectionError.unavailable
+        }
+        let active = try runAPI(["GET", "/api/session/active"], executable: executable, engine: engine,
+                                environment: environment)
+        guard let sessionIDs = activeSessionIDs(from: active) else {
+            throw OpenCodeSessionSelectionError.unavailable
+        }
+        let body = String(decoding: request, as: UTF8.self)
+        for sessionID in sessionIDs {
+            guard let encoded = sessionID.addingPercentEncoding(
+                withAllowedCharacters: CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#"))
+            ) else { throw OpenCodeSessionSelectionError.unavailable }
+            _ = try runAPI(["POST", "/api/session/\(encoded)/model", "--data", body],
+                           executable: executable, engine: engine, environment: environment)
+        }
+    }
+
+    private static func runAPI(_ arguments: [String], executable: String, engine: OpenCodeEngine,
+                               environment: DesktopLaunchEnvironment) throws -> Data {
+        let process = Process(), output = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["api"] + arguments
+        process.environment = [
+            "HOME": environment.home.isEmpty ? NSHomeDirectory() : environment.home,
+            "OPENCODE_CONFIG_DIR": engine.configDirectory.path,
+            "PATH": [
+                URL(fileURLWithPath: executable).deletingLastPathComponent().path,
+                "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
+            ].joined(separator: ":"),
+        ]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() }
+        catch { throw OpenCodeSessionSelectionError.unavailable }
+        let timeout = DispatchWorkItem {
+            if process.isRunning {
+                process.terminate()
+                DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
+                    if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) }
+                }
+            }
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: timeout)
+        var data = Data()
+        while let next = try? output.fileHandleForReading.read(upToCount: 4096), !next.isEmpty {
+            data.append(next)
+            if data.count > 1_048_576 {
+                process.terminate()
+                break
+            }
+        }
+        process.waitUntilExit()
+        timeout.cancel()
+        guard process.terminationStatus == 0, data.count <= 1_048_576 else {
+            throw OpenCodeSessionSelectionError.unavailable
+        }
+        return data
     }
 
     private var connectorDirectory: URL? {

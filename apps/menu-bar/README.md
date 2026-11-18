@@ -83,7 +83,9 @@ to Beginner hides an open Connections window.
 Detection includes Pi's managed Node, compatible installed nvm versions, and
 Homebrew/system locations. It does not source interactive shell startup files.
 
-Choose **Open Stark Pi**, then paste the copied key at Terminal's hidden prompt.
+Choose **Open Pi**, then paste the copied key at Terminal's hidden prompt.
+The button stays visible but is disabled until Pi has been set up for the
+currently running Stark model.
 Stark finds Pi automatically and creates or reuses the private working folder
 `~/Library/Application Support/Stark/Pi/Workspace`. **Change Working Folder…**
 optionally selects a project for new sessions in a sheet attached to Connections;
@@ -656,7 +658,7 @@ ready, and the previous model remains installed.
 
 ## Connect another application
 
-Select **Connections** in the menu or playground window. The shared model header identifies the model running in Chat mode and its current availability. **Apps** groups OpenWork and OpenCode Desktop in one list, with separate connection status and controls for each app. Choose **Connect** to set one up, or **Manage** to reveal its **Reconnect** and **Disconnect** controls. A pending OpenCode engine keeps its own **Allow** and **Deny** prompt. API startup and Keychain recovery messages remain visible when setup needs attention.
+Select **Connections** in the menu or playground window. The shared model header identifies the model running in Chat mode and its current availability. **Apps** groups OpenWork and OpenCode Desktop in one list, with separate connection status and controls for each app. Choose **Connect** to set one up. Once connected, **Open OpenWork** creates a task in its current workspace and binds Stark's running model; **Open OpenCode Desktop** selects that model in active OpenCode sessions and as the default for new sessions before opening the app. The Open buttons require a running chat model with tools and a known context limit. Choose **Manage** to reveal **Reconnect** and **Disconnect**. A pending OpenCode engine keeps its own **Allow** and **Deny** prompt. API startup and Keychain recovery messages remain visible when setup needs attention.
 
 For other applications, select **Connect your own app**, choose an OpenAI-compatible provider in the client and copy the **Base URL**, **API key** and **Model ID** individually. **Advanced settings** contains the saved listening port, API retry and key-regeneration controls, **Copy All as JSON**, **Copy curl Example** and API capability details. Model IDs use the Hugging Face repository ID (`owner/model`) for Hugging Face installs and the model name for local installs. Existing installations expose these names automatically.
 
@@ -664,7 +666,7 @@ The model picker under **Connect your own app** lists installed chat-capable mod
 
 ### Connect OpenWork without copying a key
 
-For the official OpenWork macOS app, choose **Connect** on the OpenWork row under **Connections → Apps**. Open OpenWork with a local workspace first. Stark installs its bundled connector into the native OpenCode global configuration directory identified from OpenWork's running engine. The configuration stores a local connector path, owner-only socket path, expected loopback Base URL and an ownership marker. It contains no API key or per-request capability. If Stark changes the configuration, reopen OpenWork and select **Stark** in its model picker.
+For the official OpenWork macOS app, choose **Connect** on the OpenWork row under **Connections → Apps**. Open OpenWork with a local workspace first. Stark installs its bundled connector into the native OpenCode global configuration directory identified from OpenWork's running engine. The configuration stores a local connector path, owner-only socket path, expected loopback Base URL and an ownership marker. It contains no API key or per-request capability. If Stark changes the configuration, **Open OpenWork** reopens the app, waits for the verified connector to advertise the current model and creates a model-bound task in the current workspace.
 
 If OpenWork settings already define a manual provider with ID `stark`, remove only that provider entry before connecting and keep your other provider entries. Stark does not migrate existing client credentials.
 
@@ -676,7 +678,7 @@ The stock helperless connection has narrow desktop validation with official Open
 
 ### Connect OpenCode Desktop without copying a key
 
-For the official OpenCode Desktop macOS app (2.2.5 or later), choose **Connect** on the OpenCode Desktop row under **Connections → Apps**. Stark opens OpenCode if needed, waits for its background engine and installs the same bundled connector entry used for OpenWork into the global configuration that engine reads. OpenWork and OpenCode can share that file; connecting one leaves the other's entry unchanged. Select **Stark** in OpenCode's model picker. If OpenCode settings already define a manual provider with ID `stark`, remove only that provider entry first.
+For the official OpenCode Desktop macOS app (2.2.5 or later), choose **Connect** on the OpenCode Desktop row under **Connections → Apps**. Stark opens OpenCode if needed, waits for its background engine and installs the same bundled connector entry used for OpenWork into the global configuration that engine reads. OpenWork and OpenCode can share that file; connecting one leaves the other's entry unchanged. **Open OpenCode Desktop** writes Stark's currently running model as the public OpenCode default, uses OpenCode's local API to switch each active session for subsequent turns, then opens or focuses the app. Inactive historical sessions keep their own explicit choice. If OpenCode settings already define a manual provider with ID `stark`, remove only that provider entry first.
 
 OpenCode Desktop runs a signed copy of its `opencode-cli` engine from `~/Library/Application Support/ai.opencode.desktop/cli/` as a detached background service that keeps running after OpenCode quits. Stark therefore approves each engine instance once. **Connect** approves the engine it verified during setup. When a new engine starts, for example after an OpenCode update or a login, Connections shows **Allow** and **Deny** for it, and the engine gets no capability until you choose **Allow**. A verified OpenCode Desktop app (Team ID `5NZ4Q7NXJ4`) must be running for its engine to connect, and the engine must run as Desktop's background service with Desktop connected to it. The engine's signature, staging location and launch environment are checked on every socket connection.
 

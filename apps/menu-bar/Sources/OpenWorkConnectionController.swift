@@ -6,6 +6,7 @@ import Security
 final class OpenWorkConnectionController: ObservableObject {
     @Published private(set) var approved = false
     @Published private(set) var busy = false
+    @Published private(set) var opening = false
     @Published private(set) var message = "OpenWork is not connected."
     @Published private(set) var clientActive = false
     @Published private(set) var disconnectPending = false
@@ -16,6 +17,7 @@ final class OpenWorkConnectionController: ObservableObject {
     private var beginnerAttempts = 0
     private var beginnerHandoff: OpenWorkBeginnerHandoff?
     private var beginnerConnect = false
+    private var openRequest: UUID?
 
     private func beginnerBasis(apiID: String, contextTokens: Int) -> String {
         guard approved, !closing, !disconnectPending,
@@ -67,7 +69,7 @@ final class OpenWorkConnectionController: ObservableObject {
     }
 
     func connectBeginner() {
-        guard !busy, !beginnerPreparing else { return }
+        guard !busy, !opening, !beginnerPreparing else { return }
         beginnerAttemptBasis = ""
         beginnerPreparedBasis = ""
         connect(beginner: true)
@@ -214,27 +216,72 @@ final class OpenWorkConnectionController: ObservableObject {
         return value
     }
 
-    func openApplication() {
-        guard !closing else { return }
+    @discardableResult
+    func openApplication() -> Bool {
+        guard !closing else { return false }
         if let application = DesktopApplicationIdentity.running(.openWork, configurationRoot: testProfileDirectory),
            let running = NSRunningApplication(processIdentifier: application.process.pid) {
             running.activate()
-            return
+            return true
         }
         guard let url = DesktopConnectionTesting.application(.openWork)
                 ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: DesktopClient.openWork.bundleID),
               DesktopClientPeer.verifyApplication(url, client: .openWork) else {
             message = "Install the official OpenWork macOS app, then choose Check installation."
-            return
+            return false
         }
         let configuration: NSWorkspace.OpenConfiguration
         do { configuration = try Self.launchConfiguration(profile: testProfileDirectory) }
-        catch { message = "The isolated connection test profile is unavailable."; return }
+        catch { message = "The isolated connection test profile is unavailable."; return false }
         NSWorkspace.shared.openApplication(at: url, configuration: configuration) { [weak self] _, error in
             DispatchQueue.main.async {
                 guard let self, !self.closing else { return }
                 if error != nil { self.message = "OpenWork could not open. Open it from Applications, then return here." }
             }
+        }
+        return true
+    }
+
+    func open(modelID: String, contextTokens: Int) {
+        guard approved, !busy, !opening, !beginnerPreparing, !closing, !disconnectPending,
+              !modelID.isEmpty, contextTokens > 0 else {
+            if !approved || disconnectPending {
+                message = "Connect OpenWork in Stark before opening it with the running model."
+            }
+            return
+        }
+        let request = UUID()
+        openRequest = request
+        opening = true
+        beginnerHandoff = nil
+        beginnerPreparedBasis = ""
+        beginnerAttemptBasis = ""
+        beginnerAttempts = 0
+        message = "Opening OpenWork with Stark’s running model…"
+        guard openApplication() else {
+            opening = false
+            openRequest = nil
+            return
+        }
+        waitForOpen(modelID: modelID, contextTokens: contextTokens, request: request, attempt: 0)
+    }
+
+    private func waitForOpen(modelID: String, contextTokens: Int, request: UUID, attempt: Int) {
+        guard openRequest == request, !closing else { return }
+        if hasDiscoveredModel(apiID: modelID, contextTokens: contextTokens) {
+            opening = false
+            openRequest = nil
+            prepareBeginnerModel(apiID: modelID, contextTokens: contextTokens, retry: true)
+            return
+        }
+        guard attempt < 60 else {
+            opening = false
+            openRequest = nil
+            message = "OpenWork could not see Stark’s running model. Keep a local workspace open, then choose Manage → Reconnect."
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.waitForOpen(modelID: modelID, contextTokens: contextTokens, request: request, attempt: attempt + 1)
         }
     }
 
@@ -250,7 +297,7 @@ final class OpenWorkConnectionController: ObservableObject {
     func connect() { connect(beginner: false) }
 
     private func connect(beginner: Bool) {
-        guard !busy, !closing, !disconnectPending, brokerPath() != nil, !apiSession.isEmpty,
+        guard !busy, !opening, !closing, !disconnectPending, brokerPath() != nil, !apiSession.isEmpty,
               let base = snapshot()["api_base_url"] as? String, !base.isEmpty else {
             message = "Start Stark's local API with Retry API, then connect OpenWork."
             return
@@ -374,6 +421,8 @@ final class OpenWorkConnectionController: ObservableObject {
 
     func disconnect() {
         guard !busy, !closing else { return }
+        openRequest = nil
+        opening = false
         discoveryScope = UUID().uuidString
         busy = true
         approved = false
@@ -414,6 +463,8 @@ final class OpenWorkConnectionController: ObservableObject {
 
     func shutdown() {
         closing = true
+        openRequest = nil
+        opening = false
         operation = UUID()
         capabilities.shutdown()
     }

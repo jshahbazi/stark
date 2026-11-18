@@ -102,7 +102,7 @@ final class PiConnectionController: ObservableObject {
             }
             self.acceptProfile(result)
             self.defaults.set(path, forKey: Self.profilePreference)
-            self.message = keychainService == nil ? "Ready. Open Stark Pi to use the running model."
+            self.message = keychainService == nil ? "Ready. Open Pi to use the running model."
                 : "Ready. Typing pi in Terminal will use Stark."
         }
     }

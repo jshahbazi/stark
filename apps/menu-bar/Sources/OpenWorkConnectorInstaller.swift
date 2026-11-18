@@ -25,7 +25,8 @@ enum OpenWorkConnectorInstallError: Error {
     }
 }
 
-/// Edits only public plugin metadata. No credentials or client auth files enter this type.
+/// Edits public plugin metadata and, only when explicitly requested, the
+/// user's default model. No credentials or client auth files enter this type.
 /// OpenWork and OpenCode share one entry: the same package, socket and marker,
 /// so installing for one client finds the other's entry already in place.
 struct OpenWorkConnectorInstaller {
@@ -48,14 +49,16 @@ struct OpenWorkConnectorInstaller {
         self.beforeCommit = beforeCommit
     }
 
-    @discardableResult func install() throws -> Bool { try update(removing: false) }
-    @discardableResult func remove() throws -> Bool { try update(removing: true) }
+    @discardableResult func install(selectingModelID: String? = nil) throws -> Bool {
+        try update(removing: false, selectingModelID: selectingModelID)
+    }
+    @discardableResult func remove() throws -> Bool { try update(removing: true, selectingModelID: nil) }
 
     private var package: String {
         connectorDirectory.standardizedFileURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
-    private func update(removing: Bool) throws -> Bool {
+    private func update(removing: Bool, selectingModelID: String?) throws -> Bool {
         guard configDirectory.isFileURL, connectorDirectory.isFileURL,
               [nil, ""].contains(configDirectory.host), [nil, ""].contains(connectorDirectory.host),
               connectorDirectory.query == nil, connectorDirectory.fragment == nil,
@@ -63,6 +66,9 @@ struct OpenWorkConnectorInstaller {
               socketPath.hasPrefix("/"), !socketPath.utf8.contains(0),
               !socketPath.contains("\n"), !socketPath.contains("\r"), socketPath.utf8.count < 104 else {
             throw OpenWorkConnectorInstallError.unsafePath
+        }
+        if let selectingModelID, !Self.validModelID(selectingModelID) {
+              throw OpenWorkConnectorInstallError.invalidConfiguration
         }
         let directory = try Self.openDirectory(configDirectory)
         defer { close(directory) }
@@ -92,6 +98,7 @@ struct OpenWorkConnectorInstaller {
         }
         let pluginProperty = properties.first { $0.key == "plugins" }
         var edits: [(Range<Int>, Data)] = []
+        var rootAdditions: [Data] = []
         let entry: [String: Any] = ["package": package, "options": [
             "socketPath": socketPath, "starkConnector": Self.ownershipMarker, "expectedBaseURL": apiBaseURL,
         ]]
@@ -138,7 +145,6 @@ struct OpenWorkConnectorInstaller {
                         let value = try JSONSerialization.data(withJSONObject: replacement, options: [.fragmentsAllowed, .withoutEscapingSlashes])
                         edits.append((field.range, value))
                     }
-                    if edits.isEmpty { return false }
                 } else {
                     edits.append((items[index].range, Data()))
                     if index < commas.count { edits.append((commas[index]..<(commas[index] + 1), Data())) }
@@ -153,11 +159,28 @@ struct OpenWorkConnectorInstaller {
             }
         } else {
             if removing { return false }
+            rootAdditions.append(Data("\"plugins\": [\n    ".utf8) + encoded + Data("\n  ]".utf8))
+        }
+        if let selectingModelID {
+            let selection = "stark/" + selectingModelID
+            if let modelProperty = properties.first(where: { $0.key == "model" }) {
+                if modelProperty.node.string != selection {
+                    let value = try JSONSerialization.data(withJSONObject: selection, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+                    edits.append((modelProperty.node.range, value))
+                }
+            } else {
+                let value = try JSONSerialization.data(withJSONObject: selection, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+                rootAdditions.append(Data("\"model\": ".utf8) + value)
+            }
+        }
+        if !rootAdditions.isEmpty {
             let comma = !properties.isEmpty && rootCommas.count < properties.count ? "," : ""
-            let insertion = Data((comma + "\n  \"plugins\": [\n    ").utf8) + encoded + Data("\n  ]\n".utf8)
+            let properties = rootAdditions.map { String(data: $0, encoding: .utf8)! }.joined(separator: ",\n  ")
+            let insertion = Data((comma + "\n  " + properties + "\n").utf8)
             let end = root.range.upperBound - 1
             edits.append((end..<end, insertion))
         }
+        if edits.isEmpty { return false }
 
         var replacement = source
         for (range, value) in edits.sorted(by: { $0.0.lowerBound > $1.0.lowerBound }) {
@@ -297,6 +320,11 @@ struct OpenWorkConnectorInstaller {
               let port = parts.port, (1...65535).contains(port), parts.percentEncodedPath == "/v1",
               parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil else { return false }
         return value == "http://127.0.0.1:\(port)/v1"
+    }
+
+    private static func validModelID(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 1024 && !value.contains("#")
+            && !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
     }
 
     private static func safeRegular(_ info: stat) -> Bool {
