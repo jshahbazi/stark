@@ -325,7 +325,10 @@ private struct PiConnectionView: View {
                 }
                 Spacer()
                 if connection.busy { ProgressView().controlSize(.small).accessibilityLabel("Setting up Pi") }
-                Button("Open Pi") { connection.open(baseURL: baseURL, modelID: modelID, key: key) }
+                Button("Open Pi") {
+                    connection.open(baseURL: baseURL, modelID: modelID, key: key,
+                                    keychainService: APICredentialStore.applicationService)
+                }
                     .buttonStyle(.borderedProminent)
                     .disabled(connection.profile == nil || connection.busy || !connection.installed || !available || !current)
                     .accessibilityLabel("Open Pi in Terminal with the running Stark model")
@@ -354,7 +357,7 @@ private struct PiConnectionView: View {
                     Button("Use Stark Workspace", action: connection.useDefaultWorkspace).disabled(connection.busy)
                 }
             }.font(.caption)
-            Text("Setup also makes Stark the default when you type pi in Terminal. Open Pi starts a separate session in the working folder above and retrieves its API key from macOS Keychain; macOS may ask you to allow access once. Pi can edit files and run commands. Sessions opened here are not saved.")
+            Text("Setup also makes Stark the default when you type pi in Terminal. Open Pi checks macOS Keychain access first, then starts a separate session in the working folder above. macOS may ask you to allow access before Terminal opens. Pi can edit files and run commands. Sessions opened here are not saved.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)

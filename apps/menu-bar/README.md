@@ -86,7 +86,9 @@ Homebrew/system locations. It does not source interactive shell startup files.
 Choose **Open Pi**. The button stays visible but is disabled until Pi has been
 set up for the currently running Stark model. Terminal opens directly into the
 connected profile; Pi obtains the API key from the Keychain command saved
-during setup, so no clipboard paste or hidden prompt is needed.
+during setup, so no clipboard paste or hidden prompt is needed. Stark checks
+that access before opening Terminal, so any required Keychain approval happens
+before Pi starts.
 Stark finds Pi automatically and creates or reuses the private working folder
 `~/Library/Application Support/Stark/Pi/Workspace`. **Change Working Folder…**
 optionally selects a project for new sessions in a sheet attached to Connections;

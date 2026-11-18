@@ -23,11 +23,13 @@ final class PiConnectionController: ObservableObject {
     typealias Completion = ([String: Any]) -> Void
     typealias Runner = (URL, [String], [String: String], @escaping Completion) -> Void
     typealias FolderChooser = (NSWindow, URL?, @escaping (URL?) -> Void) -> Void
+    typealias KeychainVerifier = (String, @escaping (Bool) -> Void) -> Void
     private let resources: URL
     private let root: URL
     private let defaults: UserDefaults
     private let runner: Runner
     private let finder: () -> Tools?
+    private let keychainVerifier: KeychainVerifier
     private var tools: Tools?
     private var refreshed = false
     private static let profilePreference = "stark.pi.manualProfile.v1"
@@ -38,9 +40,11 @@ final class PiConnectionController: ObservableObject {
             .appendingPathComponent("Stark/Pi", isDirectory: true),
          defaults: UserDefaults = .standard, tools: Tools? = nil,
          finder: @escaping () -> Tools? = { PiConnectionController.findTools() },
-         runner: @escaping Runner = PiConnectionController.runHelper) {
+         runner: @escaping Runner = PiConnectionController.runHelper,
+         keychainVerifier: @escaping KeychainVerifier = PiConnectionController.verifyKeychain) {
         self.resources = resources; self.root = root; self.defaults = defaults
         self.tools = tools; self.finder = finder; self.runner = runner
+        self.keychainVerifier = keychainVerifier
         if let path = defaults.string(forKey: Self.workingFolderPreference), path.hasPrefix("/"),
            !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
             workingFolder = URL(fileURLWithPath: path, isDirectory: true)
@@ -107,10 +111,20 @@ final class PiConnectionController: ObservableObject {
         }
     }
 
-    func open(baseURL: String, modelID: String, key: String,
+    func open(baseURL: String, modelID: String, key: String, keychainService: String,
               openTerminal: @escaping (URL, @escaping (Bool) -> Void) -> Void = PiConnectionController.openTerminal) {
         guard !busy, installed, matches(baseURL: baseURL, modelID: modelID), !key.isEmpty else { return }
-        prepareLaunch(workspace: workingFolder, openTerminal: openTerminal)
+        busy = true
+        message = "Waiting for macOS to allow Pi’s Keychain access…"
+        keychainVerifier(keychainService) { [weak self] allowed in
+            guard let self else { return }
+            self.busy = false
+            guard allowed else {
+                self.message = "Allow Stark’s API key in Keychain Access, then choose Open Pi again."
+                return
+            }
+            self.prepareLaunch(workspace: self.workingFolder, openTerminal: openTerminal)
+        }
     }
 
     func chooseWorkingFolder(in window: NSWindow?, chooser: @escaping FolderChooser = PiConnectionController.chooseFolder) {
@@ -281,6 +295,30 @@ final class PiConnectionController: ObservableObject {
         configuration.activates = true
         NSWorkspace.shared.open([command], withApplicationAt: terminal, configuration: configuration) { app, _ in
             DispatchQueue.main.async { completion(app != nil) }
+        }
+    }
+
+    private static func verifyKeychain(_ service: String, completion: @escaping (Bool) -> Void) {
+        guard service.range(of: #"^com\.starkengine\.menubar\.local-api(?:\.[A-Za-z0-9_.-]+)?$"#,
+                            options: .regularExpression) != nil else {
+            DispatchQueue.main.async { completion(false) }
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+            process.arguments = ["find-generic-password", "-s", service, "-a", "bearer-key-v1", "-w"]
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            do {
+                try process.run()
+                process.waitUntilExit()
+                let allowed = process.terminationStatus == 0
+                DispatchQueue.main.async { completion(allowed) }
+            } catch {
+                DispatchQueue.main.async { completion(false) }
+            }
         }
     }
 

@@ -35,6 +35,7 @@ struct PiConnectionTests {
         let key = "synthetic-pi-test-key"
         let tools = PiConnectionController.Tools(node: URL(fileURLWithPath: "/synthetic/node"), pi: URL(fileURLWithPath: "/synthetic/pi"))
         var calls = 0
+        var keychainChecks = 0
         var launchArguments: [String] = []
         var deferred: PiConnectionController.Completion?
         let controller = PiConnectionController(resources: directory.appendingPathComponent("resources"), root: root,
@@ -62,6 +63,10 @@ struct PiConnectionTests {
                                     args[args.index(after: $0)]
                                 } ?? directory.path])
                 } else { fatalError("unexpected_pi_helper_action") }
+            }, keychainVerifier: { service, completion in
+                keychainChecks += 1
+                require(service == "com.starkengine.menubar.local-api.fixture")
+                completion(true)
             })
         controller.refresh()
         require(controller.installed && !controller.busy && calls == 1)
@@ -88,8 +93,9 @@ struct PiConnectionTests {
         // The actual Open action launches directly. Folder selection is optional.
         opened = false
         controller.open(baseURL: baseURL, modelID: "public-model", key: key,
+            keychainService: "com.starkengine.menubar.local-api.fixture",
             openTerminal: { _, completion in opened = true; completion(true) })
-        require(opened && calls == 4 && !launchArguments.contains("--workspace"))
+        require(opened && calls == 4 && keychainChecks == 1 && !launchArguments.contains("--workspace"))
 
         _ = NSApplication.shared
         let window = NSWindow(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
@@ -102,8 +108,9 @@ struct PiConnectionTests {
         choose?(directory)
         require(!controller.busy && controller.workingFolder == directory)
         controller.open(baseURL: baseURL, modelID: "public-model", key: key,
+            keychainService: "com.starkengine.menubar.local-api.fixture",
             openTerminal: { _, completion in completion(true) })
-        require(launchArguments.contains("--workspace") && launchArguments.contains(directory.path))
+        require(keychainChecks == 2 && launchArguments.contains("--workspace") && launchArguments.contains(directory.path))
         controller.chooseWorkingFolder(in: window, chooser: { _, current, completion in
             require(current == directory); completion(nil)
         })
@@ -111,8 +118,9 @@ struct PiConnectionTests {
         controller.useDefaultWorkspace()
         require(controller.workingFolder == nil)
         controller.open(baseURL: baseURL, modelID: "public-model", key: key,
+            keychainService: "com.starkengine.menubar.local-api.fixture",
             openTerminal: { _, completion in completion(true) })
-        require(!launchArguments.contains("--workspace"))
+        require(keychainChecks == 3 && !launchArguments.contains("--workspace"))
 
         // Saved setup restoration uses the same verified helper, and an unsafe
         // helper path cannot be saved or opened even if it reports success.
