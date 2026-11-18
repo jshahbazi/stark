@@ -39,6 +39,7 @@ SCENARIOS = (
     "app-location-migration",
     "combined-migration",
     "migration-conflicts",
+    "default-model",
     "remove-stale",
     "invalid-base-url",
 )

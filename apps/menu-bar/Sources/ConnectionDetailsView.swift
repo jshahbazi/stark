@@ -19,6 +19,9 @@ struct ConnectionDetailsView: View {
     }
 
     private var canConnect: Bool { !engine.apiBaseURL.isEmpty && !engine.apiKey.isEmpty }
+    private var canOpenManagedApp: Bool {
+        !connectionInfo.runningModelID.isEmpty && engine.supportsTools && engine.contextCapacityKnown
+    }
     private var hasKey: Bool { !engine.apiKey.isEmpty }
     private var apiModels: [InstalledModel] {
         engine.models.filter { !$0.decisionOnly && !(engine.decisionModel && $0.id == engine.loadedID) }
@@ -144,9 +147,15 @@ struct ConnectionDetailsView: View {
                 Text("Use the running model with your preferred app.").font(.caption).foregroundStyle(.secondary)
             }
             VStack(spacing: 0) {
-                OpenWorkConnectionView(connection: engine.desktopConnections.openWork)
+                OpenWorkConnectionView(connection: engine.desktopConnections.openWork,
+                                       modelID: connectionInfo.runningModelID,
+                                       contextTokens: engine.apiContextTokens,
+                                       canOpen: canOpenManagedApp)
                 Divider()
-                OpenCodeConnectionView(connection: engine.desktopConnections.openCode)
+                OpenCodeConnectionView(connection: engine.desktopConnections.openCode,
+                                       modelID: connectionInfo.runningModelID,
+                                       contextTokens: engine.apiContextTokens,
+                                       canOpen: canOpenManagedApp)
             }
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
@@ -316,6 +325,13 @@ private struct PiConnectionView: View {
                 }
                 Spacer()
                 if connection.busy { ProgressView().controlSize(.small).accessibilityLabel("Setting up Pi") }
+                Button("Open Pi") {
+                    connection.open(baseURL: baseURL, modelID: modelID, key: key,
+                                    keychainService: APICredentialStore.applicationService)
+                }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(connection.profile == nil || connection.busy || !connection.installed || !available || !current)
+                    .accessibilityLabel("Open Pi in the selected terminal with the running Stark model")
                 Button(connection.profile == nil ? "Set Up Pi" : "Update Setup") {
                     connection.setup(baseURL: baseURL, modelID: modelID, key: key,
                                      keychainService: APICredentialStore.applicationService)
@@ -330,14 +346,22 @@ private struct PiConnectionView: View {
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 12) {
-                if connection.profile != nil {
-                    Button("Open Stark Pi") { connection.open(baseURL: baseURL, modelID: modelID, key: key) }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(connection.busy || !connection.installed || !available || !current)
-                        .accessibilityLabel("Open Stark Pi in Terminal and copy API key")
-                }
                 Button("Check Installation") { connection.refresh(force: true) }.disabled(connection.busy)
             }.font(.caption)
+            HStack(spacing: 8) {
+                Text("Open in").font(.caption).foregroundStyle(.secondary)
+                Picker("Terminal for Pi", selection: Binding(
+                    get: { connection.terminal },
+                    set: { connection.chooseTerminal($0) }
+                )) {
+                    ForEach(connection.availableTerminals) { terminal in
+                        Text(terminal.name).tag(terminal)
+                    }
+                }
+                .pickerStyle(.menu).labelsHidden().fixedSize()
+                .accessibilityLabel("Terminal for Pi")
+                Spacer()
+            }
             Text("Working folder: \(connection.workingFolderLabel)")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 12) {
@@ -347,7 +371,7 @@ private struct PiConnectionView: View {
                     Button("Use Stark Workspace", action: connection.useDefaultWorkspace).disabled(connection.busy)
                 }
             }.font(.caption)
-            Text("Setup also makes Stark the default when you type pi in Terminal, using your API key from macOS Keychain. macOS may ask you to allow access. Open Stark Pi starts a separate session in the working folder above; paste the copied key at its hidden prompt. Pi can edit files and run commands. Sessions opened here are not saved.")
+            Text("Setup also makes Stark the default when you type pi in a terminal. Open Pi checks macOS Keychain access first, then starts a separate session in the working folder above. macOS may ask you to allow access before the selected terminal opens. Pi can edit files and run commands. Sessions opened here are not saved.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
@@ -366,6 +390,8 @@ private struct ManagedAppConnectionRow: View {
     var needsApproval = false
     let message: String
     let detail: String
+    let canOpen: Bool
+    let open: () -> Void
     let connect: () -> Void
     let disconnect: () -> Void
     @State private var expanded = false
@@ -390,6 +416,10 @@ private struct ManagedAppConnectionRow: View {
                 if disconnectPending {
                     Button("Retry Disconnect", action: disconnect).disabled(busy).accessibilityLabel("Retry disconnecting \(name)")
                 } else if approved {
+                    Button("Open \(name)", action: open)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(busy || !canOpen || needsApproval)
+                        .accessibilityLabel("Open \(name) with the running Stark model")
                     Button("Manage", systemImage: expanded ? "chevron.up" : "chevron.down") { expanded.toggle() }
                         .disabled(busy).accessibilityLabel("Manage \(name) connection").accessibilityValue(expanded ? "Expanded" : "Collapsed")
                 } else {
@@ -412,13 +442,19 @@ private struct ManagedAppConnectionRow: View {
 
 private struct OpenWorkConnectionView: View {
     @ObservedObject var connection: OpenWorkConnectionController
+    let modelID: String
+    let contextTokens: Int
+    let canOpen: Bool
 
     var body: some View {
         ManagedAppConnectionRow(
             name: "OpenWork", symbol: "macwindow", approved: connection.approved,
-            busy: connection.busy, disconnectPending: connection.disconnectPending,
+            busy: connection.busy || connection.opening || connection.beginnerPreparing,
+            disconnectPending: connection.disconnectPending,
             message: connection.message == "OpenWork is not connected." ? "" : connection.message,
-            detail: "Select Stark in OpenWork’s model picker. It uses the running model, in either Playground mode.",
+            detail: "Open OpenWork creates a task in its current workspace and selects the running Stark model.",
+            canOpen: canOpen,
+            open: { connection.open(modelID: modelID, contextTokens: contextTokens) },
             connect: connection.connect, disconnect: connection.disconnect
         )
     }
@@ -426,14 +462,19 @@ private struct OpenWorkConnectionView: View {
 
 private struct OpenCodeConnectionView: View {
     @ObservedObject var connection: OpenCodeConnectionController
+    let modelID: String
+    let contextTokens: Int
+    let canOpen: Bool
 
     var body: some View {
         ManagedAppConnectionRow(
             name: "OpenCode Desktop", symbol: "terminal", approved: connection.approved,
-            busy: connection.busy, disconnectPending: connection.disconnectPending,
+            busy: connection.busy || connection.opening, disconnectPending: connection.disconnectPending,
             needsApproval: connection.pendingEngine != nil,
             message: connection.message == "OpenCode is not connected." ? "" : connection.message,
-            detail: "Select Stark in OpenCode’s model picker. Stark asks once for each new Desktop background engine. A terminal session sharing that approved engine can also use its Stark connection.",
+            detail: "Open OpenCode Desktop selects the running Stark model for its active session and makes it the default for new sessions. Stark asks once for each new Desktop background engine.",
+            canOpen: canOpen,
+            open: { connection.open(modelID: modelID, contextTokens: contextTokens) },
             connect: connection.connect, disconnect: connection.disconnect
         )
     }

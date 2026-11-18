@@ -10,14 +10,22 @@ Decision requests share the GUI and chat FIFO worker queue. Invalid requests and
 
 Open **Connections** in Stark. **Apps** groups OpenWork and OpenCode Desktop with independent **Connect** buttons and status; **Manage** reveals each configured app's **Reconnect** and **Disconnect** actions. OpenCode's per-engine **Allow** and **Deny** prompt stays separate. The shared model header identifies the running model, independently of the Playground mode. API startup and credential-recovery messages remain visible when setup needs attention.
 
+The Advanced Connections **Apps** tab also provides **Open OpenWork** and
+**Open OpenCode Desktop** after approval. OpenWork creates a task in its
+current workspace and binds the currently running Stark model through its
+verified UI-control channel. OpenCode writes the current model as its public
+default and uses its verified local engine API to switch active sessions for
+subsequent turns before opening or focusing Desktop. Inactive historical
+sessions retain their explicit selections.
+
 The Advanced Connections **Apps** tab also includes **Pi**, with **Set Up Pi**
-and **Copy Key & Open Pi…**. This manual Pi 1.5.2 flow creates an isolated guarded
-profile and opens Terminal for a chosen folder. Its key is supplied through the
-setup/Pi process environment and an explicit concealed/transient clipboard copy,
-then pasted into a hidden prompt. Files and command arguments contain no key;
-while running Stark schedules the unchanged clipboard item for clearing after
-two minutes and also clears it on normal quit. Crashes/force quits cannot run
-cleanup. Pi is excluded from
+and **Open Pi**. This manual Pi 1.5.2 flow creates an isolated guarded profile
+and opens the selected installed terminal for a chosen folder. The setup helper receives the key only
+in its private process environment, while subsequent launches use the
+Keychain command saved in Pi's normal configuration. The selected terminal may ask once for
+Keychain access before it opens; Open Pi waits for that lookup to succeed
+and does not place the key on the clipboard or prompt for it. Files and command
+arguments contain no key. Pi is excluded from
 Beginner setup and has no managed grant or scoped Disconnect. See
 [Pi setup](../apps/menu-bar/README.md#pi-in-connections).
 

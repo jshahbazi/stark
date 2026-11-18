@@ -96,6 +96,7 @@ struct DesktopConnectionsTests {
             case "broker-cleanup": try brokerCleanup()
             case "opencode-approval": try openCodeApproval()
             case "opencode-model-discovery": try openCodeModelDiscovery()
+            case "opencode-session-selection": try openCodeSessionSelection()
             case "opencode-pending": try openCodePending()
             case "opencode-deny": try openCodeDeny()
             case "opencode-disabled": try openCodeDisabled()
@@ -756,11 +757,36 @@ struct DesktopConnectionsTests {
             controller.disconnect()
             try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
         }
+
         try withOpenCode(openCodeStorage(enabled: true), models: models) { controller, _ in
             controller.handle("status", peer: current) { _ in }
             try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
             try check(controller.pendingEngine == current)
         }
+    }
+
+    private static func openCodeSessionSelection() throws {
+        let encoded = try JSONSerialization.data(withJSONObject: ["data": [
+            "ses_new": ["type": "running"],
+            "ses_old": ["type": "running"],
+        ]], options: [.sortedKeys])
+        try check(OpenCodeConnectionController.activeSessionIDs(from: encoded) == ["ses_new", "ses_old"])
+        for invalid in [
+            ["data": ["not-a-session": ["type": "running"]]],
+            ["data": ["ses_new": ["type": "idle"]]],
+            ["data": ["ses_new": [:]]],
+            ["extra": [:], "data": [:]],
+        ] as [[String: Any]] {
+            let data = try JSONSerialization.data(withJSONObject: invalid)
+            try check(OpenCodeConnectionController.activeSessionIDs(from: data) == nil)
+        }
+        let request = try JSONSerialization.jsonObject(
+            with: OpenCodeConnectionController.sessionModelRequest(modelID: "fixture/next-model")!
+        ) as! [String: Any]
+        try check((request["model"] as? [String: String]) == ["id": "fixture/next-model", "providerID": "stark"])
+        try check(OpenCodeConnectionController.sessionModelRequest(modelID: "") == nil)
+        try check(OpenCodeConnectionController.sessionModelRequest(modelID: "fixture#variant") == nil)
+        try check(OpenCodeConnectionController.sessionModelRequest(modelID: "fixture\nmodel") == nil)
     }
 
     private static func openCodeApproval() throws {

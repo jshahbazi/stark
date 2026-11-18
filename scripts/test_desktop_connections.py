@@ -34,6 +34,7 @@ SCENARIOS = (
     "broker-cleanup",
     "opencode-approval",
     "opencode-model-discovery",
+    "opencode-session-selection",
     "opencode-pending",
     "opencode-deny",
     "opencode-disabled",

@@ -28,7 +28,8 @@ requested subset is reported as that subset.
   an existing project. Complete decisions and desktop interaction serially.
 - Use managed Connections for OpenWork and OpenCode Desktop. A standalone
   OpenCode CLI with a copied key exercises a different connection. Pi uses its
-  existing Advanced Connections setup and Terminal/hidden-prompt credential flow.
+  existing Advanced Connections setup and selected-terminal launch with Pi's
+  Keychain credential command.
   See [local API connection details](LOCAL_API.md).
 
 Observe initial connection and working-folder settings without exporting chat,
@@ -95,7 +96,8 @@ attest that a UI action happened. There is no arbitrary diagnostic-text field.
    own run subfolder, start a fresh conversation and select Stark's exact running
    model. OpenWork and OpenCode use Stark's managed Connect/Allow controls; a new
    OpenCode engine may need Allow. Pi uses **Advanced → Connect to... → Apps → Pi**,
-   **Change Working Folder…**, and **Open Stark Pi**. Do not display or script-read
+   **Change Working Folder…**, and **Open Pi**. The Open button is disabled
+   until setup matches the running model. Do not display or script-read
    the master key. If the OS requires personal credential approval, let the user
    complete it. Record `connection` and `model` after checking both interfaces.
 2. **Build.** Read the current authored brief through the helper (below), submit
