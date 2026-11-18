@@ -518,7 +518,7 @@ struct ModelFamily: Identifiable {
         switch id {
         case "qwen3": return "Qwen3"
         case "qwen2": return "Qwen2"
-        case "qwen3_5": return "Qwen3.5"
+        case "qwen3_5": return "Qwen3.5 / 3.8"
         case "decider-flash-v1.3": return "Decider Flash v1.3"
         case "qwen3_5_moe": return "Qwen3.5 MoE"
         case "qwen4_exp": return "Qwen3.8 Flash Next"
@@ -1079,7 +1079,7 @@ struct TopModelRanking: Identifiable {
     static let entries: [Self] = [
         .init(id: "qwen4_exp", name: "Qwen3.8 Flash Next", index: 100.0, modelCount: 1, benchmarkCount: 5),
         .init(id: "glm5_next", name: "GLM-5.3 Flash", index: 97.3, modelCount: 1, benchmarkCount: 8),
-        .init(id: "qwen3_5", name: "Qwen3.5 dense", index: 61.1, modelCount: 6, benchmarkCount: 18),
+        .init(id: "qwen3_5", name: "Qwen3.5 / 3.8 dense", index: 61.1, modelCount: 6, benchmarkCount: 18),
         .init(id: "qwen3", name: "Qwen3 dense", index: 48.3, modelCount: 3, benchmarkCount: 6),
         .init(id: "qwen2", name: "Qwen2 dense", index: 41.0, modelCount: 6, benchmarkCount: 17),
         .init(id: "phi3", name: "Phi-3 dense", index: 34.9, modelCount: 1, benchmarkCount: 4),

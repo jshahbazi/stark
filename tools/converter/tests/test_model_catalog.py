@@ -1039,6 +1039,37 @@ def test_exact_official_image_source_keeps_its_recorded_revision(tmp_path):
     assert next(event[2] for event in hub.events if event[0] == "info")["revision"] == catalog.EXACT_VISION_REVISION
 
 
+def test_official_qwen38_dense_source_is_pinned_and_keeps_images(tmp_path, monkeypatch):
+    from stark_convert import vision_family
+
+    template = b"synthetic reviewed official Qwen3.8 template"
+    monkeypatch.setattr(vision_family, "_OFFICIAL_QWEN38_TEMPLATE_SHA256", hashlib.sha256(template).hexdigest())
+    sidecars = {
+        "preprocessor_config.json": vision_family._PROCESSOR,
+        "chat_template.jinja": template,
+        "tokenizer_config.json": {},
+    }
+    hub = Hub()
+    hub.add(
+        tmp_path,
+        catalog.QWEN38_DENSE_REPO,
+        geometry(),
+        revision=catalog.QWEN38_DENSE_REVISION,
+        names={"model.safetensors": 10, **{name: 100 for name in sidecars}},
+        sidecars=sidecars,
+    )
+    hub.discovered["qwen3_5"] = [catalog.QWEN38_DENSE_REPO]
+
+    item = catalog.family_catalog("qwen3_5", hub=hub)["items"][0]
+
+    assert item["repo"] == catalog.QWEN38_DENSE_REPO
+    assert item["revision"] == catalog.QWEN38_DENSE_REVISION
+    assert item["artifact_modes"] == ["text", "vision-language"]
+    assert item["default_artifact_mode"] == "vision-language"
+    assert catalog._catalog_pins("qwen3_5")[catalog.QWEN38_DENSE_REPO] == catalog.QWEN38_DENSE_REVISION
+    assert "Qwen3.8" in catalog._SEARCH_TERMS["qwen3_5"]
+
+
 def test_result_and_candidate_counts_are_bounded_even_if_api_ignores_limit(tmp_path):
     hub = Hub()
     for index in range(60):

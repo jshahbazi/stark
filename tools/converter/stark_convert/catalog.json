@@ -3337,13 +3337,17 @@
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
       "compressed_format": null,
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.8",
       "files": {
+        "chat_template": {
+          "filename": "chat_template.jinja",
+          "repo": "Qwen/Qwen3.8-27B"
+        },
         "generation_config": {
           "filename": "generation_config.json",
           "repo": "Qwen/Qwen3.8-27B"
@@ -3369,14 +3373,14 @@
         "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
         "inline_sources": {},
         "parser_id": "optional_thinking",
-        "reasoning_id": "sha256:4c79c0b7bed2fca3499075659cf1304338b333a0cefe47d75f3c1582ca1bbb7a",
+        "reasoning_id": "boolean_default_on",
         "roles": {
           "assistant": "assistant",
           "system": "system",
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "hf-generic",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.8-27B",
       "origin": "HuggingFaceOrigin",
@@ -3384,7 +3388,7 @@
       "size": "27B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },

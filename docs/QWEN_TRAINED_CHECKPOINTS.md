@@ -1,13 +1,21 @@
-# Qwen 4B trained checkpoints
+# Qwen3.5 and Qwen3.8 checkpoints
 
-Stark converts full or merged checkpoints derived from `Qwen/Qwen3-4B-Instruct-2507` and `empero-ai/Qwen3.8-4B-Distill` into its native model format. Use BF16 output for native scoring and text generation.
+Stark converts complete Qwen3.5-architecture checkpoints, including the official
+Qwen3.8 dense model, into its native model format. Use BF16 output for native
+scoring and text generation.
 
 | Checkpoint family | Converter architecture | Execution path |
 | --- | --- | --- |
 | `Qwen/Qwen3-4B-Instruct-2507` | `qwen3` | Dense attention with query/key normalization |
+| `Qwen/Qwen3.8-27B` | `qwen3_5` | Dense gated-DeltaNet/attention decoder with the existing Qwen3.5 vision family |
 | `empero-ai/Qwen3.8-4B-Distill` | `qwen3_5` | Qwen3.5 text decoder with gated attention and DeltaNet |
 
-The Empero model uses the Qwen3.5 architecture. Its repository name does not select a separate Qwen3.8 architecture. Trained text-only exports declaring `model_type=qwen3_5_text` use the same canonical `qwen3_5` adapter. Stark also extracts the text decoder from a declared vision-language wrapper and source-verifies omitted vision/MTP weights. Image, video and speculative MTP execution are outside this path.
+The Qwen3.8 dense model declares the Transformers `qwen3_5` architecture. The
+repository name does not select Stark's separate Qwen3.8 Flash Next MoE
+implementation. Trained text-only exports declaring `model_type=qwen3_5_text`
+use the same canonical `qwen3_5` adapter. Complete vision-language sources can
+retain the reviewed image tower; conversion and execution qualification remain
+artifact-specific.
 
 ## Convert your trained checkpoint
 
@@ -49,7 +57,8 @@ For a private Hugging Face checkpoint, replace the local source path with its re
 
 ## Convert the public base models
 
-The existing Qwen3 profile and the Empero extension support direct conversion:
+The existing Qwen3 profile and complete Qwen3.5-family checkpoints support
+direct conversion:
 
 ```sh
 uv run --project tools/converter --locked stark-convert Qwen/Qwen3-4B-Instruct-2507 \
@@ -59,9 +68,14 @@ uv run --project tools/converter --locked stark-convert Qwen/Qwen3-4B-Instruct-2
 uv run --project tools/converter --locked stark-convert empero-ai/Qwen3.8-4B-Distill \
   --revision c83cb7aa2999d2f35c43e9ae0634a30eb8985a1e \
   --output models/empero-qwen38-4b-distill
+
+uv run --project tools/converter --locked stark-convert Qwen/Qwen3.8-27B \
+  --revision 37561816e66b5b9153b1b64c10968c18c1e6f4a0 \
+  --artifact-mode vision-language \
+  --output models/qwen38-27b
 ```
 
-The pinned public sources are [Qwen's config](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/blob/cdbee75f17c01a7cc42f958dc650907174af0554/config.json) and [Empero's config](https://huggingface.co/empero-ai/Qwen3.8-4B-Distill/blob/c83cb7aa2999d2f35c43e9ae0634a30eb8985a1e/config.json). Both checkpoints declare Apache-2.0 licensing; preserve their licensing and attribution when distributing weights.
+The pinned Qwen3.8 source is [the official config](https://huggingface.co/Qwen/Qwen3.8-27B/blob/37561816e66b5b9153b1b64c10968c18c1e6f4a0/config.json), which declares Apache-2.0 licensing. Preserve its licensing and attribution when distributing weights. The exact 27B artifact still requires its own conversion, native-load, prefix-reuse, tool, image, memory and performance qualification.
 
 ## Run tests through Stark
 

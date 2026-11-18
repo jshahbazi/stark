@@ -61,7 +61,12 @@ also records the unsupported architecture contracts for DeepSeek V4.1, Kimi
 K3.1, Beam, Nemotron 3.5 Bolt and Gemma 4. Metadata discovery does not provide
 native execution or tool qualification for those models.
 
-Dense `qwen3_5` text conversion also admits the registered
+Dense `qwen3_5` conversion covers the shared Qwen3.5 and Qwen3.8 text and image
+family. The catalog pins the official complete `Qwen/Qwen3.8-27B` source at
+`37561816e66b5b9153b1b64c10968c18c1e6f4a0`; its BF16 image artifact and
+checkpoint-specific native run remain separately qualified gates.
+
+The same `qwen3_5` path admits the registered
 `Jundot/Qwen3.8-27B-oQ4e-mtp` extension. Its mixed affine 4/5/6/8-bit matrices
 are preserved without requantization. Uniform five/six-bit matrices retain
 their packed bytes when they use group size 64, BF16 and output-input layout.

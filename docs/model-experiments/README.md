@@ -1,5 +1,7 @@
 # Model change and experiment ledger
 
+- [20261117-QWEN38-CATALOG-01: official dense catalog admission](2026-11-17-qwen38-dense-catalog.md): the complete official `Qwen/Qwen3.8-27B` is pinned in the existing dense Qwen3.5/Qwen3.8 family, with reviewed image and XML tool-template identities. Metadata and model-free admission pass; full-model conversion and native qualification remain pending.
+
 - [20261117-FLASHSPEED-11–16 · Lily midpoint speed and release](2026-11-17-lily-midpoint-speed-and-release.md): the exact pinned retained-vision Lily Q4-XL artifact enables midpoint reuse by default with an environment kill switch. At 12K, normal append-only follow-ups were 40–46% faster to first token and fresh-plus-follow-up cycles improved 19.4%; full-model, Metal and all four lifecycle checks passed.
 
 - [20261117-FLASHSPEED-11–14 · Lily midpoint integration](2026-11-17-lily-midpoint-integration.md) isolates the default-on, pinned-artifact midpoint runtime and tests. The pinned Lily Q4-XL benchmark matched logits and two-draft MTP work. Median Pi turn time was 15.3% lower across eight matched pairs. The owner accepted the observed 12K tradeoff for the integration decision.

@@ -185,14 +185,14 @@ family. See [Ripple support and validation](../../docs/RIPPLE.md).
 
 ## Catalog coverage and qualification
 
-The declarative [catalog](stark_convert/catalog.json) records 110 reference model identities from the pinned Lalamo inventory plus ten Stark extensions. Adapters and metadata profiles cover 95 identities. A registered identity can remain planned when its configuration is outside the adapter's admitted semantics; the current catalog status and preflight result are authoritative:
+The declarative [catalog](stark_convert/catalog.json) records 110 reference model identities from the pinned Lalamo inventory plus ten Stark extensions. Adapters and metadata profiles cover 96 identities. A registered identity can remain planned when its configuration is outside the adapter's admitted semantics; the current catalog status and preflight result are authoritative:
 
 | Adapter | Implemented identities |
 | --- | --- |
 | Qwen3 | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-4B-Thinking-2507` |
 | Qwen3 MLX | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}-MLX-{4bit,8bit}`; affine groups 16/32/64/128 |
 | Qwen2 | `Qwen/Qwen2.5-Coder-{0.5B,1.5B,3B,7B,14B,32B}-Instruct`, `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` |
-| Qwen3.5 text | Dense `Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}`; extensions `empero-ai/Qwen3.8-4B-Distill` and `Jundot/Qwen3.8-27B-oQ4e-mtp`. Vision and floating auxiliary MTP tensors are omitted in text mode; a complete declared quantized MTP head is retained. MoE is unsupported |
+| Qwen3.5 / Qwen3.8 text | Dense `Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}` and the pinned official `Qwen/Qwen3.8-27B`; extensions `empero-ai/Qwen3.8-4B-Distill` and `Jundot/Qwen3.8-27B-oQ4e-mtp`. Vision and floating auxiliary MTP tensors are omitted in text mode; a complete declared quantized MTP head is retained. MoE is unsupported |
 | Qwen3.5 text MLX | `mlx-community/Qwen3.5-{0.8B,2B,4B,9B}-MLX-{4bit,8bit}`, `mlx-community/Qwen3.5-27B-{4bit,8bit}` |
 | LFM2 | Dense `LiquidAI/LFM2-{350M,700M,1.2B,2.6B}` |
 | LFM2 MLX | `mlx-community/LFM2-{350M,700M,1.2B,2.6B}-{4bit,8bit}` |

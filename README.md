@@ -96,7 +96,7 @@ The tables below include named checkpoints and fine-tunes as well as their imple
 | **Ripple-65B Preview** | Conditional native text support for prepared Q8_0 and standard (not AD) Q4_K_M checkpoints; see [Ripple setup, precision and qualification limits](docs/RIPPLE.md) |
 | Qwen3 dense | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-4B-Thinking-2507`, **Polaris-4B-Preview** (`POLARIS-Project/Polaris-4B-Preview`) |
 | Qwen2 dense | **Qwen2.5-Coder** (`Qwen/Qwen2.5-Coder-{0.5B,1.5B,3B,7B,14B,32B}-Instruct`), **DeepSeek-R1-Distill-Qwen-1.5B** (`deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B`) |
-| Qwen3.5 dense | `Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}`, **Qwen3.8-4B-Distill** (`empero-ai/Qwen3.8-4B-Distill`), **JevK5** (see Decision below), **Qwen3.8-27B oQ4e MTP** (`Jundot/Qwen3.8-27B-oQ4e-mtp`, mixed 4/5/6/8-bit with a quantized MTP head) |
+| Qwen3.5 / 3.8 dense | `Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}`, **Qwen3.8-27B** (`Qwen/Qwen3.8-27B`), **Qwen3.8-4B-Distill** (`empero-ai/Qwen3.8-4B-Distill`), **JevK5** (see Decision below), **Qwen3.8-27B oQ4e MTP** (`Jundot/Qwen3.8-27B-oQ4e-mtp`, mixed 4/5/6/8-bit with a quantized MTP head) |
 | Llama dense | `meta-llama/Llama-3.1-8B-Instruct`, `meta-llama/Llama-3.2-{1B,3B}-Instruct`, `unsloth/Llama-3.2-1B-Instruct`, **SmolLM2** (`HuggingFaceTB/SmolLM2-1.7B-Instruct`), **Nanbeige4.1** (`Nanbeige/Nanbeige4.1-3B`), **Reka Flash 3.1** (`RekaAI/reka-flash-3.1`) |
 | Mistral dense | **Mistral 7B Instruct** (`mistralai/Mistral-7B-Instruct-{v0.2,v0.3}`), **Codestral** (`mistralai/Codestral-22B-v0.1`), **Devstral Small** (`mistralai/Devstral-Small-2505`) |
 | Gemma 2 | `google/gemma-2-2b-it` |
@@ -119,7 +119,7 @@ The dense `Jundot/Qwen3.8-27B-oQ4e-mtp` checkpoint uses the converted Qwen3.5-fa
 
 | Family / model | Image support in Stark |
 | --- | --- |
-| **Qwen3.5 dense BF16** | Complete compatible checkpoints and merged fine-tunes use the configuration-driven family contract. The recorded 0.8B artifact has reference and execution evidence; other artifacts need their own checks. |
+| **Qwen3.5 / dense Qwen3.8 BF16** | Complete compatible checkpoints and merged fine-tunes use the configuration-driven family contract. The recorded 0.8B artifact has reference and execution evidence; Qwen3.8-27B metadata and conversion admission are implemented, with full artifact execution still separately unqualified. |
 | **Qwen3.5 / dense Qwen3.8 with quantized decoders** | Complete BF16 vision tower plus admitted affine decoder storage. The pinned Qwen3.5 0.8B 4-bit cases match source logits exactly; `Jundot/Qwen3.8-27B-oQ4e-mtp` passes recorded tower and worker lifecycle checks. |
 | **Qwen3.5 MoE** | The pinned quantized 35B-A3B artifact passes tower and worker lifecycle checks. The separate BF16-source MoE path has controlled component checks; full 35B execution is unverified. |
 | **Retained Qwen3.8-Flash-Next** | Add Source prepares compatible Lily and external affine image checkpoints using shared layout checks. The pinned `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` image artifact passes a full 27-layer vision comparison and worker lifecycle checks; other artifacts require their own qualification. Typed text-only Lily conversions omit the tower. |

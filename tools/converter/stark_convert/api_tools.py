@@ -60,6 +60,9 @@ _SUPPORTED_TEMPLATE_HASHES = frozenset({QWEN3_TEMPLATE_SHA256, QWEN3_4B_TEMPLATE
 # it renders named XML-like function/parameter blocks. No other template is
 # admitted by model family/name, and no upstream template text is copied here.
 QWEN38_XML_TEMPLATE_SHA256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+# Qwen/Qwen3.8-27B chat_template.jinja after removing Transformers-only
+# generation markers, revision 37561816e66b5b9153b1b64c10968c18c1e6f4a0.
+QWEN38_OFFICIAL_TEMPLATE_SHA256 = "61c5db6e90356e85fb2ccfd0466fddf3b2a5c6058b20b195a37d7b01de97c8b8"
 # alibiserikbay/JevK5's converted Qwen3.5 template at revision
 # c4f7fdb3aeab5582336406e78d3bef11bf98833d, reviewed in memory against typed
 # synthetic history. Its top-level boolean/null values use the exact
@@ -77,6 +80,9 @@ _SUPPORTED_TEMPLATE_PROGRAMS = {
     # independently rendered definitions, typed calls and result history.
     "8f92b77faedd343fd1d45a534e1fc93a77efb76adddd98a6819e6cd17a0b9bfa": _PARSER,
     "ece3bd43a4194cae4a2d3b6079214373b84f9083ff6258940d0b03634e93f08e": _XML_PARSER,
+    # Qwen/Qwen3.8-27B, revision 37561816e66b5b9153b1b64c10968c18c1e6f4a0:
+    # the same named XML tool-call/parameter wire with reasoning controls.
+    "f15832d2404398fe7cfcd5639938be4884b663b0b3921d80765af4a5578150de": _XML_PARSER,
     "a0feb6a6a23bced6ef842bcb46dad27dc43738bf9acd5751606f24aa343610d8": _QWEN35_XML_PARSER,
     # zai-org/GLM-5.3-Flash metadata revision
     # 04c4e9e95c5da8862dced7e5056455116f83a7e0: bare function name and
@@ -377,7 +383,7 @@ def tool_parser_for(codec: dict | None) -> str | None:
         return TEMPLATE_HASHES[digest]
     if digest in _SUPPORTED_TEMPLATE_HASHES:
         return _PARSER
-    if digest == QWEN38_XML_TEMPLATE_SHA256:
+    if digest in {QWEN38_XML_TEMPLATE_SHA256, QWEN38_OFFICIAL_TEMPLATE_SHA256}:
         return _XML_PARSER
     if digest == QWEN35_XML_TEMPLATE_SHA256:
         return _QWEN35_XML_PARSER

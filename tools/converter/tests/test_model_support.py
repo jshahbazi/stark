@@ -70,6 +70,8 @@ def test_matrix_is_shared_bounded_mutation_safe_and_separate_from_qualification(
     }
     assert registry.CONFIG_ADAPTERS is model_support.CONFIG_ADAPTERS
     assert registry.architecture_for_config({"model_type": "qwen3_5_text"}) == "qwen3_5"
+    qwen_dense = next(item for item in matrix["families"] if item["family_id"] == "qwen3_5")
+    assert qwen_dense["name"] == "Qwen3.5 / Qwen3.8 dense"
     matrix["families"][0]["modes"]["text"]["status"] = "qualified"
     assert support_matrix()["families"][0]["modes"]["text"]["status"] == "conditional"
 

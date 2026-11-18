@@ -30,10 +30,13 @@ _DECIDER_FAMILY_ID = "decider-flash-v1.3"
 _DECIDER_REPO = "perplexity-ai/pplx-decider-flash-v1.3"
 _DECIDER_REVISION = "d06fb3f2d97e0a52325a0d463c450cf0338f44fe"
 _DECIDER_WEIGHT_BYTES = 9_079_921_808
+QWEN38_DENSE_REPO = "Qwen/Qwen3.8-27B"
+QWEN38_DENSE_REVISION = "37561816e66b5b9153b1b64c10968c18c1e6f4a0"
 
 MAX_ITEMS = 30
 MAX_CANDIDATES = MAX_ITEMS
 MAX_INVENTORY = 16384
+MAX_SEARCH_QUERY_BYTES = 256
 # Listing positions one page may pass without a per-repository request.
 MAX_SCREENED = 500
 _LISTING_STEP = 100
@@ -90,8 +93,8 @@ _SEARCH_TERMS = {
     "phi3": ("Phi-3",),
     "granite": ("Granite",),
     "smollm3": ("SmolLM3",),
-    "qwen3_5": ("Qwen3.5", "Qwen3.6"),
-    "qwen3_5_moe": ("Qwen3.5", "Qwen3.6"),
+    "qwen3_5": ("Qwen3.5", "Qwen3.6", "Qwen3.8"),
+    "qwen3_5_moe": ("Qwen3.5", "Qwen3.6", "Qwen3.8"),
     "qwen4_exp": ("Qwen3.8-Flash-Next",),
     "lfm2": ("LFM2",),
     "llamba": ("LLaMBA",),
@@ -850,7 +853,10 @@ def _catalog_pins(family):
         source = SOURCES["qwen38-lily-q4-xl"]
         return {source["weights_repo"]: source["weights_revision"]}
     if family == "qwen3_5":
-        return {EXACT_VISION_REPO: EXACT_VISION_REVISION}
+        return {
+            EXACT_VISION_REPO: EXACT_VISION_REVISION,
+            QWEN38_DENSE_REPO: QWEN38_DENSE_REVISION,
+        }
     return {}
 
 
