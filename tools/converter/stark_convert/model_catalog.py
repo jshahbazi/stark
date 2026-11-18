@@ -993,7 +993,7 @@ def family_catalog(
     by default) prefers models from a RAM list this machine can use.
     """
     from .catalog_cache import VerdictCache
-    from .catalog_ranking import host_memory, reference_scores
+    from .catalog_ranking import catalog_reference_scores, host_memory
     from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
     from .native_catalog import FLINT_FAMILY_ID, RIPPLE_FAMILY_ID
     from .native_catalog import catalog_items as native_catalog_items
@@ -1086,9 +1086,9 @@ def family_catalog(
         hub = huggingface_hub
     deadline = time.monotonic() + deadline_seconds
     cache = VerdictCache(cache_dir, family, planning=planning) if cache_dir is not None else None
-    # Guided planning uses reference scores only to choose which bounded source
-    # metadata to inspect first. Its own report remains score-free.
-    ranking = reference_scores() if not planning or ranking_task is not None else None
+    # Browsing uses the coding score; bounded guided discovery uses the score
+    # for its selected task. Planned rows remain score-free.
+    ranking = catalog_reference_scores() if not planning or ranking_task is not None else None
     if ranking is not None and physical_memory is None:
         physical_memory = host_memory()
 

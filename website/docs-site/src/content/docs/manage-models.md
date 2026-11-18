@@ -13,7 +13,7 @@ pass the same family, format and pinned-revision checks as the catalog can be
 downloaded. Searches inside a selected family continue to filter that family's
 loaded rows without another Hub request.
 
-Inside a family, models open sorted by **Top rated (coding)**; **Top rated (general)**, name and size orders are beside it. **Hide Unsupported** is checked by default and leaves out models Stark cannot download. Uncheck it to see them marked **Unavailable** with the reason. Exports in formats Stark cannot import, such as AWQ or GPTQ, are listed under the original model they were made from, so a search for one lands on a model you can download.
+Inside a family, models open sorted by **Coding score**, followed by name and size orders. The score comes from llmbench's frozen summary score, not from Stark benchmarking the downloaded quantization. **Hide Unsupported** is checked by default and leaves out models Stark cannot download. Uncheck it to see them marked **Unavailable** with the reason. Exports in formats Stark cannot import, such as AWQ or GPTQ, are listed under the original model they were made from, so a search for one lands on a model you can download.
 
 Downloading, preparing and running are separate steps. Wait until the app reports the model is running before connecting another application.
 

@@ -598,15 +598,13 @@ def matches_recipe(path, recipe):
         if recipe.native_choice is not None:
             from .api_tools import tool_parser_for
             from .hybrid_prepare import prepared_identity
-            from .vision_runtime import model_image_family
 
             profile = recipe.native_profile
             receipt = json.loads(_small_file(root, "native-source.json"))
             parsed = json.loads(config)
             template = parsed.get("token_codec_config", {}).get("prompt_template")
             return (
-                model_image_family(parsed, root) is None
-                and prepared_identity(root)
+                prepared_identity(root)
                 == {
                     "repo": recipe.repo,
                     "revision": recipe.revision,
@@ -699,28 +697,29 @@ def recommendation_allowed(recipe, host, *, installed=False):
     physical = host.get("physical_memory_bytes")
     if type(physical) is not int or physical < max(recipe.minimum_memory, recipe.runtime_memory + 2 * GIB):
         return False
-    if recipe.native_choice is not None and "gpu_available" not in host:
+    if recipe.native_choice is not None and (
+        host.get("gpu_available") is not True or host.get("unified_memory") is not True
+    ):
         return False
-    if "gpu_available" in host or "gpu_memory_budget_bytes" in host:
-        budget = host.get("gpu_memory_budget_bytes")
-        if (
-            host.get("gpu_available") is not True
-            or host.get("unified_memory") is not True
-            or type(budget) is not int
-            or budget <= 0
-            or recipe.gpu_runtime_memory * 100 > budget * 85
-        ):
-            return False
     if installed:
         return True
-    space, download_space = host.get("free_disk_bytes"), host.get("download_free_disk_bytes")
-    return (
-        type(space) is int
-        and space + setup_credit(recipe, host) >= recipe.setup_bytes
-        and (
-            recipe.native_choice is not None or type(download_space) is int and download_space >= recipe.download_bytes
-        )
-    )
+    return True
+
+
+def disk_space_shortfall(recipe, host, *, installed=False):
+    """Return bytes missing for installation, independent of recommendation rank."""
+    if installed:
+        return 0
+    missing = 0
+    space = host.get("free_disk_bytes")
+    if type(space) is int:
+        needed = max(0, recipe.setup_bytes - setup_credit(recipe, host))
+        missing = max(missing, needed - space)
+    if recipe.native_choice is None:
+        download_space = host.get("download_free_disk_bytes")
+        if type(download_space) is int:
+            missing = max(missing, recipe.download_bytes - download_space)
+    return max(0, missing)
 
 
 def installation_allowed(recipe, host, *, installed=False):
@@ -728,13 +727,11 @@ def installation_allowed(recipe, host, *, installed=False):
     available = host.get("available_memory_bytes")
     return recommendation_allowed(recipe, host, installed=installed) and (
         installed or type(available) is int and available >= 2 * GIB
-    )
+    ) and disk_space_shortfall(recipe, host, installed=installed) == 0
 
 
 def _planning_budget(host):
-    physical = host["physical_memory_bytes"] - 2 * GIB
-    budget = host.get("gpu_memory_budget_bytes")
-    return min(physical, budget * 85 // 100) if type(budget) is int and budget > 0 else physical
+    return host["physical_memory_bytes"] - 2 * GIB
 
 
 def execution_allowed(recipe, host):
@@ -748,12 +745,9 @@ def execution_allowed(recipe, host):
 
 
 def _fit_tier(recipe, host):
-    """A comfortable fit leaves 10% beyond the admission planning reserves."""
+    """A comfortable fit leaves 10% beyond installed-memory reserves."""
     physical = host["physical_memory_bytes"] - 2 * GIB
-    budget = host.get("gpu_memory_budget_bytes")
-    physical_fit = recipe.runtime_memory * 110 <= physical * 100
-    gpu_fit = recipe.gpu_runtime_memory * 110 <= budget * 85 if type(budget) is int and budget > 0 else True
-    return int(physical_fit and gpu_fit)
+    return int(recipe.runtime_memory * 110 <= physical * 100)
 
 
 def _ranking_key(recipe, host, installed, task, preference):
@@ -784,7 +778,7 @@ def _ranking_key(recipe, host, installed, task, preference):
 
 def _recommendation_reason(recipe, host, task, preference, *, benchmark_used=False, coding_evidence_available=False):
     reasons = [
-        "The memory plan fits this Mac's RAM and GPU budget."
+        "The memory plan fits this Mac's installed unified memory."
         if "gpu_available" in host
         else "The memory plan fits this Mac's physical memory."
     ]
@@ -925,22 +919,57 @@ def recommendation_report(
         and recommendation_allowed(recipe, host, installed=bool(installed.get(recipe.id)))
     ]
     eligible.sort(key=lambda recipe: _ranking_key(recipe, host, installed, task, preference))
+    admission_order = list(eligible)
     benchmarks = load_registry() if benchmarks is None else benchmarks
-    eligible, cohort, benchmark_used = benchmarks.rank(
-        eligible, task, preference, lambda recipe: _fit_tier(recipe, host)
-    )
+    if guide_task in {"general", "coding"}:
+        cohort, benchmark_used = None, set()
+    else:
+        eligible, cohort, benchmark_used = benchmarks.rank(
+            eligible, task, preference, lambda recipe: _fit_tier(recipe, host)
+        )
     leaderboard = load_snapshot() if leaderboard is None else leaderboard
     speed_limits = speed_policy(guide_task, guide_preference, host.get("physical_memory_bytes"))
     eligible, bucket, records, leaderboard_used = leaderboard.rank(
-        eligible, guide_task, guide_preference, host.get("physical_memory_bytes"), benchmarks.model_id
+        eligible,
+        guide_task,
+        guide_preference,
+        host.get("physical_memory_bytes"),
+        benchmarks.model_id,
+        preserve_fallback=bool(benchmark_used),
     )
     if leaderboard_used:
         # Historical benchmark evidence stays visible as reference information;
         # it cannot claim to have determined a different final ordering.
         benchmark_used = set()
+    if leaderboard_used and eligible:
+        primary = eligible[0]
+        primary_installed = bool(installed.get(primary.id))
+        if not primary_installed and disk_space_shortfall(primary, host) > 0:
+            selected = {recipe.id for recipe in eligible}
+            parents = {benchmarks.model_id(recipe) for recipe in eligible}
+            alternatives = [
+                recipe
+                for recipe in sorted(
+                    admission_order,
+                    key=lambda recipe: (
+                        disk_space_shortfall(recipe, host, installed=bool(installed.get(recipe.id))) > 0,
+                        recipe.weight_bytes,
+                        recipe.runtime_memory,
+                        recipe.repo.casefold(),
+                    ),
+                )
+                if recipe.id not in selected and benchmarks.model_id(recipe) not in parents
+            ]
+            for alternative in alternatives[: 3 - len(eligible)]:
+                eligible.append(alternative)
+                parents.add(benchmarks.model_id(alternative))
     items = []
     for recipe in eligible[:3]:
-        evidence, benchmark_details = benchmarks.evidence(recipe, task, cohort, benchmark_used)
+        evidence, benchmark_details = (
+            ([], [])
+            if guide_task in {"general", "coding"}
+            else benchmarks.evidence(recipe, task, cohort, benchmark_used)
+        )
         cached_evidence, cached_details = leaderboard.evidence(
             recipe, benchmarks.model_id(recipe), guide_task, bucket, records, leaderboard_used
         )
@@ -955,23 +984,29 @@ def recommendation_report(
             coding_evidence_available=bool(benchmark_used),
         )
         if leaderboard_used:
+            index_name = "coding" if guide_task == "coding" else "non-coding"
             reason = (
-                "Selected using the cached whatmodel.sh "
-                + ("Coding" if guide_task == "coding" else "General Work")
-                + " leaderboard among models admitted by Stark's installed RAM, GPU and disk checks. "
+                f"Selected using the cached llmbench {index_name} score among models admitted by Stark's installed "
+                "RAM, GPU and disk checks. "
                 + (
-                    "This model has a published parent-model score; this Stark artifact has not been benchmarked."
+                    f"This model has a parent-model {index_name} score; this Stark artifact has not been benchmarked."
                     if recipe.id in leaderboard_used
-                    else "No matching cached score is recorded for this model; it follows scored options. "
+                    else "No matching cached index is recorded for this model; it follows indexed options. "
                     "Its quality is unknown."
                 )
             )
-        if speed_limits["applied"]:
+        if speed_limits["applied"] and leaderboard_used:
+            index_name = "coding" if guide_task == "coding" else "non-coding"
             reason = (
-                "Selected by cached task score within a weight budget of 25% of this Mac's RAM, "
-                f"with a minimum parent-model reference score of {speed_limits['minimum_score']}. "
+                f"Selected by the cached llmbench {index_name} score within a weight budget of 25% of this Mac's "
+                f"RAM, with a minimum parent-model score of {speed_limits['minimum_score']}. "
                 "Exact export weights determine the budget; quantized answer quality and response speed "
                 "have not been measured by this ranking. Stark's installed RAM, GPU and disk checks also pass."
+            )
+        elif speed_limits["applied"]:
+            reason = (
+                "Selected within a weight budget of 25% of this Mac's RAM using the admitted resource ranking. "
+                "No llmbench summary score applies to this task. Actual response speed has not been measured."
             )
         ids = list(installed.get(recipe.id, ()))
         license_name = (
@@ -982,6 +1017,13 @@ def recommendation_report(
             else ("Review the installed source license" if recipe.installed_only else "Apache-2.0")
         )
         license_name = _license_label(license_name)
+        disk_shortfall = disk_space_shortfall(recipe, host, installed=bool(ids))
+        disk_warning = (
+            f"Not enough free disk space right now. Free about {(disk_shortfall + MIB - 1) // MIB} MiB more "
+            f"or check another option; installation needs approximately {recipe.setup_bytes // GIB} GiB."
+            if disk_shortfall > 0
+            else None
+        )
         items.append(
             {
                 "id": recipe.id,
@@ -1002,6 +1044,8 @@ def recommendation_report(
                 "installed_bytes_estimate": recipe.installed_bytes,
                 "setup_disk_bytes_estimate": recipe.setup_bytes,
                 "setup_disk_bytes_remaining_estimate": recipe.setup_bytes - setup_credit(recipe, host),
+                "disk_space_shortfall_bytes": disk_shortfall,
+                "disk_space_warning": disk_warning,
                 "runtime_memory_bytes_estimate": recipe.runtime_memory,
                 "startup_memory_bytes_estimate": recipe.startup_memory,
                 "gpu_memory_bytes_estimate": recipe.gpu_runtime_memory,
@@ -1036,15 +1080,27 @@ def recommendation_report(
     native = [recipe for recipe in candidates if recipe.native_choice is not None]
     if native:
         message += " Native hybrid models were also checked for memory and setup storage."
-    if items and speed_limits["applied"]:
+    if items and speed_limits["applied"] and leaderboard_used:
+        index_name = "coding" if guide_task == "coding" else "non-coding"
         message += (
-            " Speed selects the highest cached task score within a RAM-scaled weight budget and "
+            f" Speed selects the highest cached llmbench {index_name} score within a RAM-scaled weight budget and "
             "parent-model score floor. Quantized quality and Stark speed remain unmeasured by this ranking."
         )
-    elif items and leaderboard_used:
+    elif items and speed_limits["applied"]:
         message += (
-            f" Quality uses the offline whatmodel.sh {guide_task} snapshot captured {leaderboard.captured}; "
+            " Speed uses the admitted resource ranking within a RAM-scaled weight budget; no llmbench coding "
+            "or non-coding score applies to this task."
+        )
+    elif items and leaderboard_used:
+        index_name = "coding" if guide_task == "coding" else "non-coding"
+        message += (
+            f" Quality uses the offline llmbench {index_name} score snapshot captured {leaderboard.captured}; "
             "missing scores remain unknown."
+        )
+    if items and items[0]["disk_space_warning"]:
+        message += (
+            f" {items[0]['disk_space_warning']} The recommendation is unchanged; a smaller "
+            "disk-ready option is available below."
         )
     elif items and task == "code" and preference not in {"speed", "answers"}:
         message += (
@@ -1054,7 +1110,8 @@ def recommendation_report(
         )
     if not items:
         message = (
-            "No model with a complete memory plan fits these resources. Check again or browse models in Advanced."
+            "No scored model with a complete memory plan fits these resources. "
+            "Check again or browse models in Advanced."
         )
         if (
             candidates == RECIPES
@@ -1067,7 +1124,7 @@ def recommendation_report(
             )
         if speed_limits["applied"]:
             message = (
-                "No supported model meets Speed's cached task-score floor and 25%-of-RAM weight budget "
+                "No supported model meets Speed's llmbench summary-score floor and 25%-of-RAM weight budget "
                 "within this Mac's current resources. Choose Quality or browse models in Advanced."
             )
     return {
@@ -1087,7 +1144,7 @@ def recommendation_report(
             "ram_gb": bucket["ram_gb"] if bucket else None,
             "applied": bool(leaderboard_used),
             "source": bucket["url"] if bucket else None,
-            "evidence_kind": "upstream_reference",
+            "evidence_kind": "llmbench_summary_score",
         },
         "benchmark_ranking": {
             "cohort": cohort.id if cohort is not None else None,

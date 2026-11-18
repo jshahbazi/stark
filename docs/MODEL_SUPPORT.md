@@ -238,25 +238,24 @@ quantization and stored weight-file size. Missing metadata is omitted.
 Search text is transient; sort choices persist independently for **Installed**,
 the family overview and family detail. The saved-model view sorts by name A–Z or
 Z–A, or total disk bytes from its visible versions ascending or descending. The
-family overview sorts by name A–Z or Z–A; family detail adds the two Top rated
-orders described below, name in either direction and model size ascending or
-descending. Unknown numeric values sort last
-in either direction. Choose a family to browse compatible models, sizes and
-quantizations and download a choice directly.
+family overview sorts by name A–Z or Z–A; family detail adds the coding score,
+name in either direction and model size ascending or descending. Unknown
+numeric values sort last in either direction. Choose a family to browse
+compatible models, sizes and quantizations and download a choice directly.
 
-Family detail opens on **Top rated (coding)**, with **Top rated (general)**
-beside it. Both use the bundled whatmodel.sh reference scores described in
+Family detail opens on **Coding score**. It uses the frozen llmbench summary
+scores described in
 [Beginner recommendation evidence](MODEL_RECOMMENDATIONS.md#catalogue-ordering).
 Rows that can be downloaded and whose weights fit this Mac's memory budget come
 first, then the higher score, then the smaller download; unscored rows follow
 scored ones, then models likely too large for this Mac, then unavailable rows.
-A group is placed by its best row. A scored row shows its score as a link to the
-source page, and its tooltip names the model the score belongs to. A row whose
+A group is placed by its best row. A scored row shows its score as a link to
+the source data, and its tooltip names the model the score belongs to. A row whose
 weights exceed 85% of physical memory less 2 GiB is marked as likely too large;
 that is a coarse check on weights alone, not a runtime plan. The catalogue also
 inspects sources with a reference score before the rest of the first 300
-listing positions, preferring models from the RAM list this Mac can use, so the
-first pages hold the best-rated candidates. A saved sort choice is kept.
+listing positions, so the first pages retain scored candidates. A saved sort
+choice is kept.
 
 **Hide Unsupported** is checked by default and the choice persists. It leaves
 out every row that cannot be downloaded: a weight format or quantization option

@@ -107,6 +107,17 @@ def test_all_unknown_coding_models_use_explicit_resource_fallback():
     assert "resource-based fallback; coding quality is unknown" in report["items"][0]["recommendation_reason"]
 
 
+def test_new_beginner_coding_flow_does_not_use_legacy_benchmark_cohort():
+    unknown, scored = recipe("unknown", 9), recipe("small", 1)
+    benchmarks = registry(cohort(scores={scored.repo: "100"}))
+    report = guided.recommendation_report(
+        host(), {}, candidates=[unknown, scored], task="coding", benchmarks=benchmarks
+    )
+
+    assert not report["benchmark_ranking"]["applied"]
+    assert report["status"] == "unavailable" and report["items"] == []
+
+
 def test_resource_admission_precedes_scores_and_lighter_preference_is_preserved():
     large, small = recipe("large", 10, weights=2 * guided.GIB), recipe("small", 1)
     scores = registry(cohort(scores={"example/large": "100", "example/small": "0"}))
@@ -204,17 +215,21 @@ def test_native_coding_on_128gb_mac_recommends_fresh_profiled_qwen_references_ov
     assert [item["repo"] for item in report["items"]] == [
         "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl",
         "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
-        "RecursiveSI/flint-int4",
+        "pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit",
     ]
     for item in report["items"][:2]:
         assert not item["installed_ids"]
         assert item["benchmarks"][0]["score"] == "91.9" and item["benchmarks"][0]["used_for_ranking"]
     assert report["benchmark_ranking"]["cohort"] == "qwen38-card-livecodebench-v6"
-    assert report["items"][2]["benchmarks"] == []
+    assert report["items"][2]["benchmarks"][0]["score"] == "91.9"
     machine["gpu_memory_budget_bytes"] = 80 * guided.GIB
     blocked = guided.recommendation_report(machine, installed, candidates=native, task="code")
-    assert [item["repo"] for item in blocked["items"]] == ["RecursiveSI/flint-int4"]
-    assert not blocked["benchmark_ranking"]["applied"]
+    assert [item["repo"] for item in blocked["items"]] == [
+        "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl",
+        "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
+        "pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit",
+    ]
+    assert blocked["benchmark_ranking"]["applied"]
 
 
 def test_quantized_reference_bindings_require_exact_reviewed_source_revision():

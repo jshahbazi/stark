@@ -260,6 +260,11 @@ is ready; browsing is enabled when that family is available. It does not fetch
 leaderboard data at runtime. See the [calculation and provenance](../../docs/benchmarks/2026-11-14-catalog-coding-ranking.md)
 for model coverage, attribution and the relative index's limitations.
 
+Family rows use llmbench's model-level coding summary score. The catalog displays
+**Score** rather than an artifact benchmark result; inherited quantized rows use
+their reviewed or declared parent reference without implying that quantization
+preserves quality.
+
 **Installed** shows compact rows with a readable model name, quantization, file size,
 repo link, **Run** or **Stop**, and removal button. The name of an inactive saved
 model is also a button that runs that exact version. Names may wrap. Recognized
@@ -315,10 +320,9 @@ row of a multi-variant card, opens its exact Hugging Face repository, including
 the publisher of a quantized export.
 Each row shows its text or text-and-image capability. Downloads automatically
 include image support when available for that artifact. Sort
-the family overview by name A–Z or Z–A. Family detail opens on
-**Top rated (coding)**, with **Top rated (general)**, name in either direction
-and model size ascending or descending beside it. Unknown numeric values stay
-last in either direction. **Hide Unsupported**, checked by default, leaves out
+the family overview by name A–Z or Z–A. Family detail opens on **Coding score**,
+with name in either direction and model size ascending or descending beside it.
+Unknown numeric values stay last in either direction. **Hide Unsupported**, checked by default, leaves out
 rows Stark cannot download; unchecked, they appear as **Unavailable** with the
 reason. A GPU-server export (AWQ, GPTQ and similar) that declares its original
 model is folded under that model's row instead of listed on its own. Rows
@@ -451,22 +455,23 @@ recommended working-set budget, plus CPU count, physical and available memory,
 and free space in the library and download cache. GPU and system memory share
 the same physical memory; the algorithm never adds their budgets together.
 
-Quality uses bundled, dated whatmodel.sh General Work/Coding rankings for
-11 RAM sizes from 8–512 GB, after Stark’s compatibility and resource checks.
-Alternatives in both Quality and Speed must be within 10 cached task-score
-points of that mode's best admitted model and represent distinct parent models. A distant or unknown
-score does not fill an alternative slot; without cached coverage, the guide
-offers one fallback. Cards show the reference score and its quantization
-limitation. Model offers use installed RAM and the GPU memory budget. Current
+Quality uses the bundled llmbench coding or non-coding summary score for the
+selected task after Stark's compatibility and resource checks. Alternatives in
+Quality and Speed must be within 10 score points of that mode's best admitted
+model and represent distinct parent models. A distant or unknown score does
+not fill an alternative slot. Cards show the reference score and its quantization
+limitation. Model offers use installed unified memory and the model's recorded plan. Current
+GPU working-set usage and the GPU memory budget do not gate or rank offers. Current
 available memory can add a reminder to free memory before starting; changes
 in current memory do not alter the model ranking. That reminder uses the
 artifact's startup working set when it differs from total mapped memory.
-No recommendation click requests the leaderboard. Speed selects the highest
-cached task score above its reference floor within an export-weight budget of
-25% of physical RAM, after the normal resource checks. A missing qualifying
-option offers **Choose Quality**. Scores describe parent models; quantized
+No recommendation click requests the leaderboard. Speed selects the
+highest cached score for that task above its reference floor within an
+export-weight budget of 25% of physical RAM, after the normal resource checks.
+A missing qualifying option offers **Choose Quality**. Scores describe parent
+models; quantized
 quality and actual response speed are not measured by this ranking. See the [recommendation policy and monthly refresh
-workflow](../../docs/MODEL_RECOMMENDATIONS.md).
+policy](../../docs/MODEL_RECOMMENDATIONS.md).
 
 The guide checks a bounded window of candidates in each supported catalog
 family using metadata only. Every candidate retains its exact source revision
@@ -510,9 +515,11 @@ n-gram table. Full accounting and its bounds are documented in
 [recommendation evidence](../../docs/MODEL_RECOMMENDATIONS.md). GLM and the
 original mixed export use conservative full-weight GPU estimates, which can
 exclude them from the guide on a 128 GiB Mac despite their Advanced load path.
-Recommendations use installed physical RAM and the GPU budget. New
-downloads additionally need enough space for
-source and converted copies plus setup reserves. Native preparation downloads
+Recommendations use installed physical RAM. Current or recommended GPU memory
+does not gate or reorder them. New downloads still need enough space for
+source and converted copies plus setup reserves; a low-space primary choice is
+kept and labeled with its exact shortfall, with up to two smaller disk-ready
+options alongside it. Native preparation downloads
 into the library volume and publishes by rename, so it needs one weight copy
 plus metadata and the preparation helper's 4 GiB reserve. It does not require a
 second weight-sized copy in the Hugging Face cache. Starting rechecks available

@@ -626,19 +626,19 @@ struct CatalogReferenceScore: Equatable {
               let relationship = (raw["relationship"] as? String).flatMap(Relationship.init(rawValue:)),
               let general = score(raw["general"]), let coding = score(raw["coding"]), general != nil || coding != nil,
               let source = SupportMetadata.string(raw["source_url"], maximum: 256),
-              source.hasPrefix("https://whatmodel.sh/model/"), let sourceURL = URL(string: source),
-              let captured = SupportMetadata.string(raw["captured"], maximum: 10), captured.utf8.count == 10 else { return nil }
+              source == "https://llmbench.site/summary/", let sourceURL = URL(string: source),
+              let captured = SupportMetadata.string(raw["captured"], maximum: 10), captured.utf8.count == 10,
+              general == nil, coding != nil else { return nil }
         self.modelID = modelID; self.relationship = relationship; self.general = general; self.coding = coding
         self.sourceURL = sourceURL; self.captured = captured
     }
 
-    /// The score a sort order ranks by and shows. General and coding scores are on
-    /// separate scales, so a rating order never substitutes one for the other.
+    /// The model-level coding summary score a sort order ranks by and shows.
     func score(for sort: ModelBrowserSort) -> (value: Double, task: String)? {
         switch sort {
-        case .ratingGeneral: return general.map { ($0, "general") }
-        case .ratingCoding: return coding.map { ($0, "coding") }
-        default: return general.map { ($0, "general") } ?? coding.map { ($0, "coding") }
+        case .ratingGeneral: return nil
+        case .ratingCoding: return coding.map { ($0, "coding score") }
+        default: return coding.map { ($0, "coding score") }
         }
     }
 }
@@ -650,8 +650,8 @@ enum ModelBrowserSort: String, CaseIterable {
 
     var title: String {
         switch self {
-        case .ratingGeneral: return "Top rated (general)"
-        case .ratingCoding: return "Top rated (coding)"
+        case .ratingGeneral: return "Top rated (legacy general)"
+        case .ratingCoding: return "Coding score"
         case .nameAscending: return "Name (A–Z)"
         case .nameDescending: return "Name (Z–A)"
         case .sizeAscending: return "Size (smallest first)"
@@ -684,7 +684,7 @@ enum ModelBrowserScope: String, CaseIterable {
         switch self {
         case .families: return [.nameAscending, .nameDescending]
         case .saved: return [.nameAscending, .nameDescending, .sizeAscending, .sizeDescending]
-        case .catalog: return ModelBrowserSort.allCases
+        case .catalog: return [.ratingCoding, .nameAscending, .nameDescending, .sizeAscending, .sizeDescending]
         }
     }
 }
@@ -3375,9 +3375,9 @@ struct ModelsView: View {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         if catalogSort.isRating {
                             HStack(spacing: 4) {
-                                Text("Models that fit this Mac come first, ranked by whatmodel.sh scores. Quantized versions show their original model's score.")
+                                Text("Models that fit this Mac come first, ranked by the llmbench coding score. Quantized versions show their original model's score.")
                                     .fixedSize(horizontal: false, vertical: true)
-                                Link("About scores", destination: URL(string: "https://whatmodel.sh/")!).fixedSize()
+                                Link("About scores", destination: URL(string: "https://llmbench.site/summary/")!).fixedSize()
                             }.font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer(minLength: 0)

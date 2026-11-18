@@ -58,6 +58,7 @@ from .generation_eta import GenerationEstimates
 from .guided_models import (
     MAX_EXCLUSIONS,
     TASKS,
+    disk_space_shortfall,
     execution_allowed,
     host_resources,
     installation_allowed,
@@ -887,6 +888,8 @@ class Desktop:
                     or not isinstance(reference["model_id"], str)
                     or huggingface_repository(reference["model_id"]) != reference["model_id"]
                     or reference["relationship"] not in REFERENCE_RELATIONSHIPS
+                    or reference["general"] is not None
+                    or reference["coding"] is None
                     or any(
                         score is not None
                         and (type(score) not in (int, float) or not math.isfinite(score) or not -1000 <= score <= 1000)
@@ -894,7 +897,7 @@ class Desktop:
                     )
                     or all(score is None for score in scores)
                     or not isinstance(reference["source_url"], str)
-                    or re.fullmatch(r"https://whatmodel\.sh/model/[a-z0-9-]{1,200}", reference["source_url"]) is None
+                    or reference["source_url"] != "https://llmbench.site/summary/"
                     or not isinstance(reference["captured"], str)
                     or re.fullmatch(r"\d{4}-\d{2}-\d{2}", reference["captured"]) is None
                 ):
@@ -1280,7 +1283,7 @@ class Desktop:
         valid_models = [
             (model, model_display(model))
             for model in models
-            if model.get("artifact_mode", "text") == "text" and model_valid(Path(model["path"]))
+            if model.get("artifact_mode", "text") in {"text", "vision-language"} and model_valid(Path(model["path"]))
         ]
         for recipe in tuple(candidates.values()):
             ids = [
@@ -1411,6 +1414,13 @@ class Desktop:
                 None,
             )
             resources = self.guided_resources(self.guided_hardware.get(payload["recommendation_request_id"]))
+            missing_disk = disk_space_shortfall(recipe, resources, installed=previous is not None)
+            if missing_disk > 0:
+                missing_mib = (missing_disk + 1024 * 1024 - 1) // (1024 * 1024)
+                raise DesktopError(
+                    f"Not enough free disk space to install this model. Free about {missing_mib} MiB more, "
+                    "or choose another model."
+                )
             if not installation_allowed(recipe, resources, installed=previous is not None):
                 raise DesktopError(
                     "Resources changed. Check available memory and free space, then check models again."

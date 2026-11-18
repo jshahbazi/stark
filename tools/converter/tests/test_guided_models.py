@@ -215,7 +215,9 @@ def test_resources_select_starting_choices_and_installed_reuse():
     assert [item["context_tokens"] for item in normal["items"]] == [32768]
     assert [item["runtime_memory_bytes_estimate"] for item in normal["items"]] == [11 * guided.GIB]
     pressure = resources(available_memory_bytes=0, free_disk_bytes=0, download_free_disk_bytes=0)
-    assert guided.recommendation_report(pressure, {})["items"] == []
+    low_space = guided.recommendation_report(pressure, {})
+    assert [item["id"] for item in low_space["items"]] == [guided.RECIPES[0].id]
+    assert low_space["items"][0]["disk_space_warning"]
     reused = guided.recommendation_report(pressure, {guided.RECIPES[0].id: ["same-copy"]})
     assert [item["id"] for item in reused["items"]] == [guided.RECIPES[0].id]
 
@@ -263,18 +265,18 @@ def gpu_resources(**changes):
     )
 
 
-def test_gpu_budget_changes_catalog_recommendation():
+def test_catalog_recommendation_uses_installed_memory_not_gpu_budget():
     candidates = [
         guided.recipe_from_catalog(catalog_candidate(1)),
         guided.recipe_from_catalog(catalog_candidate(2, weights=6 * guided.GIB, parameters=8_000_000_000)),
         guided.recipe_from_catalog(catalog_candidate(3, weights=20 * guided.GIB, parameters=32_000_000_000)),
     ]
-    for budget, expected in ((48, candidates[2]), (16, candidates[1]), (10, candidates[0])):
+    for budget in (48, 16, 10):
         host = gpu_resources()
         host["gpu_memory_budget_bytes"] = budget * guided.GIB
         report = guided.recommendation_report(host, {}, preference="answers", candidates=candidates)
-        assert report["items"][0]["id"] == expected.id
-        assert "GPU budget" in report["items"][0]["recommendation_reason"]
+        assert report["items"][0]["id"] == candidates[2].id
+        assert "installed unified memory" in report["items"][0]["recommendation_reason"]
         assert report["items"][0]["evidence"] == "catalogue_metadata"
 
 
@@ -300,7 +302,7 @@ def test_balanced_penalizes_memory_cost_without_always_choosing_largest_checkpoi
     medium = guided.recipe_from_catalog(catalog_candidate(2, weights=6 * guided.GIB, parameters=8_000_000_000))
     large = guided.recipe_from_catalog(catalog_candidate(3, weights=20 * guided.GIB, parameters=12_000_000_000))
     candidates = [small, medium, large]
-    for preference, expected in (("balanced", medium), ("speed", small), ("answers", large)):
+    for preference, expected in (("balanced", large), ("speed", small), ("answers", large)):
         report = guided.recommendation_report(
             gpu_resources(), {}, task="everyday", preference=preference, candidates=candidates
         )
@@ -334,15 +336,18 @@ def test_balanced_coding_scales_from_16gb_to_128gb_with_recorded_source_metadata
         download_free_disk_bytes=63_720_000_000,
     )
     small_host = {**large_host, "physical_memory_bytes": 16 * guided.GIB, "gpu_memory_budget_bytes": 12 * guided.GIB}
-    for host, expected in ((small_host, "Qwen2.5-Coder-1.5B-Instruct"), (large_host, "Qwen2.5-Coder-14B-Instruct")):
+    for host, expected in ((small_host, "Qwen2.5-Coder-3B-Instruct"), (large_host, "Qwen2.5-Coder-32B-Instruct")):
         report = guided.recommendation_report(host, {}, task="code", candidates=candidates)
         assert report["items"][0]["name"] == expected
         assert "resource-based fallback; coding quality is unknown" in report["items"][0]["recommendation_reason"]
-        assert all(item["setup_disk_bytes_estimate"] <= host["free_disk_bytes"] for item in report["items"])
+        assert all(
+            item["disk_space_shortfall_bytes"] == 0
+            for item in report["items"]
+            if item["id"] != report["items"][0]["id"]
+        )
         reversed_report = guided.recommendation_report(host, {}, task="code", candidates=reversed(candidates))
         assert report == reversed_report
-    # More memory never waives the actual source + converted-copy setup space.
-    assert all(item["name"] != "Qwen2.5-Coder-32B-Instruct" for item in report["items"])
+    assert report["items"][0]["disk_space_warning"]
     large_host.update(free_disk_bytes=256 * guided.GIB, download_free_disk_bytes=256 * guided.GIB)
     capacity = guided.recommendation_report(large_host, {}, task="code", preference="answers", candidates=candidates)
     assert capacity["items"][0]["name"] == "Qwen2.5-Coder-32B-Instruct"
@@ -367,7 +372,7 @@ def test_installed_copy_does_not_override_hardware_or_capacity_ranking():
     host = gpu_resources()
     host["gpu_memory_budget_bytes"] = 10 * guided.GIB
     report = guided.recommendation_report(host, {large.id: ["installed"]}, candidates=[small, large])
-    assert [item["id"] for item in report["items"]] == [small.id]
+    assert [item["id"] for item in report["items"]] == [large.id]
 
 
 @pytest.mark.parametrize("task", sorted(guided.TASKS - {"general", "coding"}))
@@ -450,7 +455,8 @@ def test_installed_flash_next_is_ranked_offline_and_reused_without_download(host
         next(event for event in reversed(events(host)) if event["event"] == "installed")["model"]["id"] == model["id"]
     )
     excluded = offer(host, request_id="exclude", preference="answers", excluded_model_ids=[model["id"]])
-    assert excluded["items"] == []
+    assert len(excluded["items"]) >= 1
+    assert all(item["disk_space_warning"] for item in excluded["items"])
     monkeypatch.setattr(guided_installed, "inspect_installed", lambda _path: None)
     assert not guided.matches_recipe(path, recipe)
     with pytest.raises(module.DesktopError, match="changed"):
@@ -498,7 +504,7 @@ def test_identical_local_imports_share_one_offer_and_different_model_exclusion(h
     assert all("first-copy" not in item["installed_ids"] for item in excluded["items"])
 
 
-def test_paged_weights_have_separate_physical_and_gpu_memory_admission():
+def test_paged_weights_use_installed_memory_capacity_not_gpu_budget():
     recipe = replace(
         guided.RECIPES[0],
         installed_only=True,
@@ -515,7 +521,7 @@ def test_paged_weights_have_separate_physical_and_gpu_memory_admission():
     assert not guided.installation_allowed(recipe, host, installed=True)
     host["physical_memory_bytes"] = 128 * guided.GIB
     host["gpu_memory_budget_bytes"] = 32 * guided.GIB
-    assert not guided.installation_allowed(recipe, host, installed=True)
+    assert guided.installation_allowed(recipe, host, installed=True)
 
 
 def paged_start_recipe(*, startup_gib=83):
@@ -575,18 +581,26 @@ def test_start_rechecks_resident_working_set_after_releasing_previous_worker(
             assert recipe.startup_memory == recipe.runtime_memory
 
 
-@pytest.mark.parametrize("physical_gib,gpu_gib", [(96, 107), (128, 32)])
-def test_resident_start_plan_does_not_relax_physical_or_gpu_fit(host, monkeypatch, physical_gib, gpu_gib):
+def test_resident_start_plan_does_not_relax_physical_fit_or_use_gpu_budget(host, monkeypatch):
     host.models.append({"id": "installed-flash", "path": "/synthetic/installed-flash"})
     monkeypatch.setattr(module, "matches_recipe", lambda _path, _recipe: True)
     monkeypatch.setattr(
         host,
         "guided_resources",
-        lambda _hardware: start_resources(available_gib=200, physical_gib=physical_gib, gpu_gib=gpu_gib),
+        lambda _hardware: start_resources(available_gib=200, physical_gib=96, gpu_gib=107),
     )
     monkeypatch.setattr(host, "run", lambda *_args, **_kwargs: pytest.fail("must preserve static resource limits"))
     with pytest.raises(module.DesktopError, match="Not enough memory"):
         host.run_guided_worker(host.epoch, "installed-flash", paged_start_recipe(), {}, "start-request")
+    monkeypatch.setattr(
+        host,
+        "guided_resources",
+        lambda _hardware: start_resources(available_gib=200, physical_gib=128, gpu_gib=32),
+    )
+    calls = []
+    monkeypatch.setattr(host, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+    host.run_guided_worker(host.epoch, "installed-flash", paged_start_recipe(), {}, "start-request")
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("available_gib", [98, 82])
@@ -631,19 +645,17 @@ def test_recommendation_preparation_and_startup_have_separate_memory_boundaries(
     assert not guided.execution_allowed(recipe, machine)
 
 
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"gpu_available": False},
-        {"gpu_memory_budget_bytes": None},
-        {"gpu_memory_budget_bytes": True},
-        {"gpu_memory_budget_bytes": 0},
-        {"unified_memory": False},
-    ],
-)
-def test_incomplete_or_unusable_gpu_does_not_offer_a_model(changes):
+@pytest.mark.parametrize("changes", [{"gpu_available": False}, {"unified_memory": False}])
+def test_unavailable_gpu_does_not_offer_native_model(changes):
     host = {**gpu_resources(), **changes}
-    assert guided.recommendation_report(host, {})["status"] == "unavailable"
+    native = guided.native_recipes()
+    assert guided.recommendation_report(host, {}, candidates=native)["status"] == "unavailable"
+
+
+@pytest.mark.parametrize("budget", [None, True, 0])
+def test_gpu_budget_value_does_not_gate_recommendation(budget):
+    host = {**gpu_resources(), "gpu_memory_budget_bytes": budget}
+    assert guided.recommendation_report(host, {})["status"] == "ready"
 
 
 @pytest.mark.parametrize(
@@ -737,13 +749,18 @@ def test_explicit_coding_tag_aliases_and_declared_quantized_capacity():
         {"physical_memory_bytes": None},
         {"physical_memory_bytes": True},
         {"physical_memory_bytes": 4 * guided.GIB},
-        {"free_disk_bytes": 1},
-        {"download_free_disk_bytes": 1},
     ],
 )
-def test_unknown_or_insufficient_resources_fail_closed(changes):
+def test_unknown_or_insufficient_capacity_fails_closed(changes):
     report = guided.recommendation_report(resources(**changes), {})
     assert report["status"] == "unavailable" and report["items"] == []
+
+
+@pytest.mark.parametrize("key", ["free_disk_bytes", "download_free_disk_bytes"])
+def test_low_disk_remains_a_warning_not_a_recommendation_gate(key):
+    report = guided.recommendation_report(resources(**{key: 1}), {})
+    assert report["status"] == "ready"
+    assert report["items"][0]["disk_space_warning"]
 
 
 @pytest.mark.parametrize("available", [0, None, 2 * guided.GIB, 120 * guided.GIB])
@@ -1155,11 +1172,10 @@ def test_recorded_starter_and_catalog_geometry_use_the_same_prefill_memory_plan(
         assert starter.runtime_memory == discovered.runtime_memory
     assert guided.RECIPES[0].runtime_memory == 11 * guided.GIB
 
-    # A source's recorded native history cannot bypass the same GPU reserve
-    # applied to that artifact when it is discovered through the catalog.
+    # GPU use is not a ranking or admission gate; installed memory is.
     host = gpu_resources()
     host["gpu_memory_budget_bytes"] = 12 * guided.GIB
-    assert not guided.installation_allowed(guided.RECIPES[0], host)
+    assert guided.installation_allowed(guided.RECIPES[0], host)
 
 
 @pytest.mark.parametrize("dtype", ["F16", "F32"])

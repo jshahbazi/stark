@@ -26,12 +26,14 @@ it cannot inherit the old one.
 Unqualified native plans include a 3 GiB loading/workspace allowance and round system
 and GPU estimates up to GiB. These are conservative estimates, not observed
 peak RSS or a guarantee that the loader will admit a machine under memory
-pressure. The guide retains the 2 GiB physical reserve and 85% Metal budget
-check. Recommendations use `recommendation_allowed`: installed physical RAM,
-GPU budget and setup storage determine which models the Mac can support.
-Current available memory does not filter or reorder offers, including when
-the available-memory probe is missing. The card can advise freeing memory
-before starting. Actual preparation retains a separate 2 GiB current-memory
+pressure. The guide retains the 2 GiB physical reserve, but the current or
+recommended GPU working-set value does not filter or rank recommendations.
+Recommendations use `recommendation_allowed`: installed physical RAM and native
+device capability determine fit. Current free disk and available memory do not
+filter or reorder offers, including when those probes are missing. The card
+shows a specific setup-space warning and up to two disk-ready smaller options
+when the primary choice cannot be installed immediately. Actual preparation
+still checks exact free space and retains a separate 2 GiB current-memory
 working allowance for new installs. Startup uses `execution_allowed`, rereads
 available memory and revalidates the actual artifact after releasing its
 previous worker; available memory must then cover the effective startup plan.
@@ -82,31 +84,41 @@ reports remaining setup space and rereads this credit before installation.
 Text recipes do not enable image input or add a backend. Existing native prefix
 reuse and its artifact-specific qualification remain unchanged.
 
-## Offline leaderboard references
+## Offline llmbench references
 
-`recommendation_leaderboard.json` bundles a dated [whatmodel.sh](https://whatmodel.sh/) snapshot with separate [General Work](https://whatmodel.sh/?gpu=apple&max=0) and [Coding](https://whatmodel.sh/?gpu=apple&max=0&task=coding) rankings. General Work uses the requested all-task configuration. Both lists select Apple Silicon and local models only. Full lists cover 8, 16, 24, 32, 48, 64, 96, 128, 192, 256 and 512 GB RAM. Exact query URLs, response SHA-256 values, update times, source revision and model-catalogue hash remain in the snapshot. The [November capture](archive/runs/2026-11-11-whatmodel-recommendations.md) records the top three models per RAM/task list, including models Stark cannot run.
+`llmbench_catalog_ranking.json` bundles llmbench's published model-level coding
+and non-coding summary scores from the November 17, 2026
+[summary-score snapshot](https://llmbench.site/summary/). General Work uses the
+non-coding score; Coding uses the separate coding score.
 
-For benchmark information behind these rankings, start with whatmodel’s [About this repo](https://github.com/jakemanger/whatmodel#about-this-repo) section, which links to its scoring methodology and benchmark sources. The bundled snapshot retains the source revision used for Stark’s recommendations.
-
-The recommendation path never requests whatmodel.sh. Hardware checks and supported-model discovery remain fresh; existing Hugging Face metadata lookups are separate. Clicking a source link intentionally opens the browser.
+The recommendation path does not request llmbench at runtime. Hardware checks
+and supported-model discovery remain fresh; Hugging Face metadata lookups are
+separate. Clicking a source link intentionally opens the browser.
 
 ### Selection policy
 
-1. Exclude candidates without a complete supported conversion/native route, usable chat template, tool parser, 32K context and adequate installed RAM, GPU budget and disk. Current available memory affects startup readiness, never recommendation eligibility or rank. Leaderboard rank never grants compatibility.
-2. Select the largest cached RAM bucket no greater than this Mac's physical RAM in GiB. Below the smallest bucket, cached coverage is unavailable; above the largest, use the largest bucket with actual resource checks.
-3. Match exact parent repositories from the pinned source catalogue. Reviewed export-to-parent bindings also require the exact export repository and revision. No fuzzy names, quantization labels or mutable commands establish identity. Ambiguous parents have no automatic score. A changed export revision requires another review.
-4. **Quality** selects descending task score after admission. Alternatives must have a cached score within **10 points** of the best admitted model on the same task scale, and each offer must represent a distinct parent model. Equal scores retain deterministic fallback order. Unknown scores never fill alternatives behind a scored choice. With no cached scores, offer one explicitly unknown benchmark/resource fallback. The 10-point distance is an editorial product threshold, reviewed with snapshot refreshes; it does not establish comparable measured artifact quality. Signed relative scores are not percentages or native artifact accuracy measurements. Parent scores do not establish export equivalence.
-5. **Speed** admits only candidates with a cached parent-model task score of at least **40 for General Work** or **35 for Coding**, and exact export weights no larger than **25% of physical RAM**. Installed RAM, GPU and disk checks still apply. Within that pool, select descending task score; ties prefer a smaller runtime plan, then smaller weight payload, then deterministic fallback order. Alternatives use the same **10-point distance** and **distinct-parent** rule as Quality, measured against the best candidate inside Speed's eligible pool. The increasing payload allowance lets larger Macs select stronger models without always choosing the smallest eligible checkpoint. Unknown scores, candidates below the floor and exports over the budget are excluded from all Speed alternatives. These are editorial product thresholds on separate relative score scales; review them when refreshing the leaderboard. They do not certify quantized task quality or measured response speed. Source speeds retain their provenance but do not rank these candidates.
-6. Offer one primary recommendation with up to two alternatives behind a disclosure; fewer are shown when the policy admits fewer. Each cached Quality offer shows its score and the parent-model/unevaluated-quantization limitation directly on its card. Historical benchmark results remain reference information when the cached leaderboard determines ordering.
+1. Exclude candidates without a complete supported conversion/native route, usable chat template, tool parser, 32K context and adequate installed unified memory. GPU availability and unified-memory architecture are device capabilities; current GPU working-set usage and the recommended working-set budget do not gate or rank recommendations. Current free disk and available memory affect install/start readiness, never recommendation eligibility or rank. Leaderboard rank never grants compatibility.
+2. Match exact parent repositories from the pinned source catalogue. Reviewed export-to-parent bindings also require the exact export repository and revision. No fuzzy names, quantization labels or mutable commands establish identity. Ambiguous parents receive no score. A changed export revision requires another review.
+3. **Quality** selects descending llmbench summary score for the selected task after admission. Alternatives must be within **10 points** of the best admitted model and each offer must represent a distinct parent. Unknown scores never fill alternatives behind a scored choice. With no comparable llmbench evidence, retain the direct benchmark/resource fallback.
+4. **General Work** uses llmbench's **non-coding** score. **Coding** uses its separate coding score; neither is substituted for the other.
+5. **Speed** requires the selected task's parent-model llmbench score to be at least **35** and exact export weights no larger than **25% of physical RAM**. It selects descending score, then smaller runtime and payload for ties. The same 10-point and distinct-parent rules apply.
+6. Offer one primary recommendation with up to two alternatives behind a disclosure. Every inherited score is labeled as parent-model reference evidence; its quantization is not claimed equivalent in quality.
 
-The site's memory/variant estimates use an 8K conversation allowance. Stark's 32K model-specific plan remains authoritative, including actual export weights and state. The captured site's ranking applies the same parent score across quantized variants; it does not benchmark each quantization separately. Speed's budget uses actual export weight bytes, so a quantized export may fit while its BF16 counterpart does not. Its parent score does not establish that the export preserves quality. The guide labels this limitation, and structured evidence explicitly marks quantization quality as unevaluated by this ranking. No generic bit-width quality penalty is invented. Site quantizations remain provenance and are not automatically installed. Snapshot inclusion adds no backend, conversion route or native qualification.
+Stark's 32K model-specific plan, actual export weights and state remain
+authoritative. The score never authorizes a backend, conversion route or native
+qualification. No generic bit-width quality penalty is invented.
 
-If the snapshot is unavailable, malformed or covers none of the eligible models, **Quality** retains its offline benchmark/resource fallback. **Speed** reports no qualifying recommendation, with a direct **Choose Quality** action and Advanced browsing; it never waives the score floor or weight budget. `recommendation_benchmarks.json` retains its source-bound IFEval, BFCL and LiveCodeBench records separately. General Work's Quality fallback uses instruction-following references; Coding uses the published coding cohort. Former task/preference API values retain their legacy behavior for older clients. New guides send `general`/`coding` and `quality`/`speed`.
+If the snapshot is unavailable or malformed, Coding Quality retains its direct
+benchmark/resource fallback and Speed reports no qualifying recommendation.
+`recommendation_benchmarks.json` retains the separate IFEval, BFCL and
+LiveCodeBench records. Former task/preference API values retain their legacy
+behavior for older clients.
 
 ### Guided discovery coverage
 
 Guided discovery checks a bounded metadata window, not every repository. It
-prioritizes the selected task's cached sources before inspecting that window;
+prioritizes sources with the selected task's llmbench summary score before
+inspecting that window;
 popularity alone must not spend the candidate budget before scored models are
 checked. Registered seeds join the same priority ordering, and overlapping
 Hub queries contribute each repository once. Pinned seeds retain their source
@@ -122,9 +134,9 @@ quantized export may be discoverable without an admissible guide score.
 Backend support also does not establish a guided memory plan. Gemma 4 currently
 remains outside guided recommendations because its route-specific memory
 layout is not covered by the guide planner. Its Advanced conversion support
-does not authorize adding it to the dense planning allowlist. GLM Flash and
-Flint currently have no matching cached Coding parent score in the 128 GiB
-snapshot, so neither can displace a scored Quality choice on that evidence.
+does not authorize adding it to the dense planning allowlist. Flint has no
+matching scored parent for the task, so it cannot displace a scored Quality choice
+on llmbench evidence.
 The built-in Qwen3.6-27B catalogue record also has no adapter and retains
 `conversion: planned` / `qualification: pending`; the catalogue excludes that
 record before guided ranking. Search prioritization does not promote that
@@ -137,11 +149,12 @@ The [RAM-scaled Speed check](archive/runs/2026-11-11-speed-recommendation-policy
 
 ### Catalogue ordering
 
-**Model Catalog** uses the same snapshot to order a family's rows. This is a
-browsing aid, separate from the Beginner selection policy above: it never
-selects, installs or admits a model, and every row still passes the catalogue's
-own compatibility checks. `catalog_ranking.py` attaches a reference score to a
-row only through one of these relationships, which the row records:
+**Model Catalog** uses the same frozen llmbench coding score from the official
+summary snapshot. The beginner flow also carries the matching non-coding score.
+This is a browsing aid, separate from the Beginner selection policy above: it
+never selects, installs or admits a model, and every row still passes the
+catalogue's own compatibility checks. `catalog_ranking.py` attaches a score
+to a row only through one of these relationships, which the row records:
 
 | Relationship | Rule |
 | --- | --- |
@@ -154,24 +167,23 @@ Full-precision rows other than the scored repository itself never inherit a
 score: a fine-tune, merge or re-upload has its own weights. The last two
 relationships rest on what the export's publisher states, not on a review, so
 they order rows and nothing more. The app labels every inherited score as the
-parent model's and says that the quantized version was not benchmarked. General
-and coding scores are on separate scales; each rating order uses only its own
-score and treats a missing one as unknown, after scored rows. A parent with more
-than one snapshot entry is ambiguous and has no score, as in the Beginner
-policy. One score per parent is used for every RAM list that contains it; the
-RAM list this Mac can use only decides which scored sources are inspected first.
+parent model's and says that the quantized version was not benchmarked. The
+displayed value is llmbench's coding summary score. Missing scores remain
+unknown and sort after scored rows. A parent with more than one snapshot entry
+is ambiguous and has no score. This frozen llmbench evidence is
+also used by Beginner Coding choices.
 
 ### Manual refresh
 
-There is no scheduled refresh. A maintainer reviews and commits a snapshot about monthly. The utility accesses the network only with explicit `--fetch`. Start from a reviewed upstream source checkout and record its commit. From the Stark repository root:
+There is no runtime refresh. A maintainer reviews a new llmbench capture,
+retains its source hashes and method, regenerates the approved package subset,
+and records a separate dated validation. Changing the score snapshot does not qualify a
+model or supersede native validation.
 
-```sh
-uv run --project tools/converter --locked --python 3.13.13 python tools/converter/scripts/refresh_recommendation_leaderboard.py --fetch --raw-dir /tmp/whatmodel-new-capture --source-dir /path/to/whatmodel --source-revision REVIEWED_COMMIT --captured-date YYYY-MM-DD --report docs/archive/runs/YYYY-MM-DD-whatmodel-recommendations.md
-```
-
-The utility requests both configurations for each RAM bucket, with `format=json&n=1000` to avoid default truncation. Omit `--fetch` to rebuild from saved responses and their hash manifest. Review changed identities, scores, coverage and notices; retain earlier dated reports. Run recommendation, native setup and packaging checks before pushing. Leaderboard changes do not qualify a model or supersede earlier native validation.
-
-The numerical compilation and derived scores retain whatmodel.sh / Merlinsbeard Pty Ltd's CC BY-SA 4.0 terms. Changes here select fields and RAM/task lists and map explicit parent repositories. Source-specific attributions and full notices ship in `stark_convert/_third_party/whatmodel/`. Those data terms do not relicense Stark application code, model weights or trademarks. Sources do not endorse Stark.
+The llmbench compilation is CC BY-SA 4.0 and incorporates whatmodel.sh /
+Merlinsbeard Pty Ltd data. The package retains upstream attribution and
+license notices; those data terms do not relicense Stark application code,
+model weights or trademarks. Sources do not endorse Stark.
 
 ## Score admission policy
 

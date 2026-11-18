@@ -80,9 +80,9 @@ def test_native_128gb_fit_distinguishes_gpu_paging_disk_and_installed_reuse():
         assert guided.installation_allowed(recipe, fresh)
         assert not guided.execution_allowed(recipe, {**fresh, "available_memory_bytes": recipe.runtime_memory - 1})
         assert guided.execution_allowed(recipe, {**fresh, "available_memory_bytes": recipe.runtime_memory})
-        assert not guided.installation_allowed(recipe, {**host, "gpu_memory_budget_bytes": 48 * GIB}, installed=True)
+        assert guided.installation_allowed(recipe, {**host, "gpu_memory_budget_bytes": 48 * GIB}, installed=True)
     for choice in ("glm53-q2", "qwen38-mixed"):
-        assert not guided.installation_allowed(recipes[choice], host, installed=True)
+        assert guided.installation_allowed(recipes[choice], host, installed=True)
         larger = {
             **host,
             "physical_memory_bytes": 192 * GIB,
@@ -105,7 +105,7 @@ def test_qwen_source_profile_physical_memory_matrix(physical_gib):
             gpu_memory_budget_bytes=physical_gib * GIB,
         )
         allowed = guided.installation_allowed(recipe, host, installed=True)
-        expected = physical_gib in {128, 192, 256} or (choice == "qwen38-lily-q4-xl" and physical_gib == 96)
+        expected = physical_gib in {96, 128, 192, 256}
         assert allowed is expected
 
 
@@ -119,12 +119,11 @@ def test_qwen_source_profile_gpu_budget_matrix(gpu_gib):
         free_disk_bytes=256 * GIB,
     )
     for choice in ("qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"):
-        expected = gpu_gib in {97, 128} or (choice == "qwen38-lily-q4-xl" and gpu_gib == 96)
-        assert guided.installation_allowed(recipes[choice], host, installed=True) is expected
+        assert guided.installation_allowed(recipes[choice], host, installed=True)
 
 
 @pytest.mark.parametrize("disk_gib", [32, 64, 80, 96, 128, 192, 256])
-def test_fresh_qwen_recommendation_requires_setup_disk_but_reuse_does_not(disk_gib):
+def test_fresh_qwen_recommendation_warns_about_setup_disk_and_reuse_does_not(disk_gib):
     recipe = next(recipe for recipe in guided.native_recipes() if recipe.native_choice == "qwen38-mlx-serve-mixed")
     host = host_resources(
         physical_memory_bytes=128 * GIB,
@@ -137,9 +136,11 @@ def test_fresh_qwen_recommendation_requires_setup_disk_but_reuse_does_not(disk_g
     reused = guided.recommendation_report(
         host, {recipe.id: ["installed-copy"]}, candidates=[recipe], benchmarks=guided.load_registry()
     )
-    assert bool(fresh["items"]) is (disk_gib in {128, 192, 256})
+    assert [item["id"] for item in fresh["items"]] == [recipe.id]
+    assert bool(fresh["items"][0]["disk_space_warning"]) is (disk_gib not in {128, 192, 256})
     assert [item["id"] for item in reused["items"]] == [recipe.id]
     assert reused["items"][0]["installed_ids"] == ["installed-copy"]
+    assert reused["items"][0]["disk_space_warning"] is None
 
 
 def test_qwen_recommendations_use_physical_capacity_not_current_free_memory():
@@ -268,7 +269,8 @@ def test_native_sources_are_considered_offline_without_catalog_candidates(tmp_pa
             {"items": [], "incomplete": True},
         )
         report = [json.loads(line) for line in host.output.getvalue().splitlines()][-1]["report"]
-        assert report["items"][0]["repo"] == hybrid.SOURCES["flint-int4"]["weights_repo"]
+        assert report["items"][0]["repo"] == hybrid.SOURCES["qwen38-lily-q4-xl"]["weights_repo"]
+        assert report["items"][0]["disk_space_warning"]
         assert "Native hybrid" in report["message"]
         assert report["catalog_search"]["candidates_considered"] == len(guided.RECIPES) + len(guided.native_recipes())
     finally:
@@ -320,7 +322,14 @@ def test_existing_matching_but_unqualified_copy_is_offered_with_conservative_mem
     host = Desktop(tmp_path / "unused-worker", tmp_path / "library", io.StringIO())
     path = tmp_path / "incomplete-installed-copy"
     path.mkdir()
-    host.models.append({"id": "matching-copy", "name": "Qwen Serve", "path": str(path)})
+    host.models.append(
+        {
+            "id": "matching-copy",
+            "name": "Qwen Serve",
+            "path": str(path),
+            "artifact_mode": "vision-language",
+        }
+    )
     monkeypatch.setattr(
         module,
         "host_resources",
@@ -436,7 +445,7 @@ def test_guided_native_install_uses_preparation_reuses_and_rejects_receipt_drift
         assert guided.matches_recipe(path, recipe)
         with monkeypatch.context() as scoped:
             scoped.setattr("stark_convert.vision_runtime.model_image_family", lambda _config, _path: "qwen4_exp")
-            assert not guided.matches_recipe(path, recipe)
+            assert guided.matches_recipe(path, recipe)
         host.install_guided(command)
         assert len(calls) == 1
         receipt_path = path / "native-source.json"
