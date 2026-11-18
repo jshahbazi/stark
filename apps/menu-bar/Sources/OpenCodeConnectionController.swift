@@ -295,9 +295,16 @@ final class OpenCodeConnectionController: ObservableObject {
         opening = true
         openOperation = identifier
         message = "Opening OpenCode with Stark’s running model…"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+            self?.beginOpen(modelID: modelID, contextTokens: contextTokens, baseURL: base, operation: identifier)
+        }
+    }
+
+    private func beginOpen(modelID: String, contextTokens: Int, baseURL: String, operation: UUID) {
+        guard openOperation == operation, !closing else { return }
         if DesktopApplicationIdentity.running(.openCode, configurationRoot: DesktopConnectionTesting.profile) != nil {
-            selectModelForOpen(modelID: modelID, contextTokens: contextTokens, baseURL: base,
-                               operation: identifier, attempt: 0)
+            selectModelForOpen(modelID: modelID, contextTokens: contextTokens, baseURL: baseURL,
+                               operation: operation, attempt: 0)
             return
         }
         guard let url = DesktopConnectionTesting.application(.openCode)
@@ -321,15 +328,15 @@ final class OpenCodeConnectionController: ObservableObject {
         }
         NSWorkspace.shared.openApplication(at: url, configuration: configuration) { [weak self] _, error in
             DispatchQueue.main.async {
-                guard let self, self.openOperation == identifier, !self.closing else { return }
+                guard let self, self.openOperation == operation, !self.closing else { return }
                 guard error == nil else {
                     self.opening = false
                     self.openOperation = nil
                     self.message = "OpenCode could not open. Open it from Applications, then try again."
                     return
                 }
-                self.selectModelForOpen(modelID: modelID, contextTokens: contextTokens, baseURL: base,
-                                        operation: identifier, attempt: 0)
+                self.selectModelForOpen(modelID: modelID, contextTokens: contextTokens, baseURL: baseURL,
+                                        operation: operation, attempt: 0)
             }
         }
     }

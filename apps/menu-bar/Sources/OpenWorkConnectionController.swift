@@ -258,6 +258,13 @@ final class OpenWorkConnectionController: ObservableObject {
         beginnerAttemptBasis = ""
         beginnerAttempts = 0
         message = "Opening OpenWork with Stark’s running model…"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+            self?.beginOpen(modelID: modelID, contextTokens: contextTokens, request: request)
+        }
+    }
+
+    private func beginOpen(modelID: String, contextTokens: Int, request: UUID) {
+        guard openRequest == request, !closing else { return }
         guard openApplication() else {
             opening = false
             openRequest = nil
