@@ -780,6 +780,19 @@ extension BeginnerOpenWorkStatus {
 """
 
 
+class ModelRuntimeErrorPresentationTests(unittest.TestCase):
+    def test_model_management_shows_runtime_failure_details(self):
+        source = (ROOT / "apps/menu-bar/Sources/StarkApp.swift").read_text()
+        models = source.partition("struct ModelsView: View {")[2].partition(
+            "struct InstallSupportView: View {"
+        )[0]
+        self.assertIn(
+            "if let error = engine.errorMessage",
+            models,
+            "the Installed models view hides runtime failure details",
+        )
+
+
 @unittest.skipUnless(platform.system() == "Darwin", "macOS AppKit checks")
 class WindowLifecycleTests(unittest.TestCase):
     @classmethod
