@@ -1861,7 +1861,14 @@ extension EngineController {
             let refresh = commands().last!
             engine.apply(partial(refresh, ["fresh"]))
             engine.apply(catalogReply(refresh, status: "error"))
-            return engine.catalog?.status == .error && engine.catalog?.items.isEmpty == true && !engine.catalogLoading
+            guard engine.catalog?.status == .ready,
+                  engine.catalog?.items.map(\.id) == ["fresh"],
+                  engine.catalogError == "Fixture catalog message",
+                  !engine.catalogLoading else { return false }
+            engine.retryModelCatalog()
+            let freshRetry = commands().last!
+            return freshRetry["command"] as? String == "catalog" &&
+                freshRetry["family_id"] as? String == "qwen3"
         case "catalog-pagination-auto-drains-positive-empty-and-duplicate-pages":
             engine.requestModelCatalog(familyID: "qwen3")
             let first = command()

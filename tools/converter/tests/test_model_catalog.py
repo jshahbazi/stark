@@ -182,7 +182,14 @@ def test_universal_catalog_search_routes_hub_matches_through_family_admission(tm
     assert sorted(item["repo"] for item in seen) == sorted(item["repo"] for item in report["items"])
 
 
-def test_universal_catalog_search_keeps_pinned_matches_when_live_search_fails():
+@pytest.mark.parametrize(
+    ("query", "repo", "family"),
+    [
+        ("Decider Flash", catalog._DECIDER_REPO, catalog._DECIDER_FAMILY_ID),
+        ("GLM-5.3 Flash", "unsloth/GLM-5.3-Flash-GGUF", "glm5_next"),
+    ],
+)
+def test_universal_catalog_search_keeps_pinned_matches_when_live_search_fails(query, repo, family):
     class OfflineHub:
         def HfApi(self):
             return self
@@ -190,12 +197,10 @@ def test_universal_catalog_search_keeps_pinned_matches_when_live_search_fails():
         def list_models(self, **kwargs):
             raise OSError("offline")
 
-    report = catalog.search_catalog("Decider Flash", hub=OfflineHub())
+    report = catalog.search_catalog(query, hub=OfflineHub())
 
     assert report["status"] == "ready"
-    assert [(item["repo"], item["family_id"]) for item in report["items"]] == [
-        (catalog._DECIDER_REPO, catalog._DECIDER_FAMILY_ID)
-    ]
+    assert [(item["repo"], item["family_id"]) for item in report["items"]] == [(repo, family)]
 
 
 def test_catalog_reuses_pinned_huggingface_disk_cache_across_requests(tmp_path):

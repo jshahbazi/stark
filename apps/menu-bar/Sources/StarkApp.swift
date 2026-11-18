@@ -1916,7 +1916,7 @@ final class EngineController: ObservableObject {
             let addedItems = result.items.contains { !catalogPageKnownIDs.contains($0.id) }
             if result.status == .ready {
                 catalog = FamilyModelCatalog(page: result, previous: pendingOffset > 0 ? catalog : nil)
-            } else if pendingOffset == 0 { catalog = result }
+            } else if pendingOffset == 0, shown == nil { catalog = result }
             catalogLoading = false; pendingCatalogOffset = nil
             catalogError = result.status == .ready ? nil : (result.message.isEmpty ? "Could not load these models. Try again." : result.message)
             if result.status == .ready, result.nextOffset != nil, loadRemainingCatalog || !addedItems {
@@ -2769,6 +2769,15 @@ final class EngineController: ObservableObject {
         }
     }
 
+    func retryModelCatalog() {
+        guard let familyID = catalogFamilyID else { return }
+        if catalog?.familyID == familyID, catalog?.status == .ready, catalog?.nextOffset != nil {
+            requestMoreModelCatalog()
+        } else {
+            requestModelCatalog(familyID: familyID)
+        }
+    }
+
     func cancelModelCatalog() {
         if let requestID = catalogRequestID, catalogInstallation?.catalogRequestID != requestID {
             send(["command": "catalog_cancel", "request_id": requestID])
@@ -3538,8 +3547,9 @@ struct ModelsView: View {
                 let family = families?.first(where: { $0.id == entry.id })
                 Button {
                     guard let family else { return }
-                    selectedFamily = family; catalogQuery = ""; catalogQuantization = .all
-                    engine.requestModelCatalog(familyID: family.id)
+                    selectedFamily = nil
+                    catalogQuery = ""; catalogQuantization = .all
+                    universalQuery = family.name
                 } label: {
                     HStack(spacing: 10) {
                         Text("\(entry.rank)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).frame(width: 22)
@@ -3762,7 +3772,7 @@ struct ModelsView: View {
                 } else if let message = engine.catalogError {
                     Text(message).font(.callout).foregroundStyle(.secondary)
                     Text("The list is incomplete. Models already found are still available.").font(.caption).foregroundStyle(.secondary)
-                    Button("Retry remaining models") { engine.requestMoreModelCatalog() }.disabled(engine.busy)
+                    Button("Retry remaining models") { engine.retryModelCatalog() }.disabled(engine.busy)
                 } else if catalog.nextOffset != nil {
                     if !catalogQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Text("Search filters the models loaded so far.").font(.caption).foregroundStyle(.secondary)
@@ -3783,7 +3793,7 @@ struct ModelsView: View {
             VStack(spacing: 10) {
                 Text(engine.catalog?.status == .offline ? "You’re offline" : "Couldn’t load models").font(.headline)
                 if let message = engine.catalogError { Text(message).font(.callout).foregroundStyle(.secondary) }
-                Button("Retry") { engine.requestModelCatalog(familyID: family.id) }
+                Button("Retry") { engine.retryModelCatalog() }
             }.frame(maxWidth: .infinity, minHeight: 220)
         }
     }

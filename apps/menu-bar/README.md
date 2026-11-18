@@ -253,11 +253,13 @@ rows in a single column.
 llmbench shared-benchmark calculation, in descending coding-index order. Each
 row shows its original rank, relative index, **Based on N reference models**
 and a separate shared-benchmark count. Benchmarks count once across the family
-when used in a retained comparison; individual model coverage varies. Search
-preserves that order; selecting a row opens the existing family catalog, with
-Back returning to the ranking. The snapshot remains visible before the backend
-is ready; browsing is enabled when that family is available. It does not fetch
-leaderboard data at runtime. See the [calculation and provenance](../../docs/benchmarks/2026-11-14-catalog-coding-ranking.md)
+when used in a retained comparison; individual model coverage varies. The
+ranked rows stay in snapshot order; selecting a row places the family name in
+the universal search and searches installed models and the model catalog.
+Clearing that search returns to the ranking. The
+snapshot remains visible before the backend is ready; browsing is enabled when
+that family is available. It does not fetch leaderboard data at runtime. See
+the [calculation and provenance](../../docs/benchmarks/2026-11-14-catalog-coding-ranking.md)
 for model coverage, attribution and the relative index's limitations.
 
 Family rows use llmbench's model-level coding summary score. The catalog displays
