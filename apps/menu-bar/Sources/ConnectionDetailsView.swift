@@ -354,7 +354,7 @@ private struct PiConnectionView: View {
                     Button("Use Stark Workspace", action: connection.useDefaultWorkspace).disabled(connection.busy)
                 }
             }.font(.caption)
-            Text("Setup also makes Stark the default when you type pi in Terminal, using your API key from macOS Keychain. macOS may ask you to allow access. Open Pi starts a separate session in the working folder above; paste the copied key at its hidden prompt. Pi can edit files and run commands. Sessions opened here are not saved.")
+            Text("Setup also makes Stark the default when you type pi in Terminal. Open Pi starts a separate session in the working folder above and retrieves its API key from macOS Keychain; macOS may ask you to allow access once. Pi can edit files and run commands. Sessions opened here are not saved.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)

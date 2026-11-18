@@ -30,6 +30,7 @@ struct PiConnectionTests {
         defer { defaults.removePersistentDomain(forName: suite) }
         let root = directory.appendingPathComponent("profiles")
         let profile = root.appendingPathComponent("profile-fixture").path
+        try FileManager.default.createDirectory(atPath: profile, withIntermediateDirectories: true)
         let baseURL = "http://127.0.0.1:12345/v1"
         let key = "synthetic-pi-test-key"
         let tools = PiConnectionController.Tools(node: URL(fileURLWithPath: "/synthetic/node"), pi: URL(fileURLWithPath: "/synthetic/pi"))
@@ -56,7 +57,10 @@ struct PiConnectionTests {
                     launchArguments = args
                     require(environment["STARK_API_KEY"] == nil)
                     require(args.contains(profile))
-                    completion(["ok": true, "command": profile + "/Open Pi-fixture.command"])
+                    completion(["ok": true, "command": profile + "/Open Pi-fixture.command",
+                                "workspace": args.firstIndex(of: "--workspace").map {
+                                    args[args.index(after: $0)]
+                                } ?? directory.path])
                 } else { fatalError("unexpected_pi_helper_action") }
             })
         controller.refresh()
@@ -71,20 +75,21 @@ struct PiConnectionTests {
         require(!controller.busy && controller.matches(baseURL: baseURL, modelID: "public-model"))
         require(!controller.matches(baseURL: "http://127.0.0.1:12346/v1", modelID: "public-model"))
         require(!controller.matches(baseURL: baseURL, modelID: "another-model"))
-        var copied = false, opened = false
-        controller.prepareLaunch(workspace: directory, key: key, openTerminal: { command, completion in
-            require(copied)
+        var opened = false
+        controller.prepareLaunch(workspace: directory, openTerminal: { command, completion in
             require(command.path == profile + "/Open Pi-fixture.command")
+            let script = try! String(contentsOf: command, encoding: .utf8)
+            require(!script.contains(key) && script.contains("PI_CODING_AGENT_DIR="))
+            require(script.contains("--provider 'stark-local'") && script.contains("--model 'public-model'"))
             opened = true; completion(true)
-        }, copyKey: { supplied in copied = supplied == key; return copied })
-        require(copied && opened && calls == 3)
+        })
+        require(opened && calls == 3)
 
         // The actual Open action launches directly. Folder selection is optional.
-        copied = false; opened = false
+        opened = false
         controller.open(baseURL: baseURL, modelID: "public-model", key: key,
-            openTerminal: { _, completion in require(copied); opened = true; completion(true) },
-            copyKey: { supplied in copied = supplied == key; return copied })
-        require(copied && opened && calls == 4 && !launchArguments.contains("--workspace"))
+            openTerminal: { _, completion in opened = true; completion(true) })
+        require(opened && calls == 4 && !launchArguments.contains("--workspace"))
 
         _ = NSApplication.shared
         let window = NSWindow(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
@@ -97,7 +102,7 @@ struct PiConnectionTests {
         choose?(directory)
         require(!controller.busy && controller.workingFolder == directory)
         controller.open(baseURL: baseURL, modelID: "public-model", key: key,
-            openTerminal: { _, completion in completion(true) }, copyKey: { _ in true })
+            openTerminal: { _, completion in completion(true) })
         require(launchArguments.contains("--workspace") && launchArguments.contains(directory.path))
         controller.chooseWorkingFolder(in: window, chooser: { _, current, completion in
             require(current == directory); completion(nil)
@@ -106,7 +111,7 @@ struct PiConnectionTests {
         controller.useDefaultWorkspace()
         require(controller.workingFolder == nil)
         controller.open(baseURL: baseURL, modelID: "public-model", key: key,
-            openTerminal: { _, completion in completion(true) }, copyKey: { _ in true })
+            openTerminal: { _, completion in completion(true) })
         require(!launchArguments.contains("--workspace"))
 
         // Saved setup restoration uses the same verified helper, and an unsafe

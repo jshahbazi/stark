@@ -4,8 +4,9 @@ import Foundation
 import Darwin
 
 /// Manual Pi setup uses a separate public profile. The master key is passed to
-/// the setup helper only in its environment, then explicitly copied for the
-/// user's hidden Terminal prompt. No managed capability or approval is issued.
+/// the setup helper only in its environment; launches read it from the saved
+/// Keychain command in Pi's normal configuration. No managed capability or
+/// approval is issued.
 final class PiConnectionController: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var installed = false
@@ -31,7 +32,6 @@ final class PiConnectionController: ObservableObject {
     private var refreshed = false
     private static let profilePreference = "stark.pi.manualProfile.v1"
     private static let workingFolderPreference = "stark.pi.workingFolder.v1"
-    private static let clipboard = ConnectionClipboardLease()
 
     init(resources: URL = Bundle.main.resourceURL?.appendingPathComponent("PiClient") ?? URL(fileURLWithPath: "/nonexistent"),
          root: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -108,10 +108,9 @@ final class PiConnectionController: ObservableObject {
     }
 
     func open(baseURL: String, modelID: String, key: String,
-              openTerminal: @escaping (URL, @escaping (Bool) -> Void) -> Void = PiConnectionController.openTerminal,
-              copyKey: @escaping (String) -> Bool = PiConnectionController.copyKey) {
+              openTerminal: @escaping (URL, @escaping (Bool) -> Void) -> Void = PiConnectionController.openTerminal) {
         guard !busy, installed, matches(baseURL: baseURL, modelID: modelID), !key.isEmpty else { return }
-        prepareLaunch(workspace: workingFolder, key: key, openTerminal: openTerminal, copyKey: copyKey)
+        prepareLaunch(workspace: workingFolder, openTerminal: openTerminal)
     }
 
     func chooseWorkingFolder(in window: NSWindow?, chooser: @escaping FolderChooser = PiConnectionController.chooseFolder) {
@@ -147,24 +146,63 @@ final class PiConnectionController: ObservableObject {
     }
 
     /// Omitting workspace asks the helper to create/reuse Stark's private default.
-    func prepareLaunch(workspace: URL? = nil, key: String,
-                       openTerminal: @escaping (URL, @escaping (Bool) -> Void) -> Void = PiConnectionController.openTerminal,
-                       copyKey: @escaping (String) -> Bool = PiConnectionController.copyKey) {
-        guard !busy, let profile, !key.isEmpty else { return }
+    func prepareLaunch(workspace: URL? = nil,
+                       openTerminal: @escaping (URL, @escaping (Bool) -> Void) -> Void = PiConnectionController.openTerminal) {
+        guard !busy, let profile else { return }
         var arguments = ["--action", "prepare-launch", "--profile", profile]
         if let workspace { arguments += ["--workspace", workspace.path] }
         perform(arguments) { [weak self] result in
             guard let self else { return }
             guard result["ok"] as? Bool == true, let command = result["command"] as? String,
+                  let workspace = result["workspace"] as? String,
                   URL(fileURLWithPath: command).deletingLastPathComponent().path == profile,
-                  command.hasSuffix(".command"), copyKey(key) else {
+                  command.hasSuffix(".command"),
+                  let launch = self.keychainLaunchCommand(command: URL(fileURLWithPath: command),
+                                                          workspace: URL(fileURLWithPath: workspace)) else {
                 self.message = Self.failure(result); return
             }
-            openTerminal(URL(fileURLWithPath: command)) { [weak self] opened in
-                self?.message = opened ? "Paste the copied API key in Terminal. It is hidden and is not saved in the setup files."
+            openTerminal(launch) { [weak self] opened in
+                self?.message = opened ? "Opening Pi in Terminal. macOS may ask to allow Keychain access."
                     : "Could not open Terminal. Check Pi setup and try again."
             }
         }
+    }
+
+    private func keychainLaunchCommand(command: URL, workspace: URL) -> URL? {
+        guard let profile, ownedProfilePath(profile), let tools,
+              workspace.isFileURL, FileManager.default.fileExists(atPath: workspace.path),
+              command.deletingLastPathComponent().path == profile, command.pathExtension == "command",
+              !configuredModel.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            message = "Pi's launch setup is unavailable. Update setup, then try again."
+            return nil
+        }
+        let home = NSHomeDirectory()
+        let agent = home + "/.pi/agent"
+        let path = [tools.node.deletingLastPathComponent().path, tools.pi.deletingLastPathComponent().path,
+                    home + "/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
+                    "/usr/sbin", "/sbin"].joined(separator: ":")
+        let extensionPath = URL(fileURLWithPath: profile).appendingPathComponent("extensions/stark-stream-guard.mjs").path
+        let script = """
+        #!/bin/zsh -f
+        unsetopt XTRACE VERBOSE
+        cd -- \(Self.shellQuote(workspace.path)) || exit 1
+        exec /usr/bin/env -i HOME=\(Self.shellQuote(home)) TMPDIR=\(Self.shellQuote(FileManager.default.temporaryDirectory.path)) LANG='en_US.UTF-8' SHELL='/bin/zsh' TERM='xterm-256color' PATH=\(Self.shellQuote(path)) PI_TELEMETRY='0' PI_CODING_AGENT_DIR=\(Self.shellQuote(agent)) \(Self.shellQuote(tools.pi.path)) --provider 'stark-local' --model \(Self.shellQuote(configuredModel)) --thinking 'off' --offline --no-session --no-extensions --extension \(Self.shellQuote(extensionPath)) --no-mcp --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve --tools 'read,edit,write,bash'
+        """
+        do {
+            try Data(script.utf8).write(to: command, options: .atomic)
+            guard chmod(command.path, 0o700) == 0 else {
+                message = "Pi's Terminal launcher could not be saved. Update setup and try again."
+                return nil
+            }
+            return command
+        } catch {
+            message = "Pi's Terminal launcher could not be saved. Update setup and try again."
+            return nil
+        }
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     private func acceptProfile(_ result: [String: Any]) {
@@ -236,12 +274,6 @@ final class PiConnectionController: ObservableObject {
         default: return "Pi setup could not finish. Check that the model and local API are running, then try again."
         }
     }
-
-    private static func copyKey(_ key: String) -> Bool {
-        clipboard.write(key)
-    }
-
-    static func clearCopiedKey() { clipboard.clear() }
 
     private static func openTerminal(_ command: URL, completion: @escaping (Bool) -> Void) {
         let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")

@@ -19,13 +19,12 @@ subsequent turns before opening or focusing Desktop. Inactive historical
 sessions retain their explicit selections.
 
 The Advanced Connections **Apps** tab also includes **Pi**, with **Set Up Pi**
-and **Copy Key & Open Pi…**. This manual Pi 1.5.2 flow creates an isolated guarded
-profile and opens Terminal for a chosen folder. Its key is supplied through the
-setup/Pi process environment and an explicit concealed/transient clipboard copy,
-then pasted into a hidden prompt. Files and command arguments contain no key;
-while running Stark schedules the unchanged clipboard item for clearing after
-two minutes and also clears it on normal quit. Crashes/force quits cannot run
-cleanup. Pi is excluded from
+and **Open Pi**. This manual Pi 1.5.2 flow creates an isolated guarded profile
+and opens Terminal for a chosen folder. The setup helper receives the key only
+in its private process environment, while subsequent launches use the
+Keychain command saved in Pi's normal configuration. Terminal may ask once for
+Keychain access; Open Pi does not place the key on the clipboard or prompt for
+it. Files and command arguments contain no key. Pi is excluded from
 Beginner setup and has no managed grant or scoped Disconnect. See
 [Pi setup](../apps/menu-bar/README.md#pi-in-connections).
 

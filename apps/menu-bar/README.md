@@ -83,9 +83,10 @@ to Beginner hides an open Connections window.
 Detection includes Pi's managed Node, compatible installed nvm versions, and
 Homebrew/system locations. It does not source interactive shell startup files.
 
-Choose **Open Pi**, then paste the copied key at Terminal's hidden prompt.
-The button stays visible but is disabled until Pi has been set up for the
-currently running Stark model.
+Choose **Open Pi**. The button stays visible but is disabled until Pi has been
+set up for the currently running Stark model. Terminal opens directly into the
+connected profile; Pi obtains the API key from the Keychain command saved
+during setup, so no clipboard paste or hidden prompt is needed.
 Stark finds Pi automatically and creates or reuses the private working folder
 `~/Library/Application Support/Stark/Pi/Workspace`. **Change Working Folder…**
 optionally selects a project for new sessions in a sheet attached to Connections;
@@ -95,12 +96,10 @@ Normal Pi obtains the current key from macOS Keychain through a public command
 reference, so macOS may ask you to allow access. Its auth store is untouched;
 an existing stored `stark-local` key takes precedence and must be removed through
 Pi's `/logout` to use the Keychain reference.
-This manual setup keeps the master key in process
-environments and the explicitly requested, concealed/transient clipboard item;
-it writes no key into public profiles, launch scripts or command arguments.
-While Stark runs, it schedules the unchanged clipboard item for clearing after
-two minutes and also clears it on normal quit. Crashes and force quits cannot
-run cleanup. Pi can edit files and run commands. Sessions opened here are not
+This manual setup passes the master key to the setup helper only in its private
+process environment. Open Pi writes no key into public profiles, launch
+scripts or command arguments. The saved Pi configuration retrieves it from
+macOS Keychain when needed. Pi can edit files and run commands. Sessions opened here are not
 saved and disable automatic retries/compaction; normal Pi keeps its existing
 session/retry/compaction policy. The reply ceiling is 1,024 tokens or the lower API limit.
 

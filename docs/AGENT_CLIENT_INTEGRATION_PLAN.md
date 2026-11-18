@@ -52,8 +52,9 @@ under Connections when their integrations become available.
 
 The Pi card implements manual setup: verify installed Pi 1.5.2, discover the
 running model, create a separate Stark-owned profile with the required guard,
-and open Terminal in an automatic private workspace. **Open Pi** explicitly
-copies the key for Terminal's hidden prompt and starts the connected profile.
+and open Terminal in an automatic private workspace. **Open Pi** uses the
+Keychain command saved in Pi's normal profile and starts the connected profile
+without placing the key on the clipboard or displaying a hidden prompt.
 It requires no folder selection. **Change Working Folder…** optionally selects a
 project for new sessions; **Use Stark Workspace** restores the automatic folder
 at `~/Library/Application Support/Stark/Pi/Workspace`. Setup also merges Stark's
@@ -62,9 +63,8 @@ startup default, so later `pi` launches reconnect. The persistent provider uses
 Pi's request-time command resolver to read the current master key from macOS
 Keychain; macOS may require access approval. Pi's existing auth store takes
 precedence and is untouched. Generated files and command
-arguments contain no key; the helper and Pi receive it through their environment.
-While running, Stark schedules the unchanged clipboard item for clearing after
-two minutes and clears it on normal quit. A crash or force quit cannot run cleanup.
+arguments contain no key. The setup helper receives the key through its private
+environment; Open Pi lets Pi's saved Keychain command retrieve it on demand.
 Other providers, extensions and unrelated Pi settings are preserved. Private
 backups, cooperative settings locks and a recovery journal protect updates;
 unowned provider collisions or changed files fail closed. Normal Pi retains its
@@ -321,8 +321,8 @@ no qualification from these checks. See the
 }
 ```
 
-4. Supply `STARK_API_KEY` privately to the Pi process. Do not paste the key into
-   shell history, command arguments or the shared configuration. Zero costs
+4. Use the saved Keychain command for Pi authentication. Do not paste the key
+   into the Terminal or shell history, command arguments or the shared configuration. Zero costs
    describe local API billing metadata; they do not assert zero hardware cost.
 5. Open `/model` to reload the configuration and select `stark-local` and the
    running model. In a shell with the credential already available, the explicit
