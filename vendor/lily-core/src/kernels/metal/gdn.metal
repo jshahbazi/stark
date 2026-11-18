@@ -700,15 +700,19 @@ kernel void conv_window_rollback_bf16(device const bfloat* win_in  [[buffer(0)]]
 // Tiled conv1d prefill uses separate input/output windows to avoid races.
 #define CONV_TILE 64  // must match CONV1D_PREFILL_TILE in kernels/gdn.rs
 
-kernel void conv1d_prefill_bf16(device const bfloat* win_in  [[buffer(0)]],  // [C, KD-1]
-                                device bfloat*       win_out [[buffer(1)]],  // [C, KD-1]
-                                device const bfloat* x       [[buffer(2)]],  // [M, C]
-                                device const bfloat* w       [[buffer(3)]],  // [KD, C]
-                                device bfloat*       out     [[buffer(4)]],  // [M, C]
-                                constant uint&       C       [[buffer(5)]],
-                                constant uint&       KD      [[buffer(6)]],
-                                constant uint&       M       [[buffer(7)]],
-                                uint2 gid [[thread_position_in_grid]]) {
+template<bool CAPTURE>
+static inline void conv1d_prefill_bf16_body(
+        device const bfloat* win_in,
+        device bfloat*       win_out,
+        device const bfloat* x,
+        device const bfloat* w,
+        device bfloat*       out,
+        device bfloat*       snapshot,
+        uint C,
+        uint KD,
+        uint M,
+        uint capture_after,
+        uint2 gid) {
     uint c = gid.x;
     uint m0 = gid.y * CONV_TILE;
     uint m1 = min(m0 + CONV_TILE, M);
@@ -733,12 +737,46 @@ kernel void conv1d_prefill_bf16(device const bfloat* win_in  [[buffer(0)]],  // 
         }
         win[taps - 1] = xc;
     }
+    if (CAPTURE && m1 == capture_after) {
+        for (uint t = 0; t < taps; ++t) {
+            snapshot[c * taps + t] = bfloat(win[t]);
+        }
+    }
     // The final tile writes the post-chunk window.
     if (m1 == M) {
         for (uint t = 0; t < taps; ++t) {
             win_out[c * taps + t] = bfloat(win[t]);
         }
     }
+}
+
+kernel void conv1d_prefill_bf16(device const bfloat* win_in  [[buffer(0)]],  // [C, KD-1]
+                                device bfloat*       win_out [[buffer(1)]],  // [C, KD-1]
+                                device const bfloat* x       [[buffer(2)]],  // [M, C]
+                                device const bfloat* w       [[buffer(3)]],  // [KD, C]
+                                device bfloat*       out     [[buffer(4)]],  // [M, C]
+                                constant uint&       C       [[buffer(5)]],
+                                constant uint&       KD      [[buffer(6)]],
+                                constant uint&       M       [[buffer(7)]],
+                                uint2 gid [[thread_position_in_grid]]) {
+    conv1d_prefill_bf16_body<false>(
+        win_in, win_out, x, w, out, nullptr, C, KD, M, 0, gid);
+}
+
+kernel void stark_conv1d_prefill_bf16_capture(
+        device const bfloat* win_in       [[buffer(0)]],
+        device bfloat*       win_out      [[buffer(1)]],
+        device const bfloat* x            [[buffer(2)]],
+        device const bfloat* w            [[buffer(3)]],
+        device bfloat*       out          [[buffer(4)]],
+        device bfloat*       snapshot     [[buffer(5)]],
+        constant uint&       C            [[buffer(6)]],
+        constant uint&       KD           [[buffer(7)]],
+        constant uint&       M            [[buffer(8)]],
+        constant uint&       capture_after[[buffer(9)]],
+        uint2 gid [[thread_position_in_grid]]) {
+    conv1d_prefill_bf16_body<true>(
+        win_in, win_out, x, w, out, snapshot, C, KD, M, capture_after, gid);
 }
 
 // Gated RMSNorm, one threadgroup per row.
@@ -1270,7 +1308,7 @@ kernel void gdn_chunk_wy3(device bfloat*       qkv     [[buffer(0)]],           
 // with a chunk's rows on the left share one descriptor (dynamic K,
 // accumulate), so the output's two terms land in one accumulator with the
 // exp(G_t) row scale applied between them.
-template <int NB, int SG, typename ST>
+template <int NB, int SG, typename ST, bool CAPTURE>
 static inline void gdn_chunk_scan_body(device bfloat* qk,
                                        device bfloat* w,
                                        device bfloat* u,
@@ -1284,7 +1322,9 @@ static inline void gdn_chunk_scan_body(device bfloat* qk,
                                        threadgroup ST* Sb,   // [DIM, NB]
                                        threadgroup ST* Ut,   // [C, NB]
                                        threadgroup ST* Ut2,  // [C, NB]
-                                       uint2 tg) {
+                                       uint2 tg,
+                                       device float* snapshot,
+                                       uint capture_after) {
     using namespace mpp::tensor_ops;
     constexpr int C = GDN_CHUNK;
 
@@ -1405,6 +1445,11 @@ static inline void gdn_chunk_scan_body(device bfloat* qk,
             if (S.is_valid_element(i)) {
                 const auto ix = S.get_multidimensional_index(i);
                 Sb[uint(ix[1]) * NB + uint(ix[0])] = ST(S[i]);
+                if (CAPTURE && t0 + n == capture_after) {
+                    // Store the F32 state another scan would load at this
+                    // boundary, before the BF16 staging used for its dot.
+                    snapshot[((ulong)h * DIM + uint(ix[1])) * DIM + col0 + uint(ix[0])] = S[i];
+                }
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1433,8 +1478,8 @@ kernel void NAME(device bfloat*       qk    [[buffer(0)]],  /* [M, 2*HK*DIM] */ 
     threadgroup ST Sb[DIM * GDN_CHUNK_NB];                                         \
     threadgroup ST Ut[GDN_CHUNK * GDN_CHUNK_NB];                                   \
     threadgroup ST Ut2[GDN_CHUNK * GDN_CHUNK_NB];                                  \
-    gdn_chunk_scan_body<GDN_CHUNK_NB, GDN_CHUNK_SG, ST>(qk, w, u, p, g, state, out, M, H, \
-                                                        vpk, Sb, Ut, Ut2, tg);     \
+    gdn_chunk_scan_body<GDN_CHUNK_NB, GDN_CHUNK_SG, ST, false>(qk, w, u, p, g, state, out, M, H, \
+                                                               vpk, Sb, Ut, Ut2, tg, nullptr, 0); \
 }
 // The state and pseudo-value copies are bf16: fp16 copies measured the
 // same speed with the state's error against the CPU reference 0.0011
@@ -1442,6 +1487,27 @@ kernel void NAME(device bfloat*       qk    [[buffer(0)]],  /* [M, 2*HK*DIM] */ 
 // and would cap the state's range at 65 504.
 GDN_CHUNK_SCAN_KERNEL(gdn_chunk_scan, bfloat)
 #undef GDN_CHUNK_SCAN_KERNEL
+
+kernel void stark_gdn_chunk_scan_capture(
+        device bfloat* qk           [[buffer(0)]],
+        device bfloat* w            [[buffer(1)]],
+        device bfloat* u            [[buffer(2)]],
+        device bfloat* p            [[buffer(3)]],
+        device const float* g       [[buffer(4)]],
+        device float* state         [[buffer(5)]],
+        device bfloat* out          [[buffer(6)]],
+        device float* snapshot      [[buffer(7)]],
+        constant uint& M            [[buffer(8)]],
+        constant uint& H            [[buffer(9)]],
+        constant uint& vpk          [[buffer(10)]],
+        constant uint& capture_after [[buffer(11)]],
+        uint2 tg [[threadgroup_position_in_grid]]) {
+    threadgroup bfloat Sb[DIM * GDN_CHUNK_NB];
+    threadgroup bfloat Ut[GDN_CHUNK * GDN_CHUNK_NB];
+    threadgroup bfloat Ut2[GDN_CHUNK * GDN_CHUNK_NB];
+    gdn_chunk_scan_body<GDN_CHUNK_NB, GDN_CHUNK_SG, bfloat, true>(
+        qk, w, u, p, g, state, out, M, H, vpk, Sb, Ut, Ut2, tg, snapshot, capture_after);
+}
 #endif  // __METAL_VERSION__ >= 400
 
 

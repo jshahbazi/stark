@@ -891,6 +891,15 @@ impl GenerationBackend for HybridBackend {
             profile::reset();
             self.native_prefill_snapshot = None;
         }
+        if options.cache_scope.is_some() {
+            profile::record("hybrid.prefix.cache_attempt", 0.0, 0);
+            if reused > 0 {
+                profile::record("hybrid.prefix.restore", 0.0, reused.saturating_mul(4));
+            }
+        }
+        if capture {
+            profile::record("hybrid.prefix.capture_attempt", 0.0, 0);
+        }
         self.model.reset();
         self.last_mtp = None;
         self.model.set_mtp_enabled(options.mtp_drafts > 0).map_err(|_| "mtp_not_supported")?;
@@ -912,9 +921,11 @@ impl GenerationBackend for HybridBackend {
         if let Ok(generated) = result.as_mut() {
             generated.reused_input_tokens = reused;
             // A request that ended on the retained boundary keeps its snapshot.
-            let snapshot = self
-                .model
-                .take_prefix_snapshot()
+            let captured_snapshot = self.model.take_prefix_snapshot();
+            if captured_snapshot.is_some() {
+                profile::record("hybrid.prefix.capture_stored", 0.0, 0);
+            }
+            let snapshot = captured_snapshot
                 .or_else(|| retained.filter(|_| boundary == Some(reused)))
                 .filter(|snapshot| Some(snapshot.position()) == boundary);
             if let (Some(snapshot), Some(scope), Some(boundary)) = (snapshot, options.cache_scope, boundary) {
@@ -1010,7 +1021,12 @@ impl GenerationBackend for HybridBackend {
     ) -> usize {
         match &self.prefix_cache {
             Some(entry) if !self.model.is_fenced() && entry.state.mtp_enabled() == (options.mtp_drafts > 0) => {
-                entry.reusable(input, options.context_tokens, options.cache_scope.as_ref())
+                let position = entry.reusable(input, options.context_tokens, options.cache_scope.as_ref());
+                if self.model.prefix_suffix_compatible(position, input.len() - position) {
+                    position
+                } else {
+                    0
+                }
             },
             _ => 0,
         }

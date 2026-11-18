@@ -36,10 +36,12 @@ use crate::kernels::elementwise::{
 };
 use crate::kernels::gdn::{
     GDN_HEAD_DIM, GDN_STATE_DTYPE, GdnChunkStaging, GdnGate, GdnRegscanStaging,
-    GdnStateLayout, conv1d_prefill_with_rounding as conv1d_prefill,
+    GdnStateLayout, conv1d_prefill_capture,
+    conv1d_prefill_with_rounding as conv1d_prefill,
     conv1d_step_with_layout as conv1d_step,
     gated_rmsnorm_with_rounding as gated_rmsnorm, gdn_chunk_staging_shapes,
-    gdn_prefill_mid_with_layout as gdn_prefill_mid,
+    gdn_prefill_capture_key_value,
+    gdn_prefill_mid_with_layout_midpoint_resume as gdn_prefill_mid_resume,
     gdn_step_gated_fused_with_layout as gdn_step_gated_fused, gdn_verify_gated_exact,
 };
 use crate::kernels::hc::stock::{
@@ -93,6 +95,7 @@ use super::weights::{
 
 /// Prompt tokens processed by one prefill command buffer.
 const PREFILL_CHUNK: usize = 4096;
+const PREFILL_MIDPOINT: usize = PREFILL_CHUNK / 2;
 
 /// Queries per sparse-attention sub-batch: bounds the `[QB, blocks]` score
 /// matrix and the split partials while keeping the GPU busy.
@@ -144,7 +147,12 @@ pub(super) enum BatchMode<'p> {
     /// draft head's catch-up over the chunk when the model has one. `vision`
     /// is set for a prompt with images: per-row rotary positions and the
     /// vision rows that replace the placeholders' embeddings.
-    Prefill { draw: Option<Draw<'p>>, vision: Option<&'p PrefillVision<'p>> },
+    Prefill {
+        draw: Option<Draw<'p>>,
+        vision: Option<&'p PrefillVision<'p>>,
+        checkpoint: Option<&'p Snapshot>,
+        midpoint_resume: bool,
+    },
     /// Speculative verification: a draw per row (`step0 + row` indexes the
     /// request's draws), recurrent states after each row recorded for
     /// rollback, no draft-head work (that follows once acceptance is known).
@@ -456,6 +464,62 @@ pub struct Snapshot {
     gdn: Vec<(Tensor, Tensor, GdnStateLayout)>,
     ple: Option<([u32; 2], Tensor)>,
     mtp_hidden: Option<Tensor>,
+}
+
+/// Absolute chunk alignment for the experimental text-prefill path, with at
+/// most one requested checkpoint in the span.
+struct PrefillCheckpointPlan {
+    position: Option<usize>,
+}
+
+struct GdnMidpoint<'t> {
+    after: usize,
+    state: &'t Tensor,
+    window: &'t Tensor,
+}
+
+impl Snapshot {
+    /// Allocate just the recurrent payload. The pending pass will fill all of
+    /// its tensor storage at the selected row, while KV stays in-place.
+    fn for_prefill_midpoint(
+        ctx: &MetalContext,
+        state: &DecodeState,
+        tokens: &[u32],
+        mtp_enabled: bool,
+    ) -> Result<Self> {
+        let storage = |tensor: &Tensor| {
+            Tensor::uninitialized(ctx, tensor.shape(), tensor.dtype())
+        };
+        let mut gdn = Vec::new();
+        for layer in &state.layers {
+            if let LayerState::Gdn { state, layout, conv_windows } = layer {
+                ensure!(
+                    *layout == GdnStateLayout::KeyValue,
+                    "midpoint requires KeyValue GDN state"
+                );
+                gdn.push((storage(state)?, storage(&conv_windows[0])?, *layout));
+            }
+        }
+        let ple = state
+            .ple
+            .as_ref()
+            .map(|p| -> Result<_> {
+                Ok((NgramHasher::advance(p.hist, tokens), storage(&p.conv_windows[0])?))
+            })
+            .transpose()?;
+        let mtp_hidden = state
+            .mtp
+            .as_ref()
+            .map(|m| {
+                if mtp_enabled {
+                    storage(&m.hidden)
+                } else {
+                    Tensor::zeros(ctx, m.hidden.shape(), m.hidden.dtype())
+                }
+            })
+            .transpose()?;
+        Ok(Self { pos: state.pos + tokens.len(), gdn, ple, mtp_hidden })
+    }
 }
 
 impl SnapshotApi for Snapshot {
@@ -1755,6 +1819,17 @@ impl Qwen4ExpModel {
         self.prefill_chunk
     }
 
+    /// A short resumed midpoint can switch the projection arithmetic below 17
+    /// rows from the path selected for the full containing chunk.
+    pub fn midpoint_suffix_compatible(
+        &self,
+        position: usize,
+        suffix_rows: usize,
+    ) -> bool {
+        position.is_multiple_of(self.prefill_chunk)
+            || suffix_rows > crate::kernels::skinny::DENSE_SMALLM_THRESHOLD
+    }
+
     /// Sets the prompt tokens per batched prefill pass (a power of two up
     /// to twice `PREFILL_CHUNK`; for measurement and tests).
     pub fn set_prefill_chunk(&mut self, chunk: usize) -> Result<()> {
@@ -2043,7 +2118,7 @@ impl Qwen4ExpModel {
         draw: Option<Draw<'_>>,
         vision: Option<&VisionInput<'_>>,
     ) -> Result<()> {
-        self.prefill_chunks(ctx, state, s, tokens, draw, vision, None).map(drop)
+        self.prefill_chunks(ctx, state, s, tokens, draw, vision, None, None).map(drop)
     }
 
     /// Stark's bounded image worker: retain the ordinary final target readout
@@ -2059,7 +2134,51 @@ impl Qwen4ExpModel {
         vision: Option<&VisionInput<'_>>,
         stop: &dyn Fn() -> bool,
     ) -> Result<usize> {
-        self.prefill_chunks(ctx, state, s, tokens, draw, vision, Some(stop))
+        self.prefill_chunks(ctx, state, s, tokens, draw, vision, Some(stop), None)
+            .map(|(fed, _)| fed)
+    }
+
+    /// Experimental Lily text prefill. An interior checkpoint leaves the
+    /// 4,096-row forward unchanged. A restored midpoint processes the rest
+    /// of that absolute chunk first and resumes the ordinary physical grid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prefill_with_vision_until_checkpoint(
+        &self,
+        ctx: &MetalContext,
+        state: &mut DecodeState,
+        s: &mut Scratch,
+        tokens: &[u32],
+        draw: Option<Draw<'_>>,
+        vision: Option<&VisionInput<'_>>,
+        stop: &dyn Fn() -> bool,
+        checkpoint: Option<usize>,
+    ) -> Result<(usize, Option<Snapshot>)> {
+        ensure!(
+            vision.is_none()
+                && !self.config.official_mlx_rounding()
+                && self.prefill_chunk == PREFILL_CHUNK
+                && state.pos.is_multiple_of(PREFILL_MIDPOINT)
+                && self.midpoint_suffix_compatible(state.pos, tokens.len()),
+            "midpoint prefill requires text on the Lily 4096 grid"
+        );
+        ensure!(
+            checkpoint.is_none_or(|position| {
+                position > state.pos
+                    && position.is_multiple_of(PREFILL_MIDPOINT)
+                    && position <= state.pos.saturating_add(tokens.len())
+            }),
+            "invalid prefill checkpoint position"
+        );
+        self.prefill_chunks(
+            ctx,
+            state,
+            s,
+            tokens,
+            draw,
+            None,
+            Some(stop),
+            Some(PrefillCheckpointPlan { position: checkpoint }),
+        )
     }
 
     /// [`Self::prefill_with_vision`] without a draw that stops before the
@@ -2078,7 +2197,8 @@ impl Qwen4ExpModel {
         vision: Option<&VisionInput<'_>>,
         stop: &dyn Fn() -> bool,
     ) -> Result<usize> {
-        self.prefill_chunks(ctx, state, s, tokens, None, vision, Some(stop))
+        self.prefill_chunks(ctx, state, s, tokens, None, vision, Some(stop), None)
+            .map(|(fed, _)| fed)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2091,7 +2211,8 @@ impl Qwen4ExpModel {
         draw: Option<Draw<'_>>,
         vision: Option<&VisionInput<'_>>,
         stop: Option<&dyn Fn() -> bool>,
-    ) -> Result<usize> {
+        plan: Option<PrefillCheckpointPlan>,
+    ) -> Result<(usize, Option<Snapshot>)> {
         ensure!(!tokens.is_empty(), "empty prompt");
         ensure!(state.spec.is_none(), "prefill during a pending speculative step");
         let h = self.config.hidden_size;
@@ -2136,7 +2257,17 @@ impl Qwen4ExpModel {
         let ratio = self.config.indexer.compress_ratio;
         let mut remaining = tokens.len();
         let profile = false;
-        let chunks: Vec<&[u32]> = tokens.chunks(self.prefill_chunk).collect();
+        let first_len = if plan.is_some() {
+            (self.prefill_chunk - state.pos % self.prefill_chunk).min(tokens.len())
+        } else {
+            self.prefill_chunk.min(tokens.len())
+        };
+        let chunks: Vec<&[u32]> = std::iter::once(&tokens[..first_len])
+            .chain(tokens[first_len..].chunks(self.prefill_chunk))
+            .collect();
+        let midpoint_plan = plan.is_some();
+        let capture_at = plan.and_then(|p| p.position);
+        let mut captured = None;
         // Staging ahead: while the GPU runs chunk k from one staging buffer,
         // the host stages chunk k+1's rows into the other (a paged table's
         // cold rows are SSD reads, and a chunk's gather is a tenth of its
@@ -2153,7 +2284,7 @@ impl Qwen4ExpModel {
         let mut fed = 0;
         for (k, &chunk) in chunks.iter().enumerate() {
             if stop.is_some_and(|stop| stop()) {
-                return Ok(fed);
+                return Ok((fed, None));
             }
             let mut ps = capacity.chunk(chunk)?;
             ps.ple = capacity
@@ -2185,9 +2316,33 @@ impl Qwen4ExpModel {
                 }
                 None => None,
             };
+            let inside = capture_at
+                .and_then(|position| position.checked_sub(state.pos))
+                .filter(|&after| after > 0 && after < chunk.len());
+            let midpoint = if let Some(after) = inside {
+                ensure!(
+                    after == PREFILL_MIDPOINT,
+                    "checkpoint must be halfway through a physical chunk"
+                );
+                match Snapshot::for_prefill_midpoint(
+                    ctx,
+                    state,
+                    &chunk[..after],
+                    self.mtp_enabled,
+                ) {
+                    Ok(snapshot) => Some(snapshot),
+                    Err(_) if ctx.fault().is_none() => None,
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
+            };
             let mode = BatchMode::Prefill {
                 draw: if remaining == 0 { draw } else { None },
                 vision: chunk_vision.as_ref(),
+                checkpoint: midpoint.as_ref(),
+                midpoint_resume: midpoint_plan
+                    && state.pos % self.prefill_chunk == PREFILL_MIDPOINT,
             };
             let started = std::time::Instant::now();
             let encoded = self.encode_batch(ctx, state, s, &ps, mode)?;
@@ -2248,8 +2403,17 @@ impl Qwen4ExpModel {
             }
             // The chunk's recurrent kernels wrote the other window buffers.
             state.conv_slot = 1 - state.conv_slot;
+            if midpoint.is_some() {
+                captured = midpoint;
+            } else if capture_at == Some(state.pos) {
+                match state.snapshot(ctx) {
+                    Ok(snapshot) => captured = Some(snapshot),
+                    Err(_) if ctx.fault().is_none() => {}
+                    Err(error) => return Err(error),
+                }
+            }
         }
-        Ok(fed)
+        Ok((fed, captured))
     }
 
     /// Whether a multi-chunk prefill stages the next chunk's n-gram rows
@@ -2325,6 +2489,17 @@ impl Qwen4ExpModel {
             BatchMode::Prefill { vision, .. } => vision,
             BatchMode::Verify { .. } | BatchMode::VerifyHost => None,
         };
+        let checkpoint = match mode {
+            BatchMode::Prefill { checkpoint, .. } => checkpoint,
+            _ => None,
+        };
+        let midpoint_resume = match mode {
+            BatchMode::Prefill { midpoint_resume, .. } => midpoint_resume,
+            _ => false,
+        };
+        let checkpoint_ple = checkpoint.and_then(|snapshot| {
+            snapshot.ple.as_ref().map(|(_, window)| (snapshot.pos - pos, window))
+        });
         // Rotary positions: each row's own 3-axis position for a chunk of a
         // prompt with an image, otherwise the sequence index plus the
         // state's delta (0 for text).
@@ -2403,7 +2578,12 @@ impl Qwen4ExpModel {
                 }),
                 _ => None,
             };
+            let mut gdn_midpoint = None;
             if matches!(lstate, LayerState::Gdn { .. }) {
+                gdn_midpoint = checkpoint.map(|snapshot| {
+                    let (state, window, _) = &snapshot.gdn[gdn_index];
+                    GdnMidpoint { after: snapshot.pos - pos, state, window }
+                });
                 gdn_index += 1;
             }
             self.block_batched(
@@ -2419,6 +2599,9 @@ impl Qwen4ExpModel {
                 ps,
                 ple,
                 capture.as_ref(),
+                gdn_midpoint.as_ref(),
+                checkpoint_ple,
+                midpoint_resume,
                 rope,
             )?;
             // Keep this layer's routing (and, enabled, the predictions from
@@ -2426,7 +2609,7 @@ impl Qwen4ExpModel {
         }
 
         match mode {
-            BatchMode::Prefill { draw, vision } => {
+            BatchMode::Prefill { draw, vision, checkpoint, .. } => {
                 if let Some(draw) = draw {
                     // Only the last prompt token feeds decoding: pull its stream
                     // row into the single-token scratch and reuse the decode
@@ -2460,6 +2643,18 @@ impl Qwen4ExpModel {
                 if self.mtp_enabled
                     && let (Some(mtp), Some(mst)) = (&self.weights.mtp, &state.mtp)
                 {
+                    if let Some(snapshot) = checkpoint
+                        && let Some(hidden) = &snapshot.mtp_hidden
+                    {
+                        let row = snapshot.pos - pos - 1;
+                        let wide = cfg.hc_width();
+                        copy_words(
+                            ctx,
+                            &pass,
+                            &ps.hyper.view(row * wide, &[wide])?,
+                            hidden,
+                        )?;
+                    }
                     let images = vision.map_or(&[][..], |v| v.images);
                     self.mtp_catch_up(ctx, &pass, mtp, mst, pos, s, ps, rope, images)?;
                 }
@@ -2575,7 +2770,7 @@ impl Qwen4ExpModel {
     /// and written through its hyper-connection. `capture` (verify passes)
     /// records what a rollback needs.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn block_batched(
+    fn block_batched(
         &self,
         ctx: &MetalContext,
         pass: &ComputePass<'_>,
@@ -2589,6 +2784,9 @@ impl Qwen4ExpModel {
         ps: &PrefillScratch,
         ple: Option<(&PleWeights, &PleScratch, &PleState)>,
         capture: Option<&Capture>,
+        gdn_midpoint: Option<&GdnMidpoint<'_>>,
+        checkpoint_ple: Option<(usize, &Tensor)>,
+        midpoint_resume: bool,
         rope: Rope<'_>,
     ) -> Result<()> {
         let cfg = &self.config;
@@ -2614,6 +2812,7 @@ impl Qwen4ExpModel {
                 s,
                 ps,
                 capture.and_then(|c| c.ple_conv_in.as_ref()),
+                checkpoint_ple,
                 capture.is_some_and(|c| c.exact),
             )?;
         }
@@ -2645,6 +2844,8 @@ impl Qwen4ExpModel {
                     conv_windows,
                     conv_slot,
                     capture,
+                    gdn_midpoint,
+                    midpoint_resume,
                     layer_index,
                 )?;
             }
@@ -3042,6 +3243,7 @@ impl Qwen4ExpModel {
         s: &Scratch,
         ps: &PrefillScratch,
         conv_capture: Option<&Tensor>,
+        checkpoint: Option<(usize, &Tensor)>,
         exact: bool,
     ) -> Result<()> {
         let cfg = &self.config;
@@ -3110,18 +3312,34 @@ impl Qwen4ExpModel {
         if let Some(keep) = conv_capture {
             copy_words(ctx, pass, &p.gated_n, keep)?;
         }
-        ple::ple_conv1d_prefill_with_rounding(
-            ctx,
-            pass,
-            &pst.conv_windows[conv_slot],
-            &pst.conv_windows[1 - conv_slot],
-            &p.gated_n,
-            &w.conv_w,
-            &p.gated,
-            hyper,
-            ple.ngram_size,
-            self.config.official_mlx_rounding(),
-        )?;
+        if let Some((after, window)) = checkpoint {
+            ple::ple_conv1d_prefill_capture(
+                ctx,
+                pass,
+                &pst.conv_windows[conv_slot],
+                &pst.conv_windows[1 - conv_slot],
+                &p.gated_n,
+                &w.conv_w,
+                &p.gated,
+                hyper,
+                ple.ngram_size,
+                after,
+                window,
+            )?;
+        } else {
+            ple::ple_conv1d_prefill_with_rounding(
+                ctx,
+                pass,
+                &pst.conv_windows[conv_slot],
+                &pst.conv_windows[1 - conv_slot],
+                &p.gated_n,
+                &w.conv_w,
+                &p.gated,
+                hyper,
+                ple.ngram_size,
+                self.config.official_mlx_rounding(),
+            )?;
+        }
         pass.level_barrier(&[hyper, &pst.conv_windows[1 - conv_slot]])
     }
 
@@ -3138,6 +3356,8 @@ impl Qwen4ExpModel {
         conv_windows: &[Tensor; 2],
         conv_slot: usize,
         capture: Option<&Capture>,
+        midpoint: Option<&GdnMidpoint<'_>>,
+        midpoint_resume: bool,
         layer_index: usize,
     ) -> Result<()> {
         let cfg = &self.config;
@@ -3275,16 +3495,30 @@ impl Qwen4ExpModel {
             if let Some(c) = capture {
                 copy_words(ctx, pass, &ps.qkv, &c.conv_in)?;
             }
-            conv1d_prefill(
-                ctx,
-                pass,
-                &conv_windows[conv_slot],
-                &conv_windows[1 - conv_slot],
-                &ps.qkv,
-                &w.conv_w,
-                &ps.qkv_conv,
-                self.config.official_mlx_rounding(),
-            )?;
+            if let Some(midpoint) = midpoint {
+                conv1d_prefill_capture(
+                    ctx,
+                    pass,
+                    &conv_windows[conv_slot],
+                    &conv_windows[1 - conv_slot],
+                    &ps.qkv,
+                    &w.conv_w,
+                    &ps.qkv_conv,
+                    midpoint.after,
+                    midpoint.window,
+                )?;
+            } else {
+                conv1d_prefill(
+                    ctx,
+                    pass,
+                    &conv_windows[conv_slot],
+                    &conv_windows[1 - conv_slot],
+                    &ps.qkv,
+                    &w.conv_w,
+                    &ps.qkv_conv,
+                    self.config.official_mlx_rounding(),
+                )?;
+            }
             pass.level_barrier(&[&ps.qkv_conv, &conv_windows[1 - conv_slot]])?;
         }
         self.trace_stage(ctx, pass, layer_index, "gdn_qkv", &ps.qkv, ps.m)?;
@@ -3322,23 +3556,43 @@ impl Qwen4ExpModel {
             );
         }
         let staging = ps.gdn_stage.staging();
-        gdn_prefill_mid(
-            ctx,
-            pass,
-            &ps.qkv_conv,
-            &ps.a,
-            &ps.b,
-            &w.a_log,
-            &w.dt_bias,
-            &staging,
-            gdn_state,
-            &ps.gdn_out,
-            self.gdn_scale,
-            cfg.linear_num_key_heads,
-            capture.and_then(|c| c.mid.as_ref()),
-            self.config.official_mlx_rounding(),
-            gdn_layout,
-        )?;
+        if let Some(midpoint) = midpoint {
+            gdn_prefill_capture_key_value(
+                ctx,
+                pass,
+                &ps.qkv_conv,
+                &ps.a,
+                &ps.b,
+                &w.a_log,
+                &w.dt_bias,
+                &staging,
+                gdn_state,
+                &ps.gdn_out,
+                self.gdn_scale,
+                cfg.linear_num_key_heads,
+                midpoint.after,
+                midpoint.state,
+            )?;
+        } else {
+            gdn_prefill_mid_resume(
+                ctx,
+                pass,
+                &ps.qkv_conv,
+                &ps.a,
+                &ps.b,
+                &w.a_log,
+                &w.dt_bias,
+                &staging,
+                gdn_state,
+                &ps.gdn_out,
+                self.gdn_scale,
+                cfg.linear_num_key_heads,
+                capture.and_then(|c| c.mid.as_ref()),
+                self.config.official_mlx_rounding(),
+                gdn_layout,
+                midpoint_resume,
+            )?;
+        }
         pass.level_barrier(&[&ps.gdn_out, gdn_state])?;
         gated_rmsnorm(
             ctx,

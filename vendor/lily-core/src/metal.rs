@@ -600,10 +600,23 @@ impl MetalContext {
     /// resident for the queue.
     pub fn new_buffer(&self, len: usize) -> Result<Buffer> {
         let buf = self.residency.new_buffer(&self.device, len)?;
-        if let Some(recorded) = self.recorded.borrow_mut().as_mut() {
-            recorded.push(Rc::downgrade(&buf));
-        }
+        self.record_new_buffer(&buf);
         Ok(buf)
+    }
+
+    /// Allocates shared storage whose contents are owned by a complete GPU
+    /// overwrite before first read. Ordinary model state still uses
+    /// [`Self::new_buffer`].
+    pub(crate) fn new_buffer_uninitialized(&self, len: usize) -> Result<Buffer> {
+        let buf = self.residency.new_buffer_uninitialized(&self.device, len)?;
+        self.record_new_buffer(&buf);
+        Ok(buf)
+    }
+
+    fn record_new_buffer(&self, buf: &Buffer) {
+        if let Some(recorded) = self.recorded.borrow_mut().as_mut() {
+            recorded.push(Rc::downgrade(buf));
+        }
     }
 
     /// Starts recording the buffers [`Self::new_buffer`] allocates (and so
@@ -971,14 +984,24 @@ impl Residency {
         device: &ProtocolObject<dyn MTLDevice>,
         len: usize,
     ) -> Result<Buffer> {
+        let buf = self.new_buffer_uninitialized(device, len)?;
+        unsafe {
+            core::ptr::write_bytes(buf.raw.contents().as_ptr().cast::<u8>(), 0, len)
+        };
+        Ok(buf)
+    }
+
+    fn new_buffer_uninitialized(
+        self: &Rc<Self>,
+        device: &ProtocolObject<dyn MTLDevice>,
+        len: usize,
+    ) -> Result<Buffer> {
         let raw = device
             .newBufferWithLength_options(
                 len.max(1),
                 MTLResourceOptions::StorageModeShared,
             )
             .ok_or_else(|| anyhow!("failed to allocate {len}-byte buffer"))?;
-        // Metal does not guarantee new buffer contents; callers rely on zeros.
-        unsafe { core::ptr::write_bytes(raw.contents().as_ptr().cast::<u8>(), 0, len) };
         let address = raw.gpuAddress();
         self.set.addAllocation(ProtocolObject::<dyn MTLAllocation>::from_ref(&*raw));
         self.dirty.set(true);

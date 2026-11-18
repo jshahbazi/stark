@@ -167,6 +167,64 @@ pub fn ple_conv1d_prefill_with_rounding(
     dilation: usize,
     official_mlx: bool,
 ) -> Result<()> {
+    ple_conv1d_prefill_with_checkpoint(
+        ctx,
+        pass,
+        window_in,
+        window_out,
+        x,
+        w,
+        base,
+        hyper,
+        dilation,
+        official_mlx,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ple_conv1d_prefill_capture(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    window_in: &Tensor,
+    window_out: &Tensor,
+    x: &Tensor,
+    w: &Tensor,
+    base: &Tensor,
+    hyper: &Tensor,
+    dilation: usize,
+    capture_after: usize,
+    snapshot: &Tensor,
+) -> Result<()> {
+    ple_conv1d_prefill_with_checkpoint(
+        ctx,
+        pass,
+        window_in,
+        window_out,
+        x,
+        w,
+        base,
+        hyper,
+        dilation,
+        false,
+        Some((capture_after, snapshot)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ple_conv1d_prefill_with_checkpoint(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    window_in: &Tensor,
+    window_out: &Tensor,
+    x: &Tensor,
+    w: &Tensor,
+    base: &Tensor,
+    hyper: &Tensor,
+    dilation: usize,
+    official_mlx: bool,
+    checkpoint: Option<(usize, &Tensor)>,
+) -> Result<()> {
     ensure!(x.shape().len() == 2, "x must be [M, C]");
     let (m, c) = (x.shape()[0], x.shape()[1]);
     let s = check_conv(w, c, dilation)?;
@@ -189,25 +247,74 @@ pub fn ple_conv1d_prefill_with_rounding(
             "{name} must be BF16 [M, C]"
         );
     }
-    let (name, source) = if official_mlx {
-        ("ple_conv1d_prefill_bf16_mlx", OFFICIAL_SOURCE)
+    if let Some((after, snapshot)) = checkpoint {
+        let snapshot_buf = snapshot.buffer();
+        ensure!(
+            !official_mlx
+                && after > 0
+                && after < m
+                && snapshot.shape() == [c, s]
+                && snapshot.dtype() == DType::BF16
+                && [
+                    window_in.buffer(),
+                    window_out.buffer(),
+                    x.buffer(),
+                    w.buffer(),
+                    base.buffer(),
+                    hyper.buffer(),
+                ]
+                .into_iter()
+                .all(|buffer| !std::ptr::eq(snapshot_buf, buffer)),
+            "PLE conv checkpoint requires an interior BF16 window"
+        );
+    }
+    if let Some((after, snapshot)) = checkpoint {
+        let pipeline = ctx.pipeline(
+            "stark_ple_conv1d_prefill_bf16_capture",
+            SOURCE,
+            MslVersion::V3_1,
+        )?;
+        pass.dispatch_at(
+            &pipeline,
+            &[
+                window_in.binding(),
+                window_out.binding(),
+                x.binding(),
+                w.binding(),
+                base.binding(),
+                hyper.binding(),
+                snapshot.binding(),
+            ],
+            &[
+                &u32_bytes(c),
+                &u32_bytes(kd),
+                &u32_bytes(dilation),
+                &u32_bytes(m),
+                &u32_bytes(after),
+            ],
+            Grid::Threads { grid: (c, 1, 1), threadgroup: (TG.min(c), 1, 1) },
+        )
     } else {
-        ("ple_conv1d_prefill_bf16", SOURCE)
-    };
-    let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
-    pass.dispatch_at(
-        &pipeline,
-        &[
-            window_in.binding(),
-            window_out.binding(),
-            x.binding(),
-            w.binding(),
-            base.binding(),
-            hyper.binding(),
-        ],
-        &[&u32_bytes(c), &u32_bytes(kd), &u32_bytes(dilation), &u32_bytes(m)],
-        Grid::Threads { grid: (c, 1, 1), threadgroup: (TG.min(c), 1, 1) },
-    )
+        let (name, source) = if official_mlx {
+            ("ple_conv1d_prefill_bf16_mlx", OFFICIAL_SOURCE)
+        } else {
+            ("ple_conv1d_prefill_bf16", SOURCE)
+        };
+        let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
+        pass.dispatch_at(
+            &pipeline,
+            &[
+                window_in.binding(),
+                window_out.binding(),
+                x.binding(),
+                w.binding(),
+                base.binding(),
+                hyper.binding(),
+            ],
+            &[&u32_bytes(c), &u32_bytes(kd), &u32_bytes(dilation), &u32_bytes(m)],
+            Grid::Threads { grid: (c, 1, 1), threadgroup: (TG.min(c), 1, 1) },
+        )
+    }
 }
 
 /// Single-token [`ple_conv1d_prefill`]; the window is shifted in place.

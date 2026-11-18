@@ -575,3 +575,12 @@ scan at most four positions with F32 physical state captures after each
 rollback prefix, retaining the ordinary BF16 activation boundaries. Each
 path has component comparisons against ordinary decode. Full-model
 readout/rollback and sampled performance records are maintained separately.
+The optional 2,048-token prefill midpoint uses Lily's existing KeyValue
+`gdn_chunk_scan_body` in `src/kernels/metal/gdn.metal`. The checkpoint entry
+point writes one F32 accumulator at a selected 64-row boundary, retaining
+the original BF16 working copies and serial-tail policy. Model integration
+uses the existing convolution rollback rule, fused into the GDN and PLE
+convolution dispatches for the capture-bearing pass, plus the draft-hidden
+row layout. The normal prefill entry point and non-Lily layouts remain separate.
+Lily's Apache-2.0 attribution applies. Operator and full-model qualification
+are tracked independently in the midpoint experiment record.
