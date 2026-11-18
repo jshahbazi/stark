@@ -3507,6 +3507,9 @@ struct ModelsView: View {
             if let error = engine.removalError { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             if navigation.tab != .installModel && engine.catalogInstallation == nil {
                 if engine.busy || engine.state == "error" { StatusLine(engine: engine) }
+                if let error = engine.errorMessage {
+                    Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                }
                 if engine.state == "installing" {
                     HStack {
                         Button("Show Installation Progress") { navigation.tab = .installModel }
