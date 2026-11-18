@@ -7,11 +7,13 @@ description: "Download, import, run and remove models."
 
 Open **Advanced → Manage Models → Model Catalog**, choose a supported model variant and download it. After preparation finishes, choose **Run** in **Installed**.
 
-The search bar above the tabs searches downloaded models immediately and then
-checks a bounded set of matching Hugging Face repositories. Only models that
-pass the same family, format and pinned-revision checks as the catalog can be
-downloaded. Searches inside a selected family continue to filter that family's
-loaded rows without another Hub request.
+The universal search above the tabs searches installed models immediately, then
+checks a bounded set of matching Hugging Face repositories plus pinned native and
+Decision entries. Only models that pass the same family, format and
+pinned-revision checks as the catalog can be downloaded. Search runs
+automatically; Return does not close Manage Models. Searches inside a selected
+family continue to filter that family's loaded rows without another Hub
+request.
 
 Inside a family, models open sorted by **Coding score**, followed by name and size orders. The score comes from llmbench's frozen summary score, not from Stark benchmarking the downloaded quantization. **Hide Unsupported** is checked by default and leaves out models Stark cannot download. Uncheck it to see them marked **Unavailable** with the reason. Exports in formats Stark cannot import, such as AWQ or GPTQ, are listed under the original model they were made from, so a search for one lands on a model you can download.
 

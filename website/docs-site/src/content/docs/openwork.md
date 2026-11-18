@@ -12,9 +12,11 @@ Install the official [OpenWork Mac app](https://openworklabs.com). Open a local 
 1. Open **Connections → Apps** in Stark.
 2. Choose **Connect** on the OpenWork row.
 3. If Stark asks you to reopen OpenWork, quit it completely and launch it again.
-4. Select **Stark** and the running model in OpenWork's model picker.
+4. Open a local workspace in OpenWork, then choose **Open OpenWork** in Stark.
 
-This managed connection does not require copying the API key.
+Open OpenWork creates a new task in that workspace and binds Stark's currently
+running model. It never sends a prompt. This managed connection does not require
+copying the API key.
 
 ## Verify the connection
 
@@ -24,7 +26,7 @@ Chat success alone does not verify tool execution. OpenWork controls tools and f
 
 ## If Stark does not appear
 
-Confirm a model is running in Chat mode. Reopen OpenWork after connection setup. If you previously created a manual provider named `stark`, remove only that provider entry before connecting; preserve other providers.
+Confirm a model is running in Chat mode, then reopen OpenWork after connection setup if Stark requested it. Choose **Open OpenWork** again once the app is ready. If you previously created a manual provider named `stark`, remove only that provider entry before connecting; preserve other providers.
 
 After changing Stark's API port, choose **Manage → Reconnect** on the OpenWork row, then reopen OpenWork.
 

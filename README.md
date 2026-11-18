@@ -38,11 +38,11 @@ Click the cat icon and select **Beginner → Guided setup**:
 
 1. Choose **General Work** for the OpenWork guide or **Coding** for the OpenCode Desktop guide.
 2. Choose **Quality** (selected by default) or **Speed**, then **Find a model**.
-3. Review the recommendation for your Mac, download and start it, then follow the guide to install and connect your chosen app. In OpenCode, select **Stark** and the recommended model in its model picker. You can also chat in Stark.
+3. Review the recommendation for your Mac, download and start it, then follow the guide to install and connect your chosen app. In the OpenCode guide, select **Stark** and the recommended model in its model picker, then confirm it in Stark. You can also chat in Stark.
 
 Recommendations check model compatibility, available memory and storage. Coding Quality uses llmbench's coding summary score; General Work uses its separate non-coding score. Speed applies the selected task's parent-model score floor and a weight budget that grows with RAM. These scores describe parent models, so they do not measure each quantized export. See [recommendation policy and maintenance](docs/MODEL_RECOMMENDATIONS.md). This flow is new in the source branch; installed releases may have an earlier setup.
 
-To choose your own model and settings, select **Advanced** and open **Manage Models**; **Model Catalog** and **Add from Source** remain available. Both interfaces share installed models. [Menu bar guide](apps/menu-bar/README.md)
+To choose your own model and settings, select **Advanced** and open **Manage Models**; **Model Catalog** and **Add from Source** remain available. The universal search above the tabs checks saved models immediately, then searches the bounded Hugging Face catalog and pinned native/Decision entries. Both interfaces share installed models. [Menu bar guide](apps/menu-bar/README.md#models-and-requests)
 
 ### Install the app and terminal tools
 
@@ -67,7 +67,9 @@ Conversion downloads the model; use a new output directory each time. Chat loads
 
 ### Use Stark from another app
 
-Stark serves an OpenAI-style chat API for clients on the same Mac. Run a model in Chat mode, open **Connections** from Stark's menu, and use **Apps** to connect OpenWork or OpenCode Desktop without copying a key. For other native clients, choose **Connect your own app** and copy the **Base URL**, **API key** and **Model ID** into an OpenAI-compatible provider. The master key persists in macOS Keychain until you explicitly regenerate it. Streaming is supported. Qualified models and templates can return validated function calls for the client to execute under its own approval policy; Stark does not execute functions. Browser-origin requests, remote devices, embeddings and structured output are unsupported. See the [local API contract](docs/LOCAL_API.md) and [tested clients](docs/LOCAL_API.md#client-compatibility).
+Stark serves an OpenAI-style chat API for clients on the same Mac. Run a model in Chat mode, open **Connections** from Stark's menu, and use **Apps** to connect OpenWork or OpenCode Desktop without copying a key. Once connected, **Open OpenWork** creates a task in the current workspace with Stark's running model; **Open OpenCode Desktop** opens the app and selects that model in its active session. For Pi, run **Set Up Pi**, then use **Open Pi** to launch the configured model in Terminal or iTerm2 without pasting an API key. The Pi terminal choice and working folder are remembered for later launches.
+
+For other native clients, choose **Connect your own app** and copy the **Base URL**, **API key** and **Model ID** into an OpenAI-compatible provider. The master key persists in macOS Keychain until you explicitly regenerate it. Streaming is supported. Qualified models and templates can return validated function calls for the client to execute under its own approval policy; Stark does not execute functions. Browser-origin requests, remote devices, embeddings and structured output are unsupported. See the [local API contract](docs/LOCAL_API.md), [menu bar connection guide](apps/menu-bar/README.md#connect-another-application) and [tested clients](docs/LOCAL_API.md#client-compatibility).
 
 The [native image path](docs/MULTIMODAL_IMPLEMENTATION.md) accepts one PNG/JPEG through Playground, terminal chat and the Local API. This source branch adds quantized Qwen dense/MoE, retained Lily Flash-Next, Gemma 3 and Gemma 4 image paths alongside dense Qwen3.5 BF16. Image artifacts require compatible tensors and reviewed metadata, native admission, and automatic local checks. See the [coverage and validation record](docs/archive/runs/2026-11-07-image-family-integration.md) for exact checkpoints, builds and remaining limits. Installed releases can have an earlier capability set.
 
