@@ -59,9 +59,7 @@ def _insufficient_memory(required: int, available: int) -> ImageCheckError:
         if type(available) is int
         else "Cannot determine available RAM to run the image model check. "
     )
-    return ImageCheckError(
-        reason + "Stop other models or close memory-heavy apps, then retry."
-    )
+    return ImageCheckError(reason + "Stop other models or close memory-heavy apps, then retry.")
 
 
 def preflight_family_memory(model: Path, config: dict) -> None:
