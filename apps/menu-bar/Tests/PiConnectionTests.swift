@@ -71,6 +71,13 @@ struct PiConnectionTests {
         controller.refresh()
         require(controller.installed && !controller.busy && calls == 1)
         require(!controller.matches(baseURL: baseURL, modelID: "public-model"))
+        require(controller.terminal == .terminal)
+        if let alternate = controller.availableTerminals.first(where: { $0 != .terminal }) {
+            controller.chooseTerminal(alternate)
+            require(controller.terminal == alternate
+                    && defaults.string(forKey: "stark.pi.terminal.v1") == alternate.rawValue)
+            controller.chooseTerminal(.terminal)
+        }
         controller.setup(baseURL: baseURL, modelID: "public-model", key: key,
                          keychainService: "com.starkengine.menubar.local-api.fixture")
         require(controller.busy && calls == 2)
@@ -94,7 +101,10 @@ struct PiConnectionTests {
         opened = false
         controller.open(baseURL: baseURL, modelID: "public-model", key: key,
             keychainService: "com.starkengine.menubar.local-api.fixture",
-            openTerminal: { _, completion in opened = true; completion(true) })
+            openTerminal: { _, application, completion in
+                require(application == PiTerminal.terminal.applicationURL)
+                opened = true; completion(true)
+            })
         require(opened && calls == 4 && keychainChecks == 1 && !launchArguments.contains("--workspace"))
 
         _ = NSApplication.shared
@@ -109,7 +119,7 @@ struct PiConnectionTests {
         require(!controller.busy && controller.workingFolder == directory)
         controller.open(baseURL: baseURL, modelID: "public-model", key: key,
             keychainService: "com.starkengine.menubar.local-api.fixture",
-            openTerminal: { _, completion in completion(true) })
+            openTerminal: { _, _, completion in completion(true) })
         require(keychainChecks == 2 && launchArguments.contains("--workspace") && launchArguments.contains(directory.path))
         controller.chooseWorkingFolder(in: window, chooser: { _, current, completion in
             require(current == directory); completion(nil)
@@ -119,7 +129,7 @@ struct PiConnectionTests {
         require(controller.workingFolder == nil)
         controller.open(baseURL: baseURL, modelID: "public-model", key: key,
             keychainService: "com.starkengine.menubar.local-api.fixture",
-            openTerminal: { _, completion in completion(true) })
+            openTerminal: { _, _, completion in completion(true) })
         require(keychainChecks == 3 && !launchArguments.contains("--workspace"))
 
         // Saved setup restoration uses the same verified helper, and an unsafe

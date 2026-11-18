@@ -88,7 +88,8 @@ set up for the currently running Stark model. Terminal opens directly into the
 connected profile; Pi obtains the API key from the Keychain command saved
 during setup, so no clipboard paste or hidden prompt is needed. Stark checks
 that access before opening Terminal, so any required Keychain approval happens
-before Pi starts.
+before Pi starts. The **Open in** menu lists installed Terminal and iTerm2 apps
+and remembers the choice for later Open Pi actions.
 Stark finds Pi automatically and creates or reuses the private working folder
 `~/Library/Application Support/Stark/Pi/Workspace`. **Change Working Folder…**
 optionally selects a project for new sessions in a sheet attached to Connections;

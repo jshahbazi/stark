@@ -7,6 +7,15 @@ import Darwin
 /// the setup helper only in its environment; launches read it from the saved
 /// Keychain command in Pi's normal configuration. No managed capability or
 /// approval is issued.
+enum PiTerminal: String, CaseIterable, Identifiable {
+    case terminal, iTerm
+
+    var id: String { rawValue }
+    var name: String { self == .terminal ? "Terminal" : "iTerm2" }
+    var bundleID: String { self == .terminal ? "com.apple.Terminal" : "com.googlecode.iterm2" }
+    var applicationURL: URL? { NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) }
+}
+
 final class PiConnectionController: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var installed = false
@@ -15,6 +24,7 @@ final class PiConnectionController: ObservableObject {
     @Published private(set) var configuredModel = ""
     @Published private(set) var configuredBaseURL = ""
     @Published private(set) var workingFolder: URL?
+    @Published private(set) var terminal: PiTerminal = .terminal
 
     struct Tools {
         let node: URL
@@ -24,6 +34,7 @@ final class PiConnectionController: ObservableObject {
     typealias Runner = (URL, [String], [String: String], @escaping Completion) -> Void
     typealias FolderChooser = (NSWindow, URL?, @escaping (URL?) -> Void) -> Void
     typealias KeychainVerifier = (String, @escaping (Bool) -> Void) -> Void
+    typealias TerminalOpener = (URL, URL, @escaping (Bool) -> Void) -> Void
     private let resources: URL
     private let root: URL
     private let defaults: UserDefaults
@@ -34,6 +45,7 @@ final class PiConnectionController: ObservableObject {
     private var refreshed = false
     private static let profilePreference = "stark.pi.manualProfile.v1"
     private static let workingFolderPreference = "stark.pi.workingFolder.v1"
+    private static let terminalPreference = "stark.pi.terminal.v1"
 
     init(resources: URL = Bundle.main.resourceURL?.appendingPathComponent("PiClient") ?? URL(fileURLWithPath: "/nonexistent"),
          root: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -49,9 +61,14 @@ final class PiConnectionController: ObservableObject {
            !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
             workingFolder = URL(fileURLWithPath: path, isDirectory: true)
         }
+        if let saved = defaults.string(forKey: Self.terminalPreference),
+           let selected = PiTerminal(rawValue: saved), selected.applicationURL != nil {
+            terminal = selected
+        }
     }
 
     var workingFolderLabel: String { workingFolder?.lastPathComponent ?? "Stark workspace (automatic)" }
+    var availableTerminals: [PiTerminal] { PiTerminal.allCases.filter { $0.applicationURL != nil } }
 
     func matches(baseURL: String, modelID: String) -> Bool {
         profile != nil && configuredBaseURL == baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) &&
@@ -112,8 +129,13 @@ final class PiConnectionController: ObservableObject {
     }
 
     func open(baseURL: String, modelID: String, key: String, keychainService: String,
-              openTerminal: @escaping (URL, @escaping (Bool) -> Void) -> Void = PiConnectionController.openTerminal) {
+              openTerminal: @escaping TerminalOpener = PiConnectionController.openTerminal) {
         guard !busy, installed, matches(baseURL: baseURL, modelID: modelID), !key.isEmpty else { return }
+        let application = terminal.applicationURL ?? PiTerminal.terminal.applicationURL
+        guard let application else {
+            message = "Terminal is unavailable. Install Terminal or iTerm2, then try again."
+            return
+        }
         busy = true
         message = "Waiting for macOS to allow Pi’s Keychain access…"
         keychainVerifier(keychainService) { [weak self] allowed in
@@ -123,7 +145,9 @@ final class PiConnectionController: ObservableObject {
                 self.message = "Allow Stark’s API key in Keychain Access, then choose Open Pi again."
                 return
             }
-            self.prepareLaunch(workspace: self.workingFolder, openTerminal: openTerminal)
+            self.prepareLaunch(workspace: self.workingFolder) { command, completion in
+                openTerminal(command, application, completion)
+            }
         }
     }
 
@@ -148,6 +172,12 @@ final class PiConnectionController: ObservableObject {
         message = "New Stark Pi sessions will use the automatic workspace."
     }
 
+    func chooseTerminal(_ terminal: PiTerminal) {
+        guard terminal.applicationURL != nil else { return }
+        self.terminal = terminal
+        defaults.set(terminal.rawValue, forKey: Self.terminalPreference)
+    }
+
     private static func chooseFolder(in window: NSWindow, current: URL?, completion: @escaping (URL?) -> Void) {
         let picker = NSOpenPanel()
         picker.title = "Choose a working folder for Stark Pi"
@@ -161,7 +191,7 @@ final class PiConnectionController: ObservableObject {
 
     /// Omitting workspace asks the helper to create/reuse Stark's private default.
     func prepareLaunch(workspace: URL? = nil,
-                       openTerminal: @escaping (URL, @escaping (Bool) -> Void) -> Void = PiConnectionController.openTerminal) {
+                       openTerminal: @escaping (URL, @escaping (Bool) -> Void) -> Void) {
         guard !busy, let profile else { return }
         var arguments = ["--action", "prepare-launch", "--profile", profile]
         if let workspace { arguments += ["--workspace", workspace.path] }
@@ -176,8 +206,8 @@ final class PiConnectionController: ObservableObject {
                 self.message = Self.failure(result); return
             }
             openTerminal(launch) { [weak self] opened in
-                self?.message = opened ? "Opening Pi in Terminal. macOS may ask to allow Keychain access."
-                    : "Could not open Terminal. Check Pi setup and try again."
+                self?.message = opened ? "Opening Pi in the selected terminal."
+                    : "Could not open the selected terminal. Check Pi setup and try again."
             }
         }
     }
@@ -289,8 +319,8 @@ final class PiConnectionController: ObservableObject {
         }
     }
 
-    private static func openTerminal(_ command: URL, completion: @escaping (Bool) -> Void) {
-        let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+    private static func openTerminal(_ command: URL, at terminal: URL,
+                                     completion: @escaping (Bool) -> Void) {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         NSWorkspace.shared.open([command], withApplicationAt: terminal, configuration: configuration) { app, _ in

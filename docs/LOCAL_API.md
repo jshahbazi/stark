@@ -20,10 +20,10 @@ sessions retain their explicit selections.
 
 The Advanced Connections **Apps** tab also includes **Pi**, with **Set Up Pi**
 and **Open Pi**. This manual Pi 1.5.2 flow creates an isolated guarded profile
-and opens Terminal for a chosen folder. The setup helper receives the key only
+and opens the selected installed terminal for a chosen folder. The setup helper receives the key only
 in its private process environment, while subsequent launches use the
-Keychain command saved in Pi's normal configuration. Terminal may ask once for
-Keychain access before Terminal opens; Open Pi waits for that lookup to succeed
+Keychain command saved in Pi's normal configuration. The selected terminal may ask once for
+Keychain access before it opens; Open Pi waits for that lookup to succeed
 and does not place the key on the clipboard or prompt for it. Files and command
 arguments contain no key. Pi is excluded from
 Beginner setup and has no managed grant or scoped Disconnect. See

@@ -52,7 +52,7 @@ under Connections when their integrations become available.
 
 The Pi card implements manual setup: verify installed Pi 1.5.2, discover the
 running model, create a separate Stark-owned profile with the required guard,
-and open Terminal in an automatic private workspace. **Open Pi** uses the
+and open a chosen installed terminal in an automatic private workspace. **Open Pi** uses the
 Keychain command saved in Pi's normal profile and starts the connected profile
 without placing the key on the clipboard or displaying a hidden prompt.
 It requires no folder selection. **Change Working Folder…** optionally selects a

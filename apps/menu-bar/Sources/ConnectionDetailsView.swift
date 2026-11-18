@@ -331,7 +331,7 @@ private struct PiConnectionView: View {
                 }
                     .buttonStyle(.borderedProminent)
                     .disabled(connection.profile == nil || connection.busy || !connection.installed || !available || !current)
-                    .accessibilityLabel("Open Pi in Terminal with the running Stark model")
+                    .accessibilityLabel("Open Pi in the selected terminal with the running Stark model")
                 Button(connection.profile == nil ? "Set Up Pi" : "Update Setup") {
                     connection.setup(baseURL: baseURL, modelID: modelID, key: key,
                                      keychainService: APICredentialStore.applicationService)
@@ -348,6 +348,20 @@ private struct PiConnectionView: View {
             HStack(spacing: 12) {
                 Button("Check Installation") { connection.refresh(force: true) }.disabled(connection.busy)
             }.font(.caption)
+            HStack(spacing: 8) {
+                Text("Open in").font(.caption).foregroundStyle(.secondary)
+                Picker("Terminal for Pi", selection: Binding(
+                    get: { connection.terminal },
+                    set: { connection.chooseTerminal($0) }
+                )) {
+                    ForEach(connection.availableTerminals) { terminal in
+                        Text(terminal.name).tag(terminal)
+                    }
+                }
+                .pickerStyle(.menu).labelsHidden().fixedSize()
+                .accessibilityLabel("Terminal for Pi")
+                Spacer()
+            }
             Text("Working folder: \(connection.workingFolderLabel)")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 12) {
@@ -357,7 +371,7 @@ private struct PiConnectionView: View {
                     Button("Use Stark Workspace", action: connection.useDefaultWorkspace).disabled(connection.busy)
                 }
             }.font(.caption)
-            Text("Setup also makes Stark the default when you type pi in Terminal. Open Pi checks macOS Keychain access first, then starts a separate session in the working folder above. macOS may ask you to allow access before Terminal opens. Pi can edit files and run commands. Sessions opened here are not saved.")
+            Text("Setup also makes Stark the default when you type pi in a terminal. Open Pi checks macOS Keychain access first, then starts a separate session in the working folder above. macOS may ask you to allow access before the selected terminal opens. Pi can edit files and run commands. Sessions opened here are not saved.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
