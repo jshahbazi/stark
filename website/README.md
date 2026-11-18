@@ -64,7 +64,7 @@ together.
 
 The owner-supplied logo and screenshots retain their original bytes. See
 [brand provenance](../docs/brand/README.md) and the
-[latest screenshot replacement record](../docs/archive/runs/2026-11-11-website-screenshot-replacements.md).
+[latest screenshot replacement record](../docs/archive/runs/2026-11-18-website-screenshot-replacements.md).
 Keyboard-operable tabs, focus indicators, reduced-motion handling and the skip
 link remain part of the site. `robots.txt`, `sitemap.xml` and `404.html` ship
 alongside the three pages.
