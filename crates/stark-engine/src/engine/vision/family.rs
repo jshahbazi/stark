@@ -11,6 +11,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use super::{ImageTokenIds, VisionTowerConfig};
 use crate::backends::common::InvalidInput;
@@ -94,6 +95,8 @@ const TEMPLATE_HASHES: [&str; 2] =
     [super::ARTIFACT_FILES[4].1, "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67"];
 const DYNAMIC_STOCK_TEMPLATE: &str = "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715";
 const DYNAMIC_QWEN38_TEMPLATE: &str = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041";
+const OFFICIAL_QWEN38_TEMPLATE: &str = "af16f654968d47d09a6c604e00370b12dbc21f76456f59c9e98b82e84d9f6375";
+const OFFICIAL_QWEN38_NORMALIZED_TEMPLATE: &str = "61c5db6e90356e85fb2ccfd0466fddf3b2a5c6058b20b195a37d7b01de97c8b8";
 
 pub(super) struct FamilyAdmission {
     pub tower: VisionTowerConfig,
@@ -346,16 +349,22 @@ pub(super) fn admit(
                         | FamilyProfile::AffineV3
                         | FamilyProfile::MoeV4
                         | FamilyProfile::Bf16MoeV5
-                ) && [DYNAMIC_STOCK_TEMPLATE, DYNAMIC_QWEN38_TEMPLATE].contains(&digest.as_str())
+                ) && [DYNAMIC_STOCK_TEMPLATE, DYNAMIC_QWEN38_TEMPLATE, OFFICIAL_QWEN38_TEMPLATE]
+                    .contains(&digest.as_str())
         })
     {
         return Err(InvalidInput("unsupported native vision family text processing"));
     }
     let processor: Value = serde_json::from_slice(processor_bytes).map_err(|_| invalid())?;
     let template = std::str::from_utf8(template_bytes).map_err(|_| invalid())?;
+    let prompt = config["token_codec_config"]["prompt_template"].as_str().ok_or_else(invalid)?;
+    let normalized_template = hashes.get("chat_template.jinja").is_some_and(|digest| {
+        digest == OFFICIAL_QWEN38_TEMPLATE
+            && format!("{:x}", Sha256::digest(prompt.as_bytes())) == OFFICIAL_QWEN38_NORMALIZED_TEMPLATE
+    });
     if processor != processor_profile()
         || config["token_codec_config"]["type"] != "ChatCodecConfig"
-        || config["token_codec_config"]["prompt_template"].as_str() != Some(template)
+        || prompt != template && !normalized_template
     {
         return Err(invalid());
     }
@@ -723,6 +732,11 @@ mod tests {
         let processor = serde_json::to_vec(&processor_profile()).unwrap();
         let admitted = admit(&config, &hashes, &processor, b"synthetic-template", &tokenizer).unwrap();
         assert_eq!(admitted.profile.identity(), (DYNAMIC_PROFILE, DYNAMIC_VERSION));
+        let mut official_hashes = hashes.clone();
+        official_hashes.insert("chat_template.jinja", OFFICIAL_QWEN38_TEMPLATE.into());
+        let mut official_config = config.clone();
+        official_config["artifact_contract"]["component_hashes"] = json!(official_hashes);
+        assert!(admit(&official_config, &official_hashes, &processor, b"synthetic-template", &tokenizer).is_ok());
         let tensors = &admitted.tensors.as_ref().unwrap().tensors;
         let (mut header, bytes) = valid_header_for(tensors);
         assert!(validate_tensor_header(&header, bytes + 8, 8, tensors).is_ok());

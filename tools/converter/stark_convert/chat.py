@@ -276,6 +276,8 @@ def load_template(model, *, expected_hashes=None):
                 "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80",
                 "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67",
             }
+            from .vision_family import _OFFICIAL_QWEN38_TEMPLATE_SHA256
+
             if config.get("type") == "Gemma4VisionLanguageModelConfig":
                 descriptor = config.get("artifact_contract", {}).get("family", {})
                 template_hashes = (
@@ -307,6 +309,7 @@ def load_template(model, *, expected_hashes=None):
                 }
             ):
                 template_hashes.add("a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715")
+                template_hashes.add(_OFFICIAL_QWEN38_TEMPLATE_SHA256)
                 if family["profile"] in {
                     "qwen35-dense-affine-merged-v3",
                     "qwen35-moe-affine-merged-v4",
@@ -314,15 +317,18 @@ def load_template(model, *, expected_hashes=None):
                 }:
                     template_hashes.add("c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041")
             copied = _chat_file(model / "chat_template.jinja", 256 * 1024)
+            copied_digest = hashlib.sha256(copied).hexdigest()
+            copied_matches_source = copied == source.encode("utf-8")
+            if copied_digest == _OFFICIAL_QWEN38_TEMPLATE_SHA256:
+                from .template_compat import normalize_chat_template
+
+                copied_matches_source = normalize_chat_template(copied.decode("utf-8")) == source
             if (
                 len(data) > 1024 * 1024
                 or len(copied) > 256 * 1024
-                or copied != source.encode("utf-8")
-                or hashlib.sha256(copied).hexdigest() not in template_hashes
-                or (
-                    expected_hashes is not None
-                    and hashlib.sha256(copied).hexdigest() != expected_hashes["template_sha256"]
-                )
+                or not copied_matches_source
+                or copied_digest not in template_hashes
+                or (expected_hashes is not None and copied_digest != expected_hashes["template_sha256"])
             ):
                 raise ValueError
         from .api_tools import codec_with_template_review
