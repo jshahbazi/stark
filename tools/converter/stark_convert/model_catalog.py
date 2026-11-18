@@ -1560,8 +1560,7 @@ def _search_matches(query, fields):
 
     terms = [normalized(term) for term in query.split() if normalized(term)]
     if "qwen3" in terms and not any(
-        re.search(r"(?i)(?<![a-z0-9])qwen[-_. ]*3(?![0-9]|\.[0-9]|_[0-9])", field)
-        for field in fields
+        re.search(r"(?i)(?<![a-z0-9])qwen[-_. ]*3(?![0-9]|\.[0-9]|_[0-9])", field) for field in fields
     ):
         return False
     text = normalized(" ".join(fields))
