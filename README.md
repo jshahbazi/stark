@@ -32,7 +32,7 @@ Use an **Apple silicon Mac with macOS 26.4 or newer** in a native arm64 terminal
 
 ### Install the app
 
-Download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest) and open **Install Stark** when included. It replaces the running copy and launches the new app. Older DMGs use drag-and-drop: copy `Stark.app` into Applications, quit the old app, then open the installed copy.
+Download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest). For a first installation, drag **Stark** onto the **Applications** shortcut as the arrow in the window shows. To update a running copy, open **Install Stark** when included. It replaces the running copy and launches the new app. Older DMGs use drag-and-drop only: copy `Stark.app` into Applications, quit the old app, then open the installed copy.
 
 Click the cat icon and select **Beginner → Guided setup**:
 
