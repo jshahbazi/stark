@@ -212,6 +212,7 @@ fn committed_external_view<B: Backend>() {
                         sinks: None,
                         cache: view.query_cache_view(),
                         image_span: None,
+                        block_boundary: None,
                     },
                     &mut command,
                 )
@@ -228,6 +229,7 @@ fn committed_external_view<B: Backend>() {
                         sinks: None,
                         cache: view.query_cache_view(),
                         image_span: None,
+                        block_boundary: None,
                     },
                     &mut command,
                 )
@@ -330,7 +332,7 @@ fn committed_bf16_eager_view<B: Backend>() {
         let mut query = context.create_buffer(128).unwrap();
         query.copyin(&[bf16::ZERO; 64]);
         let (keys, values) = view.validation_copy(&mut command).unwrap();
-        let output = eager.encode(&query, &keys, &values, 1, count - 1, &mut command).unwrap();
+        let output = eager.encode(&query, &keys, &values, 1, count - 1, None, &mut command).unwrap();
         let mut result = context.create_buffer(128).unwrap();
         command.encode_copy(&output, &mut result);
         command.end_encoding().submit().wait_until_completed().unwrap();

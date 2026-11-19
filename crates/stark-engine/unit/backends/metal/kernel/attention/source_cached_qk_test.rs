@@ -71,6 +71,7 @@ fn source_cached_qk_has_independent_f64_bf16_midpoint_and_tail_oracles() {
             suffix_length: 1,
             trie: None::<&<Metal as Backend>::ConstantBuffer>,
             sinks: None,
+            block_boundary: None,
             cache: KVCacheView::full(rows as u32 - 1),
         };
         let (_, stages) = <<Metal as Backend>::Kernels as Kernels>::AttentionKernel::encode_fallback_trace_for_test(

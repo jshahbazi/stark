@@ -98,6 +98,7 @@ fn get_output<T: ArrayElement + Float, B: Backend>(input: &Input<T>) -> Vec<T> {
         suffix_length: input.suffix_length as u32,
         trie: None::<&B::GlobalBuffer>,
         sinks: None,
+        block_boundary: None,
         cache: KVCacheView::full(segment_prefix_length as u32),
     };
 
@@ -145,6 +146,7 @@ fn get_gemm_output_variant<T: ArrayElement + Float>(
         suffix_length: input.suffix_length as u32,
         trie: None::<&<Metal as Backend>::GlobalBuffer>,
         sinks: None,
+        block_boundary: None,
         cache,
     };
     let gemm = super::gemm::AttentionGemm::new(&config);

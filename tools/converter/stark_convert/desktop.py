@@ -108,6 +108,23 @@ MAX_PROGRESS_BYTES = 4096
 DOWNLOAD_RETRY_INITIAL_SECONDS = 5
 MAX_SUPPORT_BYTES = 65536
 MAX_CATALOG_BYTES = 256 * 1024
+
+
+def decision_installer(source, kind):
+    from . import decider_install, elephant_install
+
+    if elephant_install.is_elephant_source(source, kind=kind):
+        return "stark_convert.elephant_install", "Elephant 1"
+    if decider_install.is_decider_source(source, kind=kind):
+        return "stark_convert.decider_install", "Decider Flash v1.3"
+    return None, None
+
+
+def prepared_decision_name(config):
+    source = config.get("source") if isinstance(config, dict) else None
+    if isinstance(source, dict) and source.get("repo") == "baselabs/elephant-1":
+        return "Elephant 1"
+    return "Decider Flash v1.3"
 PROGRESS_PHASES = ("download", "conversion")
 MODEL_FILES = ("config.json", "tokenizer.json", "model.safetensors")
 
@@ -640,15 +657,12 @@ class Desktop:
                     raise
 
     def start_catalog(self, family, request_id, offset=0):
-        from .decider_install import FAMILY_ID as DECIDER_FAMILY_ID
-
         allowed = {
             item["family_id"]
             for item in support_matrix()["families"]
             if item["model_kind"] == "language"
             or (
-                item["family_id"] == DECIDER_FAMILY_ID
-                and item["model_kind"] == "decision"
+                item["model_kind"] == "decision"
                 and item["modes"]["decision"]["status"] == "conditional"
             )
         }
@@ -2172,9 +2186,12 @@ class Desktop:
         native_decision = selected_mode == "decision"
         command = [sys.executable, "-I", "-B", "-m"]
         if native_decision:
+            module, _name = decision_installer(source, kind)
+            if module is None:
+                raise DesktopError("Choose a pinned native Decision model source.")
             command.extend(
                 [
-                    "stark_convert.decider_install",
+                    module,
                     "preflight",
                     source,
                     "--kind",
@@ -2324,7 +2341,7 @@ class Desktop:
                     raise DesktopError("The selected conversion mode does not match this Stark artifact.")
                 selected_mode = stored_mode
                 if stored_mode == "decision":
-                    name = "Decider Flash v1.3"
+                    name = prepared_decision_name(config)
         elif kind == "huggingface":
             try:
                 source = huggingface_repository(source)
@@ -2346,15 +2363,15 @@ class Desktop:
         else:
             raise DesktopError("Choose a local folder or Hugging Face repository.")
         raw_decider = False
+        decision_module = None
         if not converted and kind in {"local", "huggingface"}:
-            from .decider_install import is_decider_source
-
-            raw_decider = is_decider_source(str(path) if kind == "local" else source, kind=kind)
+            decision_module, decision_name = decision_installer(str(path) if kind == "local" else source, kind)
+            raw_decider = decision_module is not None
             if raw_decider:
                 if artifact_mode not in (None, "decision"):
                     raise DesktopError("Choose native Decision mode to install this Decider source.")
                 selected_mode = "decision"
-                name = "Decider Flash v1.3"
+                name = decision_name
         purpose = support_mode or selected_mode
         if selected_mode == "decision" and artifact_mode is None and support_mode == "text":
             # Add Source inherits the current Chat purpose before inspecting a
@@ -2364,7 +2381,7 @@ class Desktop:
         if selected_mode == "decision" and purpose != "decision":
             raise DesktopError("Decider artifacts support native Decision mode only.")
         if selected_mode == "decision" and not converted and not raw_decider:
-            raise DesktopError("Choose the pinned Decider Flash source or import a prepared Decider artifact.")
+            raise DesktopError("Choose a pinned native Decision source or import a prepared Decision artifact.")
         if converted and selected_mode == "vision-language" and purpose == "text":
             purpose = "vision-language"  # Ordinary Chat can import an existing image artifact.
         if selected_mode == "vision-language" and purpose != "vision-language":
@@ -2492,7 +2509,7 @@ class Desktop:
                 if raw_decider:
                     command.extend(
                         [
-                            "stark_convert.decider_install",
+                            decision_module,
                             "prepare",
                             str(path) if kind == "local" else source,
                             "--kind",

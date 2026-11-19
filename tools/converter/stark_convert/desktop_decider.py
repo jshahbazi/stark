@@ -17,6 +17,8 @@ from tokenizers import Tokenizer
 
 from .chat import ChatCancelled, ChatError, Worker, _popen_with_gpu_memory, read_model_config
 from .decider_protocol import DeciderError, Encoder, answer, probabilities
+from .elephant_protocol import Encoder as ElephantEncoder
+from .elephant_protocol import answer as elephant_answer
 from .decision import DecisionInputError, DecisionProtocolError, validate_inputs
 from .media import PrivateMediaStore
 from .resource_budget import REQUEST_BUDGET_MIB
@@ -42,6 +44,9 @@ class _DecisionTemplate:
 def is_decider(config):
     return isinstance(config, dict) and config.get("type") == "DeciderModelConfig"
 
+def _decision_protocol(config):
+    return config["decision_config"].get("protocol_version", 4)
+
 
 def prepared_decider(path, config=None):
     """Cheap structural import admission; the native worker still validates weights."""
@@ -54,30 +59,53 @@ def prepared_decider(path, config=None):
         ):
             return False
         decision = config["decision_config"]
-        codes, tokens = decision["codes"], decision["token_ids"]
+        protocol = _decision_protocol(config)
         temperature = decision["temperature"]
         if (
-            decision.get("protocol_version") != 4
-            or decision.get("num_options") != 255
-            or decision.get("max_pixels") != IMAGE_LIMITS["max_processed_pixels"]
+            protocol not in {4, 5}
             or type(temperature) not in (int, float)
             or not math.isfinite(temperature)
             or temperature <= 0
-            or not isinstance(codes, list)
-            or len(codes) != 255
-            or any(not isinstance(code, str) or not code for code in codes)
-            or len(set(codes)) != 255
-            or not isinstance(tokens, list)
-            or len(tokens) != 255
-            or any(type(token) is not int or token < 0 for token in tokens)
-            or len(set(tokens)) != 255
             or not isinstance(config.get("vision_config"), dict)
         ):
             return False
+        if protocol == 4:
+            codes, tokens = decision["codes"], decision["token_ids"]
+            if (
+                decision.get("num_options") != 255
+                or decision.get("max_pixels") != IMAGE_LIMITS["max_processed_pixels"]
+                or not isinstance(codes, list)
+                or len(codes) != 255
+                or any(not isinstance(code, str) or not code for code in codes)
+                or len(set(codes)) != 255
+                or not isinstance(tokens, list)
+                or len(tokens) != 255
+                or any(type(token) is not int or token < 0 for token in tokens)
+                or len(set(tokens)) != 255
+            ):
+                return False
+        else:
+            labels, tokens = decision["slot_labels"], decision["slot_token_ids"]
+            if (
+                decision.get("protocol") != "onejev-slot-lm-v2"
+                or decision.get("readout") != "slot_lm"
+                or decision.get("attention") != "block_bidirectional"
+                or decision.get("num_options") != 256
+                or decision.get("max_pixels") != 16_777_216
+                or decision.get("max_input_tokens") != 16_384
+                or not isinstance(labels, list)
+                or len(labels) != 256
+                or any(not isinstance(label, str) or not label for label in labels)
+                or not isinstance(tokens, list)
+                or len(tokens) != 256
+                or any(type(token) is not int or token < 0 for token in tokens)
+                or len(set(tokens)) != 256
+            ):
+                return False
         layers = config["decoder_config"]["transformer_config"]["layer_configs"]
         full = [layer for layer in layers if layer["mixer_config"]["type"] == "AttentionConfig"]
         return bool(full) and all(
-            layer["mixer_config"].get("is_causal") is False
+            layer["mixer_config"].get("is_causal") is (protocol == 5)
             and layer["rope_config"].get("type") == "Qwen35MRoPEConfig"
             and layer["rope_config"].get("mrope_section") == [11, 11, 10]
             and layer["rope_config"].get("interleaved") is True
@@ -110,17 +138,35 @@ class DesktopDeciderWorker(Worker):
         if not prepared_decider(self.model, config):
             raise DecisionInputError("This Decider artifact is incomplete or lacks image position support.")
         decision = config["decision_config"]
+        self.protocol = _decision_protocol(config)
+        self.num_options = decision["num_options"]
         self.temperature = decision["temperature"]
         tokenizer = Tokenizer.from_file(str(self.model / "tokenizer.json"))
-        if any(
-            tokenizer.encode(code, add_special_tokens=False).ids != [token]
-            for code, token in zip(decision["codes"], decision["token_ids"], strict=True)
-        ):
-            raise DecisionInputError("The Decider option mapping does not match its tokenizer.")
         template = IsolatedTemplate((self.model / "chat_template.jinja").read_text())
-        self.encoder = Encoder(tokenizer, _DecisionTemplate(template, self._decision_cancelled), decision["codes"])
+        template = _DecisionTemplate(template, self._decision_cancelled)
+        if self.protocol == 4:
+            if any(
+                tokenizer.encode(code, add_special_tokens=False).ids != [token]
+                for code, token in zip(decision["codes"], decision["token_ids"], strict=True)
+            ):
+                raise DecisionInputError("The Decider option mapping does not match its tokenizer.")
+            self.encoder = Encoder(tokenizer, template, decision["codes"])
+            self.answer = answer
+        else:
+            if any(
+                tokenizer.encode(label, add_special_tokens=False).ids != [token]
+                for label, token in zip(decision["slot_labels"], decision["slot_token_ids"], strict=True)
+            ):
+                raise DecisionInputError("The Elephant option mapping does not match its tokenizer.")
+            self.encoder = ElephantEncoder(tokenizer, template)
+            self.answer = elephant_answer
         self.images = False
-        self.image_input = dict(IMAGE_LIMITS)
+        self.image_input = {
+            **IMAGE_LIMITS,
+            "max_processed_pixels": decision["max_pixels"],
+            "max_patches": decision["max_pixels"] // 1024,
+            "max_image_tokens": decision["max_pixels"] // 1024,
+        }
         self.image_verification = "unverified"
         self.media = PrivateMediaStore()
         environment = {
@@ -157,15 +203,22 @@ class DesktopDeciderWorker(Worker):
                 or reply.get("images") is not True
                 or type(reply.get("max_images")) is not int
                 or reply["max_images"] != 1
-                or reply.get("options") != 255
+                or reply.get("options") != self.num_options
                 or type(reply.get("max_input_tokens")) is not int
-                or not 1 <= reply["max_input_tokens"] <= 4096
+                or reply["max_input_tokens"] != (
+                    4096 if self.protocol == 4 else 16384
+                )
             ):
                 self.close()
                 raise ChatError("The native Decider worker did not advertise its required image capabilities.")
             self.max_input_tokens = reply["max_input_tokens"]
             self.images = True
-            self.image_input = dict(IMAGE_LIMITS)
+            self.image_input = {
+                **IMAGE_LIMITS,
+                "max_processed_pixels": read_model_config(self.model)["decision_config"]["max_pixels"],
+                "max_patches": read_model_config(self.model)["decision_config"]["max_pixels"] // 1024,
+                "max_image_tokens": read_model_config(self.model)["decision_config"]["max_pixels"] // 1024,
+            }
             self.image_verification = "unverified"
         return reply
 
@@ -236,7 +289,7 @@ class DesktopDeciderWorker(Worker):
                 answers, input_tokens = {}, 0
                 for encoded in plan:
                     values, count = self._decide_question(encoded, reference, image is not None, cancelled)
-                    answers[encoded.key] = answer(request["questions"][encoded.key], values)
+                    answers[encoded.key] = self.answer(request["questions"][encoded.key], values)
                     input_tokens += count
             return {
                 "answers": answers,
@@ -250,6 +303,9 @@ class DesktopDeciderWorker(Worker):
                 "input_token_ids": list(encoded.input_ids),
                 "readout_positions": [len(encoded.input_ids) - 1],
                 "option_counts": [encoded.option_count],
+                "block_boundaries": (
+                    [encoded.block_boundary] if self.protocol == 5 else []
+                ),
                 "context_tokens": self.max_input_tokens,
                 "images": [str(self.media.root / reference["id"])] if reference is not None else [],
             },
@@ -257,7 +313,9 @@ class DesktopDeciderWorker(Worker):
         )
         if reply.get("ok") is not True:
             if reply.get("error") in {"invalid_decision_request", "decider_context_overflow"}:
-                raise DecisionInputError("The decision and image exceed the 4096-token limit. Use a smaller input.")
+                raise DecisionInputError(
+                    f"The decision and image exceed the {self.max_input_tokens}-token limit. Use a smaller input."
+                )
             if reply.get("error") == "decider_image_preparation_failed":
                 raise DecisionInputError("The image could not be prepared. Choose a supported PNG or JPEG image.")
             if reply.get("error") == "decider_resource_limit":

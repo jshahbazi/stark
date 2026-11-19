@@ -535,6 +535,14 @@ and source/local installation paths use the pinned Flash v1.3 profile. See
 and Locate capabilities, and the artifact-bound native qualification record.
 Packaged-app qualification remains pending.
 
+Elephant 1 is a second pinned Decision artifact with a separate 9B source and
+OneJev slot-LM protocol. It retains image support, uses two
+block-bidirectional full-attention regions over a causal hybrid backbone, and
+does not expose generative text, MTP, tool calling or persistent prefix state.
+Its source admission and runtime path are implemented, while exact checkpoint
+numerical, image, memory and performance qualification remain explicit pending
+work. See [Elephant 1](ELEPHANT.md).
+
 The registry uses these mode identifiers:
 
 | Mode | Intended use |

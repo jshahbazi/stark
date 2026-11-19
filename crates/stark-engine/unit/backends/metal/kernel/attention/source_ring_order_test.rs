@@ -55,6 +55,7 @@ fn run(
                 suffix_length: 1,
                 trie: None::<&<Metal as Backend>::ConstantBuffer>,
                 sinks: None,
+                block_boundary: None,
                 cache: view,
             },
             &mut commands,

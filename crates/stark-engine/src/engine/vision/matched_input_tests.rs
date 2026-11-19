@@ -347,6 +347,7 @@ fn attention<B: Backend>(backend: &str) {
                                 trie: None::<&B::GlobalBuffer>,
                                 sinks: None,
                                 cache: KVCacheView::full(0),
+                                block_boundary: None,
                             },
                             &mut command,
                         )
@@ -368,7 +369,8 @@ fn attention<B: Backend>(backend: &str) {
                             chunk_data.extend_from_slice(&query_data[begin..end]);
                         }
                         let chunk = command.allocate_constant_from_slice(&chunk_data).unwrap();
-                        let result = reference.encode(&chunk, &keys, &values, count, prefix, &mut command).unwrap();
+                        let result =
+                            reference.encode(&chunk, &keys, &values, count, prefix, None, &mut command).unwrap();
                         let begin = prefix as usize * heads as usize * head_dim as usize * 2;
                         let end = begin + count as usize * heads as usize * head_dim as usize * 2;
                         command.encode_copy(&result, (&mut readback).subrange_mut(begin..end));

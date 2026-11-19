@@ -255,6 +255,34 @@ def test_prepared_decider_has_typed_decision_only_image_display(tmp_path):
     assert result["quantization"] == "BF16"
 
 
+def test_prepared_elephant_has_independent_source_display(tmp_path):
+    model = decider_artifact(tmp_path)
+    source = {
+        "repo": inventory._ELEPHANT_REPO,
+        "revision": inventory._ELEPHANT_REVISION,
+        "metadata_sha256": {name: "1" * 64 for name in inventory._ELEPHANT_METADATA_FILES},
+        "weight_files": {"model.safetensors": {"size": 4, "sha256": "2" * 64}},
+    }
+    config = json.loads((tmp_path / "config.json").read_bytes())
+    config["source"] = source
+    config["decision_config"] = {"protocol_version": 5, "num_options": 256}
+    config_bytes = json.dumps(config).encode()
+    (tmp_path / "config.json").write_bytes(config_bytes)
+    receipt = {
+        "source": source,
+        "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+        "output_bytes": (tmp_path / "model.safetensors").stat().st_size,
+        "output_sha256": hashlib.sha256((tmp_path / "model.safetensors").read_bytes()).hexdigest(),
+    }
+    (tmp_path / "conversion.json").write_text(json.dumps(receipt))
+    result = inventory.model_display(model)
+    assert result["upstream_repo"] == inventory._ELEPHANT_REPO
+    assert result["group_id"] == "repo:" + inventory._ELEPHANT_REPO
+    assert result["group_name"] == "Elephant 1"
+    assert result["source_revision"] == inventory._ELEPHANT_REVISION
+    assert result["artifact_mode"] == "decision"
+
+
 @pytest.mark.parametrize("field", ["config_sha256", "output_bytes", "source"])
 def test_decider_display_falls_back_when_provenance_binding_is_invalid(tmp_path, field):
     model = decider_artifact(tmp_path)

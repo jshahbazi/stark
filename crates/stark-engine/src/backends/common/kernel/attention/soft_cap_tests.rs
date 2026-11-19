@@ -73,6 +73,7 @@ fn check<B: Backend, T: ArrayElement + Float>() {
                             |offset| KVCacheView::ring(prefix as u32, offset),
                         ),
                         image_span: None,
+                        block_boundary: None,
                     },
                     &mut commands,
                 )

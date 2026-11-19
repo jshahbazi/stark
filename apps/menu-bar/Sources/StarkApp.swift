@@ -521,6 +521,7 @@ struct ModelFamily: Identifiable {
         case "qwen2": return "Qwen2"
         case "qwen3_5": return "Qwen3.5 / 3.8"
         case "decider-flash-v1.3": return "Decider Flash v1.3"
+        case "elephant-1": return "Elephant 1"
         case "qwen3_5_moe": return "Qwen3.5 MoE"
         case "qwen4_exp": return "Qwen3.8 Flash Next"
         case "glm5_next": return "GLM-5.3 Flash"
@@ -3810,26 +3811,29 @@ struct ModelsView: View {
     private func savedModelRow(_ model: ModelsInventory.Model, family: String?) -> some View {
         let variantLabel = model.variantLabel
         return HStack(spacing: 10) {
-            Group {
-                if model.id == engine.modelControlID {
-                    savedModelName(model, variantLabel: variantLabel)
-                } else {
-                    Button {
-                        onRun(model.id)
-                    } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Group {
+                    if model.id == engine.modelControlID {
                         savedModelName(model, variantLabel: variantLabel)
+                    } else {
+                        Button {
+                            onRun(model.id)
+                        } label: {
+                            savedModelName(model, variantLabel: variantLabel)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(engine.busy || !model.isAvailable)
+                        .accessibilityLabel("Run " + model.displayName)
+                        .help(model.isAvailable ? "Run " + model.displayName :
+                                "This saved model is unavailable in this Stark build.")
                     }
-                    .buttonStyle(.plain)
-                    .disabled(engine.busy || !model.isAvailable)
-                    .accessibilityLabel("Run " + model.displayName)
-                    .help(model.isAvailable ? "Run " + model.displayName :
-                            "This saved model is unavailable in this Stark build.")
                 }
-                if model.artifactMode == .decision {
+                if variantLabel == nil && model.artifactMode == .decision {
                     Text("Decision and images").font(.caption).foregroundStyle(.secondary)
                 }
             }
-            .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
+            .frame(minWidth: 100, idealWidth: 150, maxWidth: .infinity, alignment: .leading)
+            .layoutPriority(0)
             Text(model.quantization ?? "—").font(.caption).foregroundStyle(.secondary)
                 .lineLimit(1).minimumScaleFactor(0.8).frame(width: 68, alignment: .leading)
             Text(model.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
@@ -3859,7 +3863,11 @@ struct ModelsView: View {
 
     private func savedModelName(_ model: ModelsInventory.Model, variantLabel: String?) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(model.displayName).font(.callout.weight(.medium)).lineLimit(2).truncationMode(.tail)
+            Text(model.displayName)
+                .font(.callout.weight(.medium))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
             if let variantLabel {
                 Text(variantLabel).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }

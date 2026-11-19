@@ -38,7 +38,7 @@ use crate::{
     parameters::{NumericalProfile, ParameterLoader},
 };
 
-pub const MAX_DECIDER_INPUT_TOKENS: u32 = 4096;
+pub const MAX_DECIDER_INPUT_TOKENS: u32 = 16_384;
 
 /// Content-free load/request failure; never contains request data or backend dumps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,9 +114,12 @@ pub struct DeciderModel<B: Backend> {
     tower: Option<VisionTower<B>>,
     tokenizer: Arc<Tokenizer>,
     config: DecoderConfig,
-    marker: u32,
+    marker: Option<u32>,
     options: u32,
     model_dim: u32,
+    max_input_tokens: u32,
+    block_attention: bool,
+    slot_readout: bool,
     limits: PreprocessLimits,
 }
 
@@ -179,8 +182,32 @@ impl<B: Backend> Engine<B> {
         if config.kind != "DeciderModelConfig" || self.capture_manager.is_some() || path.join("speculator").exists() {
             return Err(DeciderError("unsupported_decider_config"));
         }
-        let marker = integer(&config.decision_config, "marker_token_id")?;
+        let slot_readout = config.decision_config.get("readout").and_then(serde_json::Value::as_str) == Some("slot_lm");
+        let block_attention =
+            config.decision_config.get("attention").and_then(serde_json::Value::as_str) == Some("block_bidirectional");
+        if slot_readout != block_attention {
+            return Err(DeciderError("unsupported_decider_protocol"));
+        }
+        let protocol_version = config.decision_config.get("protocol_version").and_then(serde_json::Value::as_u64);
+        if slot_readout && protocol_version != Some(5)
+            || !slot_readout && protocol_version != Some(4)
+            || !slot_readout && config.decision_config.get("protocol").and_then(serde_json::Value::as_str).is_some()
+        {
+            return Err(DeciderError("unsupported_decider_protocol"));
+        }
+        let marker = if slot_readout {
+            None
+        } else {
+            Some(integer(&config.decision_config, "marker_token_id")?)
+        };
         let options = integer(&config.decision_config, "num_options")?;
+        let max_input_tokens = config
+            .decision_config
+            .get("max_input_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(4096)
+            .try_into()
+            .map_err(|_| DeciderError("invalid_decider_context"))?;
         let model_dim = config.decoder_config.transformer_config.model_dim;
         let layers = &config.decoder_config.transformer_config.layer_configs;
         let mut full = 0;
@@ -188,7 +215,7 @@ impl<B: Backend> Engine<B> {
         for layer in layers {
             match &layer.mixer_config {
                 AnyTokenMixerConfig::AttentionConfig(attention)
-                    if !attention.is_causal
+                    if attention.is_causal == slot_readout
                         && attention.reference_bf16
                         && !attention.is_kv_sharing
                         && attention.sliding_window_size.is_none() =>
@@ -204,8 +231,13 @@ impl<B: Backend> Engine<B> {
                 _ => return Err(DeciderError("unsupported_decider_attention")),
             }
         }
-        if options != 255
-            || marker >= config.decoder_config.vocab_size
+        if options
+            != if slot_readout {
+                256
+            } else {
+                255
+            }
+            || marker.is_some_and(|id| id >= config.decoder_config.vocab_size)
             || model_dim == 0
             || model_dim > 8192
             || layers.len() > 128
@@ -214,6 +246,14 @@ impl<B: Backend> Engine<B> {
             || config.decoder_config.ple_model_config.is_some()
             || config.decoder_config.embedding_norm_config.is_some()
             || config.decoder_config.separate_prefill_last_token
+            || max_input_tokens == 0
+            || max_input_tokens > MAX_DECIDER_INPUT_TOKENS
+            || max_input_tokens
+                != if slot_readout {
+                    16_384
+                } else {
+                    4096
+                }
         {
             return Err(DeciderError("unsupported_decider_geometry"));
         }
@@ -222,16 +262,46 @@ impl<B: Backend> Engine<B> {
             return Err(DeciderError("invalid_decider_vision_width"));
         }
         let max_pixels = u64::from(integer(&config.decision_config, "max_pixels")?);
-        if max_pixels != 1_638_400 {
+        if (slot_readout && max_pixels != 16_777_216) || (!slot_readout && max_pixels != 1_638_400) {
             return Err(DeciderError("unsupported_decider_max_pixels"));
         }
         let tokenizer = Arc::new(
             Tokenizer::from_file(path.join("tokenizer.json")).map_err(|_| DeciderError("invalid_decider_tokenizer"))?,
         );
         if tokenizer.get_vocab(true).values().any(|&id| id >= config.decoder_config.vocab_size)
-            || tokenizer.token_to_id("<|fim_suffix|>") != Some(marker)
+            || marker.is_some_and(|id| tokenizer.token_to_id("<|fim_suffix|>") != Some(id))
         {
             return Err(DeciderError("invalid_decider_tokenizer"));
+        }
+        if slot_readout {
+            let labels = config.decision_config.get("slot_labels").and_then(serde_json::Value::as_array);
+            let ids = config.decision_config.get("slot_token_ids").and_then(serde_json::Value::as_array);
+            let mut distinct = Vec::with_capacity(options as usize);
+            if let Some(ids) = ids {
+                for value in ids {
+                    if let Some(id) = value.as_u64().and_then(|id| u32::try_from(id).ok()) {
+                        distinct.push(id);
+                    }
+                }
+                distinct.sort_unstable();
+                distinct.dedup();
+            }
+            if labels.is_none_or(|items| items.len() != options as usize)
+                || ids.is_none_or(|items| items.len() != options as usize)
+                || distinct.len() != options as usize
+                || labels.is_none_or(|items| items.iter().any(|item| !item.is_string()))
+                || ids.is_none_or(|items| {
+                    items.iter().enumerate().any(|(index, value)| {
+                        let Some(id) = value.as_u64().and_then(|id| u32::try_from(id).ok()) else {
+                            return true;
+                        };
+                        let label = labels.and_then(|labels| labels[index].as_str()).unwrap_or("");
+                        id >= config.decoder_config.vocab_size || tokenizer.token_to_id(label) != Some(id)
+                    })
+                })
+            {
+                return Err(DeciderError("invalid_decider_slot_tokens"));
+            }
         }
         let weights = File::open(path.join("model.safetensors")).map_err(|_| DeciderError("decider_weights_io"))?;
         let loader = ParameterLoader::new(&weights, self.context.as_ref())
@@ -253,7 +323,11 @@ impl<B: Backend> Engine<B> {
             options,
             DataType::BF16,
             DataType::BF16,
-            DataType::BF16,
+            if slot_readout {
+                DataType::F32
+            } else {
+                DataType::BF16
+            },
             &tree,
             None,
             None,
@@ -265,7 +339,7 @@ impl<B: Backend> Engine<B> {
         let limits = PreprocessLimits {
             processor_max_pixels: max_pixels,
             max_processed_pixels: max_pixels,
-            max_encoder_patches: 6400,
+            max_encoder_patches: u32::try_from(max_pixels.div_ceil(1024)).unwrap_or(u32::MAX),
             ..Default::default()
         };
         Ok(DeciderModel {
@@ -279,6 +353,9 @@ impl<B: Backend> Engine<B> {
             marker,
             options,
             model_dim,
+            max_input_tokens,
+            block_attention,
+            slot_readout,
             limits,
         })
     }
@@ -308,13 +385,16 @@ where
         self.config.vocab_size
     }
     pub fn max_context_length(&self) -> Option<u32> {
-        Some(MAX_DECIDER_INPUT_TOKENS)
+        Some(self.max_input_tokens)
     }
     pub fn num_options(&self) -> usize {
         self.options as usize
     }
     pub fn has_images(&self) -> bool {
         self.tower.is_some()
+    }
+    pub fn requires_block_boundary(&self) -> bool {
+        self.block_attention
     }
 
     /// Conservative full-sequence workspace allowance. Ordinary generation's
@@ -324,7 +404,7 @@ where
         rows: u32,
         context: u32,
     ) -> Option<usize> {
-        if rows == 0 || rows > MAX_DECIDER_INPUT_TOKENS || context < rows || context > MAX_DECIDER_INPUT_TOKENS {
+        if rows == 0 || rows > self.max_input_tokens || context < rows || context > self.max_input_tokens {
             return None;
         }
         let estimate = self.decoder.scoring_memory_estimate(context, rows)?;
@@ -345,9 +425,10 @@ where
         &self,
         input: &[u32],
         marker: u32,
+        block_boundary: Option<u32>,
         context: u32,
     ) -> Result<DeciderScores, DeciderError> {
-        self.score_images(input, marker, &[], context)
+        self.score_images(input, marker, block_boundary, &[], context)
     }
 
     /// Raw protocol tokens have one placeholder per image. One static image is
@@ -356,16 +437,20 @@ where
         &self,
         input: &[u32],
         marker: u32,
+        block_boundary: Option<u32>,
         images: &[&[u8]],
         context: u32,
     ) -> Result<DeciderScores, DeciderError> {
         if input.is_empty()
-            || input.len() > MAX_DECIDER_INPUT_TOKENS as usize
+            || input.len() > self.max_input_tokens as usize
             || images.len() > 1
             || (!images.is_empty() && self.tower.is_none())
             || input.iter().any(|&id| id >= self.vocab_size())
-            || input.get(marker as usize) != Some(&self.marker)
-            || input.iter().filter(|&&id| id == self.marker).count() != 1
+            || marker as usize + 1 != input.len()
+            || self.marker.is_some_and(|expected| input.get(marker as usize) != Some(&expected))
+            || self.marker.is_some_and(|expected| input.iter().filter(|&&id| id == expected).count() != 1)
+            || block_boundary.is_some() != self.block_attention
+            || block_boundary.is_some_and(|boundary| boundary == 0 || boundary >= marker)
         {
             return Err(DeciderError("invalid_decider_input"));
         }
@@ -413,6 +498,14 @@ where
             } else {
                 0
             };
+        let block_boundary = block_boundary.map(|boundary| {
+            boundary
+                + if image_start.is_some_and(|start| start < boundary as usize) {
+                    image_rows - 1
+                } else {
+                    0
+                }
+        });
         let rows = u32::try_from(expanded.len()).map_err(|_| DeciderError("decider_context_overflow"))?;
         let decoder_bytes = self.memory_bytes(rows, context).ok_or(DeciderError("decider_resource_limit"))?;
         let image_bytes = match &prepared {
@@ -502,6 +595,11 @@ where
         } else {
             BatchTopology::new(&nodes, true)
         };
+        let batch = if let Some(boundary) = block_boundary {
+            batch.with_block_boundary(boundary).map_err(|_| DeciderError("invalid_decider_block_boundary"))?
+        } else {
+            batch
+        };
         let replacement = multimodal.as_ref().map(|image| EmbeddingReplacement {
             token_start: image.image.token_start as u32,
             features: &image.image.features,
@@ -527,7 +625,11 @@ where
         command.end_encoding().submit().wait_until_completed().map_err(|_| DeciderError("decider_backend_failed"))?;
         let prefill_seconds = started.elapsed().as_secs_f64();
         let started = Instant::now();
-        let logits: Vec<_> = (&logits).as_slice::<bf16>().iter().map(|value| value.to_f32()).collect();
+        let logits: Vec<_> = if self.slot_readout {
+            (&logits).as_slice::<f32>().to_vec()
+        } else {
+            (&logits).as_slice::<bf16>().iter().map(|value| value.to_f32()).collect()
+        };
         if logits.len() != self.options as usize || logits.iter().any(|value| !value.is_finite()) {
             return Err(DeciderError("invalid_decider_output"));
         }

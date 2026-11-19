@@ -252,6 +252,8 @@ pub struct AttentionArguments<
     pub trie: Option<TT>,
     pub sinks: Option<&'a B::GlobalBuffer>,
     pub cache: KVCacheView,
+    /// End-exclusive boundary after a bidirectional decision prefix.
+    pub block_boundary: Option<u32>,
     /// Batch-local [start, end) containing a complete bidirectional image block.
     /// Image blocks must never straddle prefill batches; trie batches cannot use this mask.
     pub image_span: Option<ImageAttentionSpan>,
@@ -341,6 +343,7 @@ mod image_span_tests {
                             trie: None::<&<B as Backend>::GlobalBuffer>,
                             sinks: None,
                             cache: KVCacheView::full(2),
+                            block_boundary: None,
                             image_span: Some(ImageAttentionSpan {
                                 range: [1, 3],
                                 respects_window,
@@ -361,6 +364,7 @@ mod image_span_tests {
                                 sinks: None,
                                 cache: KVCacheView::full(2),
                                 image_span: Some([1, 5].into()),
+                                block_boundary: None,
                             },
                             &mut commands
                         )
@@ -662,6 +666,7 @@ mod materialized_tests {
                             trie: None::<&<B as Backend>::GlobalBuffer>,
                             sinks: None,
                             cache: KVCacheView::full(1),
+                            block_boundary: None,
                         },
                         &mut commands,
                     )
@@ -719,6 +724,7 @@ mod materialized_tests {
                     trie: None::<&B::GlobalBuffer>,
                     sinks: None,
                     cache: KVCacheView::ring(0, 0),
+                    block_boundary: None,
                 },
                 &mut commands,
             )

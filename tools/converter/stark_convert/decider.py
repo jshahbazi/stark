@@ -28,6 +28,8 @@ from ._build_metadata import file_hash as _hash
 from .adapters.qwen35 import build_qwen35_plan
 from .checkpoint_metadata import CheckpointMetadata
 from .decider_protocol import PROTOCOL, DeciderError, Encoder, answer, probabilities
+from .elephant_protocol import Encoder as ElephantEncoder
+from .elephant_protocol import answer as elephant_answer
 from .streaming import (
     ConversionError,
     TensorOperation,
@@ -302,19 +304,25 @@ def prepare(source, output, *, revision=SOURCE_REVISION):
 class Decider:
     """One serialized native worker. Request content is never sent to diagnostics."""
 
-    def __init__(self, model_path, worker_path, *, max_length=4096, timeout=300):
+    def __init__(self, model_path, worker_path, *, max_length=16384, timeout=300):
         self.model_path = Path(model_path).resolve()
         self.config = read_json(self.model_path / "config.json")
         if self.config.get("type") != "DeciderModelConfig":
             raise DeciderError("A prepared Decider artifact is required.")
         self.temperature = self.config["decision_config"]["temperature"]
+        self.protocol = self.config["decision_config"].get("protocol_version", 4)
         self.max_length, self.timeout = max_length, timeout
         self._lock = threading.Lock()
         self._buffer = bytearray()
         self._process = None
         tokenizer = Tokenizer.from_file(str(self.model_path / "tokenizer.json"))
         template = IsolatedTemplate((self.model_path / "chat_template.jinja").read_text())
-        self.encoder = Encoder(tokenizer, template, self.config["decision_config"]["codes"])
+        if self.protocol == 4:
+            self.encoder = Encoder(tokenizer, template, self.config["decision_config"]["codes"])
+            self.answer = answer
+        else:
+            self.encoder = ElephantEncoder(tokenizer, template)
+            self.answer = elephant_answer
         self._process = subprocess.Popen(
             [str(Path(worker_path).resolve()), "--model-path", str(self.model_path)],
             stdin=subprocess.PIPE,
@@ -416,6 +424,9 @@ class Decider:
                             "input_token_ids": list(encoded.input_ids),
                             "readout_positions": [len(encoded.input_ids) - 1],
                             "option_counts": [encoded.option_count],
+                            "block_boundaries": (
+                                [encoded.block_boundary] if self.protocol == 5 else []
+                            ),
                             "images": [str(image) for image in images],
                             "context_tokens": self.max_length,
                         }
@@ -423,7 +434,7 @@ class Decider:
                     rows = result.get("logits")
                     if not isinstance(rows, list) or len(rows) != 1 or len(rows[0]) != encoded.option_count:
                         raise DeciderError("Invalid native decision result.")
-                    answers[encoded.key] = answer(
+                    answers[encoded.key] = self.answer(
                         request["questions"][encoded.key], probabilities(rows[0], selected_temperature)
                     )
                     input_tokens += result["input_tokens"]
@@ -467,7 +478,7 @@ def main(argv=None):
     run = commands.add_parser("decide", help="Read requests and write responses as JSON lines.")
     run.add_argument("--model-path", type=Path, required=True)
     run.add_argument("--worker", type=Path, required=True)
-    run.add_argument("--max-length", type=int, default=4096)
+    run.add_argument("--max-length", type=int, default=16384)
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":

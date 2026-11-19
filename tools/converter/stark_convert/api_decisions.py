@@ -54,7 +54,7 @@ def run_decision(desktop, payload, cancelled):
             raise APIError(503, "Stark is shutting down.", "server_stopped")
         worker = desktop.worker
         if desktop.active_model is None or worker is None:
-            raise APIError(503, "Run Decider Flash in Stark first.", "model_not_loaded")
+            raise APIError(503, "Run a native Decision model in Stark first.", "model_not_loaded")
         if desktop.current_state == "loading":
             raise APIError(429, "Stark is preparing the model. Retry after loading.", "model_busy")
         if getattr(worker, "backend", None) != "decision-native":

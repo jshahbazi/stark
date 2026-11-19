@@ -30,6 +30,11 @@ _DECIDER_FAMILY_ID = "decider-flash-v1.3"
 _DECIDER_REPO = "perplexity-ai/pplx-decider-flash-v1.3"
 _DECIDER_REVISION = "d06fb3f2d97e0a52325a0d463c450cf0338f44fe"
 _DECIDER_WEIGHT_BYTES = 9_079_921_808
+_ELEPHANT_FAMILY_ID = "elephant-1"
+_ELEPHANT_REPO = "baselabs/elephant-1"
+_ELEPHANT_REVISION = "b3f8a93462fb1051a9de031e94a7ff380e254072"
+_ELEPHANT_WEIGHT_BYTES = 18_819_722_392
+_DECISION_FAMILIES = {_DECIDER_FAMILY_ID, _ELEPHANT_FAMILY_ID}
 QWEN38_DENSE_REPO = "Qwen/Qwen3.8-27B"
 QWEN38_DENSE_REVISION = "37561816e66b5b9153b1b64c10968c18c1e6f4a0"
 
@@ -1010,9 +1015,9 @@ def family_catalog(
         return report(family_id or "", "error", "The model catalogue request is invalid.")
 
     native_family = family_id in {NATIVE_FAMILY_ID, FLINT_FAMILY_ID, RIPPLE_FAMILY_ID}
-    family = family_id if native_family or family_id == _DECIDER_FAMILY_ID else normalize_architecture(family_id)
+    family = family_id if native_family or family_id in _DECISION_FAMILIES else normalize_architecture(family_id)
     definition = next((item for item in support_matrix()["families"] if item["family_id"] == family), None)
-    if family != _DECIDER_FAMILY_ID and (
+    if family not in _DECISION_FAMILIES and (
         definition is None
         or not any(definition["modes"][mode]["status"] == "conditional" for mode in ("text", "vision-language"))
     ):
@@ -1032,25 +1037,27 @@ def family_catalog(
         )
     ):
         return report(family, "error", "The model catalogue request is invalid.")
-    if offline or os.environ.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes"}:
-        return report(family, "offline", "Connect to the internet to browse models.")
     if ranking_task not in (None, "general", "coding"):
         return report(family, "error", "The model catalogue request is invalid.")
-    if family == _DECIDER_FAMILY_ID:
-        name = "Decider Flash v1.3"
+    if family in _DECISION_FAMILIES:
+        name, repo, revision, weight_bytes, size = (
+            ("Decider Flash v1.3", _DECIDER_REPO, _DECIDER_REVISION, _DECIDER_WEIGHT_BYTES, "4B")
+            if family == _DECIDER_FAMILY_ID
+            else ("Elephant 1", _ELEPHANT_REPO, _ELEPHANT_REVISION, _ELEPHANT_WEIGHT_BYTES, "9B")
+        )
         item = {
-            "id": hashlib.sha256((_DECIDER_REPO + "@" + _DECIDER_REVISION).encode()).hexdigest()[:32],
-            "repo": _DECIDER_REPO,
-            "revision": _DECIDER_REVISION,
+            "id": hashlib.sha256((repo + "@" + revision).encode()).hexdigest()[:32],
+            "repo": repo,
+            "revision": revision,
             "name": name,
-            "size_label": "4B",
+            "size_label": size,
             "parameter_count": None,
-            "weight_bytes": _DECIDER_WEIGHT_BYTES,
+            "weight_bytes": weight_bytes,
             "quantization": "BF16",
             "artifact_modes": ["decision"],
             "default_artifact_mode": "decision",
             "downloadable": True,
-            "model_group": _model_group(_DECIDER_FAMILY_ID, _DECIDER_REPO, name, "BF16", None),
+            "model_group": _model_group(family, repo, name, "BF16", None),
             "images": True,
             "max_images": 1,
         }
@@ -1061,9 +1068,11 @@ def family_catalog(
         return report(
             family,
             "ready",
-            "Choose Decider Flash v1.3 to install its Decision-only BF16 artifact.",
+            f"Choose {name} to install its Decision-only BF16 artifact.",
             items,
         )
+    if offline or os.environ.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes"}:
+        return report(family, "offline", "Connect to the internet to browse models.")
     if family == RIPPLE_FAMILY_ID:
         # Both quantizations share a repository but have distinct pinned
         # revisions. Keep their exact artifact identities rather than collapsing
@@ -1601,10 +1610,11 @@ def _search_fixed_items(query):
         for item in catalog_items(family):
             if _search_matches(query, [family, item["repo"], item["name"], item["quantization"]]):
                 fixed.append({**item, "family_id": family})
-    decider = family_catalog(_DECIDER_FAMILY_ID)
-    for item in decider["items"]:
-        if _search_matches(query, [_DECIDER_FAMILY_ID, item["repo"], item["name"]]):
-            fixed.append({**item, "family_id": _DECIDER_FAMILY_ID})
+    for family in sorted(_DECISION_FAMILIES):
+        decision = family_catalog(family)
+        for item in decision["items"]:
+            if _search_matches(query, [family, item["repo"], item["name"]]):
+                fixed.append({**item, "family_id": family})
     return fixed
 
 
@@ -1629,14 +1639,19 @@ def search_catalog(
         or not 0 < deadline_seconds <= 600
     ):
         return _report("search", "error", "Enter a model name to search.")
+    fixed = _search_fixed_items(query)
     if offline or os.environ.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes"}:
-        return _report("search", "offline", "Connect to the internet to search Hugging Face models.")
+        if not fixed:
+            return _report("search", "offline", "Connect to the internet to search Hugging Face models.")
+        if on_item is not None:
+            for item in fixed:
+                on_item(item)
+        return _report("search", "ready", "Pinned catalog matches are available.", fixed)
     if hub is None:
         import huggingface_hub
 
         hub = huggingface_hub
 
-    fixed = _search_fixed_items(query)
     if on_item is not None:
         for item in fixed:
             on_item(item)
