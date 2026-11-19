@@ -6,9 +6,9 @@ There are three ways to install, each verifying something different; see [what e
 
 ## Install the menu bar app
 
-Download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest). For DMGs containing **Install Stark**, open the image and choose that launcher. It verifies and stages the new app before quitting the running copy, replaces it, launches the replacement, and reports completion or an explicit failure. It uses the running copy's location, including `~/Applications`. With no running copy, it prefers an existing `/Applications/Stark.app`, then `~/Applications/Stark.app`, then a writable Applications folder. Models remain in place; active chats stop.
+Download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest). Its window shows **Stark**, an arrow and the **Applications** shortcut, with the **Install Stark** launcher beneath them. For a first installation, drag Stark onto Applications as the arrow shows, eject the image, then open Stark from Applications. To replace an installed or running copy, open **Install Stark** instead; every DMG containing that launcher supports this. The launcher verifies and stages the new app before quitting the running copy, replaces it, launches the replacement, and reports completion or an explicit failure. It uses the running copy's location, including `~/Applications`. With no running copy, it prefers an existing `/Applications/Stark.app`, then `~/Applications/Stark.app`, then a writable Applications folder. Models remain in place; active chats stop.
 
-Older DMGs use drag-and-drop. Copy `Stark.app` to Applications, eject the image, quit the running old app, then open the installed app. Drag-copying alone cannot stop an older running copy.
+Older DMGs offer only drag-and-drop. Copy `Stark.app` to Applications, eject the image, quit the running old app, then open the installed app. Drag-copying alone cannot stop an older running copy, so use **Install Stark** when Stark is already running.
 
 After installation, click the cat icon and choose **Manage Models**. Use
 **Model Catalog** or **Add from Source** to add a model, then choose **Run** in
@@ -39,7 +39,7 @@ sh stark-install.sh --version VERSION
 | Route | Verification |
 | --- | --- |
 | DMG with **Install Stark** | macOS checks the signed, notarized launcher. The launcher verifies the embedded candidate against Stark's Developer ID team, checks the release metadata, and requires Gatekeeper approval before replacement. |
-| Older DMG drag-and-drop | The browser download carries a quarantine attribute, so macOS Gatekeeper checks the Developer ID signature and the stapled notarization ticket before the app first opens. |
+| DMG drag-and-drop | The browser download carries a quarantine attribute, so macOS Gatekeeper checks the Developer ID signature and the stapled notarization ticket before the app first opens. |
 | `install.sh` | Downloads the archive and its `.sha256` from the same GitHub release over TLS and refuses a mismatch. This detects corruption and a wrong file; it does not detect substitution by someone able to publish release assets, because the checksum and archive share an origin. The script runs `doctor` on the extracted bundle. For combined installs, the app installer checks app structure and runs `codesign --verify --deep --strict` on the source and staged app, but does not independently pin Stark's signing identity or perform Gatekeeper assessment of the downloaded archive. Pass `--sha256 HASH` to check against a hash you obtained elsewhere. |
 | Integrated app updater | Requires the exact GitHub asset digest, a Developer ID signature from Stark's team, a passing Gatekeeper assessment and a bundle version equal to the release tag, re-checked immediately before the swap. Release metadata is checked automatically at launch and about hourly; opening the menu refreshes it when the last check is older than 15 minutes. See [app updates](../apps/menu-bar/README.md#app-updates). |
 
