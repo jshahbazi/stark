@@ -1179,7 +1179,7 @@ extension EngineController {
                   TopModelRanking.matching("").map(\.rank) == Array(1...10),
                   TopModelRanking.entries.first(where: { $0.id == "qwen3_5" })?.searchChoices.map(\.query) ==
                       ["Qwen3.5", "Qwen3.6-27B", "Qwen3.8-27B"] else { return false }
-            return rows.map(\.name) == ["Decider Flash v1.3", "Elephant 1", "Flint", "Gemma 2", "Gemma 3", "Gemma 3 images", "Gemma 4", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
+            return rows.map(\.name) == ["Decider Flash v1.3", "Decider v1.3", "Elephant 1", "Flint", "Gemma 2", "Gemma 3", "Gemma 3 images", "Gemma 4", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
                 "Mistral", "OLMo 3", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5 / 3.8", "Qwen3.5 MoE", "Qwen3.8 Flash Next", "Ripple-65B Preview", "SmolLM3"] &&
                 !rows.contains(where: { $0.id == "modernbert" })
         case "models-display-event":

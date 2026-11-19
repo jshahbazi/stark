@@ -26,13 +26,13 @@ The main menu and playground show **GPU memory** as a percentage and compact usa
 
 ## Native decisions and images
 
-In **Manage Models**, open **Model Catalog** and browse the pinned
-**Decider Flash v1.3** or **Elephant 1** BF16 entries. **Add from Source** also
-accepts either model's Hugging Face repository, a complete pinned local
-snapshot, or a prepared Decision folder. Run selects **Decision** automatically;
-saved rows show **Decision and images**. Elephant's 9B artifact retains the
-16,384-token trained limit; its checkpoint-level qualification remains
-separate from catalog admission.
+In **Manage Models**, open **Model Catalog**, browse **Decider Flash v1.3** or
+**Decider v1.3**, or **Elephant 1**, and download the pinned BF16 entry.
+**Add from Source** accepts the selected model's Hugging Face repository, a
+complete pinned local snapshot, or a prepared Decision folder. Run selects
+**Decision** automatically; saved rows show **Decision and images**. Elephant's
+9B artifact retains its 16,384-token trained limit; its checkpoint-level
+qualification remains separate from catalog admission.
 
 Enter a question and 2–16 distinct, comma-separated answers in the desired
 order. Supply text, one PNG/JPEG image up to 4 MiB, or both. The result uses the

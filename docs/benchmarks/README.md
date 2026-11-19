@@ -12,6 +12,14 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Regular Decider v1.3 201-token smoke (2026-11-18).** The exact pinned 27B
+checkpoint loaded on an M5 Max with 128 GB memory and processed one cold text
+choice at [4.001 input tok/s](2026-11-18-regular-decider-300-token.md), with a
+3.989 input tok/s native end-to-end rate. This is classification input
+throughput, not generation throughput. It establishes a bounded native speed
+only; numerical parity, image execution and repeatable performance remain
+unqualified.
+
 **Decider HTTP latency diagnosis (2026-11-16).** The
 [source-bound profile](2026-11-16-decider-http-latency.md) measures native Decision
 HTTP medians of 1.106, 4.939 and 19.299 seconds at 80, 400 and 1,360 input

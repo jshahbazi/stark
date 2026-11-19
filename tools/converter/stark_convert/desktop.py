@@ -115,6 +115,9 @@ def decision_installer(source, kind):
 
     if elephant_install.is_elephant_source(source, kind=kind):
         return "stark_convert.elephant_install", "Elephant 1"
+    profile = decider_install.source_profile(source, kind=kind)
+    if profile is not None:
+        return "stark_convert.decider_install", profile.name
     if decider_install.is_decider_source(source, kind=kind):
         return "stark_convert.decider_install", "Decider Flash v1.3"
     return None, None
@@ -124,6 +127,12 @@ def prepared_decision_name(config):
     source = config.get("source") if isinstance(config, dict) else None
     if isinstance(source, dict) and source.get("repo") == "baselabs/elephant-1":
         return "Elephant 1"
+    if isinstance(source, dict):
+        from .decider_specs import decider_profile
+
+        profile = decider_profile(source.get("repo"))
+        if profile is not None:
+            return profile.name
     return "Decider Flash v1.3"
 
 

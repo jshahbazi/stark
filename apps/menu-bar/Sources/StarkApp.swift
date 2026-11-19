@@ -521,6 +521,7 @@ struct ModelFamily: Identifiable {
         case "qwen2": return "Qwen2"
         case "qwen3_5": return "Qwen3.5 / 3.8"
         case "decider-flash-v1.3": return "Decider Flash v1.3"
+        case "decider-v1.3": return "Decider v1.3"
         case "elephant-1": return "Elephant 1"
         case "qwen3_5_moe": return "Qwen3.5 MoE"
         case "qwen4_exp": return "Qwen3.8 Flash Next"

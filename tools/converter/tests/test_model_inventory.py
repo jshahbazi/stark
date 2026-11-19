@@ -10,6 +10,7 @@ import struct
 import pytest
 
 from stark_convert import model_inventory as inventory
+from stark_convert.decider_specs import REGULAR_DECIDER
 from stark_convert.desktop import Desktop
 
 
@@ -70,11 +71,12 @@ def bind_receipt(receipt):
     receipt["source_manifest_sha256"] = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def decider_artifact(tmp_path):
+def decider_artifact(tmp_path, *, profile=None):
+    profile = profile or decider_profile()
     model = artifact(tmp_path)
     source = {
-        "repo": inventory._DECIDER_REPO,
-        "revision": inventory._DECIDER_REVISION,
+        "repo": profile.repo,
+        "revision": profile.revision,
         "metadata_sha256": {name: "1" * 64 for name in inventory._DECIDER_METADATA_FILES},
         "weight_files": {"model.safetensors": {"size": 4, "sha256": "2" * 64}},
     }
@@ -95,6 +97,12 @@ def decider_artifact(tmp_path):
     (tmp_path / "conversion.json").write_text(json.dumps(receipt))
     model["name"] = "Local import"
     return model
+
+
+def decider_profile():
+    from stark_convert.decider_specs import FLASH_DECIDER
+
+    return FLASH_DECIDER
 
 
 def partitioned_artifact(path, *, segments=((3, 4, 64), (2, 6, 64)), malformed=None, uniform_widths=()):
@@ -281,6 +289,13 @@ def test_prepared_elephant_has_independent_source_display(tmp_path):
     assert result["group_name"] == "Elephant 1"
     assert result["source_revision"] == inventory._ELEPHANT_REVISION
     assert result["artifact_mode"] == "decision"
+def test_prepared_regular_decider_has_its_own_bound_display_identity(tmp_path):
+    result = inventory.model_display(decider_artifact(tmp_path, profile=REGULAR_DECIDER))
+    assert result["upstream_repo"] == REGULAR_DECIDER.repo
+    assert result["artifact_mode"] == "decision"
+    assert result["group_id"] == "repo:" + REGULAR_DECIDER.repo
+    assert result["group_name"] == REGULAR_DECIDER.name
+    assert result["source_revision"] == REGULAR_DECIDER.revision
 
 
 @pytest.mark.parametrize("field", ["config_sha256", "output_bytes", "source"])

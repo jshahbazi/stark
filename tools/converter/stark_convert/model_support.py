@@ -14,6 +14,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from .decider_specs import DECIDER_PROFILES, DeciderSourceProfile
 from .streaming import ConversionError, UnsupportedConversion, authorize_source_path, open_regular
 
 SCHEMA_VERSION = 1
@@ -209,7 +210,7 @@ def support_matrix() -> dict:
         "modes": list(MODES),
         "families": [
             *deepcopy(list(_FAMILIES)),
-            _decider_family_definition(),
+            *(_decider_family_definition(profile) for profile in DECIDER_PROFILES),
             _elephant_family_definition(),
             native_family_definition(),
             native_family_definition(FLINT_FAMILY_ID),
@@ -219,11 +220,11 @@ def support_matrix() -> dict:
     }
 
 
-def _decider_family_definition() -> dict:
+def _decider_family_definition(profile: DeciderSourceProfile) -> dict:
     """Expose the pinned task artifact without aliasing its Qwen3.5 backbone."""
     return {
-        "family_id": "decider-flash-v1.3",
-        "name": "Decider Flash v1.3",
+        "family_id": profile.family_id,
+        "name": profile.name,
         "architecture_aliases": [],
         "config_classes": ["DeciderModelConfig"],
         "model_kind": "decision",
@@ -236,19 +237,19 @@ def _decider_family_definition() -> dict:
         "modes": {
             "text": {
                 "status": "unsupported",
-                "message": "Decider Flash is a task-specific Decision model and cannot generate chat responses.",
+                "message": f"{profile.name} is a task-specific Decision model and cannot generate chat responses.",
                 "caveats": [],
             },
             "decision": {
                 "status": "conditional",
-                "message": "The exact pinned Decider Flash v1.3 source supports Decision mode with up to one image.",
+                "message": f"The exact pinned {profile.name} source supports Decision mode with up to one image.",
                 "caveats": ["pinned_source_only", "native_load_required", "numerical_qualification_separate"],
                 "images": True,
                 "max_images": 1,
             },
             "vision-language": {
                 "status": "unsupported",
-                "message": "Decider Flash images are supported only as inputs to its Decision task.",
+                "message": f"{profile.name} images are supported only as inputs to its Decision task.",
                 "caveats": [],
             },
         },

@@ -1,6 +1,6 @@
 # Stark local API
 
-The menu bar application's bridge serves a loopback-only HTTP API for applications on the same Mac. With a chat-capable model it supports OpenAI-style buffered or streamed completions. With a native Decision model loaded it supports ordered decision requests at `/v1/decisions` and its `/v1/systemone` compatibility alias. Only one model is loaded at a time; the operation must match that loaded model. Chat images require passing host evidence for the [supported Qwen3.5 family](VISION_FAMILY_CONTRACT.md); native Decision images use the separately admitted Decider or [Elephant](ELEPHANT.md) path. The API binds to `127.0.0.1`, requires bearer authentication, and rejects browser-origin requests. Clients may use the persistent Keychain bearer key or, for the managed OpenWork and OpenCode Desktop integrations below, a short-lived per-client capability.
+The menu bar application's bridge serves a loopback-only HTTP API for applications on the same Mac. With a chat-capable model it supports OpenAI-style buffered or streamed completions. With a native Decision model loaded it supports ordered decision requests at `/v1/decisions` and its `/v1/systemone` compatibility alias. Only one model is loaded at a time; the operation must match that loaded model. Chat images require passing host evidence for the [supported Qwen3.5 family](VISION_FAMILY_CONTRACT.md); native Decision images use the separately admitted [Decider](DECIDER.md) or [Elephant](ELEPHANT.md) path and retain each checkpoint's qualification boundary. The API binds to `127.0.0.1`, requires bearer authentication, and rejects browser-origin requests. Clients may use the persistent Keychain bearer key or, for the managed OpenWork and OpenCode Desktop integrations below, a short-lived per-client capability.
 
 Chat-completion requests can prepare the generation worker for the running chat model, regardless of Playground selection. Decision requests require a native Decision model that is already loaded; they do not switch models or modes. The `/v1/models` entry for a loaded Decision model has `capabilities.decisions: true`, image capability, and `max_output_tokens: 0`. Chat model discovery remains generation oriented. The endpoint operation and loaded model must match.
 
@@ -127,7 +127,7 @@ chat routes and cannot call either decision endpoint.
 
 ## Chat image qualification
 
-For chat completions, `capabilities.images` becomes true after the live worker passes one of two host evidence paths. The status document's `image_verification` identifies the result. A native Decider model reports its separately admitted image capability; see [Decider Flash](DECIDER.md) for that path.
+For chat completions, `capabilities.images` becomes true after the live worker passes one of two host evidence paths. The status document's `image_verification` identifies the result. A native Decider model reports its separately admitted image capability; see [Decider](DECIDER.md) for that path.
 
 | Value | Meaning |
 | --- | --- |

@@ -6,20 +6,21 @@ from types import SimpleNamespace
 
 from stark_convert import decider_install, model_catalog, model_support
 from stark_convert.decider_protocol import PROTOCOL
+from stark_convert.decider_specs import REGULAR_DECIDER
 
 
-def raw_source(path, *, generic=False):
+def raw_source(path, *, generic=False, regular=False):
     path.mkdir()
     config = {
         "model_type": "qwen3_5",
         "architectures": ["Qwen3_5Model"],
-        "tie_word_embeddings": True,
+        "tie_word_embeddings": not regular,
         "text_config": {"rope_parameters": {"mrope_interleaved": True, "mrope_section": [2, 2, 2]}},
         "vision_config": {"rope_parameters": {"rope_theta": 10000.0, "rope_type": "axial"}},
     }
     decision = {
         "format_version": 2,
-        "base_model": "Qwen/Qwen3.5-4B",
+        "base_model": REGULAR_DECIDER.base_model if regular else "Qwen/Qwen3.5-4B",
         "model_type": "qwen3_5",
         "attention_mode": "noncausal_full_attention",
         "pooling": "last",
@@ -39,8 +40,13 @@ def raw_source(path, *, generic=False):
         "processor_config.json": processor,
         "model.safetensors.index.json": {
             "weight_map": {
-                "language_model.weight": "model-00001-of-00002.safetensors",
-                "visual.weight": "model-00002-of-00002.safetensors",
+                f"{prefix}.weight": f"model-{index:05d}-of-{11 if regular else 2:05d}.safetensors"
+                for index, prefix in enumerate(
+                    ["language_model", *(f"visual.{index}" for index in range(10))]
+                    if regular
+                    else ["language_model", "visual"],
+                    start=1,
+                )
             }
         },
     }
@@ -123,6 +129,21 @@ def test_hf_snapshot_metadata_accepts_only_snapshot_to_blob_symlinks(tmp_path, m
     assert validated == snapshot.resolve()
 
 
+def test_regular_source_is_exactly_recognized_and_preflighted(tmp_path, monkeypatch):
+    source = raw_source(tmp_path / "regular", regular=True)
+    monkeypatch.setattr(decider_install, "_disk_check", lambda *_args: None)
+
+    assert decider_install.source_profile(source, kind="local") == REGULAR_DECIDER
+    result = decider_install.preflight(str(source), kind="local")
+    assert result["status"] == "conditional"
+    assert result["family_id"] == REGULAR_DECIDER.family_id
+    assert result["source"] == {
+        "kind": "local",
+        "repo": REGULAR_DECIDER.repo,
+        "revision": REGULAR_DECIDER.revision,
+    }
+
+
 def test_support_and_catalog_keep_decider_separate_from_qwen_architecture(monkeypatch):
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     families = {row["family_id"]: row for row in model_support.support_matrix()["families"]}
@@ -141,6 +162,15 @@ def test_support_and_catalog_keep_decider_separate_from_qwen_architecture(monkey
     assert item["quantization"] == "BF16"
     assert item["artifact_modes"] == ["decision"] and item["default_artifact_mode"] == "decision"
     assert item["images"] is True and item["max_images"] == 1
+
+    regular = families[REGULAR_DECIDER.family_id]
+    assert regular["model_kind"] == "decision"
+    regular_catalog = model_catalog.family_catalog(REGULAR_DECIDER.family_id)
+    assert regular_catalog["status"] == "ready" and len(regular_catalog["items"]) == 1
+    regular_item = regular_catalog["items"][0]
+    assert regular_item["repo"] == REGULAR_DECIDER.repo
+    assert regular_item["revision"] == REGULAR_DECIDER.revision
+    assert regular_item["weight_bytes"] == 52_170_802_736
 
 
 def test_install_verifies_pinned_file_set_before_conversion(tmp_path, monkeypatch):
@@ -177,3 +207,31 @@ def test_install_verifies_pinned_file_set_before_conversion(tmp_path, monkeypatc
         assert str(error) == "source_identity"
     else:
         raise AssertionError("modified source identity was accepted")
+
+
+def test_regular_install_verifies_its_own_file_set_and_profile(tmp_path, monkeypatch):
+    source = raw_source(tmp_path / "regular", regular=True)
+    pins = {}
+    for name in REGULAR_DECIDER.file_pins:
+        path = source / name
+        if not path.exists():
+            path.write_bytes((name + "\n").encode())
+        data = path.read_bytes()
+        pins[name] = ("sha256", hashlib.sha256(data).hexdigest(), len(data))
+    monkeypatch.setattr(decider_install, "_pins", lambda profile: pins if profile == REGULAR_DECIDER else {})
+    monkeypatch.setattr(decider_install, "_disk_check", lambda *_args: None)
+    captured = {}
+
+    def prepare(path, output, *, revision, profile):
+        captured.update(path=path, revision=revision, profile=profile)
+        return {"type": "DeciderModelConfig"}
+
+    monkeypatch.setattr(decider_install, "prepare_decider", prepare)
+    result = decider_install.install(str(source), kind="local", output=tmp_path / "out")
+
+    assert result["revision"] == REGULAR_DECIDER.revision
+    assert captured == {
+        "path": source,
+        "revision": REGULAR_DECIDER.revision,
+        "profile": REGULAR_DECIDER,
+    }

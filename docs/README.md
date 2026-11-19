@@ -10,7 +10,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Menu bar app](../apps/menu-bar/README.md) | Building, updating and using the app, Connections, where the app keeps state |
 | [Converter guide](../tools/converter/README.md) | `stark convert` usage, every option and limit, supported models, MLX and GGUF routes, offline replay, errors |
 | [Model-family support](MODEL_SUPPORT.md) | Family downloads, saved-model removal, mode/format coverage and installation checks |
-| [Decider Flash v1.3](DECIDER.md) | Dedicated native decision scoring with images, preparation, limits and reference validation |
+| [Decider v1.3](DECIDER.md) | Flash and regular native decision scoring with images, memory requirements, limits and qualification boundaries |
 | [Elephant 1](ELEPHANT.md) | Pinned native Elephant Decision preparation, block attention, image limits and qualification boundary |
 | [Model image status](MODEL_IMAGE_STATUS.md) | All registered families and pinned checkpoint entries, image implementation/validation status, text optimization gaps and remaining work |
 | [Default-image text parity worklist](IMAGE_DEFAULT_PARITY_PLAN.md) | Prioritized family/artifact work and mandatory future-model gates for cache correctness, text performance and supported text MTP with images loaded |
