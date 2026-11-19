@@ -210,12 +210,18 @@ Hugging Face checkpoint is downloaded and converted. If the source architecture
 has no implemented converter, Add from Source stops before downloading weights
 and explains: **This model architecture has no implemented converter.** This
 means the selected conversion path is unsupported; unavailable or inconclusive
-metadata has a separate explanation. Supported models are governed by the
+metadata has a separate explanation. **Check Compatibility** performs only the
+source-metadata and file-inventory checks, without downloading model weights.
+It reports whether the selected text or image mode has an implemented path,
+while **Install** always repeats the same admission check before downloading.
+Supported models are governed by the
 [converter](../../tools/converter/README.md). Conversion support alone does not
 guarantee that Stark can render a model's chat template or parse its function
 tool calls. Add from Source shows
 Download and Conversion progress; **Cancel Installation** cancels. Command-I
-opens that tab in the same window.
+opens that tab in the same window. **Cancel Check** stops only a compatibility
+check and leaves any running model unchanged. A prepared local-folder import
+reports **Model added to Installed** when registration completes.
 
 Failed installations offer **Retry** while the original source or catalogue
 choice remains available. Native downloads retain completed files after a

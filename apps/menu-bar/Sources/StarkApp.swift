@@ -1561,6 +1561,8 @@ final class EngineController: ObservableObject {
     @Published var conversionProgress = InstallProgress()
     @Published private(set) var modelFamilies: ModelFamilyRegistry?
     @Published private(set) var installSupportReport: ModelSupportReport?
+    @Published private(set) var installSupportIsPreview = false
+    @Published private(set) var installSuccessMessage: String?
     @Published private(set) var catalog: FamilyModelCatalog?
     @Published private(set) var catalogFamilyID: String?
     @Published private(set) var catalogLoading = false
@@ -1609,6 +1611,7 @@ final class EngineController: ObservableObject {
     private var attachmentStaging: AttachmentStaging?
     private var attachmentSelection = UUID()
     private var pendingSupportRequestID: String?
+    private var activeSourceCheckRequestID: String?
     private enum InstallRetryRequest {
         case source(String, String, String?)
         case catalog(String, String)
@@ -1683,8 +1686,12 @@ final class EngineController: ObservableObject {
     }
 
     var busy: Bool {
-        ["loading", "generating", "deciding", "installing", "stopping", "configuring", "removing"].contains(state) ||
+        ["loading", "generating", "deciding", "installing", "checking", "stopping", "configuring", "removing"].contains(state) ||
             catalogInstallation != nil || removingModelID != nil
+    }
+    var canInstallSource: Bool {
+        guard !busy else { return false }
+        return installSupportReport?.status != .unsupported && installSupportReport?.status != .inconclusive
     }
     var hasPlaygroundGeneration: Bool {
         mode == .chat && loadedMode == .chat && state == "generating" && pendingMessageID != nil
@@ -1932,7 +1939,7 @@ final class EngineController: ObservableObject {
             guard let raw = event["report"] as? [String: Any], let registry = ModelFamilyRegistry(raw) else { return }
             modelFamilies = registry
         case "model_support":
-            guard state == "installing", let expected = pendingSupportRequestID,
+            guard ["installing", "checking"].contains(state), let expected = pendingSupportRequestID,
                   event["request_id"] as? String == expected,
                   let raw = event["report"] as? [String: Any], let report = ModelSupportReport(raw) else { return }
             installSupportReport = report
@@ -1978,7 +1985,8 @@ final class EngineController: ObservableObject {
             if state == "removing" { state = loadedID.isEmpty ? "idle" : "ready"; message = loadedID.isEmpty ? "Stopped" : "Ready" }
         case "status":
             state = event["state"] as? String ?? "idle"
-            if state != "installing" { pendingSupportRequestID = nil }
+            if !["installing", "checking"].contains(state) { pendingSupportRequestID = nil }
+            if state != "checking" { activeSourceCheckRequestID = nil }
             message = event["message"] as? String ?? ""
             if state == "idle" || state == "error" {
                 loadedID = ""
@@ -2078,6 +2086,7 @@ final class EngineController: ObservableObject {
                 selectedID = id
                 UserDefaults.standard.set(id, forKey: "selectedModel")
             }
+            installSuccessMessage = event["message"] as? String ?? "Model added to Installed."
             onInstalled?()
         case "reply":
             guard mode == .chat, loadedMode == .chat, pendingMessageID != nil,
@@ -2154,6 +2163,14 @@ final class EngineController: ObservableObject {
             attachmentStaging?.clear()
         case "error":
             let requestID = event["request_id"] as? String
+            if let expected = activeSourceCheckRequestID, requestID == expected {
+                activeSourceCheckRequestID = nil
+                pendingSupportRequestID = nil
+                installErrorMessage = event["message"] as? String ?? "Could not check this model source."
+                state = loadedID.isEmpty ? "idle" : "ready"
+                message = loadedID.isEmpty ? "Stopped" : "Ready"
+                return
+            }
             if let expected = beginnerRunRequestID, requestID == expected {
                 let failedModelName = models.first { $0.id == selectedID }?.displayName
                 if let previous = beginnerRunBackup {
@@ -2632,6 +2649,7 @@ final class EngineController: ObservableObject {
         guard !busy else { return }
         errorMessage = nil
         resetInstallProgress(kind: kind)
+        installSupportIsPreview = false
         installRetryRequest = .source(source, kind, artifactMode)
         let requestID = UUID().uuidString.lowercased()
         pendingSupportRequestID = requestID
@@ -2645,6 +2663,44 @@ final class EngineController: ObservableObject {
                                       "support_mode": purpose, "support_request_id": requestID]
         if let artifactMode = artifactMode { payload["artifact_mode"] = artifactMode }
         if !send(payload) { pendingSupportRequestID = nil; activeInstallRequestID = nil; endInstallProgress("failed") }
+    }
+
+    func checkSource(source: String, kind: String, artifactMode: String? = nil) {
+        guard !busy else { return }
+        let selectedSource = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selectedSource.isEmpty else { return }
+        resetInstallProgress(kind: kind)
+        let requestID = UUID().uuidString.lowercased()
+        pendingSupportRequestID = requestID
+        activeSourceCheckRequestID = requestID
+        installSupportIsPreview = true
+        state = "checking"
+        message = "Checking model compatibility…"
+        let purpose = artifactMode == "decision" ? "decision" :
+            (artifactMode == "vision-language" ? "vision-language" : (mode == .decision ? "decision" : "text"))
+        if !send([
+            "command": "check_model_source",
+            "source": selectedSource,
+            "kind": kind,
+            "artifact_mode": artifactMode as Any? ?? NSNull(),
+            "support_mode": purpose,
+            "support_request_id": requestID,
+        ]) {
+            pendingSupportRequestID = nil
+            activeSourceCheckRequestID = nil
+            state = loadedID.isEmpty ? "idle" : "ready"
+            installErrorMessage = "Could not start the model compatibility check. Try again."
+        }
+    }
+
+    func cancelSourceCheck() {
+        guard state == "checking", let requestID = activeSourceCheckRequestID else { return }
+        if !send(["command": "cancel_model_source_check", "support_request_id": requestID]) {
+            pendingSupportRequestID = nil
+            activeSourceCheckRequestID = nil
+            state = loadedID.isEmpty ? "idle" : "ready"
+            installErrorMessage = "Could not cancel the model compatibility check. Try again."
+        }
     }
 
     func requestBeginnerModels(task: String, excludingModelID: String? = nil, preference: String = "quality") {
@@ -3031,8 +3087,11 @@ final class EngineController: ObservableObject {
 
     private func clearInstallSupport() {
         installErrorMessage = nil
+        installSuccessMessage = nil
         pendingSupportRequestID = nil
+        activeSourceCheckRequestID = nil
         installSupportReport = nil
+        installSupportIsPreview = false
     }
 
     func clearInstallFeedback() {
@@ -3521,6 +3580,8 @@ struct ModelsView: View {
             HStack {
                 if navigation.tab == .installModel && engine.state == "installing" && engine.catalogInstallation == nil {
                     Button("Cancel Installation", action: engine.stop)
+                } else if navigation.tab == .installModel && engine.state == "checking" {
+                    Button("Cancel Check", action: engine.cancelSourceCheck)
                 }
                 if engine.canRetryInstallation {
                     Button("Retry", action: engine.retryInstallation)
@@ -3529,11 +3590,24 @@ struct ModelsView: View {
                 Button("Done", action: onDone)
                     .keyboardShortcut(navigation.tab == .installModel || searchFocused ? nil : .defaultAction)
                 if navigation.tab == .installModel {
+                    Button(engine.state == "checking" ? "Checking…" : "Check Compatibility") {
+                        engine.checkSource(
+                            source: navigation.installSource,
+                            kind: navigation.installKind,
+                            artifactMode: navigation.visionConversion ? "vision-language" : nil
+                        )
+                    }.disabled(
+                        navigation.installSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                        engine.busy
+                    )
                     Button("Install") {
                         engine.install(source: navigation.installSource.trimmingCharacters(in: .whitespacesAndNewlines),
                                        kind: navigation.installKind, artifactMode: navigation.visionConversion ? "vision-language" : nil)
                     }.buttonStyle(.borderedProminent)
-                        .disabled(navigation.installSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || engine.busy)
+                        .disabled(
+                            navigation.installSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                            !engine.canInstallSource
+                        )
                         .keyboardShortcut(.defaultAction)
                 }
             }
@@ -3896,17 +3970,44 @@ struct ModelsView: View {
 struct InstallSupportView: View {
     let report: ModelSupportReport
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(report.message).font(.callout.weight(.medium))
-            ForEach(report.details, id: \.self) { detail in Text(detail).font(.caption) }
-            if !report.alternativeModes.isEmpty {
-                Text("Other modes to check: \(report.alternativeModes.map(\.title).joined(separator: ", ")).")
-                    .font(.caption)
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: icon).font(.callout.weight(.semibold)).foregroundStyle(color)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title).font(.callout.weight(.semibold))
+                Text(report.message).font(.callout)
+                ForEach(report.details, id: \.self) { detail in Text(detail).font(.caption) }
+                if !report.alternativeModes.isEmpty {
+                    Text("Other modes to check: \(report.alternativeModes.map(\.title).joined(separator: ", ")).")
+                        .font(.caption)
+                }
             }
         }
-        .foregroundStyle(report.status == .unsupported ? Color.orange : .secondary)
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityElement(children: .combine)
+    }
+
+    private var title: String {
+        switch report.status {
+        case .conditional: return "Compatible with Add from Source"
+        case .unsupported: return "This source cannot be added"
+        case .inconclusive: return "Compatibility could not be confirmed"
+        }
+    }
+
+    private var icon: String {
+        switch report.status {
+        case .conditional: return "checkmark.circle.fill"
+        case .unsupported: return "xmark.circle.fill"
+        case .inconclusive: return "questionmark.circle.fill"
+        }
+    }
+
+    private var color: Color {
+        switch report.status {
+        case .conditional: return .green
+        case .unsupported: return .orange
+        case .inconclusive: return .secondary
+        }
     }
 }
 
@@ -3930,10 +4031,14 @@ struct InstallView: View {
                         Text(report.status == .unsupported ? "This model isn’t supported" : "Model support couldn’t be verified")
                             .font(.title2.weight(.semibold))
                         InstallSupportView(report: report)
+                        if engine.installSupportIsPreview {
+                            Text("No model files were downloaded. Check another source, or choose a compatible model from Model Catalog.")
+                                .font(.callout)
+                        }
                         if report.reasons.contains("unsupported_architecture") {
                             Text("Stark needs an implemented engine and conversion path for this model family. Converting the files cannot add family support. Choose a supported family in Model Catalog.")
                                 .font(.callout)
-                        } else {
+                        } else if !engine.installSupportIsPreview {
                             Text("Stark stopped this installation. Check the source and format, or choose a compatible model from Model Catalog.")
                                 .font(.callout)
                         }
@@ -3966,7 +4071,8 @@ struct InstallView: View {
                     }.disabled(engine.busy)
                 }
             } else {
-                TextField("Repository name or full Hugging Face URL", text: $source).textFieldStyle(.roundedBorder).disabled(engine.busy)
+                TextField("Repository name or full Hugging Face URL", text: $source)
+                    .textFieldStyle(.roundedBorder).disabled(engine.busy).onSubmit { checkSource() }
                 Text("Downloads and converts a supported model. Gated repositories use your existing Hugging Face sign-in.")
                     .font(.callout).foregroundStyle(.secondary)
             }
@@ -3984,16 +4090,31 @@ struct InstallView: View {
             }
             if engine.catalogInstallation == nil {
                 if let report = engine.installSupportReport { InstallSupportView(report: report) }
-                VStack(spacing: 14) {
-                    InstallStageView(title: "Download", phase: "download", progress: engine.downloadProgress)
-                    InstallStageView(title: "Conversion", phase: "conversion", progress: engine.conversionProgress)
+                if !engine.installSupportIsPreview {
+                    VStack(spacing: 14) {
+                        InstallStageView(title: "Download", phase: "download", progress: engine.downloadProgress)
+                        InstallStageView(title: "Conversion", phase: "conversion", progress: engine.conversionProgress)
+                    }
+                    .padding(14)
+                    .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
                 }
-                .padding(14)
-                .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
-                if engine.state == "installing" || engine.state == "error" { StatusLine(engine: engine) }
+                if ["installing", "checking", "error"].contains(engine.state) { StatusLine(engine: engine) }
+                if let success = engine.installSuccessMessage {
+                    Label(success, systemImage: "checkmark.circle.fill")
+                        .font(.callout.weight(.medium)).foregroundStyle(.green)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let error = engine.installErrorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             }
         }
+    }
+
+    private func checkSource() {
+        engine.checkSource(
+            source: source,
+            kind: kind,
+            artifactMode: visionConversion ? "vision-language" : nil
+        )
     }
 }
 

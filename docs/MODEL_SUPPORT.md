@@ -225,8 +225,14 @@ Gemma 2 and Gemma 3 text still require tied embeddings.
 The app's **Manage Models** window has **Installed**, **Model Catalog** and
 **Add from Source** tabs. Buttons in the menu and Playground open it to select and
 run models; Command-I selects Add from Source in the same window. The install form
-keeps its source and options when switching tabs. Active progress and cancellation
-remain accessible, and completion stays in management. Search filters the
+keeps its source and options when switching tabs. **Check Compatibility** inspects
+bounded source metadata and file inventories without downloading weights, then
+reports whether that source has an implemented path for the selected mode.
+**Install** repeats the check immediately before conversion so a changed source
+cannot bypass admission. A compatible result is structural, not checkpoint
+qualification: tensor validation, chat-template behavior and native execution
+remain later gates. Active progress and cancellation remain accessible, and
+completion stays in management. Search filters the
 installed library immediately and then runs one bounded Hugging Face query
 across supported catalog families. Matching Hub repositories are routed from
 their metadata through the ordinary pinned family admission path; they never

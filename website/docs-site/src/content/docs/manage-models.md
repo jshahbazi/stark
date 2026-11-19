@@ -21,7 +21,12 @@ Downloading, preparing and running are separate steps. Wait until the app report
 
 ## Import a checkpoint
 
-Use **Add from Source** for a supported checkpoint. Check its architecture, weight format and template against the [converter reference](https://github.com/jshahbazi/stark/blob/main/tools/converter/README.md) first.
+Use **Add from Source** for a supported checkpoint. **Check Compatibility**
+inspects its metadata without downloading weights and reports whether Stark has
+an implemented path for the selected mode. If the result is incompatible or
+cannot be confirmed, correct the source or choose a catalog model. **Install**
+repeats the check before downloading, because compatibility is not permanent
+if a remote repository changes.
 
 Adapter-only files must be merged with their base model before import. Successful conversion establishes that the artifact was prepared; it does not qualify answer quality, tool behavior or image support.
 
