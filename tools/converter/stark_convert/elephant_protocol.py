@@ -48,8 +48,7 @@ NOT_ONE_TOKEN = {
     "JQ",
 }
 SLOT_LABELS = tuple(
-    list(LETTERS)
-    + [a + b for a in LETTERS for b in LETTERS if a + b not in NOT_ONE_TOKEN][: 256 - len(LETTERS)]
+    list(LETTERS) + [a + b for a in LETTERS for b in LETTERS if a + b not in NOT_ONE_TOKEN][: 256 - len(LETTERS)]
 )
 MAX_SLOTS = len(SLOT_LABELS)
 MAX_CHOICE_OPTIONS = 255
@@ -69,7 +68,11 @@ def render_entry(entry):
 
 
 def render_state(state):
-    return "" if state is None else state if isinstance(state, str) else json.dumps(state, ensure_ascii=False, indent=2)
+    if state is None:
+        return ""
+    if isinstance(state, str):
+        return state
+    return json.dumps(state, ensure_ascii=False, indent=2)
 
 
 def option_entries(question):
@@ -122,9 +125,10 @@ def render_question(question):
     )
     return (
         labels,
-        f"{header} {instructions}\n\nOptions:\n" + "\n".join(lines) + "\n\n" + answer_line.format(
-            letters=", ".join(letters)
-        ),
+        f"{header} {instructions}\n\nOptions:\n"
+        + "\n".join(lines)
+        + "\n\n"
+        + answer_line.format(letters=", ".join(letters)),
     )
 
 
@@ -197,7 +201,8 @@ class Encoder:
             ):
                 raise DeciderError("Choice criteria must contain 1 to 255 named options.")
             if kind == "score" and (
-                not isinstance(question.get("criteria"), list) or not 2 <= len(question["criteria"]) <= MAX_SCORE_LEVELS
+                not isinstance(question.get("criteria"), list)
+                or not 2 <= len(question["criteria"]) <= MAX_SCORE_LEVELS
             ):
                 raise DeciderError("Score criteria must contain 2 to 10 levels.")
             if kind == "noul" and question.get("criteria") is not None and not isinstance(question["criteria"], dict):
@@ -230,9 +235,7 @@ class Encoder:
         for key, question in request["questions"].items():
             labels, suffix = render_question(question)
             full_ids = tuple(
-                self.tokenizer.encode(
-                    self._prompt(request["state"], suffix, images), add_special_tokens=False
-                ).ids
+                self.tokenizer.encode(self._prompt(request["state"], suffix, images), add_special_tokens=False).ids
             )
             boundary = len(prefix_ids)
             while boundary > 0 and full_ids[:boundary] != prefix_ids[:boundary]:

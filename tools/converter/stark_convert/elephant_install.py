@@ -203,7 +203,11 @@ def preflight(source, *, kind, mode="decision", revision=None, hub=None):
             _disk_check(Path(normalized).parent, 0, output_size)
         else:
             _validate_hf_metadata(normalized, pinned, hub=hub)
-            _disk_check(Path.home() / ".cache" / "huggingface", _hf_missing_bytes(normalized, pinned, hub), output_size)
+            _disk_check(
+                Path.home() / ".cache" / "huggingface",
+                _hf_missing_bytes(normalized, pinned, hub),
+                output_size,
+            )
         return _success(kind)
     except OSError:
         return _failure(kind, "Free disk space before installing this model.", "insufficient_disk_space")

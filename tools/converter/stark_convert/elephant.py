@@ -152,11 +152,7 @@ def build_elephant_plan(source):
     tokenizer = Tokenizer.from_file(str(source / "tokenizer.json"))
     slot_ids = _slot_token_ids(tokenizer)
     output = next(
-        (
-            operation
-            for operation in plan.operations
-            if operation.name == "decoder.embedding.output_embedding.weights"
-        ),
+        (operation for operation in plan.operations if operation.name == "decoder.embedding.output_embedding.weights"),
         None,
     )
     if (
@@ -200,9 +196,7 @@ def prepare(source, output, *, revision=SOURCE_REVISION):
     if revision != SOURCE_REVISION:
         raise ConversionError("Elephant source revision must match the pinned revision")
     plan, config, slot_ids = build_elephant_plan(source)
-    payloads = {
-        name: read_regular_bytes(authorize_source_path(source, source / name)) for name in _METADATA_FILES
-    }
+    payloads = {name: read_regular_bytes(authorize_source_path(source, source / name)) for name in _METADATA_FILES}
     tokenizer = Tokenizer.from_str(payloads["tokenizer.json"].decode("utf-8"))
     if _slot_token_ids(tokenizer) != slot_ids:
         raise ConversionError("Elephant tokenizer changed while preparing")
@@ -272,9 +266,7 @@ def prepare(source, output, *, revision=SOURCE_REVISION):
                     "prefix_reuse_blocker": (
                         "Block-bidirectional full-attention states depend on the complete question suffix."
                     ),
-                    "precision": (
-                        "BF16 weights/activations/KV; F32 normalization, recurrent state and slot readout"
-                    ),
+                    "precision": ("BF16 weights/activations/KV; F32 normalization, recurrent state and slot readout"),
                     "stats": stats,
                 },
                 indent=2,

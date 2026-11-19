@@ -17,9 +17,9 @@ from tokenizers import Tokenizer
 
 from .chat import ChatCancelled, ChatError, Worker, _popen_with_gpu_memory, read_model_config
 from .decider_protocol import DeciderError, Encoder, answer, probabilities
+from .decision import DecisionInputError, DecisionProtocolError, validate_inputs
 from .elephant_protocol import Encoder as ElephantEncoder
 from .elephant_protocol import answer as elephant_answer
-from .decision import DecisionInputError, DecisionProtocolError, validate_inputs
 from .media import PrivateMediaStore
 from .resource_budget import REQUEST_BUDGET_MIB
 from .template_runtime import IsolatedTemplate, TemplateCancelled
@@ -43,6 +43,7 @@ class _DecisionTemplate:
 
 def is_decider(config):
     return isinstance(config, dict) and config.get("type") == "DeciderModelConfig"
+
 
 def _decision_protocol(config):
     return config["decision_config"].get("protocol_version", 4)
@@ -205,9 +206,7 @@ class DesktopDeciderWorker(Worker):
                 or reply["max_images"] != 1
                 or reply.get("options") != self.num_options
                 or type(reply.get("max_input_tokens")) is not int
-                or reply["max_input_tokens"] != (
-                    4096 if self.protocol == 4 else 16384
-                )
+                or reply["max_input_tokens"] != (4096 if self.protocol == 4 else 16384)
             ):
                 self.close()
                 raise ChatError("The native Decider worker did not advertise its required image capabilities.")
@@ -303,9 +302,7 @@ class DesktopDeciderWorker(Worker):
                 "input_token_ids": list(encoded.input_ids),
                 "readout_positions": [len(encoded.input_ids) - 1],
                 "option_counts": [encoded.option_count],
-                "block_boundaries": (
-                    [encoded.block_boundary] if self.protocol == 5 else []
-                ),
+                "block_boundaries": ([encoded.block_boundary] if self.protocol == 5 else []),
                 "context_tokens": self.max_input_tokens,
                 "images": [str(self.media.root / reference["id"])] if reference is not None else [],
             },

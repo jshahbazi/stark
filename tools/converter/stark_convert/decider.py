@@ -424,9 +424,7 @@ class Decider:
                             "input_token_ids": list(encoded.input_ids),
                             "readout_positions": [len(encoded.input_ids) - 1],
                             "option_counts": [encoded.option_count],
-                            "block_boundaries": (
-                                [encoded.block_boundary] if self.protocol == 5 else []
-                            ),
+                            "block_boundaries": ([encoded.block_boundary] if self.protocol == 5 else []),
                             "images": [str(image) for image in images],
                             "context_tokens": self.max_length,
                         }

@@ -23,9 +23,7 @@ class Template:
         for message in messages:
             content = message["content"]
             if isinstance(content, list):
-                content = "".join(
-                    "<image>" if item.get("type") == "image" else item["text"] for item in content
-                )
+                content = "".join("<image>" if item.get("type") == "image" else item["text"] for item in content)
             parts.append(f"<{message['role']}>\n{content}\n")
         if arguments.get("add_generation_prompt"):
             parts.append("<assistant>\n<think>\n\n</think>\n\n")
@@ -114,9 +112,7 @@ def test_elephant_rejects_changed_modeling_contract():
                 "rope_theta": 10000000,
             },
         },
-        "vision_config": {
-            "rope_parameters": {"rope_theta": 10000.0, "rope_type": "axial"}
-        },
+        "vision_config": {"rope_parameters": {"rope_theta": 10000.0, "rope_type": "axial"}},
         "modeling_overrides": {
             "attention": {"full_attention": "block_bidirectional", "linear_attention": "causal"},
             "readout": "slot_lm",

@@ -125,6 +125,8 @@ def prepared_decision_name(config):
     if isinstance(source, dict) and source.get("repo") == "baselabs/elephant-1":
         return "Elephant 1"
     return "Decider Flash v1.3"
+
+
 PROGRESS_PHASES = ("download", "conversion")
 MODEL_FILES = ("config.json", "tokenizer.json", "model.safetensors")
 
@@ -661,10 +663,7 @@ class Desktop:
             item["family_id"]
             for item in support_matrix()["families"]
             if item["model_kind"] == "language"
-            or (
-                item["model_kind"] == "decision"
-                and item["modes"]["decision"]["status"] == "conditional"
-            )
+            or (item["model_kind"] == "decision" and item["modes"]["decision"]["status"] == "conditional")
         }
         if (
             family not in allowed
