@@ -1134,6 +1134,23 @@ extension EngineController {
             let rows = ModelsInventory(models: engine.models, loadedID: engine.loadedID, registry: nil).models
             guard rows.filter(\.isRunning).map(\.id) == ["loaded"], engine.selectedID == "selected" else { return false }
             return ModelsInventory(models: engine.models, loadedID: "missing", registry: nil).models.allSatisfy({ !$0.isRunning })
+        case "models-unavailable-controls":
+            engine.loadedID = ""
+            engine.loadedMode = nil
+            engine.state = "idle"
+            engine.message = "Choose a model to run"
+            engine.apply(["event": "models", "models": [[
+                "id": "elephant", "name": "Elephant 1", "path": "/private/elephant",
+                "api_id": "private-elephant", "artifact_mode": "decision", "available": false
+            ]]])
+            let inventory = ModelsInventory(models: engine.models, loadedID: "", registry: nil)
+            guard engine.selectedID == "elephant", !engine.canStartModel,
+                  engine.statusMessage == "Elephant 1 is unavailable in this Stark build.",
+                  inventory.models.first?.isAvailable == false,
+                  !engine.runModel(id: "elephant"), noCommandSent(),
+                  engine.errorMessage?.contains("unsupported") == true else { return false }
+            engine.startModel()
+            return noCommandSent()
         case "models-empty-state":
             let inventory = ModelsInventory(models: [], loadedID: "missing", registry: nil)
             guard inventory.models.isEmpty, inventory.families == nil,
@@ -3194,6 +3211,9 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_installation_retry_preserves_source_and_fences_catalog_requests(self):
         self.exercise("source-install-retry")
         self.exercise("catalog-install-retry")
+
+    def test_unavailable_model_stays_visible_but_cannot_run(self):
+        self.exercise("models-unavailable-controls")
 
     def test_api_port_persistence_and_conflict_keeps_model_usable(self):
         self.exercise("api-port-settings-and-conflict")

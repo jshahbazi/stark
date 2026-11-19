@@ -242,6 +242,8 @@ The source tabs start with **Hugging Face**, selected by default, followed by
 **Local Folder**.
 
 **Manage Models** in the menu and Playground opens the shared management window.
+Installed artifacts that are incomplete or use a runtime format this build cannot
+load are listed with unavailable Run controls and an explanatory main-menu status.
 These views show the running model's name and use management to choose
 and run a model. Its quantization and stored weight-file size appear beside the
 name when recorded, so saved versions can be distinguished. Installation uses

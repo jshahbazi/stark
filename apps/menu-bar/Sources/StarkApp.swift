@@ -309,6 +309,7 @@ struct InstalledModel: Identifiable, Equatable {
     let name: String
     let path: String
     let apiID: String
+    let isAvailable: Bool
     let display: InstalledModelDisplay?
     let artifactMode: ModelArtifactMode?
     let removal: InstalledModelRemoval?
@@ -317,10 +318,10 @@ struct InstalledModel: Identifiable, Equatable {
 
     var displayName: String { ModelsInventory.readableName(name, display: display) }
 
-    init(id: String, name: String, path: String, apiID: String, display: InstalledModelDisplay? = nil,
+    init(id: String, name: String, path: String, apiID: String, isAvailable: Bool = true, display: InstalledModelDisplay? = nil,
          artifactMode: ModelArtifactMode? = .text, removal: InstalledModelRemoval? = nil, source: String? = nil,
          decisionOnly: Bool = false) {
-        self.id = id; self.name = name; self.path = path; self.apiID = apiID; self.display = display
+        self.id = id; self.name = name; self.path = path; self.apiID = apiID; self.isAvailable = isAvailable; self.display = display
         self.artifactMode = artifactMode; self.removal = removal; self.source = source
         self.decisionOnly = decisionOnly || artifactMode == .decision
     }
@@ -1214,6 +1215,7 @@ struct ModelsInventory {
         let name: String
         let displayName: String
         let isRunning: Bool
+        let isAvailable: Bool
         let quantization: String?
         let weightBytes: Int64?
         let sourceRevision: String?
@@ -1267,6 +1269,7 @@ struct ModelsInventory {
         func row(_ model: InstalledModel) -> Model {
             Model(id: model.id, name: model.name, displayName: model.displayName,
                   isRunning: !loadedID.isEmpty && model.id == loadedID,
+                  isAvailable: model.isAvailable,
                   quantization: model.display?.quantization, weightBytes: model.display?.weightBytes,
                   sourceRevision: model.display?.sourceRevision, removal: model.removal, artifactMode: model.artifactMode,
                   sourceName: model.display?.groupID ?? model.apiID, repositoryURL: model.display?.repositoryURL,
@@ -1720,6 +1723,10 @@ final class EngineController: ObservableObject {
     }
     var activeModel: InstalledModel? { models.first { $0.id == loadedID } }
     var activeName: String { activeModel?.name ?? "No model running" }
+    var unavailableStartableModel: InstalledModel? {
+        guard state == "idle", loadedID.isEmpty, let model = startableModel, !model.isAvailable else { return nil }
+        return model
+    }
     var selectedDecisionOnly: Bool { models.first { $0.id == selectedID }?.decisionOnly == true }
     var selectedChatOnly: Bool { models.first { $0.id == selectedID }?.artifactMode == .visionLanguage }
     var canUseChatMode: Bool { !selectedDecisionOnly && !(loadedID == selectedID && decisionModel) }
@@ -1735,7 +1742,9 @@ final class EngineController: ObservableObject {
         if let stoppedModel, let model = models.first(where: { $0.id == stoppedModel.id }) { return model }
         return models.first { $0.id == selectedID }
     }
-    var canStartModel: Bool { !busy && loadedID.isEmpty && startableModel != nil }
+    var canStartModel: Bool {
+        !busy && loadedID.isEmpty && startableModel?.isAvailable == true
+    }
     var canStopCurrentModel: Bool { canStopModel(id: modelControlID) }
 
     func startModel() {
@@ -1789,7 +1798,14 @@ final class EngineController: ObservableObject {
     var statusColor: Color {
         if state == "error" { return .red }
         if state == "ready" { return .green }
+        if unavailableStartableModel != nil { return .red }
         return busy ? .orange : .red
+    }
+    var statusMessage: String {
+        if let model = unavailableStartableModel {
+            return "\(model.displayName) is unavailable in this Stark build."
+        }
+        return message
     }
 
     func start(resourceURL: URL? = Bundle.main.resourceURL, dataDirectory: URL? = nil) {
@@ -1906,6 +1922,7 @@ final class EngineController: ObservableObject {
                 guard let id = $0["id"] as? String, let name = $0["name"] as? String,
                       let path = $0["path"] as? String else { return nil }
                 return InstalledModel(id: id, name: name, path: path, apiID: $0["api_id"] as? String ?? name,
+                                      isAvailable: $0["available"] as? Bool ?? true,
                                       display: InstalledModelDisplay($0["display"]),
                                       artifactMode: $0["artifact_mode"] == nil ? .text : ModelArtifactMode(rawValue: $0["artifact_mode"] as? String ?? ""),
                                       removal: InstalledModelRemoval($0["removal"]), source: $0["source"] as? String,
@@ -2569,6 +2586,14 @@ final class EngineController: ObservableObject {
     @discardableResult
     func run(preservingMode: Bool = false) -> Bool {
         guard !selectedID.isEmpty, !busy else { return false }
+        guard models.first(where: { $0.id == selectedID })?.isAvailable != false else {
+            let name = models.first(where: { $0.id == selectedID })?.displayName
+            errorMessage = modelFailure(
+                "This saved model is incomplete or unsupported by this Stark build.",
+                name: name
+            )
+            return false
+        }
         if selectedDecisionOnly {
             mode = .decision
             UserDefaults.standard.set(mode.rawValue, forKey: "playgroundMode")
@@ -2592,8 +2617,15 @@ final class EngineController: ObservableObject {
 
     @discardableResult
     func runModel(id: String, preservingMode: Bool = false) -> Bool {
-        guard !busy, models.contains(where: { $0.id == id }) else { return false }
+        guard !busy, let model = models.first(where: { $0.id == id }) else { return false }
         selectedID = id
+        guard model.isAvailable else {
+            errorMessage = modelFailure(
+                "This saved model is incomplete or unsupported by this Stark build.",
+                name: model.displayName
+            )
+            return false
+        }
         if modelReady {
             UserDefaults.standard.set(id, forKey: "selectedModel")
             return true
@@ -3186,7 +3218,7 @@ struct StatusLine: View {
     var body: some View {
         HStack(spacing: 7) {
             Circle().fill(engine.statusColor).frame(width: 7, height: 7)
-            Text(engine.message).font(.callout).lineLimit(3).fixedSize(horizontal: false, vertical: true)
+            Text(engine.statusMessage).font(.callout).lineLimit(3).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
             if engine.busy { ProgressView().controlSize(.small) }
         }.accessibilityElement(children: .combine)
@@ -3274,7 +3306,9 @@ struct MenuView: View {
                 Button(interface.mode == .beginner ? "Guided setup" : "Manage Models", action: manage)
                 Spacer(minLength: 0)
                 Button("Start model", action: engine.startModel).disabled(!engine.canStartModel)
-                    .help(engine.startableModel.map { "Start " + $0.displayName } ?? "Choose a model first")
+                    .help(engine.startableModel.map {
+                        $0.isAvailable ? "Start " + $0.displayName : "This model is unavailable in this Stark build."
+                    } ?? "Choose a model first")
                 Button("Stop model", action: engine.stop).disabled(!engine.canStopCurrentModel)
             }.controlSize(.small)
             if interface.mode == .advanced && engine.mode == .chat { SpeedView(engine: engine) }
@@ -3786,9 +3820,10 @@ struct ModelsView: View {
                         savedModelName(model, variantLabel: variantLabel)
                     }
                     .buttonStyle(.plain)
-                    .disabled(engine.busy)
+                    .disabled(engine.busy || !model.isAvailable)
                     .accessibilityLabel("Run " + model.displayName)
-                    .help("Run " + model.displayName)
+                    .help(model.isAvailable ? "Run " + model.displayName :
+                            "This saved model is unavailable in this Stark build.")
                 }
                 if model.artifactMode == .decision {
                     Text("Decision and images").font(.caption).foregroundStyle(.secondary)
@@ -3810,7 +3845,9 @@ struct ModelsView: View {
                         .disabled(!engine.canStopModel(id: model.id)).accessibilityLabel("Stop " + model.name)
                 } else {
                     Button("Run") { onRun(model.id) }
-                        .disabled(engine.busy).accessibilityLabel("Run " + model.name)
+                        .disabled(engine.busy || !model.isAvailable).accessibilityLabel("Run " + model.name)
+                        .help(model.isAvailable ? "Run " + model.displayName :
+                                "This saved model is unavailable in this Stark build.")
                 }
             }.controlSize(.small).frame(width: 44)
             removalButton(model).frame(width: 22)

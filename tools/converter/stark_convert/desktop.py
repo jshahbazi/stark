@@ -599,6 +599,7 @@ class Desktop:
                         "api_id": api_model_id(model),
                         "display": display,
                         "artifact_mode": display.get("artifact_mode", "text") if display else "text",
+                        "available": model_valid(Path(model["path"])),
                         "removal": removal_info(model, self.model_dir, self.models),
                     }
                 )
@@ -2677,8 +2678,13 @@ class Desktop:
 
     def run(self, epoch, identifier, mode="chat", *, guided_context=None, guided_request_id=None, automatic=False):
         model = next((m for m in self.models if m["id"] == identifier), None)
-        if model is None or not model_valid(Path(model["path"])):
+        if model is None:
             raise DesktopError("Select an installed model whose folder is still available.")
+        if not model_valid(Path(model["path"])):
+            raise DesktopError(
+                "This saved model is incomplete or uses a format unsupported by this Stark build. "
+                "Choose a compatible model from Model Catalog."
+            )
         config = read_model_config(Path(model["path"]))
         native_decision = is_decider(config)
         if native_decision and mode != "decision":
