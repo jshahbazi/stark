@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use stark_engine::{backends::metal::Metal, engine::Engine};
 
-const MAX_INPUT_TOKENS: usize = 4096;
+const MAX_INPUT_TOKENS: usize = 16384;
 const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 
@@ -30,6 +30,8 @@ enum Request {
         input_token_ids: Vec<u32>,
         readout_positions: Vec<u32>,
         option_counts: Vec<usize>,
+        #[serde(default)]
+        block_boundaries: Vec<u32>,
         #[serde(default)]
         images: Vec<PathBuf>,
         context_tokens: u32,
@@ -51,6 +53,7 @@ trait Backend {
     fn vocab_size(&self) -> u32;
     fn max_context(&self) -> u32;
     fn num_options(&self) -> usize;
+    fn requires_block_boundary(&self) -> bool;
     fn tokenize(
         &self,
         text: &str,
@@ -60,6 +63,7 @@ trait Backend {
         &mut self,
         tokens: &[u32],
         marker: u32,
+        block_boundary: Option<u32>,
         images: &[Vec<u8>],
         context: u32,
     ) -> Result<Scores, &'static str>;
@@ -82,6 +86,9 @@ impl Backend for NativeBackend {
     fn num_options(&self) -> usize {
         self.model.num_options()
     }
+    fn requires_block_boundary(&self) -> bool {
+        self.model.requires_block_boundary()
+    }
     fn tokenize(
         &self,
         text: &str,
@@ -97,14 +104,15 @@ impl Backend for NativeBackend {
         &mut self,
         tokens: &[u32],
         marker: u32,
+        block_boundary: Option<u32>,
         images: &[Vec<u8>],
         context: u32,
     ) -> Result<Scores, &'static str> {
         let result = if images.is_empty() {
-            self.model.score(tokens, marker, context)
+            self.model.score(tokens, marker, block_boundary, context)
         } else {
             let encoded = images.iter().map(Vec::as_slice).collect::<Vec<_>>();
-            self.model.score_images(tokens, marker, &encoded, context)
+            self.model.score_images(tokens, marker, block_boundary, &encoded, context)
         }
         .map_err(|error| error.0)?;
         Ok(Scores {
@@ -146,6 +154,7 @@ fn respond<B: Backend>(
             input_token_ids,
             readout_positions,
             option_counts,
+            block_boundaries,
             images,
             context_tokens,
         } => {
@@ -159,6 +168,8 @@ fn respond<B: Backend>(
                 || readout_positions[0] as usize != input_token_ids.len() - 1
                 || option_counts.len() != 1
                 || !(1..=backend.num_options()).contains(&option_counts[0])
+                || block_boundaries.len() != usize::from(backend.requires_block_boundary())
+                || block_boundaries.first().is_some_and(|&boundary| boundary == 0 || boundary >= readout_positions[0])
             {
                 return Err("invalid_decision_request");
             }
@@ -167,7 +178,13 @@ fn respond<B: Backend>(
             }
             let encoded = images.iter().map(|path| read_image(path)).collect::<Result<Vec<_>, _>>()?;
             let start = Instant::now();
-            let scores = backend.score(&input_token_ids, readout_positions[0], &encoded, context_tokens)?;
+            let scores = backend.score(
+                &input_token_ids,
+                readout_positions[0],
+                block_boundaries.first().copied(),
+                &encoded,
+                context_tokens,
+            )?;
             if scores.logits.len() != backend.num_options()
                 || scores.logits.iter().any(|x| !x.is_finite())
                 || scores.input_tokens > context_tokens as usize
@@ -351,6 +368,9 @@ mod tests {
         fn num_options(&self) -> usize {
             3
         }
+        fn requires_block_boundary(&self) -> bool {
+            false
+        }
         fn tokenize(
             &self,
             _: &str,
@@ -362,6 +382,7 @@ mod tests {
             &mut self,
             tokens: &[u32],
             _: u32,
+            _: Option<u32>,
             _: &[Vec<u8>],
             _: u32,
         ) -> Result<Scores, &'static str> {
@@ -376,7 +397,7 @@ mod tests {
         }
     }
     fn request() -> Value {
-        json!({"operation":"decide","input_token_ids":[1,2],"readout_positions":[1],"option_counts":[2],"context_tokens":64})
+        json!({"operation":"decide","input_token_ids":[1,2],"readout_positions":[1],"option_counts":[2],"block_boundaries":[],"context_tokens":64})
     }
     #[test]
     fn validates_before_compute_and_recovers_without_retaining_state() {

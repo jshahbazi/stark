@@ -465,6 +465,7 @@ fn attention_fixture_probe() -> Result<(), &'static str> {
         suffix_length: rows as u32,
         trie: None::<&<Metal as Backend>::GlobalBuffer>,
         sinks: None,
+        block_boundary: None,
         cache: if is_full_attention {
             KVCacheView::full((kv_rows - rows) as u32)
         } else {

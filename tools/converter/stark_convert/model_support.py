@@ -210,6 +210,7 @@ def support_matrix() -> dict:
         "families": [
             *deepcopy(list(_FAMILIES)),
             _decider_family_definition(),
+            _elephant_family_definition(),
             native_family_definition(),
             native_family_definition(FLINT_FAMILY_ID),
             native_family_definition(RIPPLE_FAMILY_ID),
@@ -248,6 +249,42 @@ def _decider_family_definition() -> dict:
             "vision-language": {
                 "status": "unsupported",
                 "message": "Decider Flash images are supported only as inputs to its Decision task.",
+                "caveats": [],
+            },
+        },
+    }
+
+
+def _elephant_family_definition() -> dict:
+    """Expose the pinned Elephant Decision checkpoint without generic Qwen routing."""
+    return {
+        "family_id": "elephant-1",
+        "name": "Elephant 1",
+        "architecture_aliases": [],
+        "config_classes": ["DeciderModelConfig"],
+        "model_kind": "decision",
+        "conversion": {
+            "status": "implemented",
+            "containers": [".safetensors"],
+            "source_formats": ["pinned-fullprecision"],
+            "output_dtypes": ["bfloat16"],
+        },
+        "modes": {
+            "text": {
+                "status": "unsupported",
+                "message": "Elephant 1 is a task-specific Decision model and cannot generate chat responses.",
+                "caveats": [],
+            },
+            "decision": {
+                "status": "conditional",
+                "message": "The exact pinned Elephant 1 source supports Decision mode with up to one image.",
+                "caveats": ["pinned_source_only", "native_load_required", "numerical_qualification_separate"],
+                "images": True,
+                "max_images": 1,
+            },
+            "vision-language": {
+                "status": "unsupported",
+                "message": "Elephant 1 images are supported only as inputs to its Decision task.",
                 "caveats": [],
             },
         },

@@ -748,6 +748,7 @@ fn attention_stages_probe() -> Result<(), &'static str> {
                 suffix_length: rows as u32,
                 trie: None::<&<Metal as Backend>::ConstantBuffer>,
                 sinks: None,
+                block_boundary: None,
                 cache: if head_dim == 256 {
                     KVCacheView::ring(0, 0)
                 } else {
@@ -1086,6 +1087,7 @@ fn cached_vector_attention_probe() -> Result<(), &'static str> {
                 suffix_length: 1,
                 trie: None::<&<Metal as Backend>::ConstantBuffer>,
                 sinks: None,
+                block_boundary: None,
                 cache: cache_view,
             },
             &mut commands,

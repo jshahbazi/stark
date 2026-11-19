@@ -24,12 +24,15 @@ Guided setup opens at 700 × 800 points, capped to the available screen, so the 
 
 The main menu and playground show **GPU memory** as a percentage and compact usage bar beside the status in both modes. Green indicates usage below 75% of Metal's recommended memory budget, orange starts at 75%, and red starts at 90%. Whole percentages round down so the label agrees with the color thresholds. Hover for the allocated bytes and budget. It refreshes about once a second, including during model loading and requests. Apple silicon uses shared memory; the percentage measures the model worker's Metal resource allocation against the device's recommended working-set size, excluding CPU-only allocations and other applications. This budget is a performance guideline. The bar fills at 100%; percentages above the budget remain visible. If the budget is unavailable, the readout shows allocated bytes with an empty neutral bar. A dash means no measurement is available. Stop clears the readout.
 
-## Decider decisions and images
+## Native decisions and images
 
-In **Manage Models**, open **Model Catalog**, browse **Decider Flash v1.3** and
-download the pinned BF16 entry. **Add from Source** also accepts its Hugging Face repository, a complete
-pinned local snapshot, or a prepared Decider folder. Run selects **Decision**
-automatically; saved rows show **Decision and images**.
+In **Manage Models**, open **Model Catalog** and browse the pinned
+**Decider Flash v1.3** or **Elephant 1** BF16 entries. **Add from Source** also
+accepts either model's Hugging Face repository, a complete pinned local
+snapshot, or a prepared Decision folder. Run selects **Decision** automatically;
+saved rows show **Decision and images**. Elephant's 9B artifact retains the
+16,384-token trained limit; its checkpoint-level qualification remains
+separate from catalog admission.
 
 Enter a question and 2–16 distinct, comma-separated answers in the desired
 order. Supply text, one PNG/JPEG image up to 4 MiB, or both. The result uses the

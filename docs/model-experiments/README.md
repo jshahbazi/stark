@@ -1,5 +1,7 @@
 # Model change and experiment ledger
 
+- [20261118-ELEPHANT-01: pinned Elephant 1 Decision admission](2026-11-18-elephant-1.md): source-aware Qwen3.5 block-attention and 256-slot OneJev readout implementation, catalog/install admission and separate image-retaining runtime path. Pinned metadata preflight passed; full 9B numerical, lifecycle, memory and performance qualification remains pending.
+
 - [20261117-QWEN38-CATALOG-01: official dense catalog admission](2026-11-17-qwen38-dense-catalog.md): the complete official `Qwen/Qwen3.8-27B` is pinned in the existing dense Qwen3.5/Qwen3.8 family, with reviewed image and XML tool-template identities. Metadata and model-free admission pass; full-model conversion and native qualification remain pending.
 
 - [20261117-Q38OFF-01/02 · official dense Qwen3.8 template admission](2026-11-17-qwen38-official-template-admission.md): the official 27B BF16 image conversion completed, but native admission rejected its raw/normalized chat-template pair. Binding both reviewed hashes and fixing desktop load diagnostics lets the exact converted artifact pass native load, eight-step text execution and the full automatic image check. Performance, source numerical parity, cache/MTP qualification and installed-app status remain separate.

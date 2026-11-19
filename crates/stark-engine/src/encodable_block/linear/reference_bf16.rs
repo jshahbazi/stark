@@ -2,7 +2,7 @@
 
 use crate::{
     backends::common::{
-        Backend, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput, Kernels,
+        Backend, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput, Kernels,
         kernel::{
             MlxHeadMatmulBF16Kernel, ReferenceGatherMatmulBF16Kernel, ReferenceRoundBF16F32Kernel,
             VisionCastBF16Kernel, VisionMatmulBF16Kernel,
@@ -17,6 +17,9 @@ pub(crate) struct ReferenceBF16Matmul<B: Backend> {
     round_f32: <B::Kernels as Kernels>::ReferenceRoundBF16F32Kernel,
     gather: <B::Kernels as Kernels>::ReferenceGatherMatmulBF16Kernel,
     mlx_head: Option<<B::Kernels as Kernels>::MlxHeadMatmulBF16Kernel>,
+    mlx_head_min_rows: u32,
+    mlx_head_max_rows: u32,
+    mlx_head_chunked: bool,
 }
 
 impl<B: Backend> ReferenceBF16Matmul<B> {
@@ -27,6 +30,9 @@ impl<B: Backend> ReferenceBF16Matmul<B> {
             round_f32: <B::Kernels as Kernels>::ReferenceRoundBF16F32Kernel::new(context)?,
             gather: <B::Kernels as Kernels>::ReferenceGatherMatmulBF16Kernel::new(context)?,
             mlx_head: None,
+            mlx_head_min_rows: 0,
+            mlx_head_max_rows: 0,
+            mlx_head_chunked: false,
         })
     }
 
@@ -35,12 +41,37 @@ impl<B: Backend> ReferenceBF16Matmul<B> {
         context: &B::Context,
     ) -> Result<Self, B::Error> {
         self.mlx_head = Some(<B::Kernels as Kernels>::MlxHeadMatmulBF16Kernel::new(context)?);
+        self.mlx_head_min_rows = 2;
+        self.mlx_head_max_rows = 5;
         Ok(self)
     }
 
+    pub(crate) fn with_prefill_mlx_wide(
+        mut self,
+        context: &B::Context,
+    ) -> Result<Self, B::Error> {
+        self.mlx_head = Some(<B::Kernels as Kernels>::MlxHeadMatmulBF16Kernel::new(context)?);
+        self.mlx_head_min_rows = 2;
+        self.mlx_head_max_rows = 1024;
+        self.mlx_head_chunked = true;
+        Ok(self)
+    }
+
+    fn uses_mlx_wide(
+        &self,
+        m: u32,
+        n: u32,
+    ) -> bool {
+        self.mlx_head.is_some()
+            && m >= self.mlx_head_min_rows
+            && (self.mlx_head_chunked || m <= self.mlx_head_max_rows)
+            && n > 1
+    }
+
     /// A is contiguous [m,k], with a byte offset; B is full row-major [n,k].
-    /// The exact source dot schedule is eight four-lane F32 accumulators and a
-    /// fixed binary reduction, followed by the public BF16 output boundary.
+    /// The scalar source dot uses eight four-lane F32 accumulators and a fixed
+    /// binary reduction. Bounded MLX-prefill batches use the 32-lane source dot
+    /// schedule; both paths end at the public BF16 output boundary.
     pub(crate) fn encode(
         &self,
         input: impl BufferRef<Backend = B>,
@@ -77,7 +108,7 @@ impl<B: Backend> ReferenceBF16Matmul<B> {
         if input_end > input.size() || weights.size() != weight_bytes {
             return Err(invalid().into());
         }
-        let source_wide = self.mlx_head.as_ref().filter(|_| (2..=5).contains(&m) && n > 1);
+        let source_wide = self.uses_mlx_wide(m, n).then(|| self.mlx_head.as_ref().unwrap());
         if source_wide.is_some() {
             // BufferRef can already describe a subview. Check the effective
             // byte offsets before reinterpreting either operand as bfloat4.
@@ -85,7 +116,7 @@ impl<B: Backend> ReferenceBF16Matmul<B> {
             if !input_start.is_multiple_of(8) || !weights.parts().1.start.is_multiple_of(8) {
                 return Err(invalid().into());
             }
-            elements.checked_mul(32).ok_or_else(invalid)?;
+            self.mlx_head_max_rows.min(m).checked_mul(n).and_then(|tasks| tasks.checked_mul(32)).ok_or_else(invalid)?;
         }
         let mut accumulated = commands.allocate_scratch_for_shape(&[m, n], DataType::F32)?;
         if !matches!(output_type, DataType::BF16 | DataType::F32) {
@@ -93,7 +124,22 @@ impl<B: Backend> ReferenceBF16Matmul<B> {
         }
         let mut output = commands.allocate_scratch_for_shape(&[m, n], output_type)?;
         if let Some(source) = source_wide {
-            source.encode(input.subrange(input_offset..input_end), weights, &mut accumulated, m, n, k, commands);
+            for row in (0..m).step_by(self.mlx_head_max_rows as usize) {
+                let rows = self.mlx_head_max_rows.min(m - row);
+                let input_start = input_offset + row as usize * k as usize * 2;
+                let input_stop = input_start + rows as usize * k as usize * 2;
+                let output_start = row as usize * n as usize * 4;
+                let output_stop = output_start + rows as usize * n as usize * 4;
+                source.encode(
+                    input.subrange(input_start..input_stop),
+                    weights,
+                    (&mut accumulated).subrange_mut(output_start..output_stop),
+                    rows,
+                    n,
+                    k,
+                    commands,
+                );
+            }
         } else {
             self.dot.encode(
                 input.subrange(input_offset..input_end),
@@ -177,7 +223,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        backends::common::{CommandBufferExecutable, CommandBufferPending, Context},
+        backends::common::{Buffer, CommandBufferExecutable, CommandBufferPending, Context},
         tests::helpers::{buffer_to_vec, create_buffer_with_data, for_each_backend},
     };
 
@@ -269,5 +315,52 @@ mod tests {
     #[stark_test]
     fn gathered_reference_matches_contiguous_dots_and_preserves_bf16_router_boundary() {
         for_each_backend!(|B| gathered_reference::<B>());
+    }
+
+    fn prefill_wide_policy<B: Backend>() {
+        let context = B::Context::new().unwrap();
+        let bounded =
+            ReferenceBF16Matmul::<B>::new(context.as_ref()).unwrap().with_prefill_mlx_wide(context.as_ref()).unwrap();
+        assert!(!bounded.uses_mlx_wide(1, 2));
+        assert!(bounded.uses_mlx_wide(2, 2));
+        assert!(bounded.uses_mlx_wide(1024, 2));
+        assert!(bounded.uses_mlx_wide(1025, 2));
+        assert!(!bounded.uses_mlx_wide(8, 1));
+    }
+
+    #[stark_test]
+    fn prefill_wide_policy_stays_bounded() {
+        for_each_backend!(|B| prefill_wide_policy::<B>());
+    }
+
+    fn prefill_wide_chunking<B: Backend>() {
+        let context = B::Context::new().unwrap();
+        let (m, n, k) = (1025u32, 3u32, 64u32);
+        let input = (0..m * k).map(|index| bf16::from_f32(((index as f32) * 0.011).sin())).collect::<Vec<_>>();
+        let weights = (0..n * k).map(|index| bf16::from_f32(((index as f32) * 0.017).cos())).collect::<Vec<_>>();
+        let input = create_buffer_with_data::<B, _>(&context, &input);
+        let weights = create_buffer_with_data::<B, _>(&context, &weights);
+        let baseline = ReferenceBF16Matmul::<B>::new(context.as_ref()).unwrap();
+        let wide =
+            ReferenceBF16Matmul::<B>::new(context.as_ref()).unwrap().with_prefill_mlx_wide(context.as_ref()).unwrap();
+        let mut commands = context.create_command_buffer(None, None).unwrap();
+        let expected = baseline.encode(&input, 0, &weights, m, n, k, &mut commands).unwrap();
+        let actual = wide.encode(&input, 0, &weights, m, n, k, &mut commands).unwrap();
+        let mut expected_output = context.create_buffer(expected.size()).unwrap();
+        let mut actual_output = context.create_buffer(actual.size()).unwrap();
+        commands.encode_copy(&expected, &mut expected_output);
+        commands.encode_copy(&actual, &mut actual_output);
+        commands.end_encoding().submit().wait_until_completed().unwrap();
+        let expected = buffer_to_vec::<B, bf16>(&expected_output);
+        let actual = buffer_to_vec::<B, bf16>(&actual_output);
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!(actual.to_bits().abs_diff(expected.to_bits()) <= 1);
+        }
+    }
+
+    #[stark_test]
+    fn prefill_wide_chunking_matches_reference_boundary() {
+        for_each_backend!(|B| prefill_wide_chunking::<B>());
     }
 }

@@ -10,12 +10,21 @@ pub fn reference_causal_scores_bf16(
     key_count: u32,
     rows: u32,
     prefix_len: u32,
+    block_boundary: u32,
     scale: f32,
 ) {
     for row in 0..rows as usize {
         for column in 0..key_count as usize {
             let index = row * key_count as usize + column;
-            let value = if column <= prefix_len as usize + row {
+            let query_position = prefix_len as usize + row;
+            let limit = if block_boundary == 0 {
+                prefix_len as usize + row + 1
+            } else if query_position < block_boundary as usize {
+                block_boundary as usize
+            } else {
+                key_count as usize
+            };
+            let value = if column < limit {
                 bf16::from_f32(unsafe { bf16::from_f32(*input.add(index)).to_f32() } * scale)
             } else {
                 bf16::from_bits(0xff7f)
