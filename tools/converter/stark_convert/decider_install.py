@@ -203,15 +203,11 @@ def _preflight_report(source, kind: str, revision: str | None = None) -> dict:
         normalized, pinned, profile = _source_args(source, kind, revision)
         if kind == "local":
             _validate_metadata(normalized, profile)
-            output_size = sum(
-                _pins(profile)[name][2] for name in _pins(profile) if name.endswith(".safetensors")
-            )
+            output_size = sum(_pins(profile)[name][2] for name in _pins(profile) if name.endswith(".safetensors"))
             _disk_check(normalized.parent, 0, output_size)
         else:
             _validate_hf_metadata(profile)
-            output_size = sum(
-                _pins(profile)[name][2] for name in _pins(profile) if name.endswith(".safetensors")
-            )
+            output_size = sum(_pins(profile)[name][2] for name in _pins(profile) if name.endswith(".safetensors"))
             additional = _hf_missing_bytes(profile)
             cache = Path.home() / ".cache" / "huggingface"
             _disk_check(cache, additional, output_size)
@@ -264,9 +260,7 @@ def _hub(hub=None):
 
 def _downloaded_path(hub, profile: DeciderSourceProfile, name: str) -> Path:
     return Path(
-        hub.hf_hub_download(
-            repo_id=profile.repo, filename=name, revision=profile.revision, local_files_only=False
-        )
+        hub.hf_hub_download(repo_id=profile.repo, filename=name, revision=profile.revision, local_files_only=False)
     )
 
 
@@ -342,15 +336,11 @@ def _hf_missing_bytes(
 def preflight(source, *, kind: str, mode: str = "decision", revision: str | None = None, hub=None) -> dict:
     profile = source_profile(source, kind=kind, revision=revision)
     if mode != "decision":
-        return _preflight_failure(
-            kind, "Decider supports Decision mode only.", "unsupported_mode", profile=profile
-        )
+        return _preflight_failure(kind, "Decider supports Decision mode only.", "unsupported_mode", profile=profile)
     if kind == "huggingface" and profile is not None:
         try:
             _validate_hf_metadata(profile, hub=hub)
-            output_size = sum(
-                _pins(profile)[name][2] for name in _pins(profile) if name.endswith(".safetensors")
-            )
+            output_size = sum(_pins(profile)[name][2] for name in _pins(profile) if name.endswith(".safetensors"))
             _disk_check(
                 Path.home() / ".cache" / "huggingface",
                 _hf_missing_bytes(profile, hub=hub),
@@ -372,9 +362,7 @@ def preflight(source, *, kind: str, mode: str = "decision", revision: str | None
         try:
             path, _pinned, profile = _source_args(source, kind, revision)
             _validate_metadata(path, profile)
-            output_size = sum(
-                _pins(profile)[name][2] for name in _pins(profile) if name.endswith(".safetensors")
-            )
+            output_size = sum(_pins(profile)[name][2] for name in _pins(profile) if name.endswith(".safetensors"))
             _disk_check(Path.home(), 0, output_size)
             return _preflight_success(kind, profile)
         except OSError:
@@ -433,20 +421,14 @@ def install(source, *, kind: str, output, revision: str | None = None, progress=
         raise ValueError("output_exists")
     if kind == "local":
         source_root = normalized
-        output_size = sum(
-            _pins(profile)[name][2] for name in _pins(profile) if name.endswith(".safetensors")
-        )
+        output_size = sum(_pins(profile)[name][2] for name in _pins(profile) if name.endswith(".safetensors"))
         _disk_check(output.parent, 0, output_size)
         if reporter_ is not None:
             reporter_.emit("download", "skipped", force=True)
     else:
         hub = _hub(hub)
-        output_size = sum(
-            _pins(profile)[name][2] for name in _pins(profile) if name.endswith(".safetensors")
-        )
-        _disk_check(
-            Path.home() / ".cache" / "huggingface", _hf_missing_bytes(profile, hub=hub), output_size
-        )
+        output_size = sum(_pins(profile)[name][2] for name in _pins(profile) if name.endswith(".safetensors"))
+        _disk_check(Path.home() / ".cache" / "huggingface", _hf_missing_bytes(profile, hub=hub), output_size)
         _disk_check(output.parent, 0, output_size)
         selected = [(profile.repo, name, pinned) for name in _pins(profile)]
         download = DownloadProgress(reporter_) if reporter_ is not None else None
@@ -460,9 +442,7 @@ def install(source, *, kind: str, output, revision: str | None = None, progress=
         source_root = _validate_hf_metadata(profile, hub=hub)
     if reporter_ is not None:
         reporter_.emit("conversion", "running", force=True)
-    total = (
-        _verify_files(source_root, profile) if kind == "local" else _verify_hf_files(source_root, profile)
-    )
+    total = _verify_files(source_root, profile) if kind == "local" else _verify_hf_files(source_root, profile)
     result = prepare_decider(source_root, output, revision=pinned, profile=profile)
     if reporter_ is not None:
         reporter_.emit("conversion", "complete", total, total, force=True)

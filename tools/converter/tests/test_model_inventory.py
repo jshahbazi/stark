@@ -289,6 +289,8 @@ def test_prepared_elephant_has_independent_source_display(tmp_path):
     assert result["group_name"] == "Elephant 1"
     assert result["source_revision"] == inventory._ELEPHANT_REVISION
     assert result["artifact_mode"] == "decision"
+
+
 def test_prepared_regular_decider_has_its_own_bound_display_identity(tmp_path):
     result = inventory.model_display(decider_artifact(tmp_path, profile=REGULAR_DECIDER))
     assert result["upstream_repo"] == REGULAR_DECIDER.repo
