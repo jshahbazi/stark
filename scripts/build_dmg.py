@@ -11,6 +11,8 @@ import platform
 import plistlib
 import re
 import shutil
+import stat
+import struct
 import sys
 import tempfile
 from pathlib import Path
@@ -26,11 +28,35 @@ RECIPE_FILES = (
     "scripts/install_app.py",
     "apps/installer/Sources/InstallerApp.swift",
     "apps/installer/Resources/RenderIcon.swift",
+    "apps/installer/Resources/RenderBackground.swift",
     "apps/menu-bar/Resources/Stark.jpg",
     "apps/menu-bar/Sources/AppUpdate.swift",
 )
 INSTALLER_NAME = "Install Stark.app"
 INSTALLER_ID = "com.starkengine.installer"
+
+# Finder window layout, in points from the top-left of the window content.
+# RenderBackground.swift draws the panel, arrow and guidance around these
+# icon centres, so the two always agree.
+WINDOW_SIZE = (640, 540)
+# Finder's saved bounds cover the whole frame, including the macOS 26 title
+# bar, and measure the origin from the bottom-left of the screen.
+TITLE_BAR_HEIGHT = 32
+WINDOW_ORIGIN = (320, 200)
+ICON_SIZE = 128
+ICON_CENTRES = {
+    "Stark.app": (200, 216),
+    "Applications": (440, 216),
+    INSTALLER_NAME: (200, 427),
+}
+BACKGROUND = Path(".background/background.tiff")
+LAYOUT_NAME = ".DS_Store"
+# Finder's own layout files for one small B-tree are 8196 bytes.
+LAYOUT_SIZE = 8196
+# Seconds from the classic Mac OS epoch (1904-01-01) to the Unix epoch.
+MAC_EPOCH_OFFSET = 2_082_844_800
+# Classic alias records store the volume name as a 27-byte Pascal string.
+MAX_VOLUME_NAME = 27
 
 
 def build_installer_icon(resources: Path, env: dict[str, str]) -> None:
@@ -159,6 +185,260 @@ def build_installer(
     signing.run([*arguments, app], "dmg_installer_signing_failed", env)
     signing.verify_signature(app, identity, env)
     return app
+
+
+def render_background(staging: Path, env: dict[str, str]) -> None:
+    """Draw the window background around the configured icon positions."""
+    destination = staging / BACKGROUND
+    destination.parent.mkdir()
+
+    def centre(name: str) -> dict[str, int]:
+        x, y = ICON_CENTRES[name]
+        return {"x": x, "y": y}
+
+    layout = {
+        "width": WINDOW_SIZE[0],
+        "height": WINDOW_SIZE[1],
+        "iconSize": ICON_SIZE,
+        "app": centre("Stark.app"),
+        "applications": centre("Applications"),
+        "installer": centre(INSTALLER_NAME),
+    }
+    signing.run(
+        [
+            "/usr/bin/xcrun",
+            "swift",
+            ROOT / "apps/installer/Resources/RenderBackground.swift",
+            destination,
+            json.dumps(layout, sort_keys=True, separators=(",", ":")),
+        ],
+        "dmg_background_render_failed",
+        env,
+        timeout=300,
+    )
+    signing.require(destination.is_file(), "dmg_background_missing")
+    # Reserve the layout file's blocks so the writable image cannot run out
+    # of space when the real layout replaces it after mounting.
+    (staging / LAYOUT_NAME).write_bytes(bytes(LAYOUT_SIZE))
+
+
+def created(path: Path) -> float:
+    return path.stat().st_birthtime
+
+
+def hide(path: Path) -> None:
+    os.chflags(path, path.lstat().st_flags | stat.UF_HIDDEN)
+
+
+def background_alias(
+    volume_name: str,
+    volume_created: float,
+    folder_id: int,
+    file_id: int,
+    file_created: float,
+) -> bytes:
+    """Encode the version 2 alias record Finder resolves for the background."""
+    volume = volume_name.encode()
+    signing.require(
+        0 < len(volume) <= MAX_VOLUME_NAME and b":" not in volume,
+        "dmg_volume_name_invalid",
+    )
+    folder, filename = BACKGROUND.parts
+    volume_date = volume_created + MAC_EPOCH_OFFSET
+    file_date = file_created + MAC_EPOCH_OFFSET
+    record = struct.pack(
+        ">h28pI2shI64pII4s4shhI2s10s",
+        0,  # file
+        volume,
+        int(volume_date),
+        b"H+",
+        0,  # fixed disk
+        folder_id,
+        filename.encode(),
+        file_id,
+        int(file_date),
+        bytes(4),
+        bytes(4),
+        -1,
+        -1,
+        0,
+        bytes(2),
+        bytes(10),
+    )
+
+    def tag(code: int, value: bytes) -> bytes:
+        return struct.pack(">hh", code, len(value)) + value + bytes(len(value) % 2)
+
+    def text(code: int, value: str) -> bytes:
+        encoded = value.encode("utf-16-be")
+        return tag(code, struct.pack(">h", len(encoded) // 2) + encoded)
+
+    # Tag order follows Finder's own records.
+    record += b"".join(
+        (
+            tag(0, folder.encode()),
+            tag(16, struct.pack(">Q", int(volume_date * 65536))),
+            tag(17, struct.pack(">Q", int(file_date * 65536))),
+            tag(1, struct.pack(">I", folder_id)),
+            tag(2, b":".join((volume, folder.encode(), filename.encode()))),
+            text(14, filename),
+            text(15, volume_name),
+            tag(18, f"/{BACKGROUND}".encode()),
+            # Users mount the image under /Volumes. Recording the private
+            # build mount point would leak a local path into the release.
+            tag(19, f"/Volumes/{volume_name}".encode()),
+            struct.pack(">hh", -1, 0),
+        )
+    )
+    return struct.pack(">4shh", bytes(4), 8 + len(record), 2) + record
+
+
+def layout_store(alias: bytes) -> bytes:
+    """Encode Finder's window layout as a single-leaf .DS_Store B-tree."""
+    x, y = WINDOW_ORIGIN
+    width, height = WINDOW_SIZE[0], WINDOW_SIZE[1] + TITLE_BAR_HEIGHT
+    window = {
+        "ContainerShowSidebar": False,
+        "PreviewPaneVisibility": False,
+        "ShowPathbar": False,
+        "ShowSidebar": False,
+        "ShowStatusBar": False,
+        "ShowTabView": False,
+        "ShowToolbar": False,
+        "SidebarWidth": 0,
+        # An NSRect string: {{x, y}, {width, height}}.
+        "WindowBounds": f"{{{{{x}, {y}}}, {{{width}, {height}}}}}",
+    }
+    view = {
+        "arrangeBy": "none",
+        "backgroundColorBlue": 1.0,
+        "backgroundColorGreen": 1.0,
+        "backgroundColorRed": 1.0,
+        "backgroundImageAlias": alias,
+        "backgroundType": 2,
+        "gridOffsetX": 0.0,
+        "gridOffsetY": 0.0,
+        "gridSpacing": 100.0,
+        "iconSize": float(ICON_SIZE),
+        "labelOnBottom": True,
+        "scrollPositionX": 0.0,
+        "scrollPositionY": 0.0,
+        "showIconPreview": False,
+        "showItemInfo": False,
+        "textSize": 13.0,
+        "viewOptionsVersion": 1,
+    }
+
+    def blob(value: bytes) -> bytes:
+        return b"blob" + struct.pack(">I", len(value)) + value
+
+    records = [
+        (".", b"bwsp", blob(plistlib.dumps(window, fmt=plistlib.FMT_BINARY))),
+        (".", b"icvp", blob(plistlib.dumps(view, fmt=plistlib.FMT_BINARY))),
+        (".", b"vSrn", b"long" + struct.pack(">I", 1)),
+        (".", b"vstl", b"type" + b"icnv"),
+    ]
+    for name, (x, y) in ICON_CENTRES.items():
+        location = struct.pack(">IIII", x, y, 0xFFFFFFFF, 0xFFFF0000)
+        records.append((name, b"Iloc", blob(location)))
+    # Finder keeps records in case-insensitive name order, then by code.
+    records.sort(key=lambda record: (record[0].lower(), record[1]))
+    node = struct.pack(">II", 0, len(records))
+    for name, code, value in records:
+        encoded = name.encode("utf-16-be")
+        node += struct.pack(">I", len(encoded) // 2) + encoded + code + value
+
+    # Buddy-allocated blocks, as (offset, log2 size) after the 4-byte magic:
+    # the 32-byte allocator header sits at 0, then the B-tree superblock,
+    # allocator root and one leaf. Every other buddy block remains free.
+    superblock, root, leaf = (0x20, 5), (0x800, 11), (0x1000, 12)
+    signing.require(len(node) <= 1 << leaf[1], "dmg_layout_too_large")
+    free = {width: [1 << width] for width in (6, 7, 8, 9, 10, *range(13, 31))}
+    addresses = [offset | width for offset, width in (root, superblock, leaf)]
+    allocator = struct.pack(">II", len(addresses), 0)
+    allocator += struct.pack(">256I", *addresses, *[0] * (256 - len(addresses)))
+    allocator += struct.pack(">IB4sI", 1, 4, b"DSDB", 1)
+    for width in range(32):
+        blocks = free.get(width, [])
+        allocator += struct.pack(f">I{len(blocks)}I", len(blocks), *blocks)
+    signing.require(len(allocator) <= 1 << root[1], "dmg_layout_too_large")
+
+    data = bytearray(LAYOUT_SIZE)
+    data[:36] = struct.pack(
+        ">I4sIII16s", 1, b"Bud1", root[0], 1 << root[1], root[0], bytes(16)
+    )
+    for (offset, _), payload in (
+        (root, allocator),
+        # Root node block 2, no internal levels, one node of 4096 bytes.
+        (superblock, struct.pack(">IIIII", 2, 0, len(records), 1, 1 << leaf[1])),
+        (leaf, node),
+    ):
+        data[4 + offset : 4 + offset + len(payload)] = payload
+    return bytes(data)
+
+
+def write_layout(volume: Path, volume_name: str) -> None:
+    """Point Finder at the background and place each icon on the mounted image."""
+    background = volume / BACKGROUND
+    signing.require(
+        background.is_file() and not background.is_symlink(),
+        "dmg_background_missing",
+    )
+    # The Applications shortcut is checked as a link; its target belongs to
+    # whoever mounts the image, not to the image itself.
+    for name in ICON_CENTRES:
+        signing.require(os.path.lexists(volume / name), "dmg_layout_item_missing")
+    alias = background_alias(
+        volume_name,
+        created(volume),
+        background.parent.stat().st_ino,
+        background.stat().st_ino,
+        created(background),
+    )
+    (volume / LAYOUT_NAME).write_bytes(layout_store(alias))
+    hide(background.parent)
+    # A writable mount may start an fsevents log; it is not part of the image.
+    shutil.rmtree(volume / ".fseventsd", ignore_errors=True)
+
+
+def apply_layout(
+    image: Path, volume_name: str, mountpoint: Path, env: dict[str, str]
+) -> None:
+    """Write the Finder layout into the writable image before compression."""
+    mountpoint.mkdir()
+    attached = False
+    try:
+        signing.run(
+            [
+                "/usr/bin/hdiutil",
+                "attach",
+                "-readwrite",
+                "-nobrowse",
+                "-noautoopen",
+                "-noverify",
+                "-mountpoint",
+                mountpoint,
+                image,
+            ],
+            "dmg_layout_mount_failed",
+            env,
+        )
+        attached = True
+        write_layout(mountpoint, volume_name)
+    finally:
+        if attached or mountpoint.is_mount():
+            try:
+                signing.run(
+                    ["/usr/bin/hdiutil", "detach", mountpoint],
+                    "dmg_layout_detach_failed",
+                    env,
+                )
+            except signing.SigningError:
+                signing.run(
+                    ["/usr/bin/hdiutil", "detach", "-force", mountpoint],
+                    "dmg_layout_force_detach_failed",
+                    env,
+                )
 
 
 def inventory_digest(app: Path) -> str:
@@ -423,25 +703,44 @@ def build(options: argparse.Namespace) -> dict:
         )
         installer_digest = inventory_digest(launcher)
         (staging / "Applications").symlink_to("/Applications", target_is_directory=True)
-        image = work / names[0]
+        render_background(staging, env)
+        volume_name = f"Stark {options.version}"
+        writable = work / "writable.dmg"
         signing.run(
             [
                 "/usr/bin/hdiutil",
                 "create",
                 "-volname",
-                f"Stark {options.version}",
+                volume_name,
                 "-srcfolder",
                 staging,
                 "-fs",
                 "HFS+",
                 "-format",
-                "UDZO",
-                image,
+                "UDRW",
+                writable,
             ],
             "dmg_creation_failed",
             env,
             timeout=600,
         )
+        apply_layout(writable, volume_name, work / "layout", env)
+        image = work / names[0]
+        signing.run(
+            [
+                "/usr/bin/hdiutil",
+                "convert",
+                writable,
+                "-format",
+                "UDZO",
+                "-o",
+                image,
+            ],
+            "dmg_compression_failed",
+            env,
+            timeout=600,
+        )
+        writable.unlink()
         arguments = [
             "/usr/bin/codesign",
             "--sign",
