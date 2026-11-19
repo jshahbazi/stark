@@ -237,6 +237,7 @@ fn run_single_pass_attention(
             suffix_length: seq_len as u32,
             trie: None::<&<Metal as Backend>::GlobalBuffer>,
             sinks: sinks_buffer.as_ref(),
+            block_boundary: None,
             cache: KVCacheView::full(0),
         },
         &mut command_buffer,
@@ -307,6 +308,7 @@ fn run_gemm_attention(
         suffix_length: seq_len as u32,
         trie: None::<&<Metal as Backend>::GlobalBuffer>,
         sinks: sinks_buffer.as_ref(),
+        block_boundary: None,
         cache: KVCacheView::full(0),
     };
 
@@ -491,6 +493,7 @@ fn run_two_pass_attention(
             suffix_length: seq_len as u32,
             trie: None::<&<Metal as Backend>::GlobalBuffer>,
             sinks: sinks_buffer.as_ref(),
+            block_boundary: None,
             cache: KVCacheView::full(0),
         },
         &mut command_buffer,
@@ -615,6 +618,7 @@ fn run_attention_with_kernel<B: Backend>(
         suffix_length: suffix_length as u32,
         trie: trie.as_ref(),
         sinks: None,
+        block_boundary: None,
         cache,
     };
     let mut command_buffer = context.create_command_buffer(None, None).expect("command buffer");
@@ -784,6 +788,7 @@ fn source_single_pass_preserves_precise_uniform_average_at_bf16_tie() {
                     suffix_length: 1,
                     trie: None::<&<Metal as Backend>::GlobalBuffer>,
                     sinks: None,
+                    block_boundary: None,
                     cache: KVCacheView::full(6),
                 },
                 &mut commands,

@@ -108,7 +108,7 @@ impl<B: Backend> Attention<B> {
         let temporal = target.view.ring_params().is_some().then(|| target.linearize_ring(command)).transpose()?;
         let output = if let Some((keys, values)) = &temporal {
             if let Some(reference) = reference {
-                reference.encode(&queries, keys, values, 1, target.retained_rows() - 1, command)?
+                reference.encode(&queries, keys, values, 1, target.retained_rows() - 1, None, command)?
             } else {
                 // The assistant's current position is fixed. Copy at most one
                 // local window to temporal order; full target context stays shared.
@@ -122,6 +122,7 @@ impl<B: Backend> Attention<B> {
                         sinks: None,
                         cache,
                         image_span: None,
+                        block_boundary: None,
                     },
                     command,
                 )?
@@ -134,6 +135,7 @@ impl<B: Backend> Attention<B> {
                     target.state.values.as_ref(),
                     1,
                     target.retained_rows() - 1,
+                    None,
                     command,
                 )?
             } else {
@@ -147,6 +149,7 @@ impl<B: Backend> Attention<B> {
                         sinks: None,
                         cache,
                         image_span: None,
+                        block_boundary: None,
                     },
                     command,
                 )?
@@ -220,6 +223,7 @@ impl<B: Backend> Attention<B> {
                 trie: None::<&B::ConstantBuffer>,
                 sinks: None::<&B::GlobalBuffer>,
                 cache: KVCacheView::full(0),
+                block_boundary: topology.block_boundary(),
             },
             commands,
         )?;
@@ -434,6 +438,7 @@ impl<B: Backend> Attention<B> {
                         trie: None::<&B::ConstantBuffer>,
                         sinks: self.sinks.as_ref(),
                         cache,
+                        block_boundary: batch_dim.block_boundary(),
                     },
                     command_buffer,
                 )?
@@ -504,6 +509,7 @@ impl<B: Backend> Attention<B> {
                 trie: trie.as_ref(),
                 sinks: self.sinks.as_ref(),
                 cache: state.view(),
+                block_boundary: batch_dim.block_boundary(),
             },
             command_buffer,
         )
@@ -531,6 +537,12 @@ impl<B: Backend> Attention<B> {
             }
         });
         if let Some(reference) = &self.reference {
+            if let Some(boundary) = arguments.block_boundary
+                && (arguments.cache.prefix_len() >= boundary
+                    || boundary >= arguments.cache.prefix_len() + arguments.suffix_length)
+            {
+                return Err(crate::backends::common::InvalidInput("invalid block attention boundary").into());
+            }
             if arguments.image_span.is_some() {
                 return Err(crate::backends::common::InvalidInput(
                     "reference BF16 causal score materialization does not implement bidirectional image attention",
@@ -548,8 +560,11 @@ impl<B: Backend> Attention<B> {
                 arguments.values,
                 arguments.suffix_length,
                 arguments.cache.prefix_len(),
+                arguments.block_boundary,
                 command_buffer,
             )
+        } else if arguments.block_boundary.is_some() {
+            Err(crate::backends::common::InvalidInput("block attention requires the source BF16 reference core").into())
         } else {
             self.kernel.encode(arguments, command_buffer)
         }

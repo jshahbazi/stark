@@ -10,13 +10,18 @@ PUBLIC KERNEL(ReferenceCausalScoresBF16)(
     constant uint& key_count,
     constant uint& rows,
     constant uint& prefix_len,
+    constant uint& block_boundary,
     constant float& scale,
     const uint index AXIS(rows * key_count, 128)
 ) {
   const uint row = index / key_count;
   const uint column = index % key_count;
   const float dot = float(bfloat(input[index]));
-  output[index] = column <= prefix_len + row ? bfloat(dot * scale) : bfloat(as_type<float>(0xff7f0000u));
+  const uint query_position = prefix_len + row;
+  const uint limit = block_boundary == 0
+      ? prefix_len + row + 1
+      : (query_position < block_boundary ? block_boundary : key_count);
+  output[index] = column < limit ? bfloat(dot * scale) : bfloat(as_type<float>(0xff7f0000u));
 }
 
 #include "../common/vision_exp.h"

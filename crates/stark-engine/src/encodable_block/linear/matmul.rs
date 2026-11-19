@@ -148,15 +148,21 @@ impl<B: Backend> LinearMatmul<B> {
                 ));
             }
             let reference = ReferenceBF16Matmul::new(context).map_err(LinearMatmulError::BackendError)?;
-            let source_wide = weights_tree.numerical_profile() == NumericalProfile::QwenMtpSourceBF16;
+            let profile = weights_tree.numerical_profile();
             #[cfg(test)]
-            let source_wide = source_wide
-                || (weights_tree.numerical_profile() == NumericalProfile::QwenMtpReferenceLinears
-                    && std::env::var_os("STARK_TEST_HEAD_MLX_OPERATORS").is_some());
-            let reference = if source_wide {
-                reference.with_mlx_wide(context).map_err(LinearMatmulError::BackendError)?
-            } else {
-                reference
+            let test_source_wide = profile == NumericalProfile::QwenMtpReferenceLinears
+                && std::env::var_os("STARK_TEST_HEAD_MLX_OPERATORS").is_some();
+            #[cfg(not(test))]
+            let test_source_wide = false;
+            let reference = match profile {
+                NumericalProfile::Qwen35ReferenceBF16 => {
+                    reference.with_prefill_mlx_wide(context).map_err(LinearMatmulError::BackendError)?
+                },
+                NumericalProfile::QwenMtpSourceBF16 => {
+                    reference.with_mlx_wide(context).map_err(LinearMatmulError::BackendError)?
+                },
+                _ if test_source_wide => reference.with_mlx_wide(context).map_err(LinearMatmulError::BackendError)?,
+                _ => reference,
             };
             Some(reference)
         } else {

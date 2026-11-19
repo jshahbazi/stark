@@ -38,6 +38,22 @@ _DECIDER_METADATA_FILES = {
     "LICENSE",
     "NOTICE",
 }
+_ELEPHANT_REPO = "baselabs/elephant-1"
+_ELEPHANT_REVISION = "b3f8a93462fb1051a9de031e94a7ff380e254072"
+_ELEPHANT_METADATA_FILES = {
+    "README.md",
+    "chat_template.jinja",
+    "config.json",
+    "constraints.txt",
+    "engine.py",
+    "generation_config.json",
+    "processor_config.json",
+    "readout.json",
+    "serve.patch",
+    "setup.sh",
+    "tokenizer.json",
+    "tokenizer_config.json",
+}
 
 
 def _quantized_tensor(header, name, size, *, expected_rows=None):
@@ -375,16 +391,32 @@ def model_tool_support(root):
 
 
 def _decider_bound(parsed, config_bytes, receipt, weight_bytes):
-    """Check display provenance for the typed Decider artifact without reading tensor payloads."""
+    """Check display provenance for a typed Decision artifact without tensor payloads."""
     try:
         source = parsed["source"]
+        if not isinstance(source, dict):
+            return None
+        if source.get("repo") == _ELEPHANT_REPO:
+            revision, metadata, protocol, options = (
+                _ELEPHANT_REVISION,
+                _ELEPHANT_METADATA_FILES,
+                5,
+                256,
+            )
+        else:
+            revision, metadata, protocol, options = (
+                _DECIDER_REVISION,
+                _DECIDER_METADATA_FILES,
+                4,
+                255,
+            )
         if (
             parsed.get("type") != "DeciderModelConfig"
             or not isinstance(source, dict)
-            or source.get("repo") != _DECIDER_REPO
-            or source.get("revision") != _DECIDER_REVISION
+            or source.get("repo") not in {_DECIDER_REPO, _ELEPHANT_REPO}
+            or source.get("revision") != revision
             or not isinstance(source.get("metadata_sha256"), dict)
-            or set(source["metadata_sha256"]) != _DECIDER_METADATA_FILES
+            or set(source["metadata_sha256"]) != metadata
             or any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in source["metadata_sha256"].values())
             or not isinstance(source.get("weight_files"), dict)
             or not source["weight_files"]
@@ -400,8 +432,8 @@ def _decider_bound(parsed, config_bytes, receipt, weight_bytes):
         capabilities = parsed.get("capabilities")
         if (
             not isinstance(decision, dict)
-            or decision.get("protocol_version") != 4
-            or decision.get("num_options") != 255
+            or decision.get("protocol_version") != protocol
+            or decision.get("num_options") != options
             or not isinstance(capabilities, dict)
             or capabilities.get("decision") is not True
             or capabilities.get("images") is not True
@@ -434,15 +466,22 @@ def model_display(model):
         config_bytes = _small_file(root, "config.json")
         parsed = _json(config_bytes)
         if isinstance(parsed, dict) and parsed.get("type") == "DeciderModelConfig":
+            source = parsed.get("source") if isinstance(parsed.get("source"), dict) else {}
+            elephant = source.get("repo") == _ELEPHANT_REPO
+            repo, revision, name = (
+                (_ELEPHANT_REPO, _ELEPHANT_REVISION, "Elephant 1")
+                if elephant
+                else (_DECIDER_REPO, _DECIDER_REVISION, "Decider Flash v1.3")
+            )
             result.update(
-                group_name="Decider Flash v1.3",
+                group_name=name,
                 artifact_mode="decision",
                 decision_only=True,
                 supported_modes=["decision"],
                 supports_images=True,
                 # An upstream link describes the model family; artifact-bound
                 # revision/grouping still requires the complete receipt below.
-                upstream_repo=_DECIDER_REPO,
+                upstream_repo=repo,
                 tool_support=tool_support_for(None),
             )
             try:
@@ -456,8 +495,8 @@ def model_display(model):
                 pass
             if result["source_revision"] is not None:
                 result.update(
-                    group_id="repo:" + _DECIDER_REPO,
-                    source_revision=_DECIDER_REVISION,
+                    group_id="repo:" + repo,
+                    source_revision=revision,
                 )
             return result
     except Exception:

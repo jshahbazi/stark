@@ -7,6 +7,7 @@ pub struct BatchTopology<'a> {
     full_accept: bool,
     rotary_positions: Option<&'a [[u32; 3]]>,
     image_span: Option<[u32; 2]>,
+    block_boundary: Option<u32>,
 }
 
 impl<'a> BatchTopology<'a> {
@@ -37,6 +38,7 @@ impl<'a> BatchTopology<'a> {
             full_accept,
             rotary_positions: None,
             image_span: None,
+            block_boundary: None,
         }
     }
 
@@ -77,6 +79,24 @@ impl<'a> BatchTopology<'a> {
 
     pub(crate) fn image_span(&self) -> Option<[u32; 2]> {
         self.image_span
+    }
+
+    /// Admit one bidirectional prefix followed by one bidirectional suffix.
+    pub(crate) fn with_block_boundary(
+        mut self,
+        boundary: u32,
+    ) -> Result<Self, crate::backends::common::InvalidInput> {
+        if !self.is_flat || !self.full_accept || boundary == 0 || boundary >= self.size() {
+            return Err(crate::backends::common::InvalidInput(
+                "block attention requires a complete flat prefix and suffix",
+            ));
+        }
+        self.block_boundary = Some(boundary);
+        Ok(self)
+    }
+
+    pub(crate) fn block_boundary(&self) -> Option<u32> {
+        self.block_boundary
     }
 
     pub fn nodes(&self) -> &'a [TrieNode] {

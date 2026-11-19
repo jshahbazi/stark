@@ -57,7 +57,7 @@ mod decider_tests {
         values.extend(std::iter::repeat_n(half::bf16::from_f32(future), 64));
         let v = create_buffer_with_data::<B, _>(&context, &values);
         let mut command = context.create_command_buffer(None, None).unwrap();
-        let result = attention.encode(&q, &k, &v, 2, 0, &mut command).unwrap();
+        let result = attention.encode(&q, &k, &v, 2, 0, None, &mut command).unwrap();
         let mut readback = context.create_buffer(256).unwrap();
         command.encode_copy(&result, &mut readback);
         command.end_encoding().submit().wait_until_completed().unwrap();
@@ -72,6 +72,39 @@ mod decider_tests {
             assert!(causal[64..].iter().all(|value| value.to_f32() == future / 2.0));
             assert!(bidirectional.iter().all(|value| value.to_f32() == future / 2.0));
         }
+    }
+
+    #[stark_test]
+    fn decision_block_attention_is_bidirectional_within_two_blocks() {
+        for_each_backend!(|B| {
+            let context = create_context::<B>();
+            let config: AttentionConfig = serde_json::from_value(serde_json::json!({
+                "type":"AttentionConfig", "qkvg_projection_config":{}, "out_projection_config":{},
+                "query_norm_config":null, "key_norm_config":null, "num_heads":1, "num_groups":1,
+                "head_dim":64, "is_causal":true, "scale":1.0, "sliding_window_size":null,
+                "logit_soft_cap":null, "has_sinks":false, "has_qkvg_biases":false,
+                "has_out_biases":false, "has_gate":false, "normalize_values":false,
+                "is_kv_sharing":false, "reference_bf16":true
+            }))
+            .unwrap();
+            let attention = ReferenceBF16Attention::<B>::new(&context, &config).unwrap();
+            let q = create_buffer_with_data::<B, _>(&context, &vec![half::bf16::ZERO; 3 * 64]);
+            let k = create_buffer_with_data::<B, _>(&context, &vec![half::bf16::ZERO; 3 * 64]);
+            let values = [0.0, 10.0, 20.0]
+                .into_iter()
+                .flat_map(|value| std::iter::repeat_n(half::bf16::from_f32(value), 64))
+                .collect::<Vec<_>>();
+            let v = create_buffer_with_data::<B, _>(&context, &values);
+            let mut command = context.create_command_buffer(None, None).unwrap();
+            let result = attention.encode(&q, &k, &v, 3, 0, Some(2), &mut command).unwrap();
+            let mut readback = context.create_buffer(3 * 64 * 2).unwrap();
+            command.encode_copy(&result, &mut readback);
+            command.end_encoding().submit().wait_until_completed().unwrap();
+            let values = buffer_to_vec::<B, half::bf16>(&readback);
+            assert_eq!(values[0].to_f32(), 5.0);
+            assert_eq!(values[64].to_f32(), 5.0);
+            assert!((values[128].to_f32() - 10.0).abs() < 0.125);
+        });
     }
 
     #[stark_test]
@@ -148,6 +181,7 @@ impl<B: Backend> ReferenceBF16Attention<B> {
         values: impl BufferRef<Backend = B>,
         rows: u32,
         prefix_len: u32,
+        block_boundary: Option<u32>,
         commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::ScratchBuffer, B::Error> {
         let key_count = prefix_len.checked_add(rows).ok_or(InvalidInput("reference attention cache overflow"))?;
@@ -192,7 +226,16 @@ impl<B: Backend> ReferenceBF16Attention<B> {
             } else {
                 key_count
             };
-            self.score.encode(&dot, &mut probabilities, key_count, rows, mask_prefix, self.scale, commands);
+            self.score.encode(
+                &dot,
+                &mut probabilities,
+                key_count,
+                rows,
+                mask_prefix,
+                block_boundary.unwrap_or(0),
+                self.scale,
+                commands,
+            );
             self.softmax.encode(&mut probabilities, key_count, rows, commands);
             self.dot.encode(
                 &probabilities,
@@ -252,7 +295,7 @@ impl<B: Backend> ReferenceBF16Attention<B> {
                 32,
                 commands,
             );
-            self.score.encode(&dot, &mut probabilities, key_count, 1, key_count - 1, self.scale, commands);
+            self.score.encode(&dot, &mut probabilities, key_count, 1, key_count - 1, 0, self.scale, commands);
             commands.encode_copy(&probabilities, &mut scores);
             self.softmax.encode(&mut probabilities, key_count, 1, commands);
             self.dot.encode(

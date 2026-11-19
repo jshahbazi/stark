@@ -66,6 +66,7 @@ fn source_qk_split_keeps_f32_partitions_until_the_bf16_score_store() {
             suffix_length: ROWS as u32,
             trie: None::<&<Metal as Backend>::ConstantBuffer>,
             sinks: None,
+            block_boundary: None,
             cache: KVCacheView::full(0),
         },
         &mut commands,

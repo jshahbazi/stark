@@ -135,6 +135,8 @@ Image input supports one PNG/JPEG through Playground, terminal chat and the Loca
 
 | Model | Supported use | Images |
 | --- | --- | --- |
+| **Decider Flash v1.3** (`perplexity-ai/pplx-decider-flash-v1.3`) | Qualified native Decision-only BF16 artifact with a separate 255-option readout. See [the native route](docs/DECIDER.md). | One PNG/JPEG; retained and qualified on the pinned artifact |
+| **Elephant 1** (`baselabs/elephant-1`) | Pinned native 9B Decision-only BF16 artifact with OneJev block attention and 256 LM slots. Catalog/source admission is implemented; exact numerical and performance qualification remains pending. See [Elephant](docs/ELEPHANT.md). | One PNG/JPEG; retained on the normal path, exact artifact qualification pending |
 | **JevK5** (`alibiserikbay/JevK5`, BF16 Qwen3.5-4B) | Candidate probability scoring and the app's Decision workflow. [Recorded scoring parity](docs/validation/SCORING_PARITY.md) covers 243 cases on its named build; [chat EOS checks](docs/TERMINATOR_METRICS_VALIDATION_2026_10_25.md) also cover native generation. | The recorded JevK5 artifact is text-only. |
 
 The [scoring worker](docs/SCORING.md) can also score compatible language models listed under Text. Decision use requires a direct-answer template, distinct single-token labels and checkpoint-specific checks. JevK5's recorded parity applies to its exact checkpoint and build; decision accuracy and calibration need their own evaluation.

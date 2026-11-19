@@ -72,6 +72,8 @@ The quick Lily regression in this chat used its existing **text-loaded** worker.
 | SmolLM3 `smollm3` | Implemented text/conditional Decision | No image route | Vision sibling support would be new scope. |
 | Qwen3.5 dense `qwen3_5` | BF16/eligible affine text and image routes; dense Qwen3.8 extension | Yes, compatible artifacts | Merge/ship #110 after review; qualify other artifacts independently. |
 | Qwen3.5 MoE `qwen3_5_moe` | Affine and BF16-source image profiles; BF16-source text/Decision unsupported | Yes, evidence levels differ | Complete BF16 full-model checks, broader parity/cache qualification and metadata reconciliation. |
+| Decider Flash `decider-flash-v1.3` | Pinned 4B Decision-only BF16 artifact | One image; retained tower | Separate full-sequence attention/readout qualification; no generation or retained prefix cache. |
+| Elephant 1 `elephant-1` | Pinned 9B Decision-only OneJev slot-LM artifact | One image; retained tower, exact qualification pending | Native block-attention and preparation are implemented. Exact text/image decisions, memory, lifecycle and performance remain pending; generation/MTP and persistent prefix reuse are unavailable. |
 | Qwen3.8 Flash Next `qwen4_exp` | Typed text conversion and separate retained native backends | Route-dependent | Retained Lily image support exists; typed text conversion and Pipe/F32 are separate. See detailed rows. |
 | LFM2 `lfm2` | Implemented text/conditional Decision | No image route | LFM vision and planned LFM2.5 entries do not inherit support. |
 | LLaMBA `llamba` | Implemented text/conditional Decision | No image route | No image implementation established. |
