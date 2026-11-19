@@ -384,8 +384,10 @@ def write_layout(volume: Path, volume_name: str) -> None:
         background.is_file() and not background.is_symlink(),
         "dmg_background_missing",
     )
+    # The Applications shortcut is checked as a link; its target belongs to
+    # whoever mounts the image, not to the image itself.
     for name in ICON_CENTRES:
-        signing.require((volume / name).exists(), "dmg_layout_item_missing")
+        signing.require(os.path.lexists(volume / name), "dmg_layout_item_missing")
     alias = background_alias(
         volume_name,
         created(volume),

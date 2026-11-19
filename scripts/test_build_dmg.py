@@ -450,6 +450,24 @@ class DMGTests(unittest.TestCase):
                 self.assertNotIn("dmg_signing_failed", stages)
                 self.assertEqual(list(self.options.output_dir.iterdir()), [])
 
+    def test_layout_accepts_a_shortcut_whose_target_is_absent(self):
+        # Build hosts need not have /Applications; only the link is packaged.
+        volume = self.root / "volume"
+        for name in ("Stark.app", dmg.INSTALLER_NAME, ".background"):
+            (volume / name).mkdir(parents=True)
+        (volume / dmg.BACKGROUND).write_bytes(b"synthetic background")
+        (volume / "Applications").symlink_to(self.root / "absent")
+        dmg.write_layout(volume, "Stark 0.3.0")
+        self.assertIn(
+            ("Applications", b"Iloc"),
+            read_layout((volume / dmg.LAYOUT_NAME).read_bytes()),
+        )
+        (volume / "Applications").unlink()
+        with self.assertRaisesRegex(
+            dmg.signing.SigningError, "dmg_layout_item_missing"
+        ):
+            dmg.write_layout(volume, "Stark 0.3.0")
+
     def test_busy_writable_mount_is_force_detached(self):
         self.fail_stage = "dmg_layout_detach_failed"
         self.build()
