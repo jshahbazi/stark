@@ -1719,11 +1719,7 @@ class Desktop:
         if not self.request_id(request_id):
             raise DesktopError("Choose the model compatibility check to cancel.")
         with self.lock:
-            if (
-                self.current_state != "checking"
-                or self.source_check_request_id != request_id
-                or self.job is None
-            ):
+            if self.current_state != "checking" or self.source_check_request_id != request_id or self.job is None:
                 raise DesktopError("This model compatibility check has already finished.")
             self.epoch += 1
             self.source_check_request_id = None

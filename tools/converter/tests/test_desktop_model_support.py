@@ -156,10 +156,7 @@ def test_prepared_local_artifact_install_reports_visible_completion(host, tmp_pa
 
     events = emitted(host)
     assert next(event for event in events if event["event"] == "installed")["message"] == "Model added to Installed."
-    assert any(
-        event.get("event") == "status" and event.get("message") == "Adding prepared model…"
-        for event in events
-    )
+    assert any(event.get("event") == "status" and event.get("message") == "Adding prepared model…" for event in events)
     assert events[-1]["state"] == "idle" and events[-1]["message"] == "Model installed"
 
 
