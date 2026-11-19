@@ -12,6 +12,7 @@ from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
 from . import catalog_reasons, qwen38_external
+from .decider_specs import DECIDER_BY_FAMILY, FLASH_DECIDER
 from .model_support import (
     check_vision_processing_metadata,
     normalize_architecture,
@@ -26,15 +27,14 @@ from .template_compat import NamedTemplateError, is_named_template_list, select_
 from .vision_contract import REPO as EXACT_VISION_REPO
 from .vision_contract import REVISION as EXACT_VISION_REVISION
 
-_DECIDER_FAMILY_ID = "decider-flash-v1.3"
-_DECIDER_REPO = "perplexity-ai/pplx-decider-flash-v1.3"
-_DECIDER_REVISION = "d06fb3f2d97e0a52325a0d463c450cf0338f44fe"
-_DECIDER_WEIGHT_BYTES = 9_079_921_808
+_DECIDER_FAMILY_ID = FLASH_DECIDER.family_id
+_DECIDER_REPO = FLASH_DECIDER.repo
+_DECIDER_REVISION = FLASH_DECIDER.revision
 _ELEPHANT_FAMILY_ID = "elephant-1"
 _ELEPHANT_REPO = "baselabs/elephant-1"
 _ELEPHANT_REVISION = "b3f8a93462fb1051a9de031e94a7ff380e254072"
 _ELEPHANT_WEIGHT_BYTES = 18_819_722_392
-_DECISION_FAMILIES = {_DECIDER_FAMILY_ID, _ELEPHANT_FAMILY_ID}
+_DECISION_FAMILIES = {*DECIDER_BY_FAMILY, _ELEPHANT_FAMILY_ID}
 QWEN38_DENSE_REPO = "Qwen/Qwen3.8-27B"
 QWEN38_DENSE_REVISION = "37561816e66b5b9153b1b64c10968c18c1e6f4a0"
 
@@ -1039,25 +1039,44 @@ def family_catalog(
         return report(family, "error", "The model catalogue request is invalid.")
     if ranking_task not in (None, "general", "coding"):
         return report(family, "error", "The model catalogue request is invalid.")
-    if family in _DECISION_FAMILIES:
+    if family in DECIDER_BY_FAMILY:
+        profile = DECIDER_BY_FAMILY[family]
         name, repo, revision, weight_bytes, size = (
-            ("Decider Flash v1.3", _DECIDER_REPO, _DECIDER_REVISION, _DECIDER_WEIGHT_BYTES, "4B")
-            if family == _DECIDER_FAMILY_ID
-            else ("Elephant 1", _ELEPHANT_REPO, _ELEPHANT_REVISION, _ELEPHANT_WEIGHT_BYTES, "9B")
+            profile.name,
+            profile.repo,
+            profile.revision,
+            profile.weight_bytes,
+            profile.size_label,
         )
+        parameter_count = profile.parameter_count if profile != FLASH_DECIDER else None
+        family_id = profile.family_id
+    elif family == _ELEPHANT_FAMILY_ID:
+        name, repo, revision, weight_bytes, size = (
+            "Elephant 1",
+            _ELEPHANT_REPO,
+            _ELEPHANT_REVISION,
+            _ELEPHANT_WEIGHT_BYTES,
+            "9B",
+        )
+        parameter_count = None
+        family_id = _ELEPHANT_FAMILY_ID
+    else:
+        name = repo = revision = weight_bytes = size = family_id = None
+        parameter_count = None
+    if name is not None:
         item = {
             "id": hashlib.sha256((repo + "@" + revision).encode()).hexdigest()[:32],
             "repo": repo,
             "revision": revision,
             "name": name,
             "size_label": size,
-            "parameter_count": None,
+            "parameter_count": parameter_count,
             "weight_bytes": weight_bytes,
             "quantization": "BF16",
             "artifact_modes": ["decision"],
             "default_artifact_mode": "decision",
             "downloadable": True,
-            "model_group": _model_group(family, repo, name, "BF16", None),
+            "model_group": _model_group(family_id, repo, name, "BF16", None),
             "images": True,
             "max_images": 1,
         }

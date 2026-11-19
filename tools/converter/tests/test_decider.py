@@ -20,6 +20,7 @@ from stark_convert.decider_protocol import (
     answer,
     probabilities,
 )
+from stark_convert.decider_specs import REGULAR_DECIDER
 from stark_convert.streaming import ConversionError, UnsupportedConversion, read_safetensors_header, write_plan
 
 
@@ -37,17 +38,20 @@ def decision_metadata():
     }
 
 
-def decider_fixture(path):
+def decider_fixture(path, *, regular=False):
     config, tensors, _ = vision_fixture(path)
     config["architectures"] = ["Qwen3_5Model"]
-    config["tie_word_embeddings"] = True
-    config["text_config"]["tie_word_embeddings"] = True
+    config["tie_word_embeddings"] = not regular
+    config["text_config"]["tie_word_embeddings"] = not regular
     config["text_config"]["rope_parameters"].update(mrope_section=[1, 0, 0], mrope_interleaved=True)
     config["vision_config"]["rope_parameters"] = {"rope_theta": 10000.0, "rope_type": "axial"}
     tensors.pop("lm_head.weight")
     tensors = {name.removeprefix("model."): value for name, value in tensors.items()}
     (path / "config.json").write_text(json.dumps(config))
-    (path / "decision_config.json").write_text(json.dumps(decision_metadata()))
+    decision = decision_metadata()
+    if regular:
+        decision["base_model"] = REGULAR_DECIDER.base_model
+    (path / "decision_config.json").write_text(json.dumps(decision))
     (path / "joint_config.json").write_text(json.dumps(PROTOCOL))
     save_tensors(path / "model.safetensors", tensors)
     readout = np.arange(255 * 8, dtype="<u2").reshape((255, 8))
@@ -83,6 +87,26 @@ def test_plan_preserves_backbone_vision_and_readout(tmp_path):
     assert tensor_bytes(output["decision.readout.weights"]) == readout.tobytes()
     assert json.loads(metadata["decision.readout.spec"]) == {"type": "FullPrecisionSpec", "layout": "output_input"}
     assert "decoder.embedding.embedding.weights" in output
+
+
+def test_regular_plan_reuses_input_embedding_without_an_unused_output_head(tmp_path):
+    source = tmp_path / "source"
+    _config, tensors, readout = decider_fixture(source, regular=True)
+    assert not any("lm_head" in name for name in tensors)
+
+    plan, _, _, _ = build_decider_plan(source, profile=REGULAR_DECIDER)
+
+    assert plan.source_tensors == len(tensors) + 1
+    assert plan.decoder_config["embedding_config"]["type"] == "TiedEmbeddingConfig"
+    write_plan(plan, tmp_path / "output.safetensors")
+    metadata, output = read_safetensors_header(tmp_path / "output.safetensors")
+    assert tensor_bytes(output["decision.readout.weights"]) == readout.tobytes()
+    assert "decoder.embedding.embedding.weights" in output
+    assert "decoder.embedding.input_embedding.weights" not in output
+    assert json.loads(metadata["decoder.embedding.embedding.spec"]) == {
+        "type": "FullPrecisionSpec",
+        "layout": "input_output",
+    }
 
 
 @pytest.mark.parametrize("change", ["dtype", "shape", "missing", "extra"])

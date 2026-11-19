@@ -228,6 +228,7 @@ def test_universal_catalog_search_keeps_qwen_release_lines_separate(tmp_path):
     ("query", "repo", "family"),
     [
         ("Decider Flash", catalog._DECIDER_REPO, catalog._DECIDER_FAMILY_ID),
+        ("perplexity-ai/pplx-decider-v1.3", "perplexity-ai/pplx-decider-v1.3", "decider-v1.3"),
         ("GLM-5.3 Flash", "unsloth/GLM-5.3-Flash-GGUF", "glm5_next"),
     ],
 )

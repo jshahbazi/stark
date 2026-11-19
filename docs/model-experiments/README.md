@@ -1,5 +1,7 @@
 # Model change and experiment ledger
 
+- [20261118-D13-01/02: regular Decider v1.3 admission and smoke timing](2026-11-18-decider-v13.md): the pinned 27B BF16 image checkpoint receives a separate Decision-only source/catalog profile and a headless untied-embedding conversion route. Focused model-free controls pass, conversion and native load succeed, and one 201-token M5 Max request processes 4.001 input tok/s; reference parity, images, peak memory and repeatability remain unqualified.
+
 - [20261118-ELEPHANT-01: pinned Elephant 1 Decision admission](2026-11-18-elephant-1.md): source-aware Qwen3.5 block-attention and 256-slot OneJev readout implementation, catalog/install admission and separate image-retaining runtime path. Pinned metadata preflight passed; full 9B numerical, lifecycle, memory and performance qualification remains pending.
 
 - [20261117-QWEN38-CATALOG-01: official dense catalog admission](2026-11-17-qwen38-dense-catalog.md): the complete official `Qwen/Qwen3.8-27B` is pinned in the existing dense Qwen3.5/Qwen3.8 family, with reviewed image and XML tool-template identities. Metadata and model-free admission pass; full-model conversion and native qualification remain pending.

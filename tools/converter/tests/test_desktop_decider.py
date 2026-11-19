@@ -17,6 +17,7 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 from stark_convert.chat import ChatCancelled
 from stark_convert.decider import SOURCE_REPO, SOURCE_REVISION
 from stark_convert.decider_install import FAMILY_ID
+from stark_convert.decider_specs import REGULAR_DECIDER
 from stark_convert.desktop import Desktop, DesktopError, api_model_id, model_valid
 from stark_convert.local_api import APIError
 from stark_convert.model_catalog import family_catalog
@@ -205,6 +206,19 @@ def test_prepared_local_import_and_decision_native_ready(desktop):
     assert ready["max_context_tokens"] == 4096
     assert ready["image_limits"]["max_processed_pixels"] == 1_638_400
     assert not ready["tools"] and not ready["mtp"]["supported"]
+
+
+def test_prepared_regular_import_keeps_its_family_name(desktop, artifact):
+    instance, _ = desktop
+    config = json.loads((artifact / "config.json").read_text())
+    config["source"] = {"repo": REGULAR_DECIDER.repo, "revision": REGULAR_DECIDER.revision}
+    (artifact / "config.json").write_text(json.dumps(config))
+    instance.models.clear()
+
+    instance.install(instance.epoch, "local", str(artifact))
+
+    assert instance.models[0]["name"] == REGULAR_DECIDER.name
+    assert instance.models[0]["artifact_mode"] == "decision"
 
 
 def test_add_source_chat_default_imports_prepared_decider_as_native_decision(desktop, artifact):

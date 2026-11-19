@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ._build_metadata import open_regular
 from .api_tools import codec_with_template_review, tool_support_for
+from .decider_specs import DECIDER_BY_REPO, FLASH_DECIDER
 from .hybrid_prepare import prepared_identity
 from .hybrid_vision import prepared_image_identity
 from .model_support import normalize_architecture
@@ -25,8 +26,8 @@ _REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0
 _FLOATS = {"BF16": "BF16", "F16": "FP16", "F32": "FP32"}
 _QUANT_BITS = {2, 3, 4, 5, 6, 8}
 _MAX_ROW_SEGMENTS = 128
-_DECIDER_REPO = "perplexity-ai/pplx-decider-flash-v1.3"
-_DECIDER_REVISION = "d06fb3f2d97e0a52325a0d463c450cf0338f44fe"
+_DECIDER_REPO = FLASH_DECIDER.repo
+_DECIDER_REVISION = FLASH_DECIDER.revision
 _DECIDER_METADATA_FILES = {
     "config.json",
     "decision_config.json",
@@ -404,16 +405,17 @@ def _decider_bound(parsed, config_bytes, receipt, weight_bytes):
                 256,
             )
         else:
+            profile = DECIDER_BY_REPO.get(source.get("repo"))
+            if profile is None:
+                return None
             revision, metadata, protocol, options = (
-                _DECIDER_REVISION,
+                profile.revision,
                 _DECIDER_METADATA_FILES,
                 4,
                 255,
             )
         if (
             parsed.get("type") != "DeciderModelConfig"
-            or not isinstance(source, dict)
-            or source.get("repo") not in {_DECIDER_REPO, _ELEPHANT_REPO}
             or source.get("revision") != revision
             or not isinstance(source.get("metadata_sha256"), dict)
             or set(source["metadata_sha256"]) != metadata
@@ -468,11 +470,13 @@ def model_display(model):
         if isinstance(parsed, dict) and parsed.get("type") == "DeciderModelConfig":
             source = parsed.get("source") if isinstance(parsed.get("source"), dict) else {}
             elephant = source.get("repo") == _ELEPHANT_REPO
-            repo, revision, name = (
-                (_ELEPHANT_REPO, _ELEPHANT_REVISION, "Elephant 1")
-                if elephant
-                else (_DECIDER_REPO, _DECIDER_REVISION, "Decider Flash v1.3")
-            )
+            profile = DECIDER_BY_REPO.get(source.get("repo"))
+            if elephant:
+                repo, revision, name = (_ELEPHANT_REPO, _ELEPHANT_REVISION, "Elephant 1")
+            elif profile is not None:
+                repo, revision, name = (profile.repo, profile.revision, profile.name)
+            else:
+                repo, revision, name = (None, None, model["name"])
             result.update(
                 group_name=name,
                 artifact_mode="decision",

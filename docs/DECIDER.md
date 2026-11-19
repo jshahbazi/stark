@@ -1,11 +1,37 @@
-# Decider Flash v1.3
+# Decider v1.3
 
 Stark provides a dedicated native Rust/Metal path for
 `perplexity-ai/pplx-decider-flash-v1.3`, pinned to
-`d06fb3f2d97e0a52325a0d463c450cf0338f44fe`. It supports BF16 binary decisions,
-custom answer choices, ordinal scores and one PNG/JPEG image per request.
-The vision tower is loaded by default. Qualification results and their exact
-scope are recorded in [20261116-DF13-01](model-experiments/2026-11-16-decider-flash-v13.md).
+`d06fb3f2d97e0a52325a0d463c450cf0338f44fe`, and the regular
+`perplexity-ai/pplx-decider-v1.3`, pinned to
+`9c2ebb27470d3dec2ad7ab727727e40d142c7213`. Both support BF16 binary decisions,
+custom answer choices, ordinal scores and one PNG/JPEG image per request. The
+vision tower is loaded by default.
+
+Decider Flash is the qualified 4B route. The regular checkpoint is implemented
+but its 27B artifact remains unqualified: full BF16 conversion and a 201-token
+native text request pass, while reference parity, image execution, repeatable
+performance and peak-memory evidence remain pending. The implementation uses the regular
+checkpoint's input embedding for the internal decision-only graph because that
+export intentionally has no generative `lm_head`; this does not create or admit
+a chat path. See [20261118-D13-01](model-experiments/2026-11-18-decider-v13.md).
+One 201-token cold M5 Max smoke run processed **4.001 input tok/s** and loaded
+the full native artifact in 10.042 seconds; this is bounded compatibility
+evidence, not numerical qualification or a repeatable speed claim. See the
+[benchmark record](benchmarks/2026-11-18-regular-decider-300-token.md).
+
+The regular source contains 52,170,802,736 bytes of model shards (about 48.6
+GiB), plus its readout and metadata. Preparation creates another full BF16
+artifact, so a clean Hugging Face install needs about 113 GiB free on the
+destination volume after the installer's 15 GiB margin. Weight size alone is
+not enough resident memory: the vision tower, recurrent state and full-attention
+working buffers also consume unified memory. Use a high-memory Mac; 96 GB or
+more is a practical starting point, while 48 GB machines are unsuitable. The
+catalog's "too large" indication is only a weight-only screen, not a runtime
+reservation or qualification.
+
+The Flash qualification results and their exact scope are recorded in
+[20261116-DF13-01](model-experiments/2026-11-16-decider-flash-v13.md).
 
 The [DF13-03 run](archive/runs/2026-11-16-decider-flash-v13.md) passed all 15
 reference decisions, including five image cases, with maximum probability
@@ -26,13 +52,12 @@ from Source's inherited Chat-purpose setting for detected Decider sources.
 
 ## Use in the app
 
-In **Manage Models**, open **Model Catalog**, browse **Decider Flash v1.3** and
-download its pinned BF16 entry. **Add from Source** also accepts
-`perplexity-ai/pplx-decider-flash-v1.3` as a Hugging Face source, a complete pinned
-local snapshot, or a prepared Decider folder. A prepared-folder import keeps
-using that folder; keep it available. New prepared-folder imports are named
-**Decider Flash v1.3**, independent of the folder name. Image support is included
-automatically.
+In **Manage Models**, open **Model Catalog** and choose **Decider Flash v1.3**
+or **Decider v1.3**. **Add from Source** also accepts either exact Hugging Face
+source, a complete pinned local snapshot, or a prepared Decider folder. A
+prepared-folder import keeps using that folder; keep it available. New
+prepared-folder imports retain the checkpoint's Decider family identity,
+independent of the folder name. Image support is included automatically.
 
 Run the saved model to select **Decision** mode. Enter a question and 2–16
 distinct, comma-separated answers in the desired order. Enter text, attach one
@@ -84,7 +109,9 @@ uv run --project tools/converter --locked python -m stark_convert.decider prepar
 Preparation preserves the tower, maps the separate 255-row readout, retains the
 source licence/notice and records source and output hashes. It rejects existing
 output directories, incompatible processors, old/causal protocols, unexpected
-tensor namespaces and incomplete heads. Quantized exports are not supported by
+tensor namespaces and incomplete heads. For the regular untied-embedding
+export, the decision-only planner deliberately retains the input embedding
+without inventing an LM output head. Quantized exports are not supported by
 this path.
 
 The JSONL frontend accepts the upstream decision request schema:

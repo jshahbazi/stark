@@ -1,4 +1,4 @@
-"""Prepare and run the native Decider Flash v1.3 decision/image path.
+"""Prepare and run native Decider v1.3 decision/image artifacts.
 
 The reference implementation is used only by external qualification tools.
 Run ``python -m stark_convert.decider --help`` for the explicit CLI. Prepared
@@ -28,6 +28,7 @@ from ._build_metadata import file_hash as _hash
 from .adapters.qwen35 import build_qwen35_plan
 from .checkpoint_metadata import CheckpointMetadata
 from .decider_protocol import PROTOCOL, DeciderError, Encoder, answer, probabilities
+from .decider_specs import FLASH_DECIDER, DeciderSourceProfile, decider_profile
 from .elephant_protocol import Encoder as ElephantEncoder
 from .elephant_protocol import answer as elephant_answer
 from .streaming import (
@@ -43,8 +44,8 @@ from .streaming import (
 )
 from .template_runtime import IsolatedTemplate
 
-SOURCE_REPO = "perplexity-ai/pplx-decider-flash-v1.3"
-SOURCE_REVISION = "d06fb3f2d97e0a52325a0d463c450cf0338f44fe"
+SOURCE_REPO = FLASH_DECIDER.repo
+SOURCE_REVISION = FLASH_DECIDER.revision
 _METADATA_FILES = (
     "config.json",
     "decision_config.json",
@@ -58,13 +59,13 @@ _METADATA_FILES = (
 )
 
 
-def validate_decision_metadata(config, joint, tokenizer=None):
+def validate_decision_metadata(config, joint, tokenizer=None, *, profile: DeciderSourceProfile = FLASH_DECIDER):
     """Reject causal/old-protocol checkpoints and preserve the trained option rows."""
     codes, token_ids = config.get("codes"), config.get("token_ids")
     temperature = config.get("temperature")
     if (
         config.get("format_version") != 2
-        or config.get("base_model") != "Qwen/Qwen3.5-4B"
+        or config.get("base_model") != profile.base_model
         or config.get("model_type") != "qwen3_5"
         or config.get("attention_mode") != "noncausal_full_attention"
         or config.get("pooling") != "last"
@@ -90,7 +91,7 @@ def validate_decision_metadata(config, joint, tokenizer=None):
         raise ConversionError("Decider option token IDs disagree with the tokenizer")
 
 
-def build_decider_plan(source):
+def build_decider_plan(source, *, profile: DeciderSourceProfile = FLASH_DECIDER):
     """Map the decision backbone through the existing BF16 Qwen3.5 operators.
 
     Source architecture and namespaces are adapted only in the planner's local
@@ -101,13 +102,13 @@ def build_decider_plan(source):
     config = read_json(source / "config.json")
     decision = read_json(source / "decision_config.json")
     joint = read_json(source / "joint_config.json")
-    validate_decision_metadata(decision, joint)
+    validate_decision_metadata(decision, joint, profile=profile)
     if (
         config.get("architectures") != ["Qwen3_5Model"]
         or config.get("model_type") != "qwen3_5"
         or not isinstance(config.get("text_config"), dict)
         or not isinstance(config.get("vision_config"), dict)
-        or config.get("tie_word_embeddings") is not True
+        or config.get("tie_word_embeddings") is not profile.tied_word_embeddings
         or config.get("auto_map") is not None
     ):
         raise UnsupportedConversion("Decider requires the complete dense Flash vision backbone")
@@ -120,7 +121,19 @@ def build_decider_plan(source):
     # These aliases restore the official conditional-model namespaces expected
     # by the existing Qwen3.5 planner, without touching any source files.
     mapped = {"model." + key: value for key, value in tensors.items()}
-    planned_config = {**config, "architectures": ["Qwen3_5ForConditionalGeneration"], "vision_config": vision}
+    # Decider consumes the hidden state at its marker, never the generative
+    # output embedding. The decision-only export intentionally omits lm_head;
+    # retain its input embedding through the existing tied embedding loader.
+    planned_text = dict(config["text_config"])
+    if not profile.tied_word_embeddings:
+        planned_text["tie_word_embeddings"] = True
+    planned_config = {
+        **config,
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+        "tie_word_embeddings": True,
+        "text_config": planned_text,
+        "vision_config": vision,
+    }
     plan = build_qwen35_plan(
         source, include_vision=True, checkpoint_metadata=CheckpointMetadata(planned_config, mapped)
     )
@@ -173,17 +186,23 @@ def build_decider_plan(source):
     return plan, config, decision, joint
 
 
-def prepare(source, output, *, revision=SOURCE_REVISION):
+def prepare(source, output, *, revision=SOURCE_REVISION, profile: DeciderSourceProfile | None = None):
     """Atomically prepare an image-enabled BF16 artifact from a local snapshot."""
     source, output = Path(source).resolve(), Path(output).absolute()
     if output.exists():
         raise ConversionError("Decider output already exists")
-    if len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
+    profile = profile or decider_profile(revision)
+    if (
+        profile is None
+        or profile.revision != revision
+        or len(revision) != 40
+        or any(c not in "0123456789abcdef" for c in revision)
+    ):
         raise ConversionError("Decider source revision must be immutable")
-    plan, config, decision, joint = build_decider_plan(source)
+    plan, config, decision, joint = build_decider_plan(source, profile=profile)
     payloads = {name: read_regular_bytes(authorize_source_path(source, source / name)) for name in _METADATA_FILES}
     tokenizer = Tokenizer.from_str(payloads["tokenizer.json"].decode("utf-8"))
-    validate_decision_metadata(decision, joint, tokenizer)
+    validate_decision_metadata(decision, joint, tokenizer, profile=profile)
     marker, separator = (tokenizer.token_to_id(joint[name]) for name in ("marker", "separator"))
     if marker is None or separator is None or marker == separator:
         raise ConversionError("Decider tokenizer is missing protocol markers")
@@ -232,7 +251,7 @@ def prepare(source, output, *, revision=SOURCE_REVISION):
                 (staging / name).write_bytes(payload)
         stats = write_plan(plan, staging / "model.safetensors")
         provenance = {
-            "repo": SOURCE_REPO,
+            "repo": profile.repo,
             "revision": revision,
             "metadata_sha256": {name: hashlib.sha256(payload).hexdigest() for name, payload in payloads.items()},
             "weight_files": {
@@ -467,7 +486,7 @@ class Decider:
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Prepare or run native Decider Flash v1.3 with images.")
+    parser = argparse.ArgumentParser(description="Prepare or run native Decider v1.3 with images.")
     commands = parser.add_subparsers(dest="command", required=True)
     preparation = commands.add_parser("prepare")
     preparation.add_argument("--source", type=Path, required=True)

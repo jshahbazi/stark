@@ -1,10 +1,9 @@
 //! Native protocol-v4 Decider inference. Every call owns fresh sequence state.
 //!
-//! Implements Perplexity's Decider v1.3 full-attention/readout contract:
-//! perplexity-ai/pplx-decider-flash-v1.3, revision
-//! d06fb3f2d97e0a52325a0d463c450cf0338f44fe, source/src/pplx_decider/model.py
-//! and protocol.py (Apache-2.0). Linear-attention layers retain their causal recurrence; full
-//! attention sees the entire request. No prefix state is retained or reused.
+//! Implements Perplexity's Decider v1.3 full-attention/readout contract used
+//! by the pinned Flash and regular checkpoints. Linear-attention layers retain
+//! their causal recurrence; full attention sees the entire request. No prefix
+//! state is retained or reused.
 
 use std::{fs::File, io::BufReader, path::Path, sync::Arc, time::Instant};
 

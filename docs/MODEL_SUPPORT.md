@@ -525,8 +525,12 @@ the active worker. Local qualification receipts retain their separate identity.
 
 ## Modes and support states
 
-Perplexity Decider Flash v1.3 has a dedicated BF16 native route through
-`stark-decide`, available in the app's Decision workflow and the Decider CLI.
+Perplexity Decider Flash v1.3 and regular Decider v1.3 have dedicated BF16
+native routes through `stark-decide`, available in the app's Decision workflow
+and the Decider CLI. Flash is numerically qualified. The regular 27B source is
+structurally admitted and hash-pinned, but full-model qualification is pending;
+its 52.2 GB shard set and duplicate prepared artifact make it suitable only for
+high-memory machines with substantial free disk space.
 Its typed artifact retains the vision tower, noncausal full attention and a
 separate decision readout. The registry records `artifact_mode: decision` and
 `decision_only: true`; Run selects Decision mode. The dedicated catalogue entry
