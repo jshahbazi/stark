@@ -167,8 +167,10 @@ information and never blocks library startup or changes admission. The Swift
 client ignores malformed/unknown descriptors and retains the original name.
 This presentation object is not persisted into model registry or artifact files.
 
-Each library row also reports its `artifact_mode` and a schema-1 `removal`
-descriptor (`action`, `label`, `message`). The app confirms the offered action.
+Each library row also reports its `artifact_mode`, an `available` runtime-admission
+flag and a schema-1 `removal` descriptor (`action`, `label`, `message`). The app
+keeps unavailable saved artifacts visible but disables Run. The app confirms the
+offered removal action.
 Exclusively owned managed directories are moved through macOS Foundation's
 Trash API; imported, shared or unowned paths are unregistered without moving
 files. The backend rechecks action and directory identity, serializes the

@@ -220,6 +220,15 @@ def test_malformed_optional_artifact_mode_falls_back_without_blocking(tmp_path, 
     assert event["models"][0]["artifact_mode"] == "text"
 
 
+def test_library_reports_when_saved_model_cannot_run(tmp_path):
+    model = artifact(tmp_path / "model")
+    output = io.StringIO()
+    host = Desktop(tmp_path / "unused-worker", tmp_path / "data", output)
+    host.models = [model]
+    host.library()
+    assert json.loads(output.getvalue())["models"][0]["available"] is False
+
+
 def test_native_config_determines_image_variant_despite_bad_registry_mode(tmp_path):
     model = artifact(tmp_path / "model")
     model["artifact_mode"] = []
