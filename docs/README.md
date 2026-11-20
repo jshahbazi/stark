@@ -24,6 +24,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [OLMo 3 and Gemma 4](OLMO3_GEMMA4.md) | Native text paths, Gemma 4 BF16 image profiles, encoder-free and MoE paths, precision policy and validation boundaries |
 | [Gemma 4 assistants](GEMMA4_ASSISTANT_PLAN.md) | Pinned E2B/E4B companion metadata and staged conversion, target activation/KV, text MTP and cache qualification work |
 | [Edge0-145B plan](EDGE0_PLAN.md) | Pinned metadata intake, storage and arithmetic gaps against the native Flash-Next path, and staged work; nothing implemented or run |
+| [Inkling 2 Mini plan](INKLING_2_MINI_PLAN.md) | Fixed-loop native generation plan, Apple reference, real-weight performance pilot, vision, prefix reuse and DSpark qualification |
 | [Gemma 3 images](GEMMA3_IMAGES.md) | Source-bound SigLIP image artifacts, 4B/12B/27B admission, exact processor semantics and qualification boundaries |
 | [Recursive Flint](FLINT.md) | Official INT4 preparation, native text execution, limits and reference checks |
 | [Ripple-65B Preview](RIPPLE.md) | Native Rust/Metal architecture, pinned Q4_K_M and Q8_0 preparation, precision and validation limits |
