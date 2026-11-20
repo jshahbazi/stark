@@ -1,12 +1,23 @@
 # Performance playbook
 
-What to try when making a model family faster on Stark, in roughly the order to try it, with what each idea returned on Qwen3.8-Flash-Next ("Lily"). Compiled 2026-11-19 from the records listed at the end.
+What to try when making a model family faster on Stark, in roughly the order to try it, with what each idea returned on Qwen3.8-Flash-Next ("Lily"). Compiled 2026-11-19 and updated 2026-11-20 from the records listed at the end.
 
 This page summarizes records; it is not one. Every number was measured on a named artifact, build, workload and host, and keeps that scope. Nothing here qualifies another artifact, and where this page and a dated record differ, the record is right. A technique that paid on Lily has to be measured again on the next family. One that failed on Lily failed for a stated reason, and the reason is the thing to check before trying it again.
 
 Unless a row says otherwise, figures are for `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` at revision `0f94842e`, on an Apple M5 Max with 128 GiB, with 4,096 input tokens.
 
 For comparing a new family against it: Lily is a 48-layer hybrid, 36 GDN recurrent layers and 12 sparse-attention layers. Every layer has a routed mixture-of-experts feed-forward (512 experts, 10 routed per token, plus a shared expert) and four hyper-connection streams. It has an n-gram embedding table of about 30 GiB, a one-layer draft head and a vocabulary of 248,320. The pack is about 107 GB.
+
+## Keeping this page current
+
+This page is maintained. Read it before optimizing a model or bringing up a new family, and update it in the same change as the experiment record whenever an attempt:
+
+- changes what a lever returned, or tries a lever on another family or artifact;
+- adds a rejected or failed approach, with the reason it failed;
+- adds, settles or retires an entry under "Ideas not yet tried";
+- changes a correctness gate, a measurement rule or the checklist.
+
+Add the record to the table at the end and move the date in the first paragraph. Give a figure its own artifact, build and workload when they differ from the defaults above. Results from another family get their own rows, and their own section once there are enough of them; a Lily result is not reworded to fit another model.
 
 ## Terms
 
@@ -29,10 +40,12 @@ For comparing a new family against it: Lily is a 48-layer hybrid, 36 GDN recurre
 - In speculation the unit is the round: expected tokens per round over cost per round. The verify pass is 80 to 90 percent of a round, so what matters is the cost of one more verify row against a serial step. On Lily that is about 5.7 ms against 14 ms.
 - Host scheduling inside the round was worth more than the row-kernel work of 2026-11-19. The merged build is 9 to 18 percent faster with speculation on and no output changed; the one row change that was adopted accounts for 2 to 3 points of that.
 - No fixed draft depth is right everywhere. Acceptance runs from about 50 percent to over 90 percent depending on how predictable the text is and how it is sampled. Zero, one, two and three drafts each win on some workload.
+- So depth is now chosen per round. On 2026-11-20 a planner with prompt lookup replaced two fixed drafts as the default on the pinned artifact, after a gate that ran every schedule on the same inputs across prose and code, greedy and sampled, at three input lengths: 1.218 times MTP off against 1.155. Two fixed drafts, the default until then, had been running up to 5 percent below MTP off on prose.
 - For chat and agent traffic the largest latency lever is not decode speed. Restoring state for a shared prompt prefix cut time to first token on follow-up turns by 5 to 7 times, and one extra snapshot inside the prompt cut it a further 40 to 46 percent at 12K.
 - An idle GPU costs about 0.8 s on the next request. A keepalive signal every 500 ms removes it for almost no power.
 - Kernels are compiled with fast math, so a restructured kernel can pass every synthetic byte test and still change values on the real model. The real-model control and the output-hash gate decide.
 - Session drift of 3 to 15 percent is normal on this host, and request cadence alone moves decode by 10 percent. A gain smaller than that needs alternating pairs inside one loaded worker, and an arm the change cannot affect as a noise control.
+- A decision needs enough valid samples in every cell it rests on. In the schedule gate, two cells with one and three valid samples said the planner lost to the old default by more than 5 percent. With nine each they did not, and the decision reversed.
 
 ## Step 1: build the time budget
 
@@ -173,7 +186,7 @@ Source: [optimization history][hist], rows K01 to K24, U06 to U30 and F07; [llam
 - Acceptance is exact rejection sampling on the host from complete F32 rows: accept a draft token x with probability min(1, p(x)/q(x)), and on rejection draw from max(p - q, 0) renormalized. Greedy reduces to comparing argmaxes.
 - Verify rows and the state after rollback are bit-identical to serial decode. That is tested, not guaranteed by construction.
 - A seeded request need not match its MTP-off output, and must reproduce itself run to run.
-- The draft head costs about 1.84 GB resident. It loads alongside the image tower with no measured text slowdown (104.7 against 105.5 tok/s on a short greedy prompt), image requests keep MTP off, and prefix snapshots are keyed on whether MTP is enabled, not on the draft count ([vision text MTP][lvmtp]).
+- The draft head costs about 1.84 GB resident. It loads alongside the image tower with no measured text slowdown (104.7 against 105.5 tok/s on a short greedy prompt), image requests keep MTP off, and prefix snapshots are keyed on whether MTP is enabled, not on the draft count or the round schedule ([vision text MTP][lvmtp], [selector prefix reuse][selprefix]).
 
 Three verifier designs were tried before one paid:
 
@@ -263,37 +276,60 @@ Depth interacts with how predictable the text is, how it is sampled, and how lon
 | 512 input, nucleus only, two drafts against off | -11.8 percent, 0 of 8 | [llama.cpp assessment][assess] |
 | Greedy prose, base build: one, two, three drafts against off | -4, -12, -28 percent | [merged timing][merge] |
 | Greedy prose, merged build: one, two, three drafts against off | +13, +3, -17 percent | [merged timing][merge] |
+| Prose, merged build, matched windows at 4,096 to 32,768 input: one, two, three drafts against off | Greedy +7 to +11, -4 to 0, -18 to -14 percent. Sampled +10 to +19, -5 to +1; three not run | [schedule gate][gate] |
+| Code, same sessions | Greedy +29 to +30, +39 to +42, +39 to +42 percent. Sampled +22 to +28, +26 to +34; three not run | [schedule gate][gate] |
 
 Two attempts to change the default from two drafts to one were adopted and then reverted. The first passed its functional checks and a 5 percent tolerance, then missed a preregistered 5 percent benefit gate and a guard cell. The second, narrowed to one sampling profile, passed every gate it set and then lost by 11 percent on a natural coding response. The held-out cell that favoured one draft had about 51 percent acceptance; the coding response had about 91.
+
+A third change, from two fixed drafts to a per-round planner, was adopted on 2026-11-20 and is described under Adaptive depth.
 
 Lessons for the next family:
 
 - Compare a candidate default against the current default, not against off. One draft against off looked like +9.9 percent; against the two-draft default it was +4.3.
+- Then compare the current default against off as well. Two fixed drafts survived both reverted changes and measured 0.95 to 1.01 times MTP off in every matched prose cell.
 - Set guard cells across samplers and context lengths before measuring, and include a natural long response. Short fixed sequences did not predict it.
 - Neither acceptance nor row count alone predicts the result. One draft does less speculative work; two drafts pay fewer round overheads.
 - When row cost falls, the best depth moves. One draft on prose went from a loss to a gain between the base and merged builds without any change to the drafting.
 
 #### Adaptive depth
 
-Opt-in with `mtp_policy: "adaptive"` ([depth policy][depth]). Each round the planner picks the depth that maximizes `E(m) / cost(m)` from a running acceptance estimate per position and a static cost table measured on the build. It is a pure function of acceptance history, remaining budget and sampling mode, never of the clock, so requests reproduce.
+Each round the planner picks the depth that maximizes `E(m) / cost(m)` from a running acceptance estimate per position and a static cost table measured on the build ([depth policy][depth]). It is a pure function of acceptance history, remaining budget and sampling mode, never of the clock, so requests reproduce.
 
-- On code it matches the best fixed depth (113.2 against 113.3 to 116.9 tok/s). On prose it reaches 83.9 against 86.2 to 87.3 at one fixed draft and 76.2 to 76.7 off. Sampled requests are not established either way.
+Since 2026-11-20 it is the default, with prompt lookup, for a text request with MTP on that names no schedule on the pinned image-loaded artifact ([schedule default][sched]). `"mtp_policy": "fixed"` and `"mtp_lookup": false` on a request, or `STARK_LILY_MTP_ADAPTIVE=0` at load, restore the fixed schedule. Every other artifact keeps fixed depth and takes `mtp_policy: "adaptive"` as an option.
+
+The gate that made it the default ([schedule gate][gate]) gave every arm the same corpus windows and seeds and took the median rate against MTP off in twelve cells: prose and code, greedy and sampled, at 4,096, 16,384 and 32,768 input tokens.
+
+| | One fixed draft | Two fixed drafts | Planner | Planner with lookup |
+| --- | ---: | ---: | ---: | ---: |
+| Geometric mean of the twelve cells | 1.193 | 1.155 | 1.215 | 1.218 |
+| Lowest cell | 1.070 | 0.952 | 1.060 | 1.061 |
+| Prose cells | 1.07 to 1.19 | 0.95 to 1.01 | 1.06 to 1.13 | 1.06 to 1.14 |
+| Code cells | 1.22 to 1.30 | 1.26 to 1.42 | 1.21 to 1.44 | 1.23 to 1.42 |
+
+- It does not beat the best fixed depth for a workload; it avoids the wrong one. It matches two or three fixed drafts on code and stays 6 to 14 percent above MTP off on prose, where two fixed drafts give nothing. In the fixed-corpus benchmark it read 113.2 tok/s on code against 113.3 to 116.9 at three fixed drafts ([merged timing][merge]).
+- Its exploration costs something where one depth is right throughout. On prose it ran one draft in 72 to 89 percent of head rounds, two in 7 to 26 and none in 1 to 13, and one fixed draft beat it by 5 to 7 percent on sampled prose at 4,096 and 16,384 tokens.
+- Input length changed little. The cost table measured at 4,096 tokens chose the same depths at 16,384 and 32,768.
+- The draft limit matters little. The desktop app requests two drafts, so there the planner works under a limit of two: 1.193 against 1.206 at a limit of three over eight cells, with the gap in sampled code (1.22 against 1.32 at 4,096 tokens).
 - The cost table must be re-measured whenever round costs change. With a table from the base build, the planner priced a one-draft round on prose as not worth taking and tied MTP off; after re-measuring it gained 9 to 10 percent.
+- Seeded sampled output under the planner depends on its constants, so each table has an identifier and the response reports it as `stats.schedule.cost_table`. Making the planner the default changed seeded sampled output of MTP-enabled requests and left greedy output alone.
 - A zero-draft round should be an ordinary serial step. The first design used a one-row verify, a head advance and a finish pass and cost 2 to 3 ms more per token.
 - Things that mattered in tuning: how fast low acceptance moves the estimate at the start of a request, how often an abandoned depth is probed again, and a hysteresis band small enough that a 4 percent better depth is taken.
+- Not established: natural long responses rendered through the chat template, which is where both earlier default changes failed; sampled settings other than temperature 1 with top-k 20; any other artifact.
 
 #### Prompt lookup
 
-Opt-in with `mtp_lookup: true`. A 4-gram index over the prompt and committed output proposes the tokens that followed the last match, as point-mass drafts with no draft-head forward. Verification and rejection are unchanged, so it stays exact.
+A 4-gram index over the prompt and committed output proposes the tokens that followed the last match, as point-mass drafts with no draft-head forward. Verification and rejection are unchanged, so it stays exact. It is on by default with the planner on the pinned artifact and an option (`mtp_lookup: true`) elsewhere.
 
 - Greedy copy-heavy input: +8 to +10 percent over the same depth without lookup, with 98 to 99 percent of lookup drafts accepted in screening. On the benchmark's code corpus, +5 to +9 percent over the adaptive arm.
-- Sampled at temperature 1: the continuation leaves the copy almost at once; neutral to negative.
-- Prose and non-repeating code: nothing.
+- Sampled at temperature 1: mixed. The first screening found it neutral to negative, the continuation leaving the copy almost at once. A copy-heavy sampled arm later gained 7 percent ([merged timing][merge]), and in the schedule gate it was level with the planner alone on sampled code at 4,096 and 16,384 tokens and 4 percent ahead at 32,768.
+- Prose and non-repeating code: nothing, and no measurable cost. On the gate's corpora lookup ran in 0 to 15 percent of rounds and moved the twelve-cell score by 0.3 percent.
 - A round that skips the draft head must still write the head's cache row for the pending token, or later sampled output depends on earlier requests.
 
 #### Raising the draft limit
 
 Lily's limit is 3. A plan for 8 is in the [depth policy record][depth]. It is deferred: at Lily's row cost a fourth head draft does not pay, and the GDN input projection kernel exists only for 1 to 4 rows with a cost that climbs at rows 3 and 4. Deeper limits would mainly help lookup rounds, which pay no draft steps.
+
+The desktop app is bounded lower still. Its paged-residency memory profile for the pinned artifact allows two drafts, and raising that needs a memory qualification ([schedule gate][gate]).
 
 ### 6. Prefix and state reuse
 
@@ -313,7 +349,9 @@ What generalizes:
 - Do not buy a finer grid by shrinking the prefill chunk. The chunk size also sets cold prefill efficiency. Capture state inside the pass instead.
 - One snapshot is about 110 MiB by the feasibility record and about 149 MiB by the release record; the two figures are not reconciled. One at every 2,048 boundary to 32K was estimated at about 1.6 GiB, which is why there is one midpoint and not many.
 - Key the snapshot on everything that affects state: context size, model instance, cache scope and whether MTP is enabled. Clear it on failure, cancellation, image requests and restart, and never persist it.
+- Leave out what does not affect state, and prove it. The round schedule is not in the key, because the snapshot is captured during prefill before any round runs. With the planner and lookup on, every prefix hit equalled the same request without reuse, in 67 of 67 cases as options and 77 of 77 as the default, and switching schedule between requests kept the entry ([selector prefix reuse][selprefix]).
 - Qualify with three workers per case (cache on, cache off, baseline), compare hashes, check reuse counts against a simulation of the rule, and exercise every invalidation path after a warm hit.
+- When the candidate's default differs from the baseline's, sampled cases have no baseline counterpart. Compare them with the uncached candidate only, check that the reply names the schedule it ran, and add cases that opt out of the new default: those must equal the baseline, sampled included.
 - A single snapshot is displaced by any unrelated request. One 8,714-token request took 4.93 s to first text after displacement and 0.54 s on repeat ([speed review][fsreview]).
 
 ### 7. Prefill
@@ -367,10 +405,11 @@ Published rates are not comparable until the conditions match. The 2026-11-19 co
 A speed change that is meant to leave output alone has to pass all of these, in this order of cost:
 
 1. Component byte tests on the physical GPU against the one-row or unchanged kernel: real dimensions, edge geometries, zeros, subnormal-heavy inputs, cancellation, offset views and output canaries, over several independent random draws.
-2. The real-model control: verify rows, rollback state and a host-serial reference with zero unequal values (`private_checkpoint_mtp_verify_and_rollback_match_serial`, which reads `STARK_TEST_MODEL_PATH`).
+2. The real-model control: verify rows, rollback state and a host-serial reference with zero unequal values (`private_checkpoint_mtp_verify_and_rollback_match_serial`, which reads `STARK_TEST_MODEL_PATH`). Its draft-head phase is allowed to differ and reports 248,320 unequal values with no top-1 mismatch. Run the control by name: the prefix `private_checkpoint_mtp_` also selects a test that asserts an official-pack checkpoint and stops on Lily.
 3. The output-hash gate: every default arm (greedy and sampled, 0 to 3 drafts) reproduces the baseline hash and the MTP work counters.
 4. For a new request option: a greedy request reproduces the greedy baseline hash, and a sampled request gives one hash across repeats.
-5. For anything that touches state: prefix restoration, image-loaded parity, image transitions, cancellation and reset, per [model onboarding](MODEL_ONBOARDING.md).
+5. For a change of default: on the same inputs and seeds, the new default path equals the previous build with the option requested explicitly, hash for hash and counter for counter; the opt-out and the kill switch equal the old default; and the frozen baseline arms reproduce with the kill switch set ([schedule default][sched]).
+6. For anything that touches state: prefix restoration, image-loaded parity, image transitions, cancellation and reset, per [model onboarding](MODEL_ONBOARDING.md).
 
 Step 1 is necessary and not sufficient. Kernels are compiled with fast math, and the GPU compiler schedules identical per-row source differently depending on the surrounding code. Recorded cases: a kernel whose intermediate representation matched the one-row body per row and still differed in up to 300 of 2,560 outputs on subnormal streams; a variant that passed one random draw and failed the next; and a variant that passed 288 synthetic cases and failed the real model.
 
@@ -387,7 +426,12 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 - An unchanged worker has ranged from 53.3 to 61.1 tok/s across repeats. Baseline spread of 10 to 22 percent was recorded on busy-host cells.
 - Fix the gate before the run. The gates used: a gain at least the larger of 10 percent and the baseline's own range; at least 7 of 8 paired wins; no declared cell more than 5 percent worse; a held-out corpus or seed before production. A small win inside the range is a stop decision.
 - Component timing, instrumented stage timing and end-to-end timing are three kinds of evidence. A faster component has repeatedly failed to produce a faster request.
-- Sampled arms at different depths generate different text and different lengths. Report throughput and request time separately, and do not rank sampled arms on 256-token samples.
+- Sampled arms at different depths generate different text and different lengths. Report throughput and request time separately, and do not rank sampled arms on a few 256-token samples. The schedule gate ranked them on five to nine matched windows per cell.
+- Give every arm of a comparison the same inputs and seeds, and change the input and the seed between repeats. Repeating one input and one seed measures timing noise only, because a seeded arm writes the same text every time.
+- Do not let a corpus window end where the text ends: the model stops at once and the window is lost. Sampled requests also stop early at long inputs, 4 of 15 on prose at 32,768 tokens. Drop such a window for every arm of that sampling mode, and plan spare windows.
+- Set a minimum number of valid samples for each decision cell before the run. If samples are added afterwards, add them to every cell of that kind and write the plan down before looking at them ([schedule gate][gate]).
+- Hold the incumbent to the guards the candidates are held to. The two-draft default failed the no-harm guard of the gate that replaced it.
+- Keep a copy of each measured binary outside the build directory. The next build replaces it.
 - Keep every invalid setup in the record as invalid: a wrong request type, a missing tool on the path, a concurrent build, a contended host.
 - Give each experiment its own build target directory. A shared one once carried an experimental core into a supposedly clean worker.
 - Only one process can hold a 100 GB model. Serialize model loads through one lock, and never stop a process the experiment did not start.
@@ -403,7 +447,7 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 6. If the family has a draft head: build exact batched verification first, then measure the cost of an added verify row and acceptance by position on at least code, prose, greedy and sampled.
 7. Remove host round trips inside the round before working on row kernels.
 8. Reduce row cost by batching launches, reading weights once and avoiding per-row state capture, each behind the real-model control.
-9. Choose depth from the round model, check it on a natural long response, and re-measure the cost table after each change to round cost.
+9. Choose depth from the round model, check it on a natural long response, and re-measure the cost table after each change to round cost. Gate a change of default against the current default over corpus, sampler and input-length cells with matched inputs.
 10. Inventory every piece of state a request leaves behind, then implement prefix restoration with capture points inside the prefill pass. This is required for every new path by [model onboarding](MODEL_ONBOARDING.md).
 11. Measure the first request after an idle pause, process start to ready, and peak memory against the plan.
 12. Record every attempt, including the rejected ones, in the [experiment ledger](model-experiments/README.md).
@@ -421,7 +465,11 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 | Merge the finish pass into the next round's first submission | About 0.3 ms per round |
 | Overlap host encoding in a zero-draft step inside MTP | Closes the 0.5 ms gap to MTP-off decode |
 | A draft limit of 8, mainly for lookup rounds | Needs GDN projection kernels for rows 5 to 9 |
-| A cost table keyed by context size, a second draft chunk when the head is confident, serial fallback when rounds are losing | Present in Sushi; not assessed here |
+| A second draft chunk when the head is confident, serial fallback when rounds are losing | Present in Sushi; not assessed here. Sushi also keys its cost table by context size; on Lily the table measured at 4,096 tokens chose the same depths at 32,768, so that looks unnecessary |
+| Less exploration by the planner where one depth is right throughout | One fixed draft beat it by 5 to 7 percent on sampled prose; rounds with no draft or two drafts were about one round in five there |
+| The planner default on natural long responses through the chat template | Both earlier default changes failed there. The 2026-11-20 gate used raw corpus continuation only |
+| A cost table and a schedule gate for each other pack of the family | The planner is the default on one pinned artifact. The official mixed pack takes Lily's table if asked and is unqualified |
+| Three drafts in the desktop app | About 1 percent overall and 3 to 8 percent on sampled code. The paged-residency memory profile is bounded at two and needs a memory qualification |
 | Whole-table warm of the n-gram embedding | The compared MLX server warms its 32 GB table before requests; never tried in Stark |
 | Packed 4-bit layouts at 16 and 32 lanes | Prepared in October, never built |
 | Prefix state for several conversations kept resident under a byte budget | Today one unrelated request displaces the snapshot |
@@ -444,6 +492,7 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 | 2026-11-17 | [Midpoint integration](model-experiments/2026-11-17-lily-midpoint-integration.md), [midpoint speed and release][midpoint], [startup memory][startmem] | Midpoint snapshot, memory admission |
 | 2026-11-17, on a branch | [Speed review][fsreview], [speed experiments][fsexp], [agent grid][fsagent], [fresh grid][fsfresh], [kernel follow-up][fskernel] | Chunk size, prefill fusion, hyper-connection reuse, round-finish counts |
 | 2026-11-19 | [Sushi assessment][sushi], [round profile][profile], [HC rows][hc], [GDN replay][gdn], [MoE rows][moe], [host round trips][host], [depth policy][depth], [fixed-corpus benchmark][bench], [merged timing][merge] | Round profile and the six workstreams it opened |
+| 2026-11-19 to 11-20 | [Schedule gate][gate], [selector prefix reuse][selprefix], [schedule default][sched] | Matched-window gate over twelve cells, prefix reuse under the schedule options, the planner with lookup as the default on the pinned artifact |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 
@@ -487,3 +536,6 @@ Performance work on other families is indexed in the [benchmark index](benchmark
 [depth]: model-experiments/2026-11-19-lily-mtp-depth-policy.md
 [bench]: model-experiments/2026-11-19-lily-fixed-corpus-benchmark.md
 [merge]: model-experiments/2026-11-19-lily-mtp-merged-quiet-timing.md
+[gate]: model-experiments/2026-11-19-lily-mtp-schedule-default-gate.md
+[selprefix]: model-experiments/2026-11-19-lily-mtp-selector-prefix-reuse.md
+[sched]: model-experiments/2026-11-20-lily-mtp-schedule-default.md

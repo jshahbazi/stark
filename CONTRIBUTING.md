@@ -130,6 +130,7 @@ blocker with the capability disabled for that path. A new quantization or format
 does not inherit another artifact's numerical validation.
 
 - Reference pages under `docs/` describe current behaviour. When a change alters a protocol, a limit, an option or a default, update the page in the same pull request.
+- Performance work starts from the [performance playbook](docs/PERFORMANCE_PLAYBOOK.md), for a new model family and for an existing one. It lists what to try in order, what each lever returned, the correctness gates and the measurement rules. Update it in the same pull request when an attempt changes any of those, and record the attempt in the [experiment ledger](docs/model-experiments/README.md).
 - Write Markdown without emojis and without shell heredocs in examples.
 - Put the evidence for a change (test counts, manual checks, measurements) in the pull request description. A record that must outlive the pull request goes under `docs/archive/runs/` with its date and the commit it describes; a benchmark goes under `docs/benchmarks/` and is added to the [benchmarks index](docs/benchmarks/README.md) with a note on what it supersedes.
 - Keep models, private fixtures, converted outputs and runtime artifacts out of Git; publish aggregate results and hashes only.

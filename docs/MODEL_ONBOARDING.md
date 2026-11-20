@@ -77,6 +77,13 @@ that evidence or qualify other checkpoints. Keep implemented support, numerical
 qualification, measured speed and deployment as separate outcomes; preserve
 older source-bound records when an attempt changes.
 
+For performance work on a new family or path, start from the
+[performance playbook](PERFORMANCE_PLAYBOOK.md): build its time budget before
+choosing what to optimize, follow its checklist for a new family, and apply its
+correctness gates and measurement rules. When the attempt is recorded, add what
+the family returned to the playbook in the same change. The playbook carries no
+qualification from one artifact to another.
+
 ## Bind the implementation and artifact
 
 Record the source repository and immutable revision, weight/configuration/

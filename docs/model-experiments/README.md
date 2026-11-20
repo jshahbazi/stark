@@ -173,6 +173,12 @@ from this retrospective.
    the current model-support/reference page only when the evidence supports a
    capability change. When a new comparison supersedes a benchmark, update its
    current/superseded index without changing the historical measurements.
+7. For a performance attempt, read the
+   [performance playbook](../PERFORMANCE_PLAYBOOK.md) before choosing the
+   change, and update it in the same pull request when the result changes what
+   a lever returned, adds a failed approach, adds or settles an open idea, or
+   changes a gate or measurement rule. The playbook links here; it does not
+   replace the record.
 
 For a shared infrastructure change, one record may contain a per-artifact
 matrix. Different checkpoints, quantizations, precision policies, MTP depths,

@@ -10,6 +10,11 @@ to them and must not broaden their claims. New studies need an attempt ID and
 linked source-bound evidence. Existing reports retain their original
 qualification; the ledger is not a completed historical backfill.
 
+Before starting a performance study, read the
+[performance playbook](../PERFORMANCE_PLAYBOOK.md): it lists what has been
+tried by lever, what failed and why, and the measurement rules these reports
+follow. Update it when a study changes what a lever returned.
+
 ## Current result
 
 **Regular Decider v1.3 201-token smoke (2026-11-18).** The exact pinned 27B
