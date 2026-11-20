@@ -40,7 +40,7 @@ Add the record to the table at the end and move the date in the first paragraph.
 - In speculation the unit is the round: expected tokens per round over cost per round. The verify pass is 80 to 90 percent of a round, so what matters is the cost of one more verify row against a serial step. On Lily that is about 5.7 ms against 14 ms.
 - Host scheduling inside the round was worth more than the row-kernel work of 2026-11-19. The merged build is 9 to 18 percent faster with speculation on and no output changed; the one row change that was adopted accounts for 2 to 3 points of that.
 - No fixed draft depth is right everywhere. Acceptance runs from about 50 percent to over 90 percent depending on how predictable the text is and how it is sampled. Zero, one, two and three drafts each win on some workload.
-- So depth is now chosen per round. On 2026-11-20 a planner with prompt lookup replaced two fixed drafts as the default on the pinned artifact, after a gate that ran every schedule on the same inputs across prose and code, greedy and sampled, at three input lengths: 1.218 times MTP off against 1.155. Two fixed drafts, the default until then, had been running up to 5 percent below MTP off on prose.
+- So depth is now chosen per round. On 2026-11-20 a planner with prompt lookup replaced two fixed drafts as the default on the pinned artifact, after a gate that ran every schedule on the same inputs across prose and code, greedy and sampled, at three input lengths: 1.218 times MTP off against 1.155. Two fixed drafts, the default until then, had been running up to 5 percent below MTP off on corpus prose. On natural chat responses the two are level; the planner's gain is on text the model finds hard to predict.
 - For chat and agent traffic the largest latency lever is not decode speed. Restoring state for a shared prompt prefix cut time to first token on follow-up turns by 5 to 7 times, and one extra snapshot inside the prompt cut it a further 40 to 46 percent at 12K.
 - An idle GPU costs about 0.8 s on the next request. A keepalive signal every 500 ms removes it for almost no power.
 - Kernels are compiled with fast math, so a restructured kernel can pass every synthetic byte test and still change values on the real model. The real-model control and the output-hash gate decide.
@@ -278,6 +278,7 @@ Depth interacts with how predictable the text is, how it is sampled, and how lon
 | Greedy prose, merged build: one, two, three drafts against off | +13, +3, -17 percent | [merged timing][merge] |
 | Prose, merged build, matched windows at 4,096 to 32,768 input: one, two, three drafts against off | Greedy +7 to +11, -4 to 0, -18 to -14 percent. Sampled +10 to +19, -5 to +1; three not run | [schedule gate][gate] |
 | Code, same sessions | Greedy +29 to +30, +39 to +42, +39 to +42 percent. Sampled +22 to +28, +26 to +34; three not run | [schedule gate][gate] |
+| 24 natural requests through the chat template, 1,024-token responses, two drafts against off | Coding +36 to +38 percent, planning +14 to +15, prose +20, greedy and sampled alike; acceptance 90 percent on coding and 71 to 72 on the others | [schedule default][sched] |
 
 Two attempts to change the default from two drafts to one were adopted and then reverted. The first passed its functional checks and a 5 percent tolerance, then missed a preregistered 5 percent benefit gate and a guard cell. The second, narrowed to one sampling profile, passed every gate it set and then lost by 11 percent on a natural coding response. The held-out cell that favoured one draft had about 51 percent acceptance; the coding response had about 91.
 
@@ -287,6 +288,7 @@ Lessons for the next family:
 
 - Compare a candidate default against the current default, not against off. One draft against off looked like +9.9 percent; against the two-draft default it was +4.3.
 - Then compare the current default against off as well. Two fixed drafts survived both reverted changes and measured 0.95 to 1.01 times MTP off in every matched prose cell.
+- Measure both the model's own writing and text it did not write. Continuing a novel, two drafts gave nothing; writing prose in answer to a request, the same depth gave 20 percent. A response the model composes is more predictable to its own draft head than a corpus is, so a corpus understates acceptance on chat traffic and a chat request overstates it for continuation, quotation and retrieval.
 - Set guard cells across samplers and context lengths before measuring, and include a natural long response. Short fixed sequences did not predict it.
 - Neither acceptance nor row count alone predicts the result. One draft does less speculative work; two drafts pay fewer round overheads.
 - When row cost falls, the best depth moves. One draft on prose went from a loss to a gain between the base and merged builds without any change to the drafting.
@@ -306,7 +308,8 @@ The gate that made it the default ([schedule gate][gate]) gave every arm the sam
 | Prose cells | 1.07 to 1.19 | 0.95 to 1.01 | 1.06 to 1.13 | 1.06 to 1.14 |
 | Code cells | 1.22 to 1.30 | 1.26 to 1.42 | 1.21 to 1.44 | 1.23 to 1.42 |
 
-- It does not beat the best fixed depth for a workload; it avoids the wrong one. It matches two or three fixed drafts on code and stays 6 to 14 percent above MTP off on prose, where two fixed drafts give nothing. In the fixed-corpus benchmark it read 113.2 tok/s on code against 113.3 to 116.9 at three fixed drafts ([merged timing][merge]).
+- It does not beat the best fixed depth for a workload; it avoids the wrong one. It matches two or three fixed drafts on code and stays 6 to 14 percent above MTP off on corpus prose, where two fixed drafts give nothing.
+- On natural responses through the chat template it is level with two fixed drafts: 0.989 to 1.017 of it in six cells of coding, planning and prose, greedy and sampled, and 15 to 38 percent above MTP off ([schedule default][sched]). That is where both earlier default changes lost, and it is also where the planner has nothing to add, because acceptance is high and it chooses two drafts in 59 to 98 percent of head rounds. Its gain is on text the model finds hard to predict. In the fixed-corpus benchmark it read 113.2 tok/s on code against 113.3 to 116.9 at three fixed drafts ([merged timing][merge]).
 - Its exploration costs something where one depth is right throughout. On prose it ran one draft in 72 to 89 percent of head rounds, two in 7 to 26 and none in 1 to 13, and one fixed draft beat it by 5 to 7 percent on sampled prose at 4,096 and 16,384 tokens.
 - Input length changed little. The cost table measured at 4,096 tokens chose the same depths at 16,384 and 32,768.
 - The draft limit matters little. The desktop app requests two drafts, so there the planner works under a limit of two: 1.193 against 1.206 at a limit of three over eight cells, with the gap in sampled code (1.22 against 1.32 at 4,096 tokens).
@@ -314,7 +317,7 @@ The gate that made it the default ([schedule gate][gate]) gave every arm the sam
 - Seeded sampled output under the planner depends on its constants, so each table has an identifier and the response reports it as `stats.schedule.cost_table`. Making the planner the default changed seeded sampled output of MTP-enabled requests and left greedy output alone.
 - A zero-draft round should be an ordinary serial step. The first design used a one-row verify, a head advance and a finish pass and cost 2 to 3 ms more per token.
 - Things that mattered in tuning: how fast low acceptance moves the estimate at the start of a request, how often an abandoned depth is probed again, and a hysteresis band small enough that a 4 percent better depth is taken.
-- Not established: natural long responses rendered through the chat template, which is where both earlier default changes failed; sampled settings other than temperature 1 with top-k 20; any other artifact.
+- Not established: sampled settings other than temperature 1 with top-k 20; multi-turn and tool-calling sessions; responses longer than 1,024 tokens; any other artifact.
 
 #### Prompt lookup
 
@@ -467,7 +470,7 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 | A draft limit of 8, mainly for lookup rounds | Needs GDN projection kernels for rows 5 to 9 |
 | A second draft chunk when the head is confident, serial fallback when rounds are losing | Present in Sushi; not assessed here. Sushi also keys its cost table by context size; on Lily the table measured at 4,096 tokens chose the same depths at 32,768, so that looks unnecessary |
 | Less exploration by the planner where one depth is right throughout | One fixed draft beat it by 5 to 7 percent on sampled prose; rounds with no draft or two drafts were about one round in five there |
-| The planner default on natural long responses through the chat template | Both earlier default changes failed there. The 2026-11-20 gate used raw corpus continuation only |
+| The planner default in multi-turn and tool-calling agent sessions, and at other sampled settings | Single-turn natural requests are settled (level with two fixed drafts). Agent sessions mix copied tool output, where lookup should pay, with composed text, and have not been measured |
 | A cost table and a schedule gate for each other pack of the family | The planner is the default on one pinned artifact. The official mixed pack takes Lily's table if asked and is unqualified |
 | Three drafts in the desktop app | About 1 percent overall and 3 to 8 percent on sampled code. The paged-residency memory profile is bounded at two and needs a memory qualification |
 | Whole-table warm of the n-gram embedding | The compared MLX server warms its 32 GB table before requests; never tried in Stark |

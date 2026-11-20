@@ -223,13 +223,85 @@ these confirm the shipped paths behave the same.
 - Adoption: on branch, uncommitted; not installed.
 - [Performance playbook](../PERFORMANCE_PLAYBOOK.md): updated under adaptive
   depth, prefix reuse and the correctness gate for a change of default.
-- Untested: other artifacts (they keep the fixed default), chat-template
-  prompts, other sampled settings, the app end to end, memory, and a draft
-  limit above the app's two in its paged-residency profile.
+- Untested: other artifacts (they keep the fixed default), other sampled
+  settings, the app end to end, memory, and a draft limit above the app's two
+  in its paged-residency profile. Natural responses through the chat template
+  were measured afterwards; see "Follow-up history".
 
 Keep prompts, completions, token vectors, probabilities, credentials, exception
 dumps and model/private evaluation files out of this document.
 
 ## Follow-up history
 
-None yet.
+### 2026-11-20: natural long responses through the chat template
+
+Registered before any request of this follow-up ran.
+
+- Question: both earlier changes of the default depth were reverted after
+  losing on a natural long response, and LILYADAPT-01 measured raw corpus
+  continuation only. Does the new default hold against two fixed drafts and
+  against MTP off on natural responses rendered through the chat template?
+- Workload: 24 requests written for this check, eight each of coding,
+  planning and explanatory or narrative prose. Each is rendered through the
+  artifact's chat template with its default system message and thinking
+  disabled. Context 8,192 tokens, response ceiling 1,024, native end of
+  sequence honoured, no stop strings. Greedy, and sampled at temperature 1,
+  top-k 20, top-p 0.95 with seed 42 plus the request index.
+- Arms, each on the same rendered input and seed: MTP off; two fixed drafts
+  through the explicit opt-out; the default as the desktop app requests it,
+  `mtp_drafts: 2` with no selector. Worker `02d8247c`, one loaded process,
+  fresh requests, arm order alternating by request.
+- Validity: a request counts for a sampling mode only when every arm of that
+  mode generated at least 384 tokens. A cell is one category and one mode and
+  needs at least six valid requests. If any cell has fewer, the same number of
+  new requests is added to all three categories and the pool is evaluated.
+- Statistic: per request, decode rate over the MTP-off arm's rate; the cell
+  statistic is the median.
+- Pass: in every cell the default is at least 0.97 and no more than 5 percent
+  below two fixed drafts, the thresholds of LILYADAPT-01. Otherwise fail.
+- Reported without gating: the geometric mean over cells, request wall time
+  for greedy arms (which write the same text), response lengths and how each
+  ended, and whether greedy arms share one output hash per request.
+- A failure is reported to the owner with its cells. The default is not
+  changed again without the owner's decision.
+
+Result: passed in all six cells. 146 requests in one session, no error; all
+24 requests valid in both modes; none dropped.
+
+| Category, mode | Valid requests | 2 fixed drafts | Default, limit 2 | Default over 2 fixed |
+| --- | ---: | ---: | ---: | ---: |
+| Coding, greedy | 8 | 1.363 | 1.385 | 1.017 |
+| Coding, sampled | 8 | 1.382 | 1.367 | 0.989 |
+| Planning, greedy | 8 | 1.143 | 1.149 | 1.005 |
+| Planning, sampled | 8 | 1.152 | 1.152 | 1.000 |
+| Prose, greedy | 8 | 1.203 | 1.206 | 1.003 |
+| Prose, sampled | 8 | 1.196 | 1.203 | 1.006 |
+| Geometric mean | | 1.236 | 1.240 | |
+
+- The default is level with two fixed drafts on natural responses, within 1.7
+  percent in every cell, and 15 to 38 percent above MTP off. It does not lose
+  where the two earlier default changes lost.
+- It is also no faster there. These responses are more predictable than the
+  corpus continuation of LILYADAPT-01: two fixed drafts were accepted at 90
+  percent on coding and 71 to 72 percent on planning and prose, and ran 14 to
+  38 percent above MTP off in every cell, where on the novel they ran 0.95 to
+  1.01. The planner chose two drafts in 91 to 98 percent of head rounds on
+  coding and 59 to 77 percent on planning and prose. The gain LILYADAPT-01 measured
+  on prose belongs to text the model finds hard to predict, not to the
+  model's own prose in a chat.
+- MTP off decoded at 67 to 76 tokens per second; the default at 98 to 100 on
+  coding, 80 to 81 on planning and 89 to 92 on prose. Request wall time
+  against MTP off was 0.72 to 0.88 for both schedules.
+- All 24 greedy requests gave one output hash across MTP off, two fixed drafts
+  and the default. Default requests acknowledged the adaptive policy, lookup
+  and `lily-q4-xl-lilymerge-01`; opt-out requests kept the plain
+  acknowledgement. Zero reused input tokens.
+- Every response ran to the 1,024-token ceiling, so no arm ended on its own
+  and response length did not differ between arms.
+- Limits: rendered inputs of 39 to 60 tokens with no system message (the
+  template has no default one); single-turn requests without tools; requests
+  written for this check, not the owner's earlier private request; host load
+  averages of 4.8 at the start and 1.2 at the end, with arms interleaved
+  inside each request.
+- Public aggregate:
+  [`lily-mtp-natural-responses-2026-11-20.json`](../benchmarks/data/lily-mtp-natural-responses-2026-11-20.json).
