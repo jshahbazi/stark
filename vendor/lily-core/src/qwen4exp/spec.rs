@@ -32,6 +32,14 @@
 //! Outputs are exact: every emitted token is a draw from the trunk's own
 //! distribution for its prefix; the drafts only decide how many rows a pass
 //! can confirm.
+//!
+//! Modified by Stark: the exact host-sampled path (`verify_host_batched`,
+//! `BatchMode::VerifyHost`) keeps no per-row GDN states. Its verify pass
+//! writes each GDN layer's final state to the other half of a double buffer
+//! and keeps the rows' recurrence inputs; rollback ([`Rollback::Replay`])
+//! reruns the same recurrence from the retained pre-verify state over the
+//! committed rows. The per-row captures above remain only for this legacy
+//! GPU-sampled path and are allocated on its first use.
 
 use anyhow::{Result, ensure};
 
@@ -52,9 +60,30 @@ use crate::tensor::Tensor;
 
 use super::model::{
     AttnPos, BatchMode, DecodeState, LayerState, MAX_DRAFTS, Qwen4ExpModel, Scratch,
-    SpecPending,
+    SpecPending, VERIFY_ROWS,
 };
 use super::ngram::NgramHasher;
+
+/// How a host-encoded draft pass rolls the GDN states back to `accepted`
+/// drafts of `m` verified rows (convolution windows rewind the same way for
+/// both).
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Rollback {
+    /// After an exact verify pass (`BatchMode::VerifyHost`): rerun the
+    /// recurrence from the retained pre-verify state over the committed rows.
+    Replay { accepted: usize, m: usize },
+    /// After the legacy GPU-sampled pass (`BatchMode::Verify`): copy the
+    /// captured state after the accepted row.
+    Captured { accepted: usize, m: usize },
+}
+
+impl Rollback {
+    fn rows(self) -> (usize, usize) {
+        match self {
+            Self::Replay { accepted, m } | Self::Captured { accepted, m } => (accepted, m),
+        }
+    }
+}
 
 impl Qwen4ExpModel {
     /// Draft tokens per step, or 0 without the head.
@@ -105,6 +134,9 @@ impl Qwen4ExpModel {
         // Room for this pass and the draft pass behind it (its chain rows);
         // nothing runs, so the caches can grow.
         self.ensure_room(ctx, state, s, m)?;
+        // This path rolls back by copying per-row state captures, which the
+        // exact host path does not keep.
+        s.ensure_legacy_spec_captures(ctx, &self.config)?;
         let s = &*s;
         let capacity = s.prefill.as_ref().expect("prefill scratch just ensured");
         // The token-dependent inputs, ids and n-gram rows, are written before
@@ -224,7 +256,7 @@ impl Qwen4ExpModel {
                     0,
                     pending.pos_before,
                     Some(&keep),
-                    Some((accepted, m)),
+                    Some(Rollback::Captured { accepted, m }),
                     0,
                     &SamplingParams::greedy(),
                     0,
@@ -535,7 +567,7 @@ impl Qwen4ExpModel {
         chain_row: usize,
         pos0: usize,
         keep: Option<&Tensor>,
-        rollback: Option<(usize, usize)>,
+        rollback: Option<Rollback>,
         drafts: usize,
         params: &SamplingParams,
         draw0: usize,
@@ -563,17 +595,39 @@ impl Qwen4ExpModel {
 
         let pass = ctx.begin_concurrent()?;
         pass.set_label("draft");
-        if let Some((accepted, m)) = rollback {
+        if let Some(rollback) = rollback {
+            let (accepted, m) = rollback.rows();
+            ensure!(accepted + 1 < m && m <= VERIFY_ROWS, "invalid GDN rollback");
             let heads = cfg.linear_num_value_heads;
             let per_state = heads * GDN_HEAD_DIM * GDN_HEAD_DIM;
             let mut gdn_index = 0usize;
-            for lstate in &state.layers {
-                if let LayerState::Gdn { state: st, conv_windows, .. } = lstate {
-                    let mid = sp.mid[gdn_index].view(
-                        accepted * per_state,
-                        &[heads, GDN_HEAD_DIM, GDN_HEAD_DIM],
-                    )?;
-                    copy_words(ctx, &pass, &mid, st)?;
+            for (layer_index, lstate) in state.layers.iter().enumerate() {
+                if let LayerState::Gdn { state: st, conv_windows, layout } = lstate {
+                    match rollback {
+                        // Rerun the exact verify recurrence from the
+                        // pre-verify state over the committed rows only.
+                        Rollback::Replay { .. } => self.encode_gdn_replay(
+                            ctx,
+                            &pass,
+                            layer_index,
+                            gdn_index,
+                            *layout,
+                            sp,
+                            accepted + 1,
+                            st,
+                        )?,
+                        Rollback::Captured { .. } => {
+                            let mid = sp
+                                .mid
+                                .get(gdn_index)
+                                .ok_or_else(|| anyhow::anyhow!("no legacy GDN captures"))?
+                                .view(
+                                    accepted * per_state,
+                                    &[heads, GDN_HEAD_DIM, GDN_HEAD_DIM],
+                                )?;
+                            copy_words(ctx, &pass, &mid, st)?;
+                        }
+                    }
                     let x = prefix_rows(&sp.conv_in[gdn_index], m)?;
                     conv_window_rollback(
                         ctx,

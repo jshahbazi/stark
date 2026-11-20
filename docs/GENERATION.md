@@ -224,6 +224,8 @@ Reply: `{"text":"...","token_count":N}`. An empty vector is valid. The whole vec
 | `sampling` | Optional, default `{"mode":"greedy"}`. See [Sampling](#sampling). |
 | `mtp` | Optional boolean, default `false`. `true` uses this model's `recommended_drafts`; `false` disables MTP. Unsupported models reject `true` with `mtp_not_supported`. Applies to text `generate` only. |
 | `mtp_drafts` | Optional explicit draft count, default 0. Nonzero values must fit the loaded model's `max_drafts`. Retained for advanced callers and benchmarks. Supply either `mtp` or `mtp_drafts`; supplying both, including `false` and `0`, is invalid. |
+| `mtp_policy` | Optional, `"fixed"` (default) or `"adaptive"`. Only on backends whose readiness `mtp` object lists `policies`. See [MTP round scheduling](#mtp-round-scheduling). |
+| `mtp_lookup` | Optional boolean, default `false`. `true` allows prompt-lookup proposals. Same availability as `mtp_policy`. |
 | `stop_token_ids` | Optional, at most 256 distinct token IDs below `vocab_size`. Added to the model's EOS IDs; a model EOS cannot be removed. |
 | `stop` | Optional, at most four non-empty strings of at most 1,024 characters each. See [Stop sequences](#stop-sequences). |
 | `stream` | Optional boolean, default `false`. See [Streaming](#streaming). |
@@ -250,7 +252,7 @@ The terminal reply:
 | `reused_input_tokens` | Present only when prefix reuse is enabled: prompt tokens taken from the retained prefix instead of prefill, a multiple of `prefix_cache.chunk_tokens` below `input_tokens` |
 | `output_tokens_per_second` | `(sampled_tokens - 1) / decode_seconds`, or `null` when unmeasurable |
 | `timing_method` | `first-token-wall-clock-v1` |
-| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, the admitted `verification` route, and aggregate round, proposal, accepted-prefix-count, verified-row and phase-time counters when available. |
+| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, the admitted `verification` route, and aggregate round, proposal, accepted-prefix-count, verified-row and phase-time counters when available. A request that selected a non-default `mtp_policy` or `mtp_lookup` also gets `policy`, `lookup` and `stats.schedule`; see [MTP round scheduling](#mtp-round-scheduling). |
 
 The prefill figure is a wall-clock proxy that includes native state allocation, command encoding, GPU waiting and any lookahead decode the engine schedules before returning its first token. The output rate counts sampling steps after the first token, including a terminal stop token. Prompt tokenization is excluded from all timings. The prompt plus sampled tokens never exceed `context_tokens`; there is no silent truncation.
 
@@ -331,6 +333,52 @@ cost when drafting is disabled. Set `mtp_drafts` to 1,
 2 or 3 on a text request; omit it or use 0 for ordinary autoregressive decode.
 Requests on one worker remain serialized. With `--prefix-cache`, a request resumes a [prefix snapshot](#prefix-reuse) only when it enables or disables MTP the same way as the request that captured it.
 
+<a id="mtp-round-scheduling"></a>
+
+#### MTP round scheduling
+
+The native Qwen3.8 MTP routes above (Lily-format and official mixed-affine
+weights) also accept two opt-in, request-local scheduling selectors. The
+adaptive policy's round-cost table was measured on the Lily Q4-XL artifact
+only and has not been retuned since the host round-trip changes; on other
+artifacts it is unqualified. Their readiness `mtp` object then adds
+`"policies": ["fixed", "adaptive"]`, `"default_policy": "fixed"` and
+`"lookup": true`; other backends report neither and refuse a non-default
+selector with `mtp_not_supported`.
+
+- `"mtp_policy": "adaptive"` chooses the draft count per round, from zero up
+  to the request's limit, by maximizing expected tokens per millisecond from
+  a per-position acceptance average and a static round-cost table for the
+  loaded artifact. The plan depends only on acceptance history, the remaining
+  budget and the sampling mode, never on measured time, so a request repeats
+  exactly. With `mtp_drafts` the limit is that count; with `"mtp": true` or a
+  model default it is `max_drafts`. A zero-draft round runs one ordinary
+  decode step and an exact target draw.
+- `"mtp_lookup": true` proposes drafts from the prompt and committed output
+  with no draft-head forward pass: a 4-gram index proposes the tokens that
+  followed the latest earlier match once at least 8 tokens agree across a line
+  break, or 32 without one. A lookup proposal is a point mass; it is accepted
+  with probability `min(1, p)` and a rejection samples p without that token,
+  so exact rejection sampling is unchanged. Under the fixed policy a lookup
+  round runs whenever the index proposes; under the adaptive policy it runs
+  when its expected rate is at least the head plan's. The index lives only in
+  the decode stream and is never logged.
+
+Either selector needs MTP enabled; with MTP off it is
+`invalid_generation_request`, as is an unknown policy, and `null` is invalid.
+Image requests keep MTP off and do not take these fields. Greedy output does
+not depend on either selector. Seeded sampled output with a selector is
+reproducible but differs from the fixed schedule, as it does between draft
+counts. The prefix-reuse key is unchanged: the retained snapshot is captured
+during prompt prefill, before any round runs. Default requests keep the
+existing acknowledgement schema; a request with a non-default selector adds
+`policy` and `lookup`, and `stats.schedule` with `policy`, `lookup`, `limit`,
+`head_rounds_by_depth` and `head_round_seconds_by_depth` (indexed by draft
+count), `lookup_rounds`, `lookup_proposed`, `lookup_accepted`,
+`lookup_round_seconds`, `head_advances` and `head_advance_seconds`. The
+`rounds`, `proposed`, `accepted` and `verified_rows` counters include lookup
+rounds. No token, logit or probability data is reported.
+
 Converted dense `qwen3_5` models with an admitted quantized one-layer MTP head
 report `verification: "dense-qwen35-target-verify-v1"`, recommend three drafts
 and allow up to three. Drafting defaults to zero. This route includes
@@ -383,7 +431,15 @@ The native hybrid routes use complete F32 readouts and the existing temperature,
 top-k, top-p and min-p filtering policy. The host accepts a proposed token with
 probability `min(1, p/q)` and samples a rejection from normalized `max(p-q, 0)`.
 The bonus token uses the target distribution. This is exact rejection sampling;
-there is no candidate cap or approximate acceptance threshold. Target
+there is no candidate cap or approximate acceptance threshold. On the Lily
+runtime, greedy requests do not read complete draft-head readouts on the host:
+the device selects each greedy draft as the first maximum of its readout and
+chains the draft steps in one submission, and the host reads only the proposal
+ids, which it records as point masses. If a selected logit is a zero or
+subnormal, where device and host comparisons may differ, the host reruns that
+round's drafting from complete readouts. Verify rows are still complete F32
+readouts; each is validated when the sampler consumes it, and rows after the
+first rejection are not read. Target
 verification retains ordinary decode arithmetic and its precision boundaries. Exact sampling preserves the target
 distribution, rather than requiring identical token sequences at the same seed
 with MTP on and off. Each route is reproducible on matching builds and hardware.
@@ -398,7 +454,7 @@ up to four positions in one graph, reusing weights while retaining each
 position's decode arithmetic and recurrent-state update order.
 The official mixed-affine path batches up to four positions with separate
 decode-order HC, MoE and vocabulary-head kernels, affine-64 cache writes and
-ValueKey GDN recurrence/captures. Each row retains ordinary decode's
+ValueKey GDN recurrence with replay rollback. Each row retains ordinary decode's
 precision boundaries and reduction order. The serial verifier remains a
 reference control. Uzu text conversions omit the head.
 

@@ -399,9 +399,21 @@ loaded model's recommended count; readiness exposes per-model MTP support and
 limits. The named GLM EXL3 profile's separate default is documented above.
 Draft and target distributions use Stark's complete-logit CPU
 sampler with exact probability-ratio rejection and residual correction;
-quantization is unchanged. Lily batched verification retains ordinary decode arithmetic,
-captures GDN and convolution state, and rejection restores the committed
-prefix and n-gram history. The
+quantization is unchanged. Lily batched verification retains ordinary decode arithmetic
+and keeps no per-row GDN state: the verify pass writes each GDN layer's final
+state into the other half of a double buffer and keeps the pre-verify state
+and the rows' recurrence inputs. On a partial accept, rollback reruns the same
+compiled recurrence from the pre-verify state over the committed rows; a full
+accept needs no GDN work. Convolution windows, the committed prefix and n-gram
+history are restored as before. Greedy requests select draft-head proposals
+on the device in one chained submission and read back only their ids; verify
+rows are borrowed from shared storage and validated as they are consumed, and
+rows after the first rejection are not read. The opt-in `mtp_policy` and
+`mtp_lookup` request selectors choose the draft count per round and propose
+drafts from the context without the head; see
+[MTP round scheduling](GENERATION.md#mtp-round-scheduling). A lookup round
+writes the head's cache row for the pending token with the cache-only head
+block, so the head's state after the round matches a head round. The
 head and its speculative state add memory. See the
 [generation protocol](GENERATION.md#multi-token-prediction) for settings,
 aggregate counters and sampling semantics. Scoring keeps MTP disabled.
@@ -409,8 +421,8 @@ The official mixed-affine checkpoint's existing one-layer head is also
 supported, using `batched-affine-decode-exact-v1` verification to preserve its
 ValueKey GDN, stock HC, affine-64 cache and BF16-valued head policy.
 Lily weights retain `batched-decode-exact-v1`. The official verifier uses
-its own short-row kernels and physical ValueKey rollback captures; both
-policies retain their ordinary target arithmetic.
+its own short-row kernels and the same replay rollback over its physical
+ValueKey state layout; both policies retain their ordinary target arithmetic.
 The text path requires macOS 26 and Metal 4 and uses the checkpoint's declared
 context maximum. Images require the separate retained-image artifact described
 above. Initial K/V and decode scratch

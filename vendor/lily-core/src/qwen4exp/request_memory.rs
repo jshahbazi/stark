@@ -195,9 +195,10 @@ fn scratch(
             .iter()
             .filter(|t| matches!(t, LayerType::LinearAttention))
             .count() as u128;
+        // Replay rollback: one shadow F32 state per GDN layer (the other half
+        // of its double-buffered state), no per-row state captures.
         s.add(
             &[
-                MAX_DRAFTS as u128,
                 c.linear_num_value_heads as u128,
                 GDN_HEAD_DIM as u128,
                 GDN_HEAD_DIM as u128,
@@ -207,6 +208,23 @@ fn scratch(
         )?;
         let conv = (2 * c.linear_num_key_heads as u128 * c.linear_key_head_dim as u128)
             + c.linear_num_value_heads as u128 * c.linear_value_head_dim as u128;
+        // Per GDN layer: replay inputs (convolved q/k/v, a, b rows) and the
+        // conv rollback inputs; one replay output sink.
+        s.add(
+            &[
+                (MAX_DRAFTS + 1) as u128 * (conv + 2 * c.linear_num_value_heads as u128),
+            ],
+            2,
+            gdn,
+        )?;
+        s.add(
+            &[
+                (MAX_DRAFTS + 1) as u128,
+                c.linear_num_value_heads as u128 * GDN_HEAD_DIM as u128,
+            ],
+            2,
+            1,
+        )?;
         s.add(&[(MAX_DRAFTS + 1) as u128, conv], 2, gdn)?;
         s.add(&[(MAX_DRAFTS + 1) as u128, c.hc_width() as u128], 2, 1)?;
         s.add(&[(MAX_DRAFTS + 1) as u128, c.vocab_size as u128], 4, 1)?;
@@ -716,6 +734,35 @@ mod tests {
         .unwrap();
         assert!(tiny_after_large < cold);
         assert!(tiny_after_large <= retained);
+    }
+
+    #[test]
+    fn mtp_scratch_charges_one_gdn_shadow_state_not_per_row_captures() {
+        let cfg = geometry();
+        let with = scratch(&cfg, KvFormat::Q8, 16384, 0, true).unwrap().bytes;
+        let without = scratch(&cfg, KvFormat::Q8, 16384, 0, false).unwrap().bytes;
+        let gdn = cfg
+            .layer_types
+            .iter()
+            .filter(|t| matches!(t, LayerType::LinearAttention))
+            .count() as u128;
+        let align = |bytes: u128| bytes.div_ceil(256) * 256;
+        let heads = cfg.linear_num_value_heads as u128;
+        let rows = (MAX_DRAFTS + 1) as u128;
+        let conv = cfg.gdn_conv_channels() as u128;
+        let state = heads * (GDN_HEAD_DIM as u128).pow(2) * 4;
+        // One shadow state per GDN layer, not MAX_DRAFTS per-row captures;
+        // replay inputs per layer and one replay sink; the conv rollback
+        // inputs, PLE conv inputs, verify logits and the 4 MiB control area
+        // as before.
+        let expected = gdn * align(state)
+            + gdn * align(rows * (conv + 2 * heads) * 2)
+            + align(rows * heads * GDN_HEAD_DIM as u128 * 2)
+            + gdn * align(rows * conv * 2)
+            + align(rows * cfg.hc_width() as u128 * 2)
+            + align(rows * cfg.vocab_size as u128 * 4)
+            + 4 * 1024 * 1024;
+        assert_eq!(with - without, expected);
     }
 
     #[test]

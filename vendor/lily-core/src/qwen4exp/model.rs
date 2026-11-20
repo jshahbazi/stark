@@ -1070,11 +1070,29 @@ impl Scratch {
     }
 }
 
+/// Rows a verify pass can hold: the pending token plus the drafts.
+pub(super) const VERIFY_ROWS: usize = MAX_DRAFTS + 1;
+
 /// What a verify pass records so a draft pass can roll the recurrent state
 /// back to the accepted prefix, plus the draft head's small buffers.
 pub(super) struct SpecScratch {
+    /// Per GDN layer: F32 `[H, 128, 128]`, the other half of the layer's
+    /// double-buffered recurrent state. An exact verify pass reads the
+    /// layer's state and writes its final state here, and the host then
+    /// swaps the two (`swap_gdn_shadow`): from then until the next verify
+    /// pass this holds the pre-verify state that replay rollback reruns the
+    /// accepted rows from. No per-row states are kept.
+    pub(super) gdn_shadow: Vec<Tensor>,
+    /// Per GDN layer: bf16 `[VERIFY_ROWS * (C + 2H)]`, the verified rows'
+    /// recurrence inputs (convolved q/k/v rows, then the `a` rows, then the
+    /// `b` rows) for replay; see [`SpecScratch::replay_rows`].
+    pub(super) gdn_replay: Vec<Tensor>,
+    /// bf16 `[VERIFY_ROWS, H*128]`: where a replay's discarded row outputs go.
+    pub(super) gdn_replay_sink: Tensor,
     /// Per GDN layer: F32 `[MAX_DRAFTS, H, 128, 128]`, the state after each
-    /// verified row but the last.
+    /// verified row but the last. Only the GPU-sampled legacy path
+    /// (`verify`, `BatchMode::Verify`) uses it, so it is allocated on its
+    /// first use and is empty otherwise.
     pub(super) mid: Vec<Tensor>,
     /// Per GDN layer: bf16 `[MAX_DRAFTS + 1, C]`, the verified rows' conv inputs.
     pub(super) conv_in: Vec<Tensor>,
@@ -1107,17 +1125,26 @@ impl SpecScratch {
             .iter()
             .filter(|t| matches!(t, super::config::LayerType::LinearAttention))
             .count();
-        let rows = MAX_DRAFTS + 1;
+        let rows = VERIFY_ROWS;
         Ok(Self {
-            mid: (0..gdn_layers)
+            gdn_shadow: (0..gdn_layers)
                 .map(|_| {
                     Tensor::zeros(
                         ctx,
-                        &[MAX_DRAFTS, heads, GDN_HEAD_DIM, GDN_HEAD_DIM],
+                        &[heads, GDN_HEAD_DIM, GDN_HEAD_DIM],
                         GDN_STATE_DTYPE,
                     )
                 })
                 .collect::<Result<_>>()?,
+            gdn_replay: (0..gdn_layers)
+                .map(|_| Tensor::zeros(ctx, &[rows * (c + 2 * heads)], DType::BF16))
+                .collect::<Result<_>>()?,
+            gdn_replay_sink: Tensor::zeros(
+                ctx,
+                &[rows, heads * GDN_HEAD_DIM],
+                DType::BF16,
+            )?,
+            mid: Vec::new(),
             conv_in: (0..gdn_layers)
                 .map(|_| Tensor::zeros(ctx, &[rows, c], DType::BF16))
                 .collect::<Result<_>>()?,
@@ -1134,6 +1161,131 @@ impl SpecScratch {
             ctrl: Tensor::zeros(ctx, &[ctrl_words(MAX_DRAFTS)], DType::U32)?,
             chain_in: Tensor::zeros(ctx, &[1, cfg.hc_width()], DType::BF16)?,
         })
+    }
+
+    /// GDN layer `gdn_index`'s replay inputs for the first `m` verified rows:
+    /// convolved q/k/v `[m, C]`, `a` `[m, H]` and `b` `[m, H]`.
+    pub(super) fn replay_rows(
+        &self,
+        gdn_index: usize,
+        m: usize,
+        c: usize,
+        heads: usize,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
+        ensure!((1..=VERIFY_ROWS).contains(&m), "replay rows {m}");
+        let rows = &self.gdn_replay[gdn_index];
+        let qkv = rows.view(0, &[m, c])?;
+        let a = rows.view(VERIFY_ROWS * c, &[m, heads])?;
+        let b = rows.view(VERIFY_ROWS * (c + heads), &[m, heads])?;
+        Ok((qkv, a, b))
+    }
+
+    /// Allocates the legacy per-row state captures on first use.
+    fn ensure_legacy_mid(&mut self, ctx: &MetalContext, cfg: &Qwen4ExpConfig) -> Result<()> {
+        if self.mid.len() == self.gdn_shadow.len() {
+            return Ok(());
+        }
+        self.mid = (0..self.gdn_shadow.len())
+            .map(|_| {
+                Tensor::zeros(
+                    ctx,
+                    &[
+                        MAX_DRAFTS,
+                        cfg.linear_num_value_heads,
+                        GDN_HEAD_DIM,
+                        GDN_HEAD_DIM,
+                    ],
+                    GDN_STATE_DTYPE,
+                )
+            })
+            .collect::<Result<_>>()?;
+        Ok(())
+    }
+}
+
+impl Qwen4ExpModel {
+    /// Replay rollback of GDN layer `layer_index` (the `gdn_index`-th GDN
+    /// layer): reruns the exact verify recurrence from the pre-verify state in
+    /// the spec scratch's shadow over the first `rows` verified rows, writing
+    /// the state after them to `state_out` (the layer's current state).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn encode_gdn_replay(
+        &self,
+        ctx: &MetalContext,
+        pass: &ComputePass<'_>,
+        layer_index: usize,
+        gdn_index: usize,
+        layout: GdnStateLayout,
+        spec: &SpecScratch,
+        rows: usize,
+        state_out: &Tensor,
+    ) -> Result<()> {
+        let cfg = &self.config;
+        let Mixer::Gdn(w) = &self.weights.layers[layer_index].mixer else {
+            anyhow::bail!("GDN state without GDN weights");
+        };
+        let (qkv, a, b) = spec.replay_rows(
+            gdn_index,
+            rows,
+            cfg.gdn_conv_channels(),
+            cfg.linear_num_value_heads,
+        )?;
+        crate::kernels::gdn::gdn_replay_rows(
+            ctx,
+            pass,
+            layout,
+            &crate::kernels::gdn::GdnReplayRows { qkv: &qkv, a: &a, b: &b },
+            &w.a_log,
+            &w.dt_bias,
+            &w.norm_w,
+            &spec.gdn_shadow[gdn_index],
+            state_out,
+            &spec.gdn_replay_sink,
+            self.gdn_scale,
+            cfg.linear_num_key_heads,
+            cfg.rms_norm_eps,
+            self.gdn_gate,
+        )
+    }
+}
+
+impl Scratch {
+    /// Allocates the legacy GPU-sampled path's per-row GDN state captures.
+    pub(super) fn ensure_legacy_spec_captures(
+        &mut self,
+        ctx: &MetalContext,
+        cfg: &Qwen4ExpConfig,
+    ) -> Result<()> {
+        let spec = self.spec.as_mut().ok_or_else(|| anyhow::anyhow!("no spec scratch"))?;
+        spec.ensure_legacy_mid(ctx, cfg)
+    }
+}
+
+impl DecodeState {
+    /// After an exact verify pass wrote every GDN layer's final state into
+    /// the spec scratch's shadow: makes those the layers' states and keeps
+    /// the pre-verify states in the shadow for replay rollback. Swapping
+    /// handles moves no data.
+    pub(super) fn swap_gdn_shadow(&mut self, spec: &mut SpecScratch) -> Result<()> {
+        let states: Vec<&mut Tensor> = self
+            .layers
+            .iter_mut()
+            .filter_map(|layer| match layer {
+                LayerState::Gdn { state, .. } => Some(state),
+                LayerState::Attn { .. } => None,
+            })
+            .collect();
+        ensure!(
+            states.len() == spec.gdn_shadow.len()
+                && states.iter().zip(&spec.gdn_shadow).all(|(state, shadow)| {
+                    shadow.shape() == state.shape() && shadow.dtype() == state.dtype()
+                }),
+            "GDN shadow geometry"
+        );
+        for (state, shadow) in states.into_iter().zip(&mut spec.gdn_shadow) {
+            std::mem::swap(state, shadow);
+        }
+        Ok(())
     }
 }
 
@@ -1428,12 +1580,18 @@ impl PrefillScratch {
     }
 }
 
-/// What a verify pass records per layer for rollback: the GDN states after
-/// each row but the last, and the rows' conv inputs (GDN and PLE) so the conv
-/// windows can be rewound.
+/// What a verify pass records per layer for rollback: for an exact pass the
+/// GDN recurrence inputs of the rows (replay) and where the final state goes
+/// (the shadow, keeping the pre-verify state in place); for the legacy pass
+/// the GDN states after each row but the last; and the rows' conv inputs (GDN
+/// and PLE) so the conv windows can be rewound.
 pub(super) struct Capture {
     exact: bool,
     pub(super) mid: Option<Tensor>,
+    /// Exact passes: `[m, C]` convolved q/k/v, `[m, H]` a and b rows.
+    pub(super) replay: Option<(Tensor, Tensor, Tensor)>,
+    /// Exact passes: the GDN final state's destination.
+    pub(super) state_out: Option<Tensor>,
     pub(super) conv_in: Tensor,
     pub(super) ple_conv_in: Option<Tensor>,
 }
@@ -1441,7 +1599,6 @@ pub(super) struct Capture {
 /// Ordinary decode values copied into request-local speculative captures.
 struct DecodeCapture<'a> {
     row: usize,
-    rows: usize,
     spec: &'a SpecScratch,
     hyper: &'a Tensor,
 }
@@ -2062,7 +2219,7 @@ impl Qwen4ExpModel {
             1,
             Draw { params: &greedy, step: state.pos },
             None,
-            Some(DecodeCapture { row, rows, spec, hyper }),
+            Some(DecodeCapture { row, spec, hyper }),
         )?;
         pass.end()
     }
@@ -2542,9 +2699,17 @@ impl Qwen4ExpModel {
             };
             let capture = match (spec, lstate) {
                 (Some(sp), LayerState::Gdn { .. }) => {
-                    let mid = (m > 1)
+                    let exact = matches!(mode, BatchMode::VerifyHost);
+                    // Exact passes keep no per-row states: the final state
+                    // goes to the shadow and the rows' recurrence inputs to
+                    // the replay rows (replay rollback). The legacy pass
+                    // captures the state after every row but the last.
+                    let mid = (!exact && m > 1)
                         .then(|| {
-                            sp.mid[gdn_index].view(
+                            let mid = sp.mid.get(gdn_index).ok_or_else(|| {
+                                anyhow::anyhow!("legacy GDN captures not allocated")
+                            })?;
+                            mid.view(
                                 0,
                                 &[
                                     m - 1,
@@ -2555,9 +2720,21 @@ impl Qwen4ExpModel {
                             )
                         })
                         .transpose()?;
+                    let replay = exact
+                        .then(|| {
+                            sp.replay_rows(
+                                gdn_index,
+                                m,
+                                cfg.gdn_conv_channels(),
+                                cfg.linear_num_value_heads,
+                            )
+                        })
+                        .transpose()?;
                     Some(Capture {
-                        exact: matches!(mode, BatchMode::VerifyHost),
+                        exact,
                         mid,
+                        replay,
+                        state_out: exact.then(|| sp.gdn_shadow[gdn_index].clone()),
                         conv_in: prefix_rows(&sp.conv_in[gdn_index], m)?,
                         ple_conv_in: sp
                             .ple_conv_in
@@ -2569,6 +2746,8 @@ impl Qwen4ExpModel {
                 (Some(sp), LayerState::Attn { .. }) => Some(Capture {
                     exact: matches!(mode, BatchMode::VerifyHost),
                     mid: None,
+                    replay: None,
+                    state_out: None,
                     conv_in: prefix_rows(&sp.conv_in[0], 0)?,
                     ple_conv_in: sp
                         .ple_conv_in
@@ -2830,9 +3009,9 @@ impl Qwen4ExpModel {
         self.trace_stage(ctx, pass, layer_index, "mixer_input", &ps.hc.mixed, ps.m)?;
         match (&layer.mixer, lstate) {
             (Mixer::Gdn(w), LayerState::Gdn { state, conv_windows, layout }) => {
-                if profile_exact {
-                    pass.profile_stage(crate::metal::stage_profile::Phase::Gdn)?;
-                }
+                // Exact verify rows mark the GDN sub-stages inside
+                // `gdn_batched` (projection and convolution, recurrence,
+                // output projection), as ordinary decode does.
                 self.gdn_batched(
                     ctx,
                     pass,
@@ -3361,11 +3540,24 @@ impl Qwen4ExpModel {
         layer_index: usize,
     ) -> Result<()> {
         let cfg = &self.config;
+        use crate::metal::stage_profile::Phase;
+        // Exact verify passes keep the rows' recurrence inputs for replay
+        // rollback: the convolution and the gate split write them straight
+        // into the layer's replay rows, which the recurrence then reads.
+        let replay = capture.and_then(|c| c.replay.as_ref());
+        let qkv_conv = replay.map_or(&ps.qkv_conv, |r| &r.0);
+        let gate_a = replay.map_or(&ps.a, |r| &r.1);
+        let gate_b = replay.map_or(&ps.b, |r| &r.2);
         if let Some(c) = capture.filter(|c| c.exact && cfg.official_mlx_rounding()) {
             ensure!(
                 gdn_layout == GdnStateLayout::ValueKey,
                 "official exact GDN layout"
             );
+            let state_out = c
+                .state_out
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("exact GDN verify without a state output"))?;
+            pass.profile_stage(Phase::GdnInputProjections)?;
             let projected = ps.stack.view(0, &[ps.m, w.in_proj.out_features()])?;
             crate::kernels::official_q8_projection::gemv_gdn_decode_rows(
                 ctx,
@@ -3376,8 +3568,9 @@ impl Qwen4ExpModel {
                 true,
             )?;
             pass.level_barrier(&[&projected])?;
-            split_cols_bf16(ctx, pass, &projected, &[&ps.qkv, &ps.z, &ps.a, &ps.b])?;
-            pass.level_barrier(&[&ps.qkv, &ps.z, &ps.a, &ps.b])?;
+            split_cols_bf16(ctx, pass, &projected, &[&ps.qkv, &ps.z, gate_a, gate_b])?;
+            pass.level_barrier(&[&ps.qkv, &ps.z, gate_a, gate_b])?;
+            pass.profile_stage(Phase::GdnConv)?;
             copy_words(ctx, pass, &ps.qkv, &c.conv_in)?;
             crate::kernels::gdn::conv1d_verify_value_key_exact(
                 ctx,
@@ -3386,37 +3579,35 @@ impl Qwen4ExpModel {
                 &conv_windows[1 - conv_slot],
                 &ps.qkv,
                 &w.conv_w,
-                &ps.qkv_conv,
+                qkv_conv,
             )?;
-            pass.level_barrier(&[
-                &ps.qkv_conv,
-                &conv_windows[1 - conv_slot],
-                &c.conv_in,
-            ])?;
+            pass.level_barrier(&[qkv_conv, &conv_windows[1 - conv_slot], &c.conv_in])?;
             self.trace_stage(ctx, pass, layer_index, "gdn_qkv", &ps.qkv, ps.m)?;
             self.trace_stage(ctx, pass, layer_index, "gdn_z", &ps.z, ps.m)?;
-            self.trace_stage(ctx, pass, layer_index, "gdn_a", &ps.a, ps.m)?;
-            self.trace_stage(ctx, pass, layer_index, "gdn_b", &ps.b, ps.m)?;
-            self.trace_stage(ctx, pass, layer_index, "gdn_conv", &ps.qkv_conv, ps.m)?;
+            self.trace_stage(ctx, pass, layer_index, "gdn_a", gate_a, ps.m)?;
+            self.trace_stage(ctx, pass, layer_index, "gdn_b", gate_b, ps.m)?;
+            self.trace_stage(ctx, pass, layer_index, "gdn_conv", qkv_conv, ps.m)?;
+            pass.profile_stage(Phase::GdnRecurrence)?;
             crate::kernels::gdn::gdn_verify_value_key_exact(
                 ctx,
                 pass,
-                &ps.qkv_conv,
-                &ps.a,
-                &ps.b,
+                qkv_conv,
+                gate_a,
+                gate_b,
                 &w.a_log,
                 &w.dt_bias,
                 gdn_state,
+                state_out,
                 &ps.z,
                 &w.norm_w,
                 &ps.gdn_out,
                 &ps.gdn_gated,
                 self.gdn_scale,
                 cfg.rms_norm_eps,
-                c.mid.as_ref(),
             )?;
-            pass.level_barrier(&[&ps.gdn_gated, gdn_state])?;
+            pass.level_barrier(&[&ps.gdn_gated, state_out])?;
             self.trace_stage(ctx, pass, layer_index, "gdn_gated", &ps.gdn_gated, ps.m)?;
+            pass.profile_stage(Phase::GdnOutProjection)?;
             return crate::kernels::official_q8_projection::gemv_gdn_decode_rows(
                 ctx,
                 pass,
@@ -3432,6 +3623,14 @@ impl Qwen4ExpModel {
                 && cfg.linear_conv_kernel_dim == 4
                 && w.in_proj.out_features().is_multiple_of(2)
         });
+        let exact = capture.is_some_and(|c| c.exact);
+        if exact {
+            pass.profile_stage(if fused_capture.is_some() {
+                Phase::GdnInputProjectionConv
+            } else {
+                Phase::GdnInputProjections
+            })?;
+        }
         if let Some(c) = fused_capture {
             quant::gemv_q4_gdn_conv_rows_exact(
                 ctx,
@@ -3440,20 +3639,20 @@ impl Qwen4ExpModel {
                 &ps.hc.mixed,
                 &ps.qkv,
                 &ps.z,
-                &ps.a,
-                &ps.b,
+                gate_a,
+                gate_b,
                 &conv_windows[conv_slot],
                 &conv_windows[1 - conv_slot],
                 &w.conv_w,
-                &ps.qkv_conv,
+                qkv_conv,
                 Some(&c.conv_in),
             )?;
             pass.level_barrier(&[
                 &ps.qkv,
                 &ps.z,
-                &ps.a,
-                &ps.b,
-                &ps.qkv_conv,
+                gate_a,
+                gate_b,
+                qkv_conv,
                 &conv_windows[1 - conv_slot],
                 &c.conv_in,
             ])?;
@@ -3469,12 +3668,7 @@ impl Qwen4ExpModel {
                     &projected,
                 )?;
                 pass.level_barrier(&[&projected])?;
-                split_cols_bf16(
-                    ctx,
-                    pass,
-                    &projected,
-                    &[&ps.qkv, &ps.z, &ps.a, &ps.b],
-                )?;
+                split_cols_bf16(ctx, pass, &projected, &[&ps.qkv, &ps.z, gate_a, gate_b])?;
             } else {
                 project_stack_or_slices(
                     ctx,
@@ -3491,7 +3685,10 @@ impl Qwen4ExpModel {
                     &s.dequant,
                 )?;
             }
-            pass.level_barrier(&[&ps.qkv, &ps.z, &ps.a, &ps.b])?;
+            pass.level_barrier(&[&ps.qkv, &ps.z, gate_a, gate_b])?;
+            if exact {
+                pass.profile_stage(Phase::GdnConv)?;
+            }
             if let Some(c) = capture {
                 copy_words(ctx, pass, &ps.qkv, &c.conv_in)?;
             }
@@ -3515,27 +3712,33 @@ impl Qwen4ExpModel {
                     &conv_windows[1 - conv_slot],
                     &ps.qkv,
                     &w.conv_w,
-                    &ps.qkv_conv,
+                    qkv_conv,
                     self.config.official_mlx_rounding(),
                 )?;
             }
-            pass.level_barrier(&[&ps.qkv_conv, &conv_windows[1 - conv_slot]])?;
+            pass.level_barrier(&[qkv_conv, &conv_windows[1 - conv_slot]])?;
         }
         self.trace_stage(ctx, pass, layer_index, "gdn_qkv", &ps.qkv, ps.m)?;
         self.trace_stage(ctx, pass, layer_index, "gdn_z", &ps.z, ps.m)?;
-        self.trace_stage(ctx, pass, layer_index, "gdn_a", &ps.a, ps.m)?;
-        self.trace_stage(ctx, pass, layer_index, "gdn_b", &ps.b, ps.m)?;
-        self.trace_stage(ctx, pass, layer_index, "gdn_conv", &ps.qkv_conv, ps.m)?;
+        self.trace_stage(ctx, pass, layer_index, "gdn_a", gate_a, ps.m)?;
+        self.trace_stage(ctx, pass, layer_index, "gdn_b", gate_b, ps.m)?;
+        self.trace_stage(ctx, pass, layer_index, "gdn_conv", qkv_conv, ps.m)?;
         if let Some(capture) = capture.filter(|c| c.exact) {
+            let state_out = capture
+                .state_out
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("exact GDN verify without a state output"))?;
+            pass.profile_stage(Phase::GdnRecurrenceNorm)?;
             gdn_verify_gated_exact(
                 ctx,
                 pass,
-                &ps.qkv_conv,
-                &ps.a,
-                &ps.b,
+                qkv_conv,
+                gate_a,
+                gate_b,
                 &w.a_log,
                 &w.dt_bias,
                 gdn_state,
+                state_out,
                 &ps.z,
                 &w.norm_w,
                 &ps.gdn_gated,
@@ -3543,10 +3746,10 @@ impl Qwen4ExpModel {
                 cfg.linear_num_key_heads,
                 cfg.rms_norm_eps,
                 self.gdn_gate,
-                capture.mid.as_ref(),
             )?;
-            pass.level_barrier(&[&ps.gdn_gated, gdn_state])?;
+            pass.level_barrier(&[&ps.gdn_gated, state_out])?;
             self.trace_stage(ctx, pass, layer_index, "gdn_gated", &ps.gdn_gated, ps.m)?;
+            pass.profile_stage(Phase::GdnOutProjection)?;
             return project_mat_decode_exact(
                 ctx,
                 pass,
@@ -4407,7 +4610,7 @@ impl Qwen4ExpModel {
     /// the block's input, not its output, so only a catch-up, which never
     /// reads it, may call this.
     #[allow(clippy::too_many_arguments)]
-    fn mtp_block_caches(
+    pub(super) fn mtp_block_caches(
         &self,
         ctx: &MetalContext,
         pass: &ComputePass<'_>,
@@ -4611,17 +4814,27 @@ impl Qwen4ExpModel {
                             &s.qkv,
                             &raw.view(capture.row * width, &[width])?,
                         )?;
-                        if capture.row + 1 < capture.rows {
-                            let mid = &capture.spec.mid[gdn_index];
+                        // Replay rollback inputs: this row's convolved q/k/v
+                        // and gates (the pre-verify state was copied to the
+                        // shadow before the first row).
+                        let (qkv_rows, a_rows, b_rows) = capture.spec.replay_rows(
+                            gdn_index,
+                            VERIFY_ROWS,
+                            width,
+                            s.a.numel(),
+                        )?;
+                        for (source, rows) in
+                            [(&s.qkv_conv, &qkv_rows), (&s.a, &a_rows), (&s.b, &b_rows)]
+                        {
+                            let n = source.numel();
                             copy_words(
                                 ctx,
                                 pass,
-                                state,
-                                &mid.view(capture.row * state.numel(), state.shape())?,
+                                source,
+                                &rows.view(capture.row * n, &[n])?,
                             )?;
-                            pass.level_barrier(&[mid])?;
                         }
-                        pass.level_barrier(&[raw])?;
+                        pass.level_barrier(&[raw, &capture.spec.gdn_replay[gdn_index]])?;
                     }
                     gdn_index += 1;
                 }

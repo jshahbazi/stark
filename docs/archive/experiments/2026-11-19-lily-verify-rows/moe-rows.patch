@@ -1,0 +1,1530 @@
+diff --git a/docs/model-experiments/2026-11-19-lily-moe-verify-rows.md b/docs/model-experiments/2026-11-19-lily-moe-verify-rows.md
+new file mode 100644
+index 00000000..3b29d6a4
+--- /dev/null
++++ b/docs/model-experiments/2026-11-19-lily-moe-verify-rows.md
+@@ -0,0 +1,118 @@
++# 20261119-LILYROWS-03: share routed experts across verify rows
++
++## Identity and state
++
++| Field | Value |
++| --- | --- |
++| Attempt ID / registered date / executed date / owner | 20261119-LILYROWS-03; registered and executed 2026-11-19; workstream `moe-rows` of the Lily MTP speed project |
++| Kind | Kernel (performance), with an overlap diagnostic |
++| Attempt state | Completed |
++| Result and acceptance criterion | Stop rule passed (cross-row overlap above 20 percent at 3 rows). Exact sharing kernels built and byte-identical. Performance: not faster (gate/up even at best, down/combine slower). Rejected for the default path. |
++| Evidence scope | Operator/component byte tests and timings; full-model numerical (output-hash gate, MTP rollback test); end-to-end staged screening |
++| Promotion decision | Rejected as default. Kernels kept default-off behind a private selector for the orchestrator's decision; recommended for removal before merge |
++| Disposition | Experiment only; uncommitted in the workstream worktree |
++| Predecessor / related attempts / governing issue / PR | Baseline 20261119-SUSHI-02; precedent 20261116-LILY-REUSE-01 (projection reuse). No PR. |
++
++## Hypothesis and change
++
++- Problem: routed experts cost about 2.6 ms of GPU time per extra verify row (gate/up 1.4, down/combine 1.05). Each row reads its own 10 experts, and an expert that several rows chose is read again. If the stages are bound by DRAM bandwidth, reading each such expert once per pass should cut the slope roughly in proportion to the duplicate share.
++- Baseline: `stark_moe_gate_up_decode_rows` (grid rows x 640 x top_k, 32 lanes per output channel) and `stark_moe_down_combine_inject_decode_rows` (grid rows x 1280, 128 threads, 16 lanes per output row, four simdgroups).
++- Candidate: `stark_moe_gate_up_shared_rows_r{4,9}` (grid 640 x rows*top_k; a threadgroup whose entry is the first selection of its expert serves every row that chose that expert, and the rest exit) and `stark_moe_down_combine_shared_rows_r{4,9}` (one threadgroup per output-row pair for all rows; it builds an ownership table in threadgroup memory, reads each distinct expert once, and runs the per-row slot-ordered combine and HC write). Every row keeps the ordinary decode body, lane mapping, reduction and BF16 boundaries. The row count is a template parameter (4 and 9 are compiled).
++- Correctness fixed in advance: byte equality with the per-row kernels and with ordinary decode; baseline output hashes for every arm.
++- Stop rule fixed in advance: if fewer than 20 percent of selections are duplicates at 3 rows, record the result and do not build.
++
++## Artifact, source and environment
++
++| Field | Baseline | Candidate |
++| --- | --- | --- |
++| Model family, exact checkpoint and upstream revision | `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` rev `0f94842e3682b49acace4daeb4cf2e65a6f94f83` | same |
++| Format/quantization | Q4 group 64 affine experts (512 experts, top-10, 48 layers); router, shared expert and shared gate are Q8 | same |
++| Backend, vendor revision and local patch provenance | vendored lily-core at Stark `4d09b550` | Stark-local patch: `kernels/metal/stark_moe_shared_rows.metal` (new), `kernels/moe.rs`, `moe_ffn.rs`, `moe_row_overlap.rs` (new, diagnostic), `moe_decode_exact_tests.rs`, and an 11-line diagnostic hook in `qwen4exp/model.rs`. Original Stark code, nothing adapted from Sushi. |
++| Stark commit, dirty patch and executable hash | `4d09b550`, worker `5dfb90b6...298d` (20261119-SUSHI-02) | `4d09b550` plus `runtime/patches/moe-rows.patch`; diagnostic worker `6f13bddf...baf3f`, kernel worker `c707d4f2...f068` |
++| Toolchains, dependency lock hashes and build flags | rustc 1.98.1 release (worker); nightly-2026-10-01 (tests); Metal 32023.883; Cargo.lock `7e6dfa20...066c` | same |
++| Weight, activation, accumulation, recurrent-state and KV precision | unchanged | unchanged (same per-row arithmetic) |
++| Selected kernel and materialization policies | per-row expert kernels | default unchanged; `STARK_LILY_MOE_SHARED_ROWS=gate_up` or `all` selects the shared kernels |
++| Hardware, physical RAM, OS/driver/Metal toolchain | Apple M5 Max, 128 GB, macOS 26.7.2 | same |
++| Available headroom, observed peak memory and measurement method | not measured | not measured (the shared kernels add no buffers; the diagnostic allocates 64 KB only when enabled) |
++
++## Workload and controls
++
++- Image tower loaded (the runner's default native launch); no image requests. Image and MTP parity N/A: this change affects only verify-row MoE dispatch, and the default path is unchanged.
++- Corpus: the frozen public code corpus at 4,096 input tokens; the input hash matches the baseline. Arms: sampled (temperature 1, top-k 20, top-p 0.95, seed 42, 256 tokens) and greedy (512 tokens) at 0 to 3 drafts. Fresh requests, one repeat. Every real-model run went through the model-slot wrapper.
++- Host not quiet: other workstreams shared the GPU and CPU, so all timings are screening only.
++
++## Step 1: bandwidth and overlap
++
++Tensor-header bytes per expert per layer: gate, up and down codes at 819,200 each, plus 51,200 scales and 51,200 biases each, giving 2,764,800 bytes. A row reads 10 x 48 of them, 1.327 GB per pass (gate/up 0.885 GB, down 0.442 GB). That is slightly above the brief's 1.18 GB estimate, because the brief left out scales and biases.
++
++Overlap counts from the private diagnostic (`STARK_LILY_MOE_ROW_OVERLAP_OUTPUT`, counts only, run `moe-rows-1`):
++
++| Arm (rows) | Verify passes | Duplicate selections | Saved reads (1 - distinct/selections) | New experts per extra row | Upper-bound bytes saved per extra row |
++| --- | ---: | ---: | ---: | --- | ---: |
++| s1 (2) | 146 | 34.2% | 17.1% | 0.658 | 0.45 GB |
++| s2 (3) | 110 | 44.3% | 24.7% | 0.667, 0.594 | 0.49 GB |
++| s3 (4) | 102 | 50.3% | 29.7% | 0.673, 0.594, 0.544 | 0.53 GB |
++| g2 (3) | 183 | 38.7% | 21.4% | 0.745, 0.613 | 0.43 GB |
++| g3 (4) | 147 | 45.9% | 26.9% | 0.726, 0.620, 0.579 | 0.48 GB |
++
++The stop rule passed (s2 44.3 percent, g2 38.7 percent). If the stages were purely bandwidth-bound, the slope would be predicted to fall from about 2.45 to about 1.6 ms per extra row (about 35 percent fewer bytes per extra row). The diagnostic run itself reproduced every baseline output hash.
++
++Bandwidth check (component test `moe_rows_expert_overlap_timing`: 48 distinct synthetic layers of 40 experts, zero weights, per-row kernels, median of 12; ms for 48 layers):
++
++| Rows | gate/up distinct | partial | same | down distinct | partial | same |
++| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
++| 1 | 1.67 | | | 1.07 | | |
++| 2 | 3.16 | 2.78 | 2.07 | 1.92 | 1.87 | 1.85 |
++| 3 | 4.60 | 3.95 | 3.01 | 2.78 | 2.71 | 2.69 |
++| 4 | 6.05 | 5.18 | 3.95 | 3.64 | 3.55 | 3.53 |
++
++What the table shows:
++
++- Gate/up with distinct experts costs about 1.45 ms per extra row (about 610 GB/s, close to DRAM peak). With every row choosing the same experts, so that only one row's bytes come from DRAM, it still costs about 0.95 ms per extra row. That remainder is per-row arithmetic: nibble decode, conversion and two dot products for every weight and every row. The existing per-row kernel already gets part of the duplicate saving from the cache ("partial" falls between "distinct" and "same").
++- Down/combine costs about 0.85 ms per extra row whether rows share experts or not. It is not bound by DRAM bytes, so sharing reads cannot help it.
++- Upper bound on any exact sharing kernel that is as efficient as the per-row kernel: about 0.3 to 0.4 ms per extra row on gate/up (partial to same) and about 0 on down. That is far below the 0.85 ms predicted from bytes alone.
++
++## Attempt history and failures
++
++| Trial / source | What was attempted | Observation | Validity and disposition |
++| --- | --- | --- | --- |
++| Overlap diagnostic `moe-rows-1` | Counts per verify pass, aggregated per request | 34 to 50 percent duplicate selections; hashes equal to baseline | Valid; diagnostic kept default-off |
++| Bandwidth control | Per-row kernels over distinct, partial and same routes | Gate/up per extra row is about 0.95 ms ALU-bound and about 1.45 ms DRAM-bound; down is not DRAM-bound | Valid component screening, other agents active |
++| Shared kernels v1 | Shared weight words and affine terms; each row runs the full decode block body in turn | Byte-identical. Gate/up: 2 rows partial 2.76 to 3.06 ms (slower), 3 rows 4.21 to 4.13, 4 rows 5.63 to 5.44 (within noise); same pattern slower at every row count. Down: slower in every case (3 rows partial 2.72 to 3.39) | Exact, not faster; rejected as default |
++| Shared kernels v2 | Nibble decode hoisted out of the row loop to cut per-row arithmetic | Bytes changed (first mismatch at rows 1, pattern none: the default math mode compiles the reordered code differently) and much slower (register arrays) | Invalid under the exactness contract; reverted |
++| Real-model staged A/B `moe-rows-3/4/5` (s1, s2, s3; off / gate_up / all) | Same binary, private selector | Verify GPU command at 2/3/4 rows: off 20.57/26.84/34.90, all 21.14/27.32/34.07. HC (not touched by this change) varied from 4.05 to 6.56 ms across runs | Too noisy to resolve under 1 ms; consistent with the component tie. Inconclusive at best |
++| Hash gate `moe-rows-2` (all arms, selector `all`) | End-to-end exactness | All 8 output hashes and work counts equal to baseline | Valid for exactness. Its timings are invalid: an engine test build ran concurrently (s0 also fell 10 percent) |
++
++## Correctness and lifecycle
++
++- Component byte tests (physical Metal, release, nightly-2026-10-01), all passing:
++  - `expert_shared_rows_match_per_row_bytes`: 4 independent draws (two ordinary; one with subnormal-heavy inputs, scales and biases; one with large cancelling inputs and biases) x rows 1 to 9 x 6 route patterns (none, all, all permuted, some, pairs, random). Covers gate/up, and down with and without the HC write, with output canaries. 432 down cases, 52,531,200 bytes compared, 0 unequal. A first version with one ordinary draw also passed (108 cases).
++  - Residual risk, reported by the HC workstream: under fast math, the GPU back end can schedule identical per-row code differently depending on the surrounding kernel. That produced rare single-BF16 flips in another workstream's shared-weight kernel that passed one draw. The draws above did not reproduce it here, but byte identity is shown by sampling, not proven. That adds to the rejection.
++  - `decode_exact_moe_rows_match_ordinary_bytes`: extended to 16 and 64 experts, shared modes off, gate_up and all, rows 1 to 4, both router renorm settings.
++  - `batched_moe_injection_matches_ordinary_fused_bytes` (72 cases) and `official_decode_exact_moe_rows_match_ordinary_bytes` still pass.
++- Real-model: the end-to-end hash gate passes with the shared kernels on. The `private_checkpoint_mtp_verify_and_rollback_match_serial` result is in the follow-up below.
++- Prefix reuse and rollback: unaffected (no state, scratch or cache change).
++
++## Performance and memory
++
++| Metric and measurement boundary | Baseline | Candidate | Repeats/dispersion | Eligibility and conclusion |
++| --- | --- | --- | --- | --- |
++| Gate/up, 3 rows, partial route (component, 48 layers) | 4.21 ms | 4.13 ms | median of 12, noisy host | tie |
++| Down/combine, 3 rows, partial route (component) | 2.72 ms | 3.39 ms | median of 12 | regression |
++| Verify GPU command, s2 (real model, staged) | 26.84 ms | 27.32 ms (all) | one run each | inconclusive, contended host |
++| Useful decode / end-to-end rate | not measured validly | not measured validly | | invalid run (concurrent build) |
++| Peak memory | not measured | not measured | | no new buffers |
++
++## Evidence, decision and limits
++
++- Cross-row expert overlap is large (17 to 30 percent of reads, 34 to 50 percent of selections), but the routed-expert slope is not mainly DRAM bytes. Gate/up per extra row is bound by the exact per-row arithmetic at about 0.95 ms even with perfect sharing, and the existing kernel already gets part of the saving from the cache. Down/combine does not depend on bytes at all.
++- Exact sharing therefore leaves about 0.3 to 0.4 ms per extra row to gain on gate/up at most, and the exact shared kernel built here does not capture it. Cutting per-row arithmetic (decoding once for all rows) changed bytes under the default math mode.
++- Decision: do not adopt. The selector and kernels are default-off; recommend removing them, or keeping them only as an archived reference.
++- The diagnostic (`moe_row_overlap`) is default-off and costs one environment check per verify layer when off. Keep it only if overlap needs measuring for the 9-row depth; otherwise remove it with the kernels.
++- Rest of the MoE verify path: router (Q8, F32 output), shared gate (Q8), shared expert gate/up and down (Q8 BF16) all take the projection-reuse path and read weights once. The routed experts are the only per-row weight reads left.
++- Next: a lower-arithmetic exact formulation would need to match decode bytes. Possible routes are an explicit `fma`/precise math-mode decode kernel with a matching verify kernel (this changes the decode reference, so it needs its own precision attempt), or a different row-parallel lane split. Down/combine latency (about 0.85 ms per row, not bytes) is a separate target: dispatch shape, or fusion with gate/up.
++
++## Follow-up history
++
++- 2026-11-19: `private_checkpoint_mtp_verify_and_rollback_match_serial` (needs `STARK_TEST_MODEL_PATH`; the shared brief first named it `STARK_LILY_TEST_MODEL_PATH`) passed on the real model with `STARK_LILY_MOE_SHARED_ROWS=all`. The verify (86 readouts), rollback (24) and host-serial (30) phases have 0 unequal values. The draft-head phase has 248,320 unequal values, a known allowed difference with 0 top-1 mismatches; this change does not touch the draft head.
++- 2026-11-19: the byte test was strengthened to 4 independent draws, including subnormal-heavy and cancellation inputs (see Correctness), after the HC workstream reported fast-math scheduling flips. Still 0 unequal.
+diff --git a/vendor/lily-core/src/kernels/metal/stark_moe_shared_rows.metal b/vendor/lily-core/src/kernels/metal/stark_moe_shared_rows.metal
+new file mode 100644
+index 00000000..05c746b1
+--- /dev/null
++++ b/vendor/lily-core/src/kernels/metal/stark_moe_shared_rows.metal
+@@ -0,0 +1,333 @@
++// SPDX-License-Identifier: Apache-2.0
++// Stark (attempt 20261119-LILYROWS-03): verifier rows that share routed
++// experts. Each distinct expert selected by any row of a verify pass is read
++// once; every row keeps its own accumulation with exactly the per-row decode
++// lane mapping, loop order and BF16 boundaries of
++// `stark_moe_gate_up_decode_rows` and `moe_down_combine_inject_body<16, 4>`.
++// Compiled after moe.metal (MOE_MAX_K).
++//
++// Grouping is recomputed inside each threadgroup from the [M, TOPK] routed
++// ids: entry j = r * TOPK + s owns expert ids[j] if no earlier entry selected
++// the same expert. Its members are, for each row r, the slot of that row that
++// selected the expert (top-k ids are distinct within a row), or none.
++
++constant uint STARK_MOE_NO_SLOT = 0xFFFFFFFFu;
++
++// One thread: serial form, used to fill a threadgroup table.
++template <uint R>
++static inline bool stark_moe_shared_members(device const uint* ids,
++                                            uint j, uint M, uint TOPK,
++                                            thread uint* member) {
++    const uint e = ids[j];
++    for (uint p = 0; p < j; ++p) {
++        if (ids[p] == e) {
++            return false;
++        }
++    }
++    for (uint r = 0; r < R; ++r) {
++        member[r] = STARK_MOE_NO_SLOT;
++        if (r < M) {
++            for (uint s = 0; s < TOPK; ++s) {
++                if (ids[r * TOPK + s] == e) {
++                    member[r] = r * TOPK + s;
++                }
++            }
++        }
++    }
++    return true;
++}
++
++// One simdgroup cooperatively: every lane returns the same answer.
++template <uint R>
++static inline bool stark_moe_shared_members_simd(device const uint* ids,
++                                                 uint j, uint M, uint TOPK,
++                                                 uint lane, thread uint* member) {
++    const uint e = ids[j];
++    const uint S = M * TOPK;
++    bool earlier = false;
++    for (uint p = lane; p < j; p += 32) {
++        earlier = earlier || ids[p] == e;
++    }
++    if (simd_any(earlier)) {
++        return false;
++    }
++    constexpr uint T = (R * MOE_MAX_K + 31) / 32;
++    uint found[T];
++    for (uint t = 0; t < T; ++t) {
++        const uint q = lane + 32 * t;
++        found[t] = (q < S && ids[q] == e) ? q : STARK_MOE_NO_SLOT;
++    }
++    for (uint r = 0; r < R; ++r) {
++        uint c = STARK_MOE_NO_SLOT;
++        for (uint t = 0; t < T; ++t) {
++            if (found[t] != STARK_MOE_NO_SLOT && found[t] / TOPK == r) {
++                c = found[t];
++            }
++        }
++        member[r] = simd_min(c);
++    }
++    return true;
++}
++
++// Grid (N, M * TOPK), 32 threads. Threadgroups of non-owning entries exit.
++template <uint R>
++static inline void stark_moe_gate_up_shared_rows_body(
++    device const uint* gate_codes, device const bfloat* gate_scales,
++    device const bfloat* gate_biases, device const uint* up_codes,
++    device const bfloat* up_scales, device const bfloat* up_biases,
++    device const bfloat* x, device const uint* indices, device bfloat* y,
++    uint K, uint GS, uint N, uint TOPK, uint M, uint row, uint entry,
++    uint lane) {
++    uint member[R];
++    if (!stark_moe_shared_members_simd<R>(indices, entry, M, TOPK, lane, member)) {
++        return;
++    }
++    const ulong grow = (ulong)indices[entry] * N + row;
++    const uint words = K / 8;
++    const uint blocks = words / 4;
++    const uint bpg = GS / 32;
++    const uint groups = K / GS;
++    device const uint4* gate_wrow =
++        (device const uint4*)(gate_codes + grow * words);
++    device const uint4* up_wrow =
++        (device const uint4*)(up_codes + grow * words);
++    float gate_sum[R];
++    float up_sum[R];
++    for (uint r = 0; r < R; ++r) {
++        gate_sum[r] = 0.0f;
++        up_sum[r] = 0.0f;
++    }
++    for (uint i = lane; i < blocks; i += 32) {
++        uint g = i / bpg;
++        uint4 gate_w4 = gate_wrow[i];
++        uint4 up_w4 = up_wrow[i];
++        const float gs = float(gate_scales[grow * groups + g]);
++        const float gb = float(gate_biases[grow * groups + g]);
++        const float us = float(up_scales[grow * groups + g]);
++        const float ub = float(up_biases[grow * groups + g]);
++        // Each sharing row runs decode's complete block body in turn (only
++        // the weight words and affine terms are shared). Hoisting the nibble
++        // decode out of the row loop was measured slower and changed bytes
++        // under the default math mode (20261119-LILYROWS-03).
++        for (uint r = 0; r < R; ++r) {
++            if (member[r] == STARK_MOE_NO_SLOT) {
++                continue;
++            }
++            device const bfloat4* xv = (device const bfloat4*)(x + (ulong)r * K);
++            float gate_dot = 0.0f;
++            float up_dot = 0.0f;
++            float x_sum = 0.0f;
++            for (uint j = 0; j < 4; ++j) {
++                float4 xlo = float4(xv[2 * (4 * i + j)]);
++                float4 xhi = float4(xv[2 * (4 * i + j) + 1]);
++                uint gw = gate_w4[j];
++                uint uw = up_w4[j];
++                float4 gqlo = float4(float((gw >> 0) & 0xF), float((gw >> 4) & 0xF),
++                                     float((gw >> 8) & 0xF), float((gw >> 12) & 0xF));
++                float4 gqhi = float4(float((gw >> 16) & 0xF), float((gw >> 20) & 0xF),
++                                     float((gw >> 24) & 0xF), float((gw >> 28) & 0xF));
++                float4 uqlo = float4(float((uw >> 0) & 0xF), float((uw >> 4) & 0xF),
++                                     float((uw >> 8) & 0xF), float((uw >> 12) & 0xF));
++                float4 uqhi = float4(float((uw >> 16) & 0xF), float((uw >> 20) & 0xF),
++                                     float((uw >> 24) & 0xF), float((uw >> 28) & 0xF));
++                gate_dot += dot(gqlo, xlo) + dot(gqhi, xhi);
++                up_dot += dot(uqlo, xlo) + dot(uqhi, xhi);
++                x_sum += dot(xlo, float4(1.0f)) + dot(xhi, float4(1.0f));
++            }
++            gate_sum[r] += gs * gate_dot + gb * x_sum;
++            up_sum[r] += us * up_dot + ub * x_sum;
++        }
++    }
++    for (uint r = 0; r < R; ++r) {
++        if (member[r] == STARK_MOE_NO_SLOT) {
++            continue;
++        }
++        float gsum = simd_sum(gate_sum[r]);
++        float usum = simd_sum(up_sum[r]);
++        if (lane == 0) {
++            gsum = float(bfloat(gsum));
++            usum = float(bfloat(usum));
++            y[(ulong)member[r] * N + row] =
++                bfloat((gsum / (1.0f + exp(-gsum))) * usum);
++        }
++    }
++}
++
++#define STARK_MOE_GATE_UP_SHARED_ROWS(R)                                     \
++kernel void stark_moe_gate_up_shared_rows_r##R(                              \
++    device const uint* gate_codes [[buffer(0)]],                             \
++    device const bfloat* gate_scales [[buffer(1)]],                          \
++    device const bfloat* gate_biases [[buffer(2)]],                          \
++    device const uint* up_codes [[buffer(3)]],                               \
++    device const bfloat* up_scales [[buffer(4)]],                            \
++    device const bfloat* up_biases [[buffer(5)]],                            \
++    device const bfloat* x [[buffer(6)]],                                    \
++    device const uint* indices [[buffer(7)]],                                \
++    device bfloat* y [[buffer(8)]],                                          \
++    constant uint& K [[buffer(9)]],                                          \
++    constant uint& GS [[buffer(10)]],                                        \
++    constant uint& N [[buffer(11)]],                                         \
++    constant uint& TOPK [[buffer(12)]],                                      \
++    constant uint& M [[buffer(13)]],                                         \
++    uint2 tg [[threadgroup_position_in_grid]],                               \
++    uint lane [[thread_index_in_threadgroup]]) {                             \
++    stark_moe_gate_up_shared_rows_body<R>(gate_codes, gate_scales,           \
++        gate_biases, up_codes, up_scales, up_biases, x, indices, y, K, GS,   \
++        N, TOPK, M, tg.x, tg.y, lane);                                       \
++}
++
++STARK_MOE_GATE_UP_SHARED_ROWS(4)
++STARK_MOE_GATE_UP_SHARED_ROWS(9)
++
++// Grid (H / 2), 128 threads (four simdgroups, 16 lanes per output row, two
++// rows per simdgroup). Simdgroup sg walks owning entries sg, sg + 4, ...;
++// each per-slot sum keeps the decode lane order and shuffle reduction. The
++// slot-ordered combine, shared expert and optional HC write (G > 0) then run
++// per row exactly as `moe_down_combine_inject_body`.
++template <uint R>
++static inline void stark_moe_down_shared_rows_body(
++    device const uint* codes, device const bfloat* scales,
++    device const bfloat* biases, device const bfloat* x,
++    device const uint* indices, device const float* scores,
++    device const bfloat* shared_out, device const float* shared_gate,
++    device bfloat* out, device bfloat* hyper, device const bfloat* inj,
++    uint G, float inv_g, uint K, uint GS, uint H, uint TOPK, uint M,
++    uint group, uint sg, uint lane, threadgroup float* xchg,
++    threadgroup uint* table, threadgroup uint* owners) {
++    constexpr uint LANES = 16;
++    constexpr uint SG = 4;
++    constexpr uint ROWS = 32 / LANES;
++    const uint hlane = lane % LANES;
++    const uint rl = lane / LANES;
++    const uint row = group * ROWS + rl;
++    const uint words = K / 8;
++    const uint blocks = words / 4;
++    const uint bpg = GS / 32;
++    const uint groups = K / GS;
++    const uint S = M * TOPK;
++    const uint tid = sg * 32 + lane;
++    // Ownership/member table, built once per threadgroup (S <= 128 threads).
++    if (tid < S) {
++        uint m[R];
++        const bool owner = stark_moe_shared_members<R>(indices, tid, M, TOPK, m);
++        for (uint r = 0; r < R; ++r) {
++            table[tid * R + r] = owner ? m[r] : STARK_MOE_NO_SLOT;
++        }
++        owners[tid] = owner ? 1u : 0u;
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    for (uint entry = sg; entry < S; entry += SG) {
++        if (owners[entry] == 0) {
++            continue;
++        }
++        uint member[R];
++        for (uint r = 0; r < R; ++r) {
++            member[r] = table[entry * R + r];
++        }
++        const ulong grow = (ulong)indices[entry] * H + row;
++        device const uint4* wrow = (device const uint4*)(codes + grow * words);
++        float sum[R];
++        for (uint r = 0; r < R; ++r) {
++            sum[r] = 0.0f;
++        }
++        for (uint i = hlane; i < blocks; i += LANES) {
++            const uint g = i / bpg;
++            const float scale = float(scales[grow * groups + g]);
++            const float bias = float(biases[grow * groups + g]);
++            const uint4 w4 = wrow[i];
++            for (uint r = 0; r < R; ++r) {
++                if (member[r] == STARK_MOE_NO_SLOT) {
++                    continue;
++                }
++                device const bfloat4* xv =
++                    (device const bfloat4*)(x + (ulong)member[r] * K);
++                float qx = 0.0f;
++                float xs = 0.0f;
++                for (uint j = 0; j < 4; ++j) {
++                    const uint word = w4[j];
++                    const float4 xlo = float4(xv[2 * (4 * i + j)]);
++                    const float4 xhi = float4(xv[2 * (4 * i + j) + 1]);
++                    const float4 qlo =
++                        float4(float((word >> 0) & 0xF), float((word >> 4) & 0xF),
++                               float((word >> 8) & 0xF), float((word >> 12) & 0xF));
++                    const float4 qhi =
++                        float4(float((word >> 16) & 0xF), float((word >> 20) & 0xF),
++                               float((word >> 24) & 0xF), float((word >> 28) & 0xF));
++                    qx += dot(qlo, xlo) + dot(qhi, xhi);
++                    xs += dot(xlo, float4(1.0f)) + dot(xhi, float4(1.0f));
++                }
++                sum[r] += scale * qx + bias * xs;
++            }
++        }
++        for (uint r = 0; r < R; ++r) {
++            if (member[r] == STARK_MOE_NO_SLOT) {
++                continue;
++            }
++            float v = sum[r];
++            for (uint off = LANES / 2; off > 0; off >>= 1) {
++                v += simd_shuffle_down(v, off);
++            }
++            if (hlane == 0) {
++                xchg[member[r] * ROWS + rl] = float(bfloat(v));
++            }
++        }
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    if (tid >= M * ROWS) {
++        return;
++    }
++    const uint r = tid / ROWS;
++    const uint orl = tid % ROWS;
++    const uint orow = group * ROWS + orl;
++    device const float* rscores = scores + (ulong)r * TOPK;
++    float combined = 0.0f;
++    for (uint slot = 0; slot < TOPK; ++slot) {
++        combined += rscores[slot] * xchg[(r * TOPK + slot) * ROWS + orl];
++    }
++    {
++        const float gate = 1.0f / (1.0f + exp(-shared_gate[r]));
++        combined += gate * float(shared_out[(ulong)r * H + orow]);
++    }
++    const bfloat branch = bfloat(combined);
++    out[(ulong)r * H + orow] = branch;
++    for (uint g = 0; g < G; ++g) {
++        const float logit = float(inj[(ulong)r * G + g]) * inv_g;
++        const float weight = 2.0f / (1.0f + exp(-logit));
++        const ulong at = (ulong)r * G * H + (ulong)g * H + orow;
++        hyper[at] = bfloat(float(hyper[at]) + float(branch) * weight);
++    }
++}
++
++#define STARK_MOE_DOWN_SHARED_ROWS(R)                                        \
++kernel void stark_moe_down_combine_shared_rows_r##R(                         \
++    device const uint* codes [[buffer(0)]],                                  \
++    device const bfloat* scales [[buffer(1)]],                               \
++    device const bfloat* biases [[buffer(2)]],                               \
++    device const bfloat* x [[buffer(3)]],                                    \
++    device const uint* indices [[buffer(4)]],                                \
++    device const float* scores [[buffer(5)]],                                \
++    device const bfloat* shared [[buffer(6)]],                               \
++    device const float* gate [[buffer(7)]],                                  \
++    device bfloat* out [[buffer(8)]],                                        \
++    device bfloat* hyper [[buffer(9)]],                                      \
++    device const bfloat* inj [[buffer(10)]],                                 \
++    constant uint& K [[buffer(11)]],                                         \
++    constant uint& GS [[buffer(12)]],                                        \
++    constant uint& H [[buffer(13)]],                                         \
++    constant uint& TOPK [[buffer(14)]],                                      \
++    constant uint& M [[buffer(15)]],                                         \
++    constant uint& G [[buffer(16)]],                                         \
++    constant float& inv_g [[buffer(17)]],                                    \
++    uint group [[threadgroup_position_in_grid]],                             \
++    uint sg [[simdgroup_index_in_threadgroup]],                              \
++    uint lane [[thread_index_in_simdgroup]]) {                               \
++    threadgroup float xchg[R * MOE_MAX_K * 2];                               \
++    threadgroup uint table[R * MOE_MAX_K * R];                               \
++    threadgroup uint owners[R * MOE_MAX_K];                                  \
++    stark_moe_down_shared_rows_body<R>(codes, scales, biases, x, indices,    \
++        scores, shared, gate, out, hyper, inj, G, inv_g, K, GS, H, TOPK, M,  \
++        group, sg, lane, xchg, table, owners);                               \
++}
++
++STARK_MOE_DOWN_SHARED_ROWS(4)
++STARK_MOE_DOWN_SHARED_ROWS(9)
+diff --git a/vendor/lily-core/src/kernels/moe.rs b/vendor/lily-core/src/kernels/moe.rs
+index b2e5f529..15ef99e4 100644
+--- a/vendor/lily-core/src/kernels/moe.rs
++++ b/vendor/lily-core/src/kernels/moe.rs
+@@ -14,6 +14,11 @@ const DECODE_ROWS_SOURCE: &str = concat!(
+     "\n",
+     include_str!("metal/stark_moe_decode_rows.metal"),
+ );
++const SHARED_ROWS_SOURCE: &str = concat!(
++    include_str!("metal/moe.metal"),
++    "\n",
++    include_str!("metal/stark_moe_shared_rows.metal"),
++);
+ 
+ /// Decode's F32 router body over independently addressed rows.
+ pub(crate) fn moe_router_topk_decode_rows(
+@@ -128,6 +133,168 @@ pub(crate) fn moe_gate_up_decode_rows(
+     )
+ }
+ 
++/// Rows of one verify pass that select the same expert share its weight
++/// reads; each row keeps decode's exact gate/up accumulation and SwiGLU
++/// (`stark_moe_gate_up_decode_rows` arithmetic). Same tensors and output as
++/// [`moe_gate_up_decode_rows`].
++#[allow(clippy::too_many_arguments)]
++pub(crate) fn moe_gate_up_shared_rows(
++    ctx: &MetalContext,
++    pass: &ComputePass<'_>,
++    gate: &QuantWeights,
++    up: &QuantWeights,
++    n: usize,
++    x: &Tensor,
++    indices: &Tensor,
++    y: &Tensor,
++    top_k: usize,
++) -> Result<()> {
++    ensure!(
++        x.shape().len() == 2 && x.dtype() == DType::BF16,
++        "shared expert inputs require BF16 [m,K]"
++    );
++    let (m, k) = (x.shape()[0], x.shape()[1]);
++    ensure!(
++        (1..=SHARED_ROWS_MAX).contains(&m) && (1..=MAX_K).contains(&top_k),
++        "shared expert batch geometry"
++    );
++    ensure!(
++        gate.bits == 4
++            && up.bits == 4
++            && gate.in_features() == k
++            && gate.out_features().is_multiple_of(n),
++        "shared gate weight geometry"
++    );
++    ensure!(
++        (gate.out_features(), gate.in_features(), gate.group_size)
++            == (up.out_features(), up.in_features(), up.group_size),
++        "shared gate/up differ"
++    );
++    ensure!(
++        k.is_multiple_of(gate.group_size) && gate.group_size.is_multiple_of(32),
++        "shared gate packing"
++    );
++    ensure!(
++        indices.dtype() == DType::U32
++            && indices.numel() == m * top_k
++            && y.dtype() == DType::BF16
++            && y.numel() == m * top_k * n,
++        "shared expert output geometry"
++    );
++    let name = if m <= 4 {
++        "stark_moe_gate_up_shared_rows_r4"
++    } else {
++        "stark_moe_gate_up_shared_rows_r9"
++    };
++    let pipeline = ctx.pipeline(name, SHARED_ROWS_SOURCE, MslVersion::V3_1)?;
++    pass.dispatch_at(
++        &pipeline,
++        &[
++            gate.codes.binding(),
++            gate.scales.binding(),
++            gate.biases.binding(),
++            up.codes.binding(),
++            up.scales.binding(),
++            up.biases.binding(),
++            x.binding(),
++            indices.binding(),
++            y.binding(),
++        ],
++        &[
++            &u32_bytes(k),
++            &u32_bytes(gate.group_size),
++            &u32_bytes(n),
++            &u32_bytes(top_k),
++            &u32_bytes(m),
++        ],
++        Grid::Threadgroups { groups: (n, m * top_k, 1), threadgroup: (32, 1, 1) },
++    )
++}
++
++/// Expert-shared form of [`moe_down_combine_decode_rows`] and, with an
++/// injection, [`moe_down_combine_inject_decode_rows`]: one threadgroup per
++/// output-row pair serves every row, reading each distinct expert once.
++#[allow(clippy::too_many_arguments)]
++pub(crate) fn moe_down_combine_shared_rows(
++    ctx: &MetalContext,
++    pass: &ComputePass<'_>,
++    w: &QuantWeights,
++    h: usize,
++    x: &Tensor,
++    indices: &Tensor,
++    scores: &Tensor,
++    shared: &Tensor,
++    gate: &Tensor,
++    out: &Tensor,
++    top_k: usize,
++    injection: Option<HcInjection<'_>>,
++) -> Result<()> {
++    let m = out.shape().first().copied().unwrap_or(0);
++    ensure!(
++        out.shape().len() == 2
++            && out.dtype() == DType::BF16
++            && (1..=SHARED_ROWS_MAX).contains(&m),
++        "shared down rows geometry"
++    );
++    ensure!(m * top_k <= 128, "shared down table exceeds one threadgroup");
++    let k =
++        check_rows_down_combine(w, h, x, indices, scores, shared, gate, out, top_k, m)?;
++    let (hyper, logits, groups) = match injection {
++        Some(inj) => {
++            ensure!(inj.groups > 0, "HC injection needs at least one stream");
++            ensure!(
++                inj.hyper.dtype() == DType::BF16
++                    && inj.hyper.numel() == m * h * inj.groups,
++                "HC hyper must be BF16 [rows,groups,h]"
++            );
++            ensure!(
++                inj.logits.dtype() == DType::BF16
++                    && inj.logits.numel() == m * inj.groups,
++                "HC logits must be BF16 [rows,groups]"
++            );
++            (inj.hyper, inj.logits, inj.groups)
++        }
++        // G = 0: no HC write; the bindings are never dereferenced.
++        None => (out, out, 0),
++    };
++    let name = if m <= 4 {
++        "stark_moe_down_combine_shared_rows_r4"
++    } else {
++        "stark_moe_down_combine_shared_rows_r9"
++    };
++    let pipeline = ctx.pipeline(name, SHARED_ROWS_SOURCE, MslVersion::V3_1)?;
++    let inv_g = if groups == 0 { 0.0f32 } else { 1.0 / groups as f32 };
++    pass.dispatch_at(
++        &pipeline,
++        &[
++            w.codes.binding(),
++            w.scales.binding(),
++            w.biases.binding(),
++            x.binding(),
++            indices.binding(),
++            scores.binding(),
++            shared.binding(),
++            gate.binding(),
++            out.binding(),
++            hyper.binding(),
++            logits.binding(),
++        ],
++        &[
++            &u32_bytes(k),
++            &u32_bytes(w.group_size),
++            &u32_bytes(h),
++            &u32_bytes(top_k),
++            &u32_bytes(m),
++            &u32_bytes(groups),
++            &inv_g.to_ne_bytes(),
++        ],
++        Grid::Threadgroups { groups: (h / 2, 1, 1), threadgroup: (128, 1, 1) },
++    )
++}
++
++/// Rows the expert-shared verifier kernels are compiled for.
++pub(crate) const SHARED_ROWS_MAX: usize = 9;
++
+ /// Decode's 16-lane, four-simdgroup down/combine body over independent rows.
+ #[allow(clippy::too_many_arguments)]
+ pub(crate) fn moe_down_combine_decode_rows(
+@@ -192,8 +359,28 @@ fn check_decode_rows_down_combine(
+         "decode combine requires BF16 [m,H]"
+     );
+     let m = out.shape()[0];
++    ensure!((1..=4).contains(&m), "decode combine geometry");
++    let k =
++        check_rows_down_combine(w, h, x, indices, scores, shared, gate, out, top_k, m)?;
++    Ok((m, k))
++}
++
++#[allow(clippy::too_many_arguments)]
++fn check_rows_down_combine(
++    w: &QuantWeights,
++    h: usize,
++    x: &Tensor,
++    indices: &Tensor,
++    scores: &Tensor,
++    shared: &Tensor,
++    gate: &Tensor,
++    out: &Tensor,
++    top_k: usize,
++    m: usize,
++) -> Result<usize> {
+     ensure!(
+-        (1..=4).contains(&m)
++        out.shape().len() == 2
++            && out.shape()[0] == m
+             && (1..=MAX_K).contains(&top_k)
+             && out.shape()[1] == h
+             && h.is_multiple_of(2),
+@@ -225,7 +412,7 @@ fn check_decode_rows_down_combine(
+             && gate.numel() == m,
+         "decode shared precision or geometry"
+     );
+-    Ok((m, k))
++    Ok(k)
+ }
+ 
+ /// Ordinary fused down/combine/HC body, addressed independently per row.
+diff --git a/vendor/lily-core/src/moe_decode_exact_tests.rs b/vendor/lily-core/src/moe_decode_exact_tests.rs
+index 47180811..aee411c7 100644
+--- a/vendor/lily-core/src/moe_decode_exact_tests.rs
++++ b/vendor/lily-core/src/moe_decode_exact_tests.rs
+@@ -43,7 +43,22 @@ fn weights(
+ fn decode_exact_moe_rows_match_ordinary_bytes() -> Result<()> {
+     let ctx = MetalContext::new()?;
+     let mut seed = 0x39f2_17c1;
+-    let (h, inter, e, top_k) = (2560, 640, 16, 10);
++    // With 16 experts the rows of a pass share most experts; with 64 they
++    // share some or none. The verifier reads each shared expert once
++    // (20261119-LILYROWS-03) and must still equal ordinary decode.
++    for e in [16, 64] {
++        decode_exact_moe_rows_match_ordinary_bytes_at(&ctx, &mut seed, e)?;
++    }
++    Ok(())
++}
++
++fn decode_exact_moe_rows_match_ordinary_bytes_at(
++    ctx: &MetalContext,
++    seed: &mut u32,
++    e: usize,
++) -> Result<()> {
++    let mut seed = *seed;
++    let (h, inter, top_k) = (2560, 640, 10);
+     let shared_gu = weights(&ctx, &mut seed, 4, 2 * inter, h)?;
+     let w = MoeWeights {
+         gate: weights(&ctx, &mut seed, 8, e, h)?,
+@@ -69,7 +84,9 @@ fn decode_exact_moe_rows_match_ordinary_bytes() -> Result<()> {
+             norm_topk_prob: renorm,
+         };
+         let decode = MoeScratch::new(&ctx, &dims)?;
+-        for m in 1..=4 {
++        for (m, mode) in (1..=4).flat_map(|m| {
++            [SharedRows::Off, SharedRows::GateUp, SharedRows::All].map(|mode| (m, mode))
++        }) {
+             let values: Vec<_> = (0..m * h)
+                 .map(|_| (word(&mut seed) % 4097) as f32 / 1024.0 - 2.0)
+                 .collect();
+@@ -104,7 +121,7 @@ fn decode_exact_moe_rows_match_ordinary_bytes() -> Result<()> {
+                 )?;
+                 pass.level_barrier(&[])?;
+             }
+-            prefill_moe_decode_exact(
++            let injected = prefill_moe_decode_exact_shared(
+                 &ctx,
+                 &pass,
+                 &dims,
+@@ -119,12 +136,14 @@ fn decode_exact_moe_rows_match_ordinary_bytes() -> Result<()> {
+                     dequant: &staging,
+                 },
+                 &rows,
+-                &decode,
++                None,
++                mode,
+             )?;
++            ensure!(!injected, "absent HC injection changed passthrough semantics");
+             pass.end()?.commit()?.wait()?;
+             ensure!(
+                 reference.raw_bytes() == candidate.raw_bytes(),
+-                "row-batched MoE differs from ordinary decode"
++                "row-batched MoE differs from ordinary decode: experts {e} rows {m} {mode:?}"
+             );
+         }
+     }
+@@ -505,3 +524,404 @@ fn batched_moe_injection_streaming_timing() -> Result<()> {
+     }
+     Ok(())
+ }
++
++/// Attempt 20261119-LILYROWS-03: the expert-shared verifier kernels must be
++/// byte-identical to the ordinary one-row decode-rows kernels when rows share
++/// all, some or none of their experts, in the same or permuted slot order, up
++/// to nine rows, with and without the HC write.
++#[test]
++#[ignore = "requires a physical Apple Silicon Metal device"]
++fn expert_shared_rows_match_per_row_bytes() -> Result<()> {
++    let ctx = MetalContext::new()?;
++    let (h, inter, e, top_k) = (2560, 640, 128, 10);
++    let patterns = ["none", "all", "all_permuted", "some", "pairs", "random"];
++    let mut cases = 0;
++    let mut compared = 0usize;
++    // Independent draws: two ordinary, one subnormal-heavy (inputs and
++    // affine scales/biases), one cancellation-heavy. Fast-math scheduling can
++    // differ between kernels with identical per-row code, so a single passing
++    // draw is not evidence.
++    for (draw, style) in [(0u32, 0u8), (1, 1), (2, 2), (3, 0)] {
++        let mut seed = 0x5e7a_c0de ^ (draw.wrapping_mul(0x9e37_79b9) | 1);
++        let gate_w = styled_weights(&ctx, &mut seed, e * inter, h, style)?;
++        let up_w = styled_weights(&ctx, &mut seed, e * inter, h, style)?;
++        let down_w = styled_weights(&ctx, &mut seed, e * h, inter, style)?;
++        for m in 1..=9 {
++            for pattern in patterns {
++                let ids_values: Vec<u32> = (0..m * top_k)
++                    .map(|i| {
++                        let (r, s) = (i / top_k, i % top_k);
++                        match pattern {
++                            "none" => (r * top_k + s) as u32,
++                            "all" => s as u32,
++                            "all_permuted" => ((s + 3 * r) % top_k) as u32,
++                            "some" if s % 3 == 0 => s as u32,
++                            "some" => (r * top_k + s + 20) as u32,
++                            // Adjacent rows share half of their experts.
++                            "pairs" => {
++                                ((r / 2) * top_k + (s + 5 * (r % 2)) % (2 * top_k))
++                                    as u32
++                            }
++                            _ => 0,
++                        }
++                    })
++                    .collect();
++                let ids_values = if pattern == "random" {
++                    (0..m)
++                        .flat_map(|_| {
++                            let mut row = Vec::new();
++                            while row.len() < top_k {
++                                let id = word(&mut seed) % 24;
++                                if !row.contains(&id) {
++                                    row.push(id);
++                                }
++                            }
++                            row
++                        })
++                        .collect()
++                } else {
++                    ids_values
++                };
++                for r in 0..m {
++                    let row = &ids_values[r * top_k..(r + 1) * top_k];
++                    ensure!(
++                        row.iter().enumerate().all(|(i, v)| !row[..i].contains(v)),
++                        "test route repeats an expert within a row"
++                    );
++                }
++                let ids = Tensor::from_bytes(
++                    &ctx,
++                    bytemuck::cast_slice(&ids_values),
++                    &[m, top_k],
++                    DType::U32,
++                )?;
++                let rand_bf16 = |seed: &mut u32, n: usize, shape: &[usize]| {
++                    let v = styled_values(seed, n, style);
++                    Tensor::from_f32_as_bf16(&ctx, &v, shape)
++                };
++                let x = rand_bf16(&mut seed, m * h, &[m, h])?;
++                let ref_y = Tensor::zeros(&ctx, &[m * top_k, inter], DType::BF16)?;
++                let cand_y = Tensor::zeros(&ctx, &[m * top_k, inter], DType::BF16)?;
++                let pass = ctx.begin_concurrent()?;
++                for r in 0..m {
++                    moe::moe_gate_up_decode_rows(
++                        &ctx,
++                        &pass,
++                        &gate_w,
++                        &up_w,
++                        inter,
++                        &x.view(r * h, &[1, h])?,
++                        &ids.view(r * top_k, &[1, top_k])?,
++                        &ref_y.view(r * top_k * inter, &[top_k, inter])?,
++                        top_k,
++                    )?;
++                }
++                moe::moe_gate_up_shared_rows(
++                    &ctx, &pass, &gate_w, &up_w, inter, &x, &ids, &cand_y, top_k,
++                )?;
++                pass.commit()?.wait()?;
++                ensure!(
++                    ref_y.raw_bytes() == cand_y.raw_bytes(),
++                    "shared gate/up differs: draw {draw} rows {m} pattern {pattern}"
++                );
++                compared += ref_y.byte_len();
++                // Down/combine from the gate/up activations (plus a perturbation
++                // so slots differ), with and without the HC write.
++                let ea = rand_bf16(&mut seed, m * top_k * inter, &[m * top_k, inter])?;
++                let scores_values: Vec<_> = (0..m * top_k)
++                    .map(|_| (word(&mut seed) % 1000 + 1) as f32 / 4099.0)
++                    .collect();
++                let scores = Tensor::from_f32(&ctx, &scores_values, &[m, top_k])?;
++                let shared = rand_bf16(&mut seed, m * h, &[m, h])?;
++                let gate_values: Vec<_> = (0..m)
++                    .map(|r| [-256.0, 256.0, -0.1234, 0.1234, -0.0, 0.0, 1.5][r % 7])
++                    .collect();
++                let gate = Tensor::from_f32(&ctx, &gate_values, &[m])?;
++                for g in [0usize, 4] {
++                    let ref_out = Tensor::zeros(&ctx, &[m, h], DType::BF16)?;
++                    let out_storage = Tensor::zeros(&ctx, &[m * h + 16], DType::BF16)?;
++                    out_storage.write_bytes(&vec![0xa5; out_storage.byte_len()])?;
++                    let cand_out = out_storage.view(8, &[m, h])?;
++                    let gg = g.max(1);
++                    let initial = rand_bf16(&mut seed, m * gg * h, &[m, gg * h])?;
++                    let ref_hyper = Tensor::zeros(&ctx, &[m, gg * h], DType::BF16)?;
++                    ref_hyper.write_bytes(initial.raw_bytes())?;
++                    let cand_hyper = Tensor::zeros(&ctx, &[m, gg * h], DType::BF16)?;
++                    cand_hyper.write_bytes(initial.raw_bytes())?;
++                    let inj_values: Vec<_> = (0..m * gg)
++                        .map(|i| [-256.0, 256.0, -0.5, 0.5, -0.0, 0.0, 0.3][i % 7])
++                        .collect();
++                    let inj = Tensor::from_f32_as_bf16(&ctx, &inj_values, &[m, gg])?;
++                    let pass = ctx.begin_concurrent()?;
++                    for r in 0..m {
++                        let args = (
++                            &ea.view(r * top_k * inter, &[top_k * inter])?,
++                            &ids.view(r * top_k, &[1, top_k])?,
++                            &scores.view(r * top_k, &[1, top_k])?,
++                            &shared.view(r * h, &[1, h])?,
++                            &gate.view(r, &[1])?,
++                            &ref_out.view(r * h, &[1, h])?,
++                        );
++                        if g == 0 {
++                            moe::moe_down_combine_decode_rows(
++                                &ctx, &pass, &down_w, h, args.0, args.1, args.2,
++                                args.3, args.4, args.5, top_k,
++                            )?;
++                        } else {
++                            moe::moe_down_combine_inject_decode_rows(
++                                &ctx,
++                                &pass,
++                                &down_w,
++                                h,
++                                args.0,
++                                args.1,
++                                args.2,
++                                args.3,
++                                args.4,
++                                args.5,
++                                top_k,
++                                moe::HcInjection {
++                                    hyper: &ref_hyper.view(r * g * h, &[g * h])?,
++                                    logits: &inj.view(r * g, &[g])?,
++                                    groups: g,
++                                },
++                            )?;
++                        }
++                    }
++                    moe::moe_down_combine_shared_rows(
++                        &ctx,
++                        &pass,
++                        &down_w,
++                        h,
++                        &ea,
++                        &ids,
++                        &scores,
++                        &shared,
++                        &gate,
++                        &cand_out,
++                        top_k,
++                        (g > 0).then_some(moe::HcInjection {
++                            hyper: &cand_hyper,
++                            logits: &inj,
++                            groups: g,
++                        }),
++                    )?;
++                    pass.commit()?.wait()?;
++                    ensure!(
++                        ref_out.raw_bytes() == cand_out.raw_bytes(),
++                        "shared down/combine differs: draw {draw} rows {m} pattern {pattern} groups {g}"
++                    );
++                    ensure!(
++                        ref_hyper.raw_bytes() == cand_hyper.raw_bytes(),
++                        "shared HC write differs: draw {draw} rows {m} pattern {pattern} groups {g}"
++                    );
++                    let bytes = out_storage.raw_bytes();
++                    ensure!(
++                        bytes[..16]
++                            .iter()
++                            .chain(&bytes[bytes.len() - 16..])
++                            .all(|&b| b == 0xa5),
++                        "shared down wrote outside its output view"
++                    );
++                    compared += ref_out.byte_len() + ref_hyper.byte_len();
++                    cases += 1;
++                }
++            }
++        }
++    }
++    eprintln!(
++        "{}",
++        serde_json::json!({"scope":"expert_shared_rows_byte_control","attempt":"20261119-LILYROWS-03","draws":4,"down_cases":cases,"compared_bytes":compared,"unequal_bytes":0})
++    );
++    Ok(())
++}
++
++/// Attempt 20261119-LILYROWS-03: does the current per-row routed-expert
++/// verifier already get cross-row sharing from the cache? Times the ordinary
++/// row kernels over 48 distinct synthetic layers (far larger than any cache)
++/// with routes whose rows pick all-distinct, partly shared or identical
++/// experts. Zero-filled weights: only the traffic and dispatch shape matter.
++#[test]
++#[ignore = "physical Apple Silicon; component timings only"]
++fn moe_rows_expert_overlap_timing() -> Result<()> {
++    let ctx = MetalContext::new()?;
++    let (h, inter, top_k, layers, e) = (2560, 640, 10, 48, 40);
++    let zero_q4 = |n: usize, k: usize| -> Result<QuantWeights> {
++        Ok(QuantWeights {
++            codes: Tensor::zeros(&ctx, &[n, k / 8], DType::U32)?,
++            scales: Tensor::zeros(&ctx, &[n, k / 64], DType::BF16)?,
++            biases: Tensor::zeros(&ctx, &[n, k / 64], DType::BF16)?,
++            bits: 4,
++            group_size: 64,
++        })
++    };
++    let banks: Vec<_> = (0..layers)
++        .map(|_| {
++            Ok((zero_q4(e * inter, h)?, zero_q4(e * inter, h)?, zero_q4(e * h, inter)?))
++        })
++        .collect::<Result<_>>()?;
++    let pattern = |name: &str, m: usize| -> Vec<u32> {
++        (0..m * top_k)
++            .map(|i| {
++                let (r, s) = (i / top_k, i % top_k);
++                match name {
++                    "distinct" => (r * top_k + s) as u32,
++                    // Four shared slots: close to the measured 25-30 percent
++                    // saved reads at three and four rows.
++                    "partial" if s < 4 => s as u32,
++                    "partial" => (r * top_k + s) as u32,
++                    _ => s as u32,
++                }
++            })
++            .collect()
++    };
++    let mut cases = Vec::new();
++    for m in 1..=4 {
++        let x = Tensor::zeros(&ctx, &[m, h], DType::BF16)?;
++        let ea = Tensor::zeros(&ctx, &[m * top_k, inter], DType::BF16)?;
++        let scores = Tensor::zeros(&ctx, &[m, top_k], DType::F32)?;
++        let shared = Tensor::zeros(&ctx, &[m, h], DType::BF16)?;
++        let gate = Tensor::zeros(&ctx, &[m], DType::F32)?;
++        let out = Tensor::zeros(&ctx, &[m, h], DType::BF16)?;
++        let names: &[&str] =
++            if m == 1 { &["distinct"] } else { &["distinct", "partial", "same"] };
++        for name in names {
++            let ids_values = pattern(name, m);
++            let distinct = {
++                let mut v = ids_values.clone();
++                v.sort_unstable();
++                v.dedup();
++                v.len()
++            };
++            let ids = Tensor::from_bytes(
++                &ctx,
++                bytemuck::cast_slice(&ids_values),
++                &[m, top_k],
++                DType::U32,
++            )?;
++            let run = |stage: usize| -> Result<f64> {
++                let pass = ctx.begin_concurrent()?;
++                for (g, u, d) in &banks {
++                    match stage {
++                        0 => {
++                            moe::moe_gate_up_decode_rows(
++                                &ctx, &pass, g, u, inter, &x, &ids, &ea, top_k,
++                            )?;
++                            pass.level_barrier(&[&ea])?;
++                        }
++                        1 => {
++                            moe::moe_down_combine_decode_rows(
++                                &ctx, &pass, d, h, &ea, &ids, &scores, &shared, &gate,
++                                &out, top_k,
++                            )?;
++                            pass.level_barrier(&[&out])?;
++                        }
++                        2 => {
++                            moe::moe_gate_up_shared_rows(
++                                &ctx, &pass, g, u, inter, &x, &ids, &ea, top_k,
++                            )?;
++                            pass.level_barrier(&[&ea])?;
++                        }
++                        _ => {
++                            moe::moe_down_combine_shared_rows(
++                                &ctx, &pass, d, h, &ea, &ids, &scores, &shared, &gate,
++                                &out, top_k, None,
++                            )?;
++                            pass.level_barrier(&[&out])?;
++                        }
++                    }
++                }
++                let done = pass.commit()?.wait_retain()?;
++                let t = done.timing()?;
++                Ok((t.gpu_end_secs - t.gpu_start_secs) * 1e3)
++            };
++            let mut samples = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
++            for round in 0..14 {
++                for stage in 0..4 {
++                    let ms = run(stage)?;
++                    if round >= 2 {
++                        samples[stage].push(ms);
++                    }
++                }
++            }
++            let median = |v: &mut Vec<f64>| {
++                v.sort_by(f64::total_cmp);
++                v[v.len() / 2]
++            };
++            let (gu, dn) = (median(&mut samples[0]), median(&mut samples[1]));
++            let (sgu, sdn) = (median(&mut samples[2]), median(&mut samples[3]));
++            cases.push(serde_json::json!({
++                "rows": m, "pattern": name, "distinct_experts": distinct,
++                "gate_up_ms_48_layers": gu, "down_combine_ms_48_layers": dn,
++                "shared_gate_up_ms_48_layers": sgu, "shared_down_combine_ms_48_layers": sdn,
++            }));
++        }
++    }
++    eprintln!(
++        "{}",
++        serde_json::json!({"scope":"moe_rows_expert_overlap_timing","attempt":"20261119-LILYROWS-03","layers":layers,"samples":12,"cases":cases})
++    );
++    Ok(())
++}
++
++/// Test values by style: 0 ordinary, 1 mostly BF16 subnormals (both signs)
++/// mixed with ordinary values, 2 large near-cancelling pairs.
++fn styled_values(seed: &mut u32, n: usize, style: u8) -> Vec<f32> {
++    let ordinary = |seed: &mut u32| (word(seed) % 4097) as f32 / 1024.0 - 2.0;
++    (0..n)
++        .map(|i| match style {
++            1 => {
++                let w = word(seed);
++                if w % 4 != 0 {
++                    let bits = ((w >> 8) % 0x7f + 1) as u16
++                        | if w & 0x10 != 0 { 0x8000 } else { 0 };
++                    half::bf16::from_bits(bits).to_f32()
++                } else {
++                    ordinary(seed)
++                }
++            }
++            2 => {
++                let w = word(seed);
++                let big = ((w % 4097) as f32 + 1.0) * 64.0;
++                if i % 2 == 0 { big } else { -big + ((w >> 16) % 5) as f32 * 0.25 }
++            }
++            _ => ordinary(seed),
++        })
++        .collect()
++}
++
++/// Q4 group-64 weights whose affine terms follow `styled_values`: style 1
++/// gives subnormal scales and biases, style 2 large cancelling biases.
++fn styled_weights(
++    ctx: &MetalContext,
++    seed: &mut u32,
++    n: usize,
++    k: usize,
++    style: u8,
++) -> Result<QuantWeights> {
++    if style == 0 {
++        return weights(ctx, seed, 4, n, k);
++    }
++    let words = k / 8;
++    let codes: Vec<_> = (0..n * words).map(|_| word(seed)).collect();
++    let groups = n * k / 64;
++    let (scales, biases) = if style == 1 {
++        (styled_values(seed, groups, 1), styled_values(seed, groups, 1))
++    } else {
++        let scales: Vec<_> =
++            (0..groups).map(|_| (word(seed) % 127 + 1) as f32 / 4096.0).collect();
++        (scales, styled_values(seed, groups, 2))
++    };
++    Ok(QuantWeights {
++        codes: Tensor::from_bytes(
++            ctx,
++            bytemuck::cast_slice(&codes),
++            &[n, words],
++            DType::U32,
++        )?,
++        scales: Tensor::from_f32_as_bf16(ctx, &scales, &[n, k / 64])?,
++        biases: Tensor::from_f32_as_bf16(ctx, &biases, &[n, k / 64])?,
++        bits: 4,
++        group_size: 64,
++    })
++}
+diff --git a/vendor/lily-core/src/moe_ffn.rs b/vendor/lily-core/src/moe_ffn.rs
+index 88f17787..df176a46 100644
+--- a/vendor/lily-core/src/moe_ffn.rs
++++ b/vendor/lily-core/src/moe_ffn.rs
+@@ -779,6 +779,29 @@ pub(crate) fn prefill_moe_decode_exact_with_injection(
+     ms: &PrefillMoeScratch,
+     _decode_scratch: &MoeScratch,
+     injection: Option<moe::HcInjection<'_>>,
++) -> Result<bool> {
++    prefill_moe_decode_exact_shared(
++        ctx,
++        pass,
++        dims,
++        w,
++        io,
++        ms,
++        injection,
++        expert_shared_rows(),
++    )
++}
++
++#[allow(clippy::too_many_arguments)]
++fn prefill_moe_decode_exact_shared(
++    ctx: &MetalContext,
++    pass: &ComputePass<'_>,
++    dims: &MoeDims,
++    w: &MoeWeights,
++    io: &PrefillMoeIo<'_>,
++    ms: &PrefillMoeScratch,
++    injection: Option<moe::HcInjection<'_>>,
++    shared_rows: SharedRows,
+ ) -> Result<bool> {
+     let m = io.x.shape()[0];
+     ensure!((1..=4).contains(&m), "decode-exact MoE supports 1..4 rows");
+@@ -820,17 +843,31 @@ pub(crate) fn prefill_moe_decode_exact_with_injection(
+         None => &ms.indices,
+     };
+     pass.profile_stage(crate::metal::stage_profile::Phase::MoeGateUp)?;
+-    moe::moe_gate_up_decode_rows(
+-        ctx,
+-        pass,
+-        &w.expert_gate,
+-        &w.expert_up,
+-        inter,
+-        io.x,
+-        slots,
+-        &ms.ea,
+-        top_k,
+-    )?;
++    if shared_rows != SharedRows::Off {
++        moe::moe_gate_up_shared_rows(
++            ctx,
++            pass,
++            &w.expert_gate,
++            &w.expert_up,
++            inter,
++            io.x,
++            slots,
++            &ms.ea,
++            top_k,
++        )?;
++    } else {
++        moe::moe_gate_up_decode_rows(
++            ctx,
++            pass,
++            &w.expert_gate,
++            &w.expert_up,
++            inter,
++            io.x,
++            slots,
++            &ms.ea,
++            top_k,
++        )?;
++    }
+     project_mat_decode_exact(
+         ctx,
+         pass,
+@@ -840,6 +877,23 @@ pub(crate) fn prefill_moe_decode_exact_with_injection(
+     )?;
+     pass.level_barrier(&[&ms.ea, &ms.shared_out])?;
+     pass.profile_stage(crate::metal::stage_profile::Phase::MoeDown)?;
++    if shared_rows == SharedRows::All {
++        moe::moe_down_combine_shared_rows(
++            ctx,
++            pass,
++            &w.expert_down,
++            h,
++            &ms.ea,
++            slots,
++            &ms.scores,
++            &ms.shared_out,
++            &ms.decode_shared_gate,
++            io.out,
++            top_k,
++            injection,
++        )?;
++        return Ok(injection.is_some());
++    }
+     if let Some(injection) = injection {
+         moe::moe_down_combine_inject_decode_rows(
+             ctx,
+@@ -1299,3 +1353,30 @@ pub(crate) fn project_lm_logits(
+     pass.level_barrier(&[out])?;
+     quant::round_logits_bf16_values(ctx, pass, out)
+ }
++
++/// Experimental expert-shared verifier kernels (attempt 20261119-LILYROWS-03):
++/// rows of a pass that select the same routed expert read its weights once.
++/// Byte-identical to the per-row kernels by test, but not faster, so off by
++/// default. The private `STARK_LILY_MOE_SHARED_ROWS` selects `gate_up` (shared
++/// gate/up only) or `all` (gate/up and down/combine) for same-binary A/B.
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub(crate) enum SharedRows {
++    Off,
++    GateUp,
++    All,
++}
++
++fn expert_shared_rows() -> SharedRows {
++    static MODE: std::sync::OnceLock<SharedRows> = std::sync::OnceLock::new();
++    *MODE.get_or_init(|| match std::env::var("STARK_LILY_MOE_SHARED_ROWS").as_deref() {
++        Ok("gate_up") => SharedRows::GateUp,
++        Ok("all") => SharedRows::All,
++        _ => SharedRows::Off,
++    })
++}
++
++/// Private verify-row expert-overlap diagnostic (attempt 20261119-LILYROWS-03).
++/// Enabled only by `STARK_LILY_MOE_ROW_OVERLAP_OUTPUT=<path>`; see
++/// [`row_overlap`].
++#[path = "moe_row_overlap.rs"]
++pub(crate) mod row_overlap;
+diff --git a/vendor/lily-core/src/moe_row_overlap.rs b/vendor/lily-core/src/moe_row_overlap.rs
+new file mode 100644
+index 00000000..dc93b6e1
+--- /dev/null
++++ b/vendor/lily-core/src/moe_row_overlap.rs
+@@ -0,0 +1,213 @@
++// Stark: private diagnostic for attempt 20261119-LILYROWS-03.
++//! Cross-row routed-expert overlap counter for exact verify passes.
++//!
++//! Off unless `STARK_LILY_MOE_ROW_OVERLAP_OUTPUT` names a file. When on, each
++//! exact verify layer copies its `[m, top_k]` routed expert ids into a
++//! process-local buffer. When the next verify pass (or the next prefill)
++//! starts encoding, the previous pass has completed and its ids are reduced
++//! on the host to aggregate counts; the ids themselves are never written or
++//! logged. One JSON line of counts per segment (a segment ends at the next
++//! large prefill, i.e. the next request) is appended to the file. No token
++//! ids, router scores or probabilities are recorded.
++
++use std::collections::BTreeMap;
++use std::fs::OpenOptions;
++use std::io::Write;
++use std::path::PathBuf;
++use std::sync::{Mutex, OnceLock};
++
++use anyhow::{Result, ensure};
++
++use crate::kernels::u32_bytes;
++use crate::metal::{ComputePass, Grid, MetalContext, MslVersion};
++use crate::tensor::{DType, Tensor};
++
++const SOURCE: &str = r#"
++#include <metal_stdlib>
++using namespace metal;
++kernel void stark_moe_row_overlap_copy(
++    device const uint* src [[buffer(0)]],
++    device uint* dst [[buffer(1)]],
++    constant uint& n [[buffer(2)]],
++    uint i [[thread_position_in_grid]]) {
++    if (i < n) { dst[i] = src[i]; }
++}
++"#;
++
++const MAX_LAYERS: usize = 128;
++const MAX_ROWS: usize = 4;
++const MAX_TOP_K: usize = 32;
++
++fn output() -> Option<&'static PathBuf> {
++    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
++    PATH.get_or_init(|| {
++        std::env::var_os("STARK_LILY_MOE_ROW_OVERLAP_OUTPUT")
++            .filter(|v| !v.is_empty())
++            .map(PathBuf::from)
++    })
++    .as_ref()
++}
++
++#[derive(Default, Clone, Copy)]
++struct Totals {
++    verify_passes: u64,
++    layer_passes: u64,
++    selections: u64,
++    duplicate_selections: u64,
++    distinct_experts: u64,
++    /// Experts row `r` selects that no earlier row of the pass selected.
++    new_by_row: [u64; MAX_ROWS],
++}
++
++struct Pending {
++    ids: Tensor,
++    rows: usize,
++    top_k: usize,
++    layers: usize,
++}
++
++struct State {
++    pending: Option<Pending>,
++    totals: BTreeMap<usize, Totals>,
++    segment: u64,
++}
++
++// The buffer is only read on the host after the GPU work that wrote it has
++// completed; the mutex serializes host access.
++unsafe impl Send for State {}
++
++fn state() -> &'static Mutex<State> {
++    static STATE: OnceLock<Mutex<State>> = OnceLock::new();
++    STATE.get_or_init(|| {
++        Mutex::new(State { pending: None, totals: BTreeMap::new(), segment: 0 })
++    })
++}
++
++fn reduce(state: &mut State) -> Result<()> {
++    let Some(p) = state.pending.as_mut() else { return Ok(()) };
++    if p.layers == 0 {
++        return Ok(());
++    }
++    let ids = p.ids.to_u32()?;
++    let (m, k) = (p.rows, p.top_k);
++    let t = state.totals.entry(m).or_default();
++    t.verify_passes += 1;
++    for layer in 0..p.layers {
++        let base = layer * MAX_ROWS * MAX_TOP_K;
++        let row = |r: usize| &ids[base + r * k..base + (r + 1) * k];
++        t.layer_passes += 1;
++        let mut seen: Vec<u32> = Vec::with_capacity(m * k);
++        for r in 0..m {
++            for &e in row(r) {
++                t.selections += 1;
++                if (0..m).any(|o| o != r && row(o).contains(&e)) {
++                    t.duplicate_selections += 1;
++                }
++                if !seen.contains(&e) {
++                    seen.push(e);
++                    t.new_by_row[r] += 1;
++                }
++            }
++        }
++        t.distinct_experts += seen.len() as u64;
++    }
++    p.layers = 0;
++    Ok(())
++}
++
++fn write_segment(state: &mut State) -> Result<()> {
++    let Some(path) = output() else { return Ok(()) };
++    if state.totals.is_empty() {
++        return Ok(());
++    }
++    let mut by_rows = serde_json::Map::new();
++    for (m, t) in &state.totals {
++        by_rows.insert(
++            m.to_string(),
++            serde_json::json!({
++                "verify_passes": t.verify_passes,
++                "layer_passes": t.layer_passes,
++                "selections": t.selections,
++                "duplicate_selections": t.duplicate_selections,
++                "distinct_experts": t.distinct_experts,
++                "new_by_row": &t.new_by_row[..*m],
++            }),
++        );
++    }
++    let line = serde_json::json!({
++        "diagnostic": "moe_row_overlap",
++        "attempt": "20261119-LILYROWS-03",
++        "segment": state.segment,
++        "by_rows": by_rows,
++    });
++    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
++    writeln!(file, "{line}")?;
++    state.segment += 1;
++    state.totals.clear();
++    Ok(())
++}
++
++/// Records this exact verify layer's routed ids. `indices` is `[m, top_k]`
++/// and must already be complete in pass order (the caller places this after
++/// the MoE block's barriers). A no-op unless the diagnostic is enabled.
++pub(crate) fn capture(
++    ctx: &MetalContext,
++    pass: &ComputePass<'_>,
++    layer_index: usize,
++    indices: &Tensor,
++) -> Result<()> {
++    if output().is_none() {
++        return Ok(());
++    }
++    ensure!(indices.dtype() == DType::U32 && indices.shape().len() == 2, "overlap ids");
++    let (m, k) = (indices.shape()[0], indices.shape()[1]);
++    ensure!(
++        (1..=MAX_ROWS).contains(&m) && k <= MAX_TOP_K && layer_index < MAX_LAYERS,
++        "overlap geometry"
++    );
++    let mut st =
++        state().lock().map_err(|_| anyhow::anyhow!("overlap state poisoned"))?;
++    if layer_index == 0 {
++        // The previous verify pass completed before this one is encoded.
++        reduce(&mut st)?;
++    }
++    if st.pending.is_none() {
++        st.pending = Some(Pending {
++            ids: Tensor::zeros(ctx, &[MAX_LAYERS * MAX_ROWS * MAX_TOP_K], DType::U32)?,
++            rows: m,
++            top_k: k,
++            layers: 0,
++        });
++    }
++    let p = st.pending.as_mut().expect("pending allocated");
++    if layer_index == 0 {
++        p.rows = m;
++        p.top_k = k;
++        p.layers = 0;
++    }
++    ensure!(p.rows == m && p.top_k == k, "overlap rows changed within a pass");
++    let dst = p.ids.view(layer_index * MAX_ROWS * MAX_TOP_K, &[m * k])?;
++    let n = m * k;
++    let pipeline =
++        ctx.pipeline("stark_moe_row_overlap_copy", SOURCE, MslVersion::V3_1)?;
++    pass.dispatch_at(
++        &pipeline,
++        &[indices.binding(), dst.binding()],
++        &[&u32_bytes(n)],
++        Grid::Threads { grid: (n, 1, 1), threadgroup: (n.min(256), 1, 1) },
++    )?;
++    p.layers = p.layers.max(layer_index + 1);
++    Ok(())
++}
++
++/// Ends a segment at the start of a large prefill: reduces the last verify
++/// pass (complete by then) and appends one aggregate line.
++pub(crate) fn end_segment() -> Result<()> {
++    if output().is_none() {
++        return Ok(());
++    }
++    let mut st =
++        state().lock().map_err(|_| anyhow::anyhow!("overlap state poisoned"))?;
++    reduce(&mut st)?;
++    write_segment(&mut st)
++}
+diff --git a/vendor/lily-core/src/qwen4exp/model.rs b/vendor/lily-core/src/qwen4exp/model.rs
+index 5d515412..fc5bb790 100644
+--- a/vendor/lily-core/src/qwen4exp/model.rs
++++ b/vendor/lily-core/src/qwen4exp/model.rs
+@@ -2934,6 +2934,17 @@ impl Qwen4ExpModel {
+         } else {
+             pass.level_barrier(&[&ps.branch_out])?;
+         }
++        // Private overlap diagnostic (20261119-LILYROWS-03); no-op unless enabled.
++        if capture.is_some_and(|c| c.exact) {
++            crate::moe_ffn::row_overlap::capture(
++                ctx,
++                pass,
++                layer_index,
++                &prefix_rows(&ps.moe.indices, ps.m)?,
++            )?;
++        } else if ps.m > 4 && layer_index == 0 {
++            crate::moe_ffn::row_overlap::end_segment()?;
++        }
+         self.trace_stage(ctx, pass, layer_index, "moe_output", &ps.branch_out, ps.m)?;
+         if !injected {
+             hc_inject_bf16(

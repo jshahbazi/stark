@@ -30,6 +30,30 @@ pub(crate) struct MtpCapabilities {
     pub verification: &'static str,
 }
 
+/// Opt-in per-request MTP round scheduling (attempt 20261119-LILYDEPTH-01).
+/// The default runs the request's draft count with head drafts every round.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MtpScheduling {
+    /// `"mtp_policy": "adaptive"`: per-round depth up to the draft count.
+    pub adaptive: bool,
+    /// `"mtp_lookup": true`: prompt-lookup proposals when the output copies.
+    pub lookup: bool,
+}
+
+impl MtpScheduling {
+    pub fn is_default(self) -> bool {
+        !self.adaptive && !self.lookup
+    }
+
+    pub fn policy(self) -> &'static str {
+        if self.adaptive {
+            "adaptive"
+        } else {
+            "fixed"
+        }
+    }
+}
+
 /// An omitted setting uses its default, while an explicitly present null is
 /// invalid. Serde's ordinary Option<T> would otherwise conflate the two.
 fn present_value<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -128,6 +152,10 @@ enum Request {
         mtp: Option<bool>,
         #[serde(default, deserialize_with = "present_value")]
         mtp_drafts: Option<u32>,
+        #[serde(default, deserialize_with = "present_value")]
+        mtp_policy: Option<String>,
+        #[serde(default, deserialize_with = "present_value")]
+        mtp_lookup: Option<bool>,
         #[serde(default)]
         stop_token_ids: Vec<u32>,
         #[serde(default)]
@@ -305,6 +333,7 @@ pub(crate) struct GenerationOptions {
     pub seed: u64,
     pub sampling: Sampling,
     pub mtp_drafts: u32,
+    pub mtp_scheduling: MtpScheduling,
     pub eos_token_ids: Vec<u32>,
     pub extra_stop_token_ids: Vec<u32>,
     pub stop: Vec<String>,
@@ -559,6 +588,10 @@ pub(crate) trait GenerationBackend {
     fn default_mtp_drafts(&self) -> u32 {
         0
     }
+    /// Whether requests may select adaptive depth or prompt lookup.
+    fn supports_mtp_scheduling(&self) -> bool {
+        false
+    }
     fn mtp_metadata(&self) -> Option<Value> {
         None
     }
@@ -769,6 +802,40 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         Ok(drafts)
     }
 
+    /// Resolves the opt-in round scheduling selectors. Either needs MTP on and
+    /// a backend that supports it. Adaptive depth without an explicit draft
+    /// count plans up to the loaded model's limit.
+    fn resolve_mtp_scheduling(
+        &self,
+        policy: Option<String>,
+        lookup: Option<bool>,
+        explicit_drafts: bool,
+        drafts: &mut u32,
+    ) -> Result<MtpScheduling, &'static str> {
+        let adaptive = match policy.as_deref() {
+            None | Some("fixed") => false,
+            Some("adaptive") => true,
+            Some(_) => return Err("invalid_generation_request"),
+        };
+        let scheduling = MtpScheduling {
+            adaptive,
+            lookup: lookup.unwrap_or(false),
+        };
+        if scheduling.is_default() {
+            return Ok(scheduling);
+        }
+        if *drafts == 0 {
+            return Err("invalid_generation_request");
+        }
+        if !self.backend.supports_mtp_scheduling() {
+            return Err("mtp_not_supported");
+        }
+        if adaptive && !explicit_drafts {
+            *drafts = self.mtp.ok_or("mtp_not_supported")?.max_drafts as u32;
+        }
+        Ok(scheduling)
+    }
+
     fn validate_options(
         &self,
         options: &GenerationOptions,
@@ -787,6 +854,10 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             return Err("resource_budget_exceeded");
         }
         self.resolve_mtp(None, Some(options.mtp_drafts))?;
+        if !options.mtp_scheduling.is_default() && (options.mtp_drafts == 0 || !self.backend.supports_mtp_scheduling())
+        {
+            return Err("invalid_generation_request");
+        }
         if self.backend.max_context_length().is_some_and(|max| options.context_tokens > max) {
             return Err("context_overflow");
         }
@@ -812,6 +883,11 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         let options = if effective_drafts != requested_drafts {
             effective_options = GenerationOptions {
                 mtp_drafts: effective_drafts,
+                mtp_scheduling: if effective_drafts == 0 {
+                    MtpScheduling::default()
+                } else {
+                    options.mtp_scheduling
+                },
                 ..options.clone()
             };
             &effective_options
@@ -946,6 +1022,17 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     fields.insert(name.to_owned(), expected);
                 }
             }
+            if !options.mtp_scheduling.is_default() {
+                for (name, expected) in [
+                    ("policy", json!(options.mtp_scheduling.policy())),
+                    ("lookup", json!(options.mtp_scheduling.lookup)),
+                ] {
+                    if fields.get(name).is_some_and(|value| *value != expected) {
+                        return Err("invalid_generation_output");
+                    }
+                    fields.insert(name.to_owned(), expected);
+                }
+            }
             if effective_drafts != requested_drafts {
                 fields.insert("requested_drafts".to_owned(), json!(requested_drafts));
                 fields.insert("fallback_reason".to_owned(), json!("unsupported_sampling"));
@@ -1034,6 +1121,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     seed: 0,
                     sampling,
                     mtp_drafts: self.resolve_mtp(mtp, mtp_drafts)?,
+                    mtp_scheduling: MtpScheduling::default(),
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
                     extra_stop_token_ids: Vec::new(),
                     stop: Vec::new(),
@@ -1079,6 +1167,8 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 sampling,
                 mtp,
                 mtp_drafts,
+                mtp_policy,
+                mtp_lookup,
                 stop_token_ids,
                 stream,
                 stop,
@@ -1086,12 +1176,16 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 cache_scope,
             } => {
                 let cache_scope = self.resolve_cache_scope(cache_scope)?;
+                let mut drafts = self.resolve_mtp(mtp, mtp_drafts)?;
+                let mtp_scheduling =
+                    self.resolve_mtp_scheduling(mtp_policy, mtp_lookup, mtp_drafts.is_some(), &mut drafts)?;
                 let options = GenerationOptions {
                     context_tokens,
                     max_new_tokens,
                     seed,
                     sampling,
-                    mtp_drafts: self.resolve_mtp(mtp, mtp_drafts)?,
+                    mtp_drafts: drafts,
+                    mtp_scheduling,
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
                     extra_stop_token_ids: stop_token_ids,
                     stop,
@@ -1145,6 +1239,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     seed: 0,
                     sampling: Sampling::default(),
                     mtp_drafts: 0,
+                    mtp_scheduling: MtpScheduling::default(),
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
                     extra_stop_token_ids: Vec::new(),
                     stop: Vec::new(),
@@ -1234,6 +1329,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     seed,
                     sampling,
                     mtp_drafts: 0,
+                    mtp_scheduling: MtpScheduling::default(),
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
                     extra_stop_token_ids: stop_token_ids,
                     stop,
@@ -1449,6 +1545,11 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         None => json!({"supported":false,"max_drafts":0,"recommended_drafts":0,
             "default_drafts":0,"operations":[]}),
     };
+    if worker.mtp.is_some() && worker.backend.supports_mtp_scheduling() {
+        readiness["mtp"]["policies"] = json!(["fixed", "adaptive"]);
+        readiness["mtp"]["default_policy"] = json!("fixed");
+        readiness["mtp"]["lookup"] = json!(true);
+    }
     if worker.media.is_some() && worker.backend.supports_images() {
         let identity = worker
             .backend
@@ -1603,6 +1704,8 @@ mod tests {
         prefix_reuse_override: Option<usize>,
         plans: Vec<RecordedPlan>,
         planning_allowed: bool,
+        mtp_scheduling: bool,
+        scheduling_requests: Vec<MtpScheduling>,
     }
 
     struct FakePreparedImage {
@@ -1678,6 +1781,9 @@ mod tests {
         fn default_mtp_drafts(&self) -> u32 {
             self.default_mtp_drafts
         }
+        fn supports_mtp_scheduling(&self) -> bool {
+            self.mtp_scheduling
+        }
         fn effective_mtp_drafts(
             &self,
             options: &GenerationOptions,
@@ -1739,6 +1845,7 @@ mod tests {
             self.seeds.push(options.seed);
             self.sampling.push(options.sampling.clone());
             self.mtp_requests.push(options.mtp_drafts);
+            self.scheduling_requests.push(options.mtp_scheduling);
             self.drained.store(false, Ordering::SeqCst);
             // Mirror the native backend: take the entry, reuse or drop it, and
             // retain a completed scoped state as pending until publication.
@@ -1963,6 +2070,8 @@ mod tests {
             prefix_reuse_override: None,
             plans: Vec::new(),
             planning_allowed: true,
+            mtp_scheduling: false,
+            scheduling_requests: Vec::new(),
         })
         .unwrap()
     }
@@ -2100,6 +2209,93 @@ mod tests {
         assert_eq!(readiness["mtp"]["max_drafts"], 3);
         assert_eq!(readiness["mtp"]["recommended_drafts"], 2);
         assert_eq!(readiness["mtp"]["operations"], json!(["generate"]));
+    }
+
+    #[test]
+    fn mtp_scheduling_selectors_are_opt_in_validated_and_acknowledged() {
+        let mut worker = mtp_worker(3, 2);
+        let mut request = standard();
+        request["mtp_drafts"] = json!(2);
+        request["mtp_policy"] = json!("adaptive");
+        // A backend without scheduling refuses before inference.
+        assert_eq!(post(&mut worker, request.clone())["error"], "mtp_not_supported");
+        assert_eq!(worker.backend.generation_calls, 0);
+        worker.backend.mtp_scheduling = true;
+        let mut output = Vec::new();
+        run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
+        let readiness: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(readiness["mtp"]["policies"], json!(["fixed", "adaptive"]));
+        assert_eq!(readiness["mtp"]["default_policy"], "fixed");
+        assert_eq!(readiness["mtp"]["lookup"], true);
+        // Defaults and explicit "fixed" are the existing behaviour, unacknowledged.
+        for policy in [None, Some("fixed")] {
+            let mut plain = standard();
+            plain["mtp_drafts"] = json!(2);
+            if let Some(policy) = policy {
+                plain["mtp_policy"] = json!(policy);
+            }
+            let reply = post(&mut worker, plain);
+            assert!(reply.get("error").is_none());
+            assert!(reply["mtp"].get("policy").is_none() && reply["mtp"].get("lookup").is_none());
+        }
+        let reply = post(&mut worker, request.clone());
+        assert!(reply.get("error").is_none());
+        assert_eq!((reply["mtp"]["policy"].clone(), reply["mtp"]["lookup"].clone()), (json!("adaptive"), json!(false)));
+        // Adaptive with `mtp: true` plans up to the model limit.
+        let mut toggle = standard();
+        toggle["mtp"] = json!(true);
+        toggle["mtp_policy"] = json!("adaptive");
+        toggle["mtp_lookup"] = json!(true);
+        let reply = post(&mut worker, toggle);
+        assert_eq!(reply["mtp"]["drafts"], 3);
+        assert_eq!((reply["mtp"]["policy"].clone(), reply["mtp"]["lookup"].clone()), (json!("adaptive"), json!(true)));
+        let mut lookup = standard();
+        lookup["mtp_drafts"] = json!(1);
+        lookup["mtp_lookup"] = json!(true);
+        let reply = post(&mut worker, lookup);
+        assert_eq!((reply["mtp"]["drafts"].clone(), reply["mtp"]["policy"].clone()), (json!(1), json!("fixed")));
+        assert_eq!(
+            worker.backend.scheduling_requests,
+            [
+                MtpScheduling::default(),
+                MtpScheduling::default(),
+                MtpScheduling {
+                    adaptive: true,
+                    lookup: false
+                },
+                MtpScheduling {
+                    adaptive: true,
+                    lookup: true
+                },
+                MtpScheduling {
+                    adaptive: false,
+                    lookup: true
+                },
+            ]
+        );
+        assert_eq!(worker.backend.mtp_requests, [2, 2, 2, 3, 1]);
+        let calls = worker.backend.generation_calls;
+        // Selectors without MTP, unknown policies and wrong types are refused.
+        for (key, value, drafts, error) in [
+            ("mtp_policy", json!("adaptive"), json!(0), "invalid_generation_request"),
+            ("mtp_lookup", json!(true), json!(0), "invalid_generation_request"),
+            ("mtp_policy", json!("planner"), json!(2), "invalid_generation_request"),
+            ("mtp_policy", json!(null), json!(2), "invalid_request"),
+            ("mtp_lookup", json!("yes"), json!(2), "invalid_request"),
+        ] {
+            let mut bad = standard();
+            bad["mtp_drafts"] = drafts;
+            bad[key] = value;
+            assert_eq!(post(&mut worker, bad)["error"], error, "{key}");
+        }
+        let mut off = standard();
+        off["mtp_lookup"] = json!(true);
+        assert_eq!(post(&mut worker, off)["error"], "invalid_generation_request");
+        let mut off = standard();
+        off["mtp_lookup"] = json!(false);
+        off["mtp_policy"] = json!("fixed");
+        assert!(post(&mut worker, off).get("error").is_none());
+        assert_eq!(worker.backend.generation_calls, calls + 1);
     }
 
     #[test]
@@ -2704,6 +2900,7 @@ mod tests {
             seed: 0,
             sampling: Sampling::Greedy {},
             mtp_drafts: 0,
+            mtp_scheduling: MtpScheduling::default(),
             eos_token_ids: vec![1],
             extra_stop_token_ids: Vec::new(),
             stop: Vec::new(),
@@ -2742,6 +2939,7 @@ mod tests {
             seed: 0,
             sampling: Sampling::Greedy {},
             mtp_drafts: 0,
+            mtp_scheduling: MtpScheduling::default(),
             eos_token_ids: vec![1],
             extra_stop_token_ids: Vec::new(),
             stop: Vec::new(),
@@ -2907,6 +3105,7 @@ mod tests {
             seed: 0,
             sampling: Sampling::default(),
             mtp_drafts: 0,
+            mtp_scheduling: MtpScheduling::default(),
             eos_token_ids: vec![1],
             extra_stop_token_ids: Vec::new(),
             stop: Vec::new(),
@@ -2961,6 +3160,7 @@ mod tests {
                     seed: 0,
                     sampling: Sampling::default(),
                     mtp_drafts: 0,
+                    mtp_scheduling: MtpScheduling::default(),
                     eos_token_ids: vec![1],
                     extra_stop_token_ids: Vec::new(),
                     stop: Vec::new(),

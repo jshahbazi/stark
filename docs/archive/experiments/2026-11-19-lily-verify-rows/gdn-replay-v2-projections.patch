@@ -1,0 +1,3530 @@
+diff --git a/docs/model-experiments/2026-11-19-lily-gdn-verify-replay.md b/docs/model-experiments/2026-11-19-lily-gdn-verify-replay.md
+new file mode 100644
+index 00000000..391635d5
+--- /dev/null
++++ b/docs/model-experiments/2026-11-19-lily-gdn-verify-replay.md
+@@ -0,0 +1,95 @@
++# 20261119-LILYROWS-02: Lily GDN verify replay rollback
++
++## Identity and state
++
++| Field | Value |
++| --- | --- |
++| Attempt ID / registered date / executed date / owner | `20261119-LILYROWS-02` / 2026-11-19 / 2026-11-19 / `gdn-replay` workstream of the Lily MTP speed project |
++| Kind | Kernel, state-affecting rollback path, memory and performance |
++| Attempt state | Completed (draft record, uncommitted worktree) |
++| Result and acceptance criterion | Passed exactness: kernel byte tests, real-model verify/rollback control and the end-to-end output-hash gate on every arm. Performance target (GDN verify about 3.6/3.9/4.2 ms at 2/3/4 rows, slope at or under 0.3 ms per row) not met: the recurrence now meets it, the GDN input projection does not (see below) |
++| Evidence scope | Operator/component (synthetic byte and timing), full-model numerical, lifecycle (early-stop drop path), end-to-end timing (screening, shared host) |
++| Promotion decision | Awaiting orchestrator integration and a quiet comparison |
++| Disposition | Experiment only, uncommitted in the workstream worktree |
++| Predecessor / related attempts / governing issue / PR | Baseline `20261119-SUSHI-02`; related: projection reuse (`2026-11-16-lily-projection-reuse.md`), small-row verifier (`docs/benchmarks/2026-11-15-lily-small-row-verifier.md`) |
++
++## Hypothesis and change
++
++- Problem: in `BatchMode::VerifyHost` the GDN recurrence kernel `gdn_verify_gated_exact_register` wrote a full F32 state after every row but the last (113,246,208 bytes per extra row over 36 layers) so a partial accept could copy one back. The baseline brief attributed the rising GDN verify slope (0.55, 1.24, 1.65 ms) to this.
++- Diagnostic first step: the verify stage profile emitted only the parent `qwen.mtp.verify.gpu.gdn` because `block_batched` marked `Phase::Gdn` and `gdn_batched` (the verify/prefill GDN branch) had no sub-phase markers; only the decode branch (`gdn_decode_branch`) did. The exact verify branches of `gdn_batched` now mark input projection(+conv), conv, recurrence(+norm) and output projection, the same `Phase::Gdn*` children decode uses. Markers are no-ops unless stage profiling is enabled.
++- Candidate (Sushi technique, reimplemented; no code copied): the verify recurrence reads the layer state and writes only the final state, into the other half of a per-layer double buffer (`SpecScratch::gdn_shadow`). The host swaps the two handles after the pass (`DecodeState::swap_gdn_shadow`, no data moved), so the shadow then holds the pre-verify state. The pass writes the rows' recurrence inputs (convolved q/k/v, `a`, `b`) straight into per-layer replay rows instead of prefill scratch. On a partial accept, `finish_host_verify` reruns the same compiled kernel (same pipeline, same arguments, prefix views) from the shadow over the committed rows into the current state; a full accept does nothing. The pre-verify state survives the first finish, so the early-stop `Drop` path can finish again with a smaller count. Row count is a kernel parameter (Rust limit `GDN_VERIFY_MAX_ROWS = 16`; tests run 1 to 9 rows). The ValueKey (official) verify kernel got the same in/out split and replay.
++- Legacy GPU-sampled path (`verify`, `BatchMode::Verify`, not called anywhere in Stark) keeps per-row captures, now allocated lazily on its first use; the serial reference `verify_host` copies the state to the shadow and records replay rows so the shared `finish_host_verify` replays for it too.
++- Controls set before running: byte identity to ordinary decode for outputs, final state, untouched pre-verify state, in-place form, and every replay prefix; real-model `private_checkpoint_mtp_verify_and_rollback_match_serial` with zero unequal values in verify, rollback and host-serial phases; identical output hashes to the frozen baseline on all eight arms.
++
++## Artifact, source and environment
++
++| Field | Baseline | Candidate |
++| --- | --- | --- |
++| Model family, exact checkpoint and upstream revision | `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` at `0f94842e3682b49acace4daeb4cf2e65a6f94f83`, installed copy, image tower loaded | same |
++| Format/quantization and hashes | Lily Q4-XL, KeyValue GDN state layout; per-file hashes not re-recorded | same |
++| Backend, vendor revision and local patch provenance | `vendor/lily-core` at base | Stark-local patch to `kernels/gdn.rs`, `kernels/metal/gdn.metal`, `qwen4exp/{model,spec,host_spec,request_memory}.rs` and GDN tests |
++| Stark commit, dirty patch and executable hash | `4d09b55045f24eab81da0a9b5b024b9c02318459` plus the diagnostic markers only; worker SHA-256 `d42451b7cb067e91d72b2ff252e9ad421f959c5c873b0caa042c2c7561e2fd6d` (frozen baseline worker `5dfb90b6...` for hash gate) | same base plus this patch; worker SHA-256 `0b72de41f7076445949b00c41d2956b24bcb9f87954a979f5bb61d92f3d157eb`; checkpoint patch `runtime/patches/gdn-replay.patch` |
++| Toolchains and build flags | Rust 1.98.1 `--release --locked`; nightly-2026-10-01 for engine tests | same |
++| Precision | F32 recurrent state, BF16 activations, unchanged | unchanged |
++| Kernel policy | `gdn_verify_gated_exact_register` with per-row `mid` captures | same kernel, state in/out split, no captures; replay reruns it |
++| Hardware | Apple M5 Max, 128 GB | same |
++| Memory | MTP scratch held `MAX_DRAFTS` F32 states per GDN layer (339,738,624 bytes) | one shadow state per GDN layer (113,246,208 bytes) plus replay rows (about 3.0 MB) and a 49 KB sink; saves about 226 MB of request scratch |
++
++## Workload and controls
++
++- Corpus and options: frozen 4,096-token public code corpus (input hash matched the baseline), seed 42, sampled temperature 1 / top-k 20 / top-p 0.95 for 256 tokens, greedy 512 tokens, drafts 0 to 3, image tower loaded, fresh requests.
++- Paired order: baseline-equivalent worker then candidate, back to back inside one model-slot hold, two pairs for timing, one instrumented pair. Other agents shared the host; not quiet-screened. Timings are screening only.
++- Image, cache and MTP-with-images qualification: not re-run; the change is confined to the text verify/rollback recurrence and leaves image requests (MTP off) untouched.
++
++## Attempt history and failures
++
++| Trial / source | What was attempted | Observation | Validity and disposition |
++| --- | --- | --- | --- |
++| `gdn-replay-1` (instrumented, base + markers) | Split GDN verify cost | Decode 1 row: projection+conv 1.78, recurrence 0.81, out projection 0.76 ms. Verify 2/3/4 rows: projection+conv 2.01/2.82/3.62, recurrence 1.79/1.89/2.40, out projection 0.92/1.14/1.55 | Valid attribution; the slope at 3 and 4 rows is mostly the input projection, not the captures. Recurrence has a large 1-to-2-row step |
++| Synthetic timing, `gdn_verification_streaming_chain_timing` | Register verify (final state only) vs decode steps vs replay, 36 layers | Final-only verify 17.6/20.0/23.1/26.2/41.1 us per layer at 1/2/3/4/9 rows (about 0.11 ms per extra row over 36 layers); decode steps grow about 7 us per row per layer; replay of m-1 rows 16.6/19.6/23.6/37.8 | Component evidence for the recurrence |
++| `stark_gdn_verify_gated_stream` | Device-memory variant through decode's own step body | 42 to 77 us per layer, about twice the register kernel | Rejected, removed |
++| `gdn-replay-2` / `-3` | First candidate end-to-end runs | Hashes matched; host heavily contended (draft and s0 also slowed 25%) | Timing invalid, hash evidence kept |
++| `gdn-replay-4p` (instrumented pair) | Base vs candidate | See table below | Valid screening |
++| `gdn-replay-5t` (two uninstrumented pairs) | Base vs candidate, all arms | See table below; pair 0 noisier (g0 +8%, g3 +13%) | Pair 1 used for conclusions |
++
++## Correctness and lifecycle
++
++- `gdn_register_verification_matches_decode_bytes` (extended): three independent draws x two geometries x rows 1 to 9 x two gates x six styles (ordinary, zero q/k, saturated gates, signed zeros/extremes, subnormal-heavy state and inputs, cancellation); 648 cases, 3,240 replay prefixes, 9,217,732,608 bytes compared, reference and candidate SHA-256 `78d5256babf559b2799e35c899ac7258406803bfb17755c14d94241dff25d1b7`, all equal. Checks pre-verify state untouched, final state, in-place form, outputs and every replay prefix against ordinary decode.
++- `fused_gdn_projection_rows_match_decode_and_all_rollback_prefixes` (extended): 128 cases, 448 conv rollback prefixes, 160 recurrence replay prefixes on the Lily geometry chained from the fused projection rows, SHA-256 `76324820eea39b0683c8e39d9b044bced9a572cc44cf0afd277b5b0211dbdd34` on both sides.
++- `official_value_key_verification_rows_match_decode_and_captures` (ValueKey): three draws x rows 1/2/3/4/9, 57 replay prefixes, all equal. `gdn_verification_batch_matches_decode_bytes` (legacy control kernel) passes unchanged.
++- Real model, `private_checkpoint_mtp_verify_and_rollback_match_serial` (reads `STARK_TEST_MODEL_PATH`): passed; verify phase 86 readouts, rollback phase 24 readouts, host-serial phase 30 readouts, all zero unequal values; it covers every accepted count at widths 1 to 4, the dense-to-sparse lengths, and the early-stop `Drop` path at 0 to 4 pulled tokens. The draft-head phase differs as before (head numerics are allowed to differ; not asserted).
++- Model-free: lily-core unit suite 98 passed (includes new `mtp_scratch_charges_one_gdn_shadow_state_not_per_row_captures`); stark-generate prefix tests 25 passed, 1 ignored; GDN midpoint capture tests (`chunk_capture_tests`, synthetic Metal) 2 passed.
++- Not run: `private_lily_midpoint_full_logits_and_mtp` and `private_lily_midpoint_lifecycle_transitions` need private fixtures (`STARK_LILY_MIDPOINT_FIXTURE`, `STARK_LILY_MIDPOINT_IMAGE`) whose location was not available to this workstream. Prefix snapshots copy the current state handle at call time and are not taken while a verify is pending, so the handle swap does not reach them, but this is code review, not a run.
++- Buffer ownership: the swap exchanges handles between the request state and the model scratch; both live in the context's single residency set. Snapshots and restores copy data. A failed verify swaps nothing.
++
++## Performance and memory
++
++Instrumented pair (`gdn-replay-4p`, GPU ms per verify pass, rows = drafts + 1):
++
++| Stage | g1 (2 rows) base / cand | g2 (3 rows) | g3 (4 rows) | s2 | s3 |
++| --- | --- | --- | --- | --- | --- |
++| GDN recurrence+norm | 1.850 / 1.651 | 2.078 / 1.711 | 2.386 / 1.846 | 2.132 / 1.879 | 2.398 / 1.942 |
++| GDN total | 4.884 / 4.676 | 6.037 / 5.730 | 7.586 / 7.258 | 6.059 / 5.762 | 7.663 / 7.078 |
++| Verify command | 20.53 / 20.29 | 25.90 / 25.25 | 31.31 / 31.11 | 25.80 / 25.12 | 31.49 / 30.10 |
++| Finish GPU busy per round | 0.407 / 0.408 | 0.566 / 0.613 | 0.949 / 0.881 | 0.565 / 0.574 | 0.727 / 0.827 |
++
++Uninstrumented pair 1 (`gdn-replay-5t-*-1`, tok/s): g1 82.44 to 84.76 (+2.8%), g2 90.33 to 93.03 (+3.0%), g3 88.83 to 90.88 (+2.3%), s1 +2.9%, s2 77.95 to 79.20 (+1.6%), s3 66.99 to 69.28 (+3.4%); g0 +0.5%, s0 0.0%. Verify per round fell 0.5 to 1.3 ms; finish per round changed by 0.00 to +0.11 ms (replay on partial accepts, largest on s3). The replay costs less than its verify saving in every arm, sampled arms included.
++
++The target was not met for GDN as a whole: the recurrence now grows about 0.1 ms per row in the model (1.65, 1.71, 1.85 ms), but it still carries a fixed step of about 0.8 ms over decode's 0.83 ms at two rows in the full model (synthetic shows only 0.17 ms); and the fused Q4 input projection plus convolution (`stark_q4_gdn_conv_rows_m{2,3,4}`, `stark_gemv_q4_packed_rows_sum`) grows 0.75 to 1.0 ms per row at 3 and 4 rows, with the output projection adding 0.2 to 0.4 ms per row. Those projection kernels are shared row-reuse code outside this workstream's files and were not changed.
++
++## Evidence, decision and limits
++
++- Run files (aggregates and hashes only): `runtime/agent-runs/gdn-replay-1-*` (attribution), `gdn-replay-2.json` (hash gate, contended), `gdn-replay-3-*`, `gdn-replay-4p-{base,cand}-0*` (instrumented pair), `gdn-replay-5t-{base,cand}-{0,1}.json` (timing pairs). All candidate output hashes equal the frozen baseline on all eight arms.
++- What else blocks nine verify rows on the GDN side: `gemv_q4_gdn_conv_rows_exact` is instantiated for 1 to 4 rows only and its per-row cost rises steeply; `MAX_DRAFTS`/`VERIFY_ROWS` size the replay rows and conv-input scratch; `prefix_rows`/`project_mat_decode_exact` row paths for the output projection; `conv_window_rollback` and the recurrence already take any row count. Per-row GDN state cost is now zero bytes, so nine rows add only about 0.4 MB of replay rows per verify.
++- Next: a row-reuse rewrite of the GDN input projection (register pressure at M=3/4 is the likely cause) and an investigation of the in-model two-row recurrence step.
++
++## Follow-up history
++
++- 2026-11-19: draft record created by the workstream; orchestrator to integrate provenance and the quiet comparison.
++- 2026-11-19, projection follow-up (same attempt ID): why rows 3 and 4 of the shared-weight Q4 projections cost more than row 2.
++  - Synthetic component timing (`q4_row_reuse_projection_timing`, 36 distinct Lily-size weights) reproduces the real-model shape: GDN input projection+conv 1.66/1.78/2.21/2.96 ms and output projection 0.67/0.71/0.86/1.15 ms at 1/2/3/4 rows (quietest run; later runs on a busier host were 10 to 20% higher with the same shape). Real model: 1.78/2.01/2.82/3.62 and 0.76/0.92/1.14/1.55.
++  - Ruled out: a second pass or lane change at m > 2 (every instance uses the same grid, 16 lanes per channel, one pass), a fallback path (m = 2..4 all take `stark_q4_gdn_conv_rows_m*` / `stark_projection_reuse_q4_bf16_m*`), and a thread-limit drop from registers (every pipeline reports 1,024 maximum threads).
++  - Cause: per-row work that every output channel repeats. Each channel pair re-reads every input row from the device cache and re-does the BF16 widening and the weight-independent input sum of `dot_word_q4` for every word. One row costs about 1.66 ms of weight streaming (near DRAM bandwidth), which hides the per-row work at two rows. From three rows that work exceeds the weight stream and the kernel becomes compute and cache-load bound.
++  - Restructurings, all byte-identical in synthetic tests (288 cases: 6 draws, ordinary, subnormal-heavy, cancellation and extreme inputs, offset views, rows 2 to 4, Lily and small geometries, against ordinary decode or the byte-tested fused kernel): (1) staged F32 rows and word sums from a pre-pass: slower (3.33/4.42 against 2.84/3.79 ms at 3/4 rows), rejected; (2) rows parked in threadgroup memory per 16 channels: 2.64/3.27 against 2.64/3.43, marginal, not pursued; (3) rows and word sums parked: 2.36/2.97 against 2.64/3.43, and 2.38/2.88 against 2.64/3.55 in the real model at 3/4 rows, but the real-model control `private_checkpoint_mtp_verify_and_rollback_match_serial` failed (verify phase 3,476,470 of 21,355,520 values unequal) and every MTP arm's output hash changed (`gdn-replay-8t-cand-0.json`). Rejected. Three restructurings done, so the work stopped there. The synthetic tests passed while the real model failed, which matches the fast-math scheduling fragility the HC workstream found. The variants remain in the source, test-only and switched off; the shipped default is the original kernel.
++  - One-to-two-row recurrence step: fully unrolling the register kernel's state load and store loops was byte-identical in synthetic tests but slower in the real model (recurrence 2.48/2.84/3.02 against 1.98/2.16 ms). Reverted, cause not established. Quieter pair `gdn-replay-7p-base-0`: replay build recurrence 1.45/1.84/2.00 ms at 2/3/4 rows against 0.83 ms for the serial step.
++  - Final state: the shipped behavior is the replay build plus test-only kernels. The real-model control passed again (verify, rollback and host-serial phases zero unequal). The end-to-end hash gate was not rerun on the final build; the replay build (`gdn-replay-8t-base-0`, same shipped kernels) matched all eight baseline hashes.
+diff --git a/vendor/lily-core/src/kernels/gdn.rs b/vendor/lily-core/src/kernels/gdn.rs
+index 73e6e087..41db576a 100644
+--- a/vendor/lily-core/src/kernels/gdn.rs
++++ b/vendor/lily-core/src/kernels/gdn.rs
+@@ -139,10 +139,19 @@ pub fn gdn_step_gated_named(
+     )
+ }
+ 
+-/// Verifies one to four causal rows in one dispatch, preserving ordinary
+-/// decode's F32 recurrence, reduction order and BF16 output-rounding boundary.
+-/// Each thread retains its state column across the short verification group.
+-/// `mid`, when present, receives the state after every row except the last.
++/// Most causal rows one exact verify recurrence dispatch takes. The register
++/// kernels hold one state column per thread whatever the row count, so this
++/// only bounds the per-row inputs; the verify graph has its own row limit.
++pub const GDN_VERIFY_MAX_ROWS: usize = 16;
++
++/// Verifies causal rows in one dispatch, preserving ordinary decode's F32
++/// recurrence, reduction order and BF16 output-rounding boundary. Each thread
++/// retains its state column across the rows. The state is read from
++/// `state_in` and the state after the last row is written to `state_out`
++/// (which may be the same tensor). Nothing is written per row: with
++/// `state_out` distinct, `state_in` still holds the pre-verify state, and
++/// rerunning this dispatch from it over the first `n` rows ([`gdn_replay_rows`])
++/// gives the state after `n` rows.
+ #[allow(clippy::too_many_arguments)]
+ pub fn gdn_verify_gated_exact(
+     ctx: &MetalContext,
+@@ -152,7 +161,8 @@ pub fn gdn_verify_gated_exact(
+     b: &Tensor,
+     a_log: &Tensor,
+     dt_bias: &Tensor,
+-    state: &Tensor,
++    state_in: &Tensor,
++    state_out: &Tensor,
+     z: &Tensor,
+     norm_w: &Tensor,
+     out: &Tensor,
+@@ -160,9 +170,8 @@ pub fn gdn_verify_gated_exact(
+     num_k_heads: usize,
+     eps: f32,
+     gate_act: GdnGate,
+-    mid: Option<&Tensor>,
+ ) -> Result<()> {
+-    gdn_verify_gated_exact_named(
++    gdn_verify_gated_exact_kernel(
+         ctx,
+         pass,
+         qkv,
+@@ -170,7 +179,8 @@ pub fn gdn_verify_gated_exact(
+         b,
+         a_log,
+         dt_bias,
+-        state,
++        state_in,
++        state_out,
+         z,
+         norm_w,
+         out,
+@@ -178,13 +188,17 @@ pub fn gdn_verify_gated_exact(
+         num_k_heads,
+         eps,
+         gate_act,
+-        mid,
+-        "gdn_verify_gated_exact_register",
++        GDN_VERIFY_KERNEL,
+     )
+ }
+ 
++/// The shipped exact verify recurrence kernel.
++const GDN_VERIFY_KERNEL: &str = "gdn_verify_gated_exact_register";
++
++/// [`gdn_verify_gated_exact`] through a kernel with its bindings (timing and
++/// byte controls).
+ #[allow(clippy::too_many_arguments)]
+-fn gdn_verify_gated_exact_named(
++pub(crate) fn gdn_verify_gated_exact_kernel(
+     ctx: &MetalContext,
+     pass: &ComputePass<'_>,
+     qkv: &Tensor,
+@@ -192,7 +206,8 @@ fn gdn_verify_gated_exact_named(
+     b: &Tensor,
+     a_log: &Tensor,
+     dt_bias: &Tensor,
+-    state: &Tensor,
++    state_in: &Tensor,
++    state_out: &Tensor,
+     z: &Tensor,
+     norm_w: &Tensor,
+     out: &Tensor,
+@@ -200,9 +215,147 @@ fn gdn_verify_gated_exact_named(
+     num_k_heads: usize,
+     eps: f32,
+     gate_act: GdnGate,
+-    mid: Option<&Tensor>,
+     kernel: &'static str,
+ ) -> Result<()> {
++    let heads = a_log.numel();
++    let rows = check_verify_gated(
++        qkv,
++        a,
++        b,
++        a_log,
++        dt_bias,
++        state_in,
++        z,
++        norm_w,
++        out,
++        scale,
++        num_k_heads,
++        eps,
++    )?;
++    ensure!(
++        state_out.dtype() == DType::F32 && state_out.numel() == state_in.numel(),
++        "invalid GDN verify output state"
++    );
++    let pipeline = ctx.pipeline(kernel, SOURCE, MslVersion::V3_1)?;
++    pass.dispatch_at(
++        &pipeline,
++        &[
++            qkv.binding(),
++            a.binding(),
++            b.binding(),
++            a_log.binding(),
++            dt_bias.binding(),
++            state_in.binding(),
++            z.binding(),
++            norm_w.binding(),
++            out.binding(),
++            state_out.binding(),
++        ],
++        &[
++            &u32_bytes(rows),
++            &u32_bytes(heads),
++            &u32_bytes(num_k_heads),
++            &scale.to_ne_bytes(),
++            &eps.to_ne_bytes(),
++            &u32_bytes(gate_act as usize),
++        ],
++        Grid::Threadgroups { groups: (heads, 1, 1), threadgroup: (GDN_HEAD_DIM, 1, 1) },
++    )
++}
++
++/// Inputs of an exact verify recurrence kept for replay rollback: the
++/// convolved `[q | k | v]` rows and the `a` / `b` gate rows of the verified
++/// rows. The recurrence reads nothing else that depends on the rows.
++pub struct GdnReplayRows<'a> {
++    /// BF16 `[n, (2*HK+H)*128]`.
++    pub qkv: &'a Tensor,
++    /// BF16 `[n, H]`.
++    pub a: &'a Tensor,
++    /// BF16 `[n, H]`.
++    pub b: &'a Tensor,
++}
++
++/// Replay rollback: reruns the exact verify recurrence of `layout` from the
++/// retained pre-verify state `state_in` over the first rows of `rows` (all of
++/// them; pass prefix views for an accepted prefix), writing the state after
++/// the last one to `state_out`. It is the verify pass's own dispatch with the
++/// same arguments, so the state is bit-identical to the verify pass's (and
++/// so to ordinary decode's) after that many rows. The row outputs are not
++/// needed: they go to `sink` (BF16, at least `n * H * 128` elements), which
++/// also stands in for the output gate the KeyValue kernel reads for them.
++#[allow(clippy::too_many_arguments)]
++pub fn gdn_replay_rows(
++    ctx: &MetalContext,
++    pass: &ComputePass<'_>,
++    layout: GdnStateLayout,
++    rows: &GdnReplayRows<'_>,
++    a_log: &Tensor,
++    dt_bias: &Tensor,
++    norm_w: &Tensor,
++    state_in: &Tensor,
++    state_out: &Tensor,
++    sink: &Tensor,
++    scale: f32,
++    num_k_heads: usize,
++    eps: f32,
++    gate_act: GdnGate,
++) -> Result<()> {
++    let heads = a_log.numel();
++    ensure!(heads > 0 && rows.a.numel().is_multiple_of(heads), "invalid GDN replay rows");
++    let n = rows.a.numel() / heads;
++    let width = heads * GDN_HEAD_DIM;
++    ensure!(
++        n > 0 && sink.dtype() == DType::BF16 && sink.numel() >= n * width,
++        "invalid GDN replay sink"
++    );
++    let sink = sink.view(0, &[n, width])?;
++    ensure!(
++        [state_in, state_out]
++            .iter()
++            .all(|t| !std::ptr::eq(sink.buffer(), t.buffer())),
++        "GDN replay sink aliases a state"
++    );
++    match layout {
++        GdnStateLayout::KeyValue => gdn_verify_gated_exact(
++            ctx,
++            pass,
++            rows.qkv,
++            rows.a,
++            rows.b,
++            a_log,
++            dt_bias,
++            state_in,
++            state_out,
++            &sink,
++            norm_w,
++            &sink,
++            scale,
++            num_k_heads,
++            eps,
++            gate_act,
++        ),
++        GdnStateLayout::ValueKey => gdn_verify_raw_value_key_recurrence(
++            ctx, pass, rows.qkv, rows.a, rows.b, a_log, dt_bias, state_in, state_out,
++            &sink, scale,
++        ),
++    }
++}
++
++#[allow(clippy::too_many_arguments)]
++fn check_verify_gated(
++    qkv: &Tensor,
++    a: &Tensor,
++    b: &Tensor,
++    a_log: &Tensor,
++    dt_bias: &Tensor,
++    state: &Tensor,
++    z: &Tensor,
++    norm_w: &Tensor,
++    out: &Tensor,
++    scale: f32,
++    num_k_heads: usize,
++    eps: f32,
++) -> Result<usize> {
+     let heads = a_log.numel();
+     ensure!(
+         heads > 0 && num_k_heads > 0 && heads.is_multiple_of(num_k_heads),
+@@ -210,7 +363,10 @@ fn gdn_verify_gated_exact_named(
+     );
+     ensure!(a.numel().is_multiple_of(heads), "invalid GDN verify rows");
+     let rows = a.numel() / heads;
+-    ensure!((1..=4).contains(&rows), "GDN verify requires one to four rows");
++    ensure!(
++        (1..=GDN_VERIFY_MAX_ROWS).contains(&rows),
++        "GDN verify requires one to {GDN_VERIFY_MAX_ROWS} rows"
++    );
+     let dim = GDN_HEAD_DIM;
+     let channels = (2 * num_k_heads + heads) * dim;
+     let values = rows * heads * dim;
+@@ -248,6 +404,49 @@ fn gdn_verify_gated_exact_named(
+         scale.is_finite() && eps.is_finite() && eps > 0.0,
+         "invalid GDN verify scale or epsilon"
+     );
++    Ok(rows)
++}
++
++/// The original threadgroup-state short scan with per-row `mid` captures
++/// (`gdn_verify_gated_exact`), kept as a byte-test control.
++#[cfg(test)]
++#[allow(clippy::too_many_arguments)]
++fn gdn_verify_gated_exact_named(
++    ctx: &MetalContext,
++    pass: &ComputePass<'_>,
++    qkv: &Tensor,
++    a: &Tensor,
++    b: &Tensor,
++    a_log: &Tensor,
++    dt_bias: &Tensor,
++    state: &Tensor,
++    z: &Tensor,
++    norm_w: &Tensor,
++    out: &Tensor,
++    scale: f32,
++    num_k_heads: usize,
++    eps: f32,
++    gate_act: GdnGate,
++    mid: Option<&Tensor>,
++    kernel: &'static str,
++) -> Result<()> {
++    let heads = a_log.numel();
++    let dim = GDN_HEAD_DIM;
++    let rows = check_verify_gated(
++        qkv,
++        a,
++        b,
++        a_log,
++        dt_bias,
++        state,
++        z,
++        norm_w,
++        out,
++        scale,
++        num_k_heads,
++        eps,
++    )?;
++    ensure!(rows <= 4, "the legacy GDN verify control takes one to four rows");
+     if let Some(mid) = mid {
+         ensure!(
+             mid.dtype() == DType::F32 && mid.numel() >= (rows - 1) * state.numel(),
+@@ -1671,7 +1870,7 @@ pub fn conv1d_verify_value_key_exact(
+ ) -> Result<()> {
+     ensure!(x.numel().is_multiple_of(10240), "VK verify conv width");
+     let rows = x.numel() / 10240;
+-    ensure!((1..=4).contains(&rows), "VK verify conv rows");
++    ensure!((1..=GDN_VERIFY_MAX_ROWS).contains(&rows), "VK verify conv rows");
+     ensure!(
+         [window_in, window_out, x, w, out].iter().all(|t| t.dtype() == DType::BF16)
+             && window_in.numel() == 3 * 10240
+@@ -1703,9 +1902,12 @@ pub fn conv1d_verify_value_key_exact(
+     )
+ }
+ 
+-/// Exact ordinary-decode ValueKey recurrence over one to four verification
+-/// rows. Registers retain the F32 physical state between rows; captures use
+-/// that same `[head, value, key]` order, never a transposed approximation.
++/// Exact ordinary-decode ValueKey recurrence over verification rows.
++/// Registers retain the F32 physical `[head, value, key]` state between rows.
++/// The state is read from `state_in` and the state after the last row is
++/// written to `state_out` (which may be the same tensor); nothing is written
++/// per row, and rollback replays the recurrence from `state_in`
++/// ([`gdn_replay_rows`]).
+ #[allow(clippy::too_many_arguments)]
+ pub fn gdn_verify_value_key_exact(
+     ctx: &MetalContext,
+@@ -1715,49 +1917,88 @@ pub fn gdn_verify_value_key_exact(
+     b: &Tensor,
+     a_log: &Tensor,
+     dt_bias: &Tensor,
+-    state: &Tensor,
++    state_in: &Tensor,
++    state_out: &Tensor,
+     z: &Tensor,
+     norm_w: &Tensor,
+     raw: &Tensor,
+     out: &Tensor,
+     scale: f32,
+     eps: f32,
+-    mid: Option<&Tensor>,
+ ) -> Result<()> {
+     ensure!(a.numel().is_multiple_of(48), "VK verify gate rows");
+     let rows = a.numel() / 48;
+-    ensure!((1..=4).contains(&rows), "VK verify requires one to four rows");
+     ensure!(
+-        [qkv, a, b, dt_bias, z, raw, out].iter().all(|t| t.dtype() == DType::BF16)
++        [z, out].iter().all(|t| t.dtype() == DType::BF16)
++            && z.numel() == rows * 6144
++            && out.numel() == rows * 6144,
++        "VK verify activation geometry"
++    );
++    ensure!(
++        norm_w.dtype() == DType::F32 && norm_w.numel() == 128,
++        "VK verify norm geometry"
++    );
++    ensure!(eps.is_finite() && eps > 0.0, "VK verify epsilon");
++    gdn_verify_raw_value_key_recurrence(
++        ctx, pass, qkv, a, b, a_log, dt_bias, state_in, state_out, raw, scale,
++    )?;
++    pass.level_barrier(&[raw, state_out])?;
++    let norm = ctx.pipeline_with_math_mode(
++        "gdn_verify_normgate_value_key_exact",
++        SOURCE,
++        MslVersion::V3_1,
++        MslMathMode::Safe,
++    )?;
++    pass.dispatch_at(
++        &norm,
++        &[raw.binding(), z.binding(), norm_w.binding(), out.binding()],
++        &[&eps.to_ne_bytes()],
++        Grid::Threadgroups { groups: (48 * rows, 1, 1), threadgroup: (32, 1, 1) },
++    )
++}
++
++/// The ValueKey verify recurrence alone: raw BF16 outputs `[rows, 48*128]`
++/// into `raw`, final state into `state_out`.
++#[allow(clippy::too_many_arguments)]
++fn gdn_verify_raw_value_key_recurrence(
++    ctx: &MetalContext,
++    pass: &ComputePass<'_>,
++    qkv: &Tensor,
++    a: &Tensor,
++    b: &Tensor,
++    a_log: &Tensor,
++    dt_bias: &Tensor,
++    state_in: &Tensor,
++    state_out: &Tensor,
++    raw: &Tensor,
++    scale: f32,
++) -> Result<()> {
++    ensure!(a.numel().is_multiple_of(48), "VK verify gate rows");
++    let rows = a.numel() / 48;
++    ensure!(
++        (1..=GDN_VERIFY_MAX_ROWS).contains(&rows),
++        "VK verify requires one to {GDN_VERIFY_MAX_ROWS} rows"
++    );
++    ensure!(
++        [qkv, a, b, dt_bias, raw].iter().all(|t| t.dtype() == DType::BF16)
+             && qkv.numel() == rows * 10240
+             && b.numel() == rows * 48
+             && dt_bias.numel() == 48
+-            && z.numel() == rows * 6144
+-            && raw.numel() == rows * 6144
+-            && out.numel() == rows * 6144,
++            && raw.numel() == rows * 6144,
+         "VK verify activation geometry"
+     );
+     ensure!(
+         a_log.dtype() == DType::F32
+             && a_log.numel() == 48
+-            && norm_w.dtype() == DType::F32
+-            && norm_w.numel() == 128
+-            && state.dtype() == DType::F32
+-            && state.shape() == [48, 128, 128],
++            && [state_in, state_out]
++                .iter()
++                .all(|t| t.dtype() == DType::F32 && t.shape() == [48, 128, 128]),
+         "VK verify state/weight geometry"
+     );
+     ensure!(
+-        scale.to_bits() == (1.0f32 / 128.0f32.sqrt()).to_bits()
+-            && eps.is_finite()
+-            && eps > 0.0,
+-        "VK verify scale or epsilon"
++        scale.to_bits() == (1.0f32 / 128.0f32.sqrt()).to_bits(),
++        "VK verify scale"
+     );
+-    if let Some(mid) = mid {
+-        ensure!(
+-            mid.dtype() == DType::F32 && mid.numel() == (rows - 1) * state.numel(),
+-            "VK verify capture geometry"
+-        );
+-    }
+     let recurrence = ctx.pipeline_with_math_mode(
+         "gdn_verify_raw_value_key_exact",
+         SOURCE,
+@@ -1772,29 +2013,12 @@ pub fn gdn_verify_value_key_exact(
+             b.binding(),
+             a_log.binding(),
+             dt_bias.binding(),
+-            state.binding(),
++            state_in.binding(),
+             raw.binding(),
+-            mid.unwrap_or(state).binding(),
+-        ],
+-        &[
+-            &scale.to_ne_bytes(),
+-            &u32_bytes(rows),
+-            &u32_bytes(if mid.is_some() { rows - 1 } else { 0 }),
++            state_out.binding(),
+         ],
++        &[&scale.to_ne_bytes(), &u32_bytes(rows)],
+         Grid::Threadgroups { groups: (48 * 4, 1, 1), threadgroup: (256, 1, 1) },
+-    )?;
+-    pass.level_barrier(&[raw, state])?;
+-    let norm = ctx.pipeline_with_math_mode(
+-        "gdn_verify_normgate_value_key_exact",
+-        SOURCE,
+-        MslVersion::V3_1,
+-        MslMathMode::Safe,
+-    )?;
+-    pass.dispatch_at(
+-        &norm,
+-        &[raw.binding(), z.binding(), norm_w.binding(), out.binding()],
+-        &[&eps.to_ne_bytes()],
+-        Grid::Threadgroups { groups: (48 * rows, 1, 1), threadgroup: (32, 1, 1) },
+     )
+ }
+ 
+diff --git a/vendor/lily-core/src/kernels/gdn_projection_rows_tests.rs b/vendor/lily-core/src/kernels/gdn_projection_rows_tests.rs
+index e7a1c325..d1d5032c 100644
+--- a/vendor/lily-core/src/kernels/gdn_projection_rows_tests.rs
++++ b/vendor/lily-core/src/kernels/gdn_projection_rows_tests.rs
+@@ -95,6 +95,7 @@ fn fused_gdn_projection_rows_match_decode_and_all_rollback_prefixes() -> Result<
+     let mut seed = 0x3b71_293d;
+     let mut cases = 0;
+     let mut rollback_prefix_cases = 0;
++    let mut replay_prefix_cases = 0;
+     let mut compared_bytes = 0;
+     let mut reference_hash = Sha256::new();
+     let mut candidate_hash = Sha256::new();
+@@ -274,6 +275,26 @@ fn fused_gdn_projection_rows_match_decode_and_all_rollback_prefixes() -> Result<
+                             )?;
+                             rollback_prefix_cases += 1;
+                         }
++                        if c == 10240 {
++                            // Lily geometry: the recurrence over the fused
++                            // rows, with replay rollback from the retained
++                            // pre-verify state to every accepted prefix,
++                            // against ordinary decode steps.
++                            replay_prefix_cases += check_recurrence_replay(
++                                &ctx,
++                                &mut seed,
++                                m,
++                                &reference_raw.value,
++                                &reference_conv,
++                                &conv_out.value,
++                                &z.value,
++                                &a.value,
++                                &b.value,
++                                &mut reference_hash,
++                                &mut candidate_hash,
++                                &mut compared_bytes,
++                            )?;
++                        }
+                         for tensor in [
+                             &input,
+                             &conv_w,
+@@ -305,13 +326,137 @@ fn fused_gdn_projection_rows_match_decode_and_all_rollback_prefixes() -> Result<
+         }
+     }
+     eprintln!(
+-        "GDN projection rows exact: cases={cases} rollback_prefix_cases={rollback_prefix_cases} compared_bytes={compared_bytes} reference_sha256={} candidate_sha256={}",
++        "GDN projection rows exact: cases={cases} rollback_prefix_cases={rollback_prefix_cases} replay_prefix_cases={replay_prefix_cases} compared_bytes={compared_bytes} reference_sha256={} candidate_sha256={}",
+         hex(&reference_hash.finish()),
+         hex(&candidate_hash.finish())
+     );
+     Ok(())
+ }
+ 
++/// Ordinary decode steps over the serially projected rows against one exact
++/// verify recurrence over the fused rows (final state to a separate buffer)
++/// and replays from the untouched pre-verify state to every prefix.
++#[allow(clippy::too_many_arguments)]
++fn check_recurrence_replay(
++    ctx: &MetalContext,
++    seed: &mut u32,
++    m: usize,
++    reference_raw: &Tensor,
++    reference_conv: &[Guarded],
++    conv_out: &Tensor,
++    z: &Tensor,
++    a: &Tensor,
++    b: &Tensor,
++    reference_hash: &mut Sha256,
++    candidate_hash: &mut Sha256,
++    count: &mut usize,
++) -> Result<usize> {
++    use crate::kernels::gdn::{
++        GDN_HEAD_DIM, GdnGate, GdnReplayRows, GdnStateLayout, gdn_replay_rows,
++        gdn_step_gated_fused, gdn_verify_gated_exact,
++    };
++    let (hk, h, c, v) = (16, 48, 10240, 6144);
++    let n = c + v + 2 * h;
++    let d = GDN_HEAD_DIM;
++    let words = h * d * d;
++    let a_log = Tensor::from_f32(ctx, &values(seed, h, 2.0), &[h])?;
++    let dt_bias = Tensor::from_f32_as_bf16(ctx, &values(seed, h, 1.0), &[h])?;
++    let norm = Tensor::from_f32(ctx, &values(seed, d, 1.0), &[d])?;
++    let initial = values(seed, words, 0.5);
++    let reference_state = Tensor::from_f32(ctx, &initial, &[h, d, d])?;
++    let pre = Tensor::from_f32(ctx, &initial, &[h, d, d])?;
++    let pre_bytes = pre.raw_bytes().to_vec();
++    let fin = Tensor::zeros(ctx, &[h, d, d], DType::F32)?;
++    let out = Tensor::zeros(ctx, &[m, v], DType::BF16)?;
++    let reference_out = Tensor::zeros(ctx, &[m, v], DType::BF16)?;
++    let sink = Tensor::zeros(ctx, &[m, v], DType::BF16)?;
++    let mut prefixes = Vec::new();
++    for row in 0..m {
++        let pass = ctx.begin_concurrent()?;
++        let raw = reference_raw.view(row * n, &[n])?;
++        gdn_step_gated_fused(
++            ctx,
++            &pass,
++            &reference_conv[row].value,
++            &raw.view(c + v, &[h])?,
++            &raw.view(c + v + h, &[h])?,
++            &a_log,
++            &dt_bias,
++            &reference_state,
++            &raw.view(c, &[v])?,
++            &norm,
++            &reference_out.view(row * v, &[v])?,
++            1.0 / (d as f32).sqrt(),
++            hk,
++            1e-6,
++            GdnGate::Sigmoid,
++        )?;
++        pass.end()?.commit()?.wait()?;
++        prefixes.push(reference_state.raw_bytes().to_vec());
++    }
++    let replayed: Vec<_> = (0..m)
++        .map(|_| Tensor::zeros(ctx, &[h, d, d], DType::F32))
++        .collect::<Result<_>>()?;
++    let pass = ctx.begin_concurrent()?;
++    gdn_verify_gated_exact(
++        ctx,
++        &pass,
++        conv_out,
++        a,
++        b,
++        &a_log,
++        &dt_bias,
++        &pre,
++        &fin,
++        z,
++        &norm,
++        &out,
++        1.0 / (d as f32).sqrt(),
++        hk,
++        1e-6,
++        GdnGate::Sigmoid,
++    )?;
++    pass.level_barrier(&[&fin, &out])?;
++    for (rows, target) in replayed.iter().enumerate().map(|(i, t)| (i + 1, t)) {
++        gdn_replay_rows(
++            ctx,
++            &pass,
++            GdnStateLayout::KeyValue,
++            &GdnReplayRows {
++                qkv: &conv_out.view(0, &[rows, c])?,
++                a: &a.view(0, &[rows, h])?,
++                b: &b.view(0, &[rows, h])?,
++            },
++            &a_log,
++            &dt_bias,
++            &norm,
++            &pre,
++            target,
++            &sink,
++            1.0 / (d as f32).sqrt(),
++            hk,
++            1e-6,
++            GdnGate::Sigmoid,
++        )?;
++        pass.level_barrier(&[target, &sink])?;
++    }
++    pass.end()?.commit()?.wait()?;
++    compare(&pre_bytes, pre.raw_bytes(), "pre-verify state", reference_hash, candidate_hash, count)?;
++    compare(
++        reference_out.raw_bytes(),
++        out.raw_bytes(),
++        "recurrence output",
++        reference_hash,
++        candidate_hash,
++        count,
++    )?;
++    compare(&prefixes[m - 1], fin.raw_bytes(), "final state", reference_hash, candidate_hash, count)?;
++    for (expected, target) in prefixes.iter().zip(&replayed) {
++        compare(expected, target.raw_bytes(), "replayed state", reference_hash, candidate_hash, count)?;
++    }
++    Ok(m)
++}
++
+ struct StreamingOutputs {
+     stack: Tensor,
+     qkv: Tensor,
+diff --git a/vendor/lily-core/src/kernels/gdn_value_key_verify_tests.rs b/vendor/lily-core/src/kernels/gdn_value_key_verify_tests.rs
+index eef9547f..9126612c 100644
+--- a/vendor/lily-core/src/kernels/gdn_value_key_verify_tests.rs
++++ b/vendor/lily-core/src/kernels/gdn_value_key_verify_tests.rs
+@@ -21,29 +21,32 @@ fn official_value_key_verification_rows_match_decode_and_captures() -> Result<()
+     let norm = Tensor::from_f32(&ctx, &values(128, 43, 80.0), &[128])?;
+     let conv_w = Tensor::from_f32_as_bf16(&ctx, &values(4 * C, 5, 250.0), &[4, C])?;
+     let scale = 1.0f32 / 128.0f32.sqrt();
+-    for rows in 1..=4 {
++    let mut replay_cases = 0;
++    // Four rows is today's verify limit; nine checks the row count stays a
++    // parameter.
++    for (draw, rows) in (0..3usize).flat_map(|draw| [1, 2, 3, 4, 9].map(move |rows| (draw, rows))) {
+         let x = Tensor::from_f32_as_bf16(
+             &ctx,
+-            &values(rows * C, 7 + rows, 73.0),
++            &values(rows * C, 7 + rows + 1000 * draw, 73.0),
+             &[rows, C],
+         )?;
+         let a = Tensor::from_f32_as_bf16(
+             &ctx,
+-            &values(rows * H, 9 + rows, 200.0),
++            &values(rows * H, 9 + rows + 1000 * draw, 200.0),
+             &[rows, H],
+         )?;
+         let b = Tensor::from_f32_as_bf16(
+             &ctx,
+-            &values(rows * H, 11 + rows, 50.0),
++            &values(rows * H, 11 + rows + 1000 * draw, 50.0),
+             &[rows, H],
+         )?;
+         let z = Tensor::from_f32_as_bf16(
+             &ctx,
+-            &values(rows * V, 13 + rows, 20.0),
++            &values(rows * V, 13 + rows + 1000 * draw, 20.0),
+             &[rows, V],
+         )?;
+-        let history = values(3 * C, 19 + rows, 60.0);
+-        let initial_state = values(S, 23 + rows, 1000.0);
++        let history = values(3 * C, 19 + rows + 1000 * draw, 60.0);
++        let initial_state = values(S, 23 + rows + 1000 * draw, 1000.0);
+         let wi = Tensor::from_f32_as_bf16(&ctx, &history, &[C, 3])?;
+         let wo = Tensor::zeros(&ctx, &[C, 3], DType::BF16)?;
+         let wr = Tensor::from_f32_as_bf16(&ctx, &history, &[C, 3])?;
+@@ -55,9 +58,14 @@ fn official_value_key_verification_rows_match_decode_and_captures() -> Result<()
+         let raw_ref = Tensor::zeros(&ctx, &[rows, V], DType::BF16)?;
+         let out = Tensor::zeros(&ctx, &[rows, V], DType::BF16)?;
+         let out_ref = Tensor::zeros(&ctx, &[rows, V], DType::BF16)?;
+-        let mid = (rows > 1)
+-            .then(|| Tensor::zeros(&ctx, &[rows - 1, H, 128, 128], DType::F32))
+-            .transpose()?;
++        // The verify pass writes its final state to a separate buffer and
++        // keeps `state` (pre-verify) for replay rollback.
++        let state_after = Tensor::zeros(&ctx, &[H, 128, 128], DType::F32)?;
++        let in_place = Tensor::from_f32(&ctx, &initial_state, &[H, 128, 128])?;
++        let replayed: Vec<_> = (0..rows)
++            .map(|_| Tensor::zeros(&ctx, &[H, 128, 128], DType::F32))
++            .collect::<Result<_>>()?;
++        let sink = Tensor::zeros(&ctx, &[rows, V], DType::BF16)?;
+         let pass = ctx.begin_concurrent()?;
+         conv1d_verify_value_key_exact(&ctx, &pass, &wi, &wo, &x, &conv_w, &conv)?;
+         pass.level_barrier(&[&conv, &wo])?;
+@@ -70,16 +78,52 @@ fn official_value_key_verification_rows_match_decode_and_captures() -> Result<()
+             &a_log,
+             &dt,
+             &state,
++            &state_after,
+             &z,
+             &norm,
+             &raw,
+             &out,
+             scale,
+             1e-6,
+-            mid.as_ref(),
+         )?;
++        pass.level_barrier(&[&raw, &out, &state_after])?;
++        // In place (state_in aliases state_out) gives the same final state.
++        gdn_verify_value_key_exact(
++            &ctx, &pass, &conv, &a, &b, &a_log, &dt, &in_place, &in_place, &z, &norm,
++            &raw, &out, scale, 1e-6,
++        )?;
++        pass.level_barrier(&[&raw, &out, &in_place])?;
++        // Replay rollback to every accepted prefix from the retained state.
++        for (n, target) in replayed.iter().enumerate().map(|(i, t)| (i + 1, t)) {
++            gdn_replay_rows(
++                &ctx,
++                &pass,
++                GdnStateLayout::ValueKey,
++                &GdnReplayRows {
++                    qkv: &conv.view(0, &[n, C])?,
++                    a: &a.view(0, &[n, H])?,
++                    b: &b.view(0, &[n, H])?,
++                },
++                &a_log,
++                &dt,
++                &norm,
++                &state,
++                target,
++                &sink,
++                scale,
++                16,
++                1e-6,
++                GdnGate::Sigmoid,
++            )?;
++            pass.level_barrier(&[target, &sink])?;
++        }
+         pass.commit()?.wait()?;
+-        let mut expected_mid = Vec::new();
++        ensure!(
++            state.raw_bytes()
++                == Tensor::from_f32(&ctx, &initial_state, &[H, 128, 128])?.raw_bytes(),
++            "VK verify modified its input state"
++        );
++        let mut expected_prefix = Vec::new();
+         for row in 0..rows {
+             let qr = conv_ref.view(row * C, &[C])?;
+             let rr = raw_ref.view(row * V, &[V])?;
+@@ -117,9 +161,7 @@ fn official_value_key_verification_rows_match_decode_and_captures() -> Result<()
+                 &rr,
+             )?;
+             pass.commit()?.wait()?;
+-            if row + 1 < rows {
+-                expected_mid.extend_from_slice(reference_state.raw_bytes());
+-            }
++            expected_prefix.push(reference_state.raw_bytes().to_vec());
+         }
+         ensure!(
+             wi.raw_bytes()
+@@ -131,12 +173,22 @@ fn official_value_key_verification_rows_match_decode_and_captures() -> Result<()
+         ensure!(raw.raw_bytes() == raw_ref.raw_bytes(), "VK recurrence raw mismatch");
+         ensure!(out.raw_bytes() == out_ref.raw_bytes(), "VK norm-gate output mismatch");
+         ensure!(
+-            state.raw_bytes() == reference_state.raw_bytes(),
++            state_after.raw_bytes() == reference_state.raw_bytes(),
+             "VK final state mismatch"
+         );
+-        if let Some(mid) = mid {
+-            ensure!(mid.raw_bytes() == expected_mid, "VK capture state mismatch");
++        ensure!(
++            in_place.raw_bytes() == reference_state.raw_bytes(),
++            "VK in-place final state mismatch"
++        );
++        for (n, (target, expected)) in replayed.iter().zip(&expected_prefix).enumerate() {
++            ensure!(
++                target.raw_bytes() == &expected[..],
++                "VK replay state mismatch rows={rows} accepted_prefix={}",
++                n + 1
++            );
++            replay_cases += 1;
+         }
+     }
++    eprintln!("VK verify replay exact: replay_cases={replay_cases}");
+     Ok(())
+ }
+diff --git a/vendor/lily-core/src/kernels/gdn_verify_exact_tests.rs b/vendor/lily-core/src/kernels/gdn_verify_exact_tests.rs
+index 9033fb90..80708896 100644
+--- a/vendor/lily-core/src/kernels/gdn_verify_exact_tests.rs
++++ b/vendor/lily-core/src/kernels/gdn_verify_exact_tests.rs
+@@ -58,10 +58,266 @@ fn gdn_verification_batch_matches_decode_bytes() -> Result<()> {
+     check_kernel("gdn_verify_gated_exact")
+ }
+ 
++/// The shipped register verifier against ordinary decode: outputs and final
++/// state, the untouched pre-verify state, the in-place form, and replay
++/// rollback from the pre-verify state to every accepted prefix, at every row
++/// count from one to nine. Three independent random draws per shape; besides
++/// ordinary values the styles cover zero q/k rows, saturated gates, signed
++/// zeros and extremes, subnormal-heavy state and inputs, and cancellation
++/// (large alternating-sign state and keys whose dot products cancel).
+ #[test]
+ #[ignore = "requires a physical Apple Silicon Metal device"]
+ fn gdn_register_verification_matches_decode_bytes() -> Result<()> {
+-    check_kernel("gdn_verify_gated_exact_register")
++    let ctx = MetalContext::new()?;
++    let mut reference_hash = Sha256::new();
++    let mut candidate_hash = Sha256::new();
++    let mut checked_bytes = 0;
++    let mut cases = 0;
++    let mut replay_cases = 0;
++    for draw in 0..3u32 {
++    let mut random = 0x4744_4e52 ^ draw.wrapping_mul(0x9e37_79b9);
++    for (hk, h) in [(2, 6), (16, 48)] {
++        let d = GDN_HEAD_DIM;
++        let c = (2 * hk + h) * d;
++        let width = h * d;
++        let state_words = h * d * d;
++        for m in 1..=9 {
++            for gate in [GdnGate::Sigmoid, GdnGate::Silu] {
++                for style in 0..6 {
++                    let mut raw = values(&mut random, m * c, 2.0, -1.0);
++                    let mut a_values = values(&mut random, m * h, 2.0, -1.0);
++                    let mut b_values = values(&mut random, m * h, 2.0, -1.0);
++                    let mut z_values = values(&mut random, m * width, 2.0, -1.0);
++                    let mut initial = values(&mut random, state_words, 0.5, -0.25);
++                    if style == 1 {
++                        for row in raw.chunks_exact_mut(c) {
++                            row[..2 * hk * d].fill(0.0);
++                        }
++                        initial.fill(0.0);
++                    } else if style == 2 {
++                        for (i, a) in a_values.iter_mut().enumerate() {
++                            *a = if i.is_multiple_of(2) { 40.0 } else { -40.0 };
++                        }
++                        for (i, b) in b_values.iter_mut().enumerate() {
++                            *b = if i.is_multiple_of(2) { -40.0 } else { 40.0 };
++                        }
++                        for (i, z) in z_values.iter_mut().enumerate() {
++                            *z = if i.is_multiple_of(2) { 40.0 } else { -40.0 };
++                        }
++                    } else if style == 3 {
++                        for (i, x) in raw.iter_mut().enumerate() {
++                            *x = [0.0, -0.0, 1e-30, -1e-30, 64.0, -64.0, 0.5, -0.5]
++                                [i % 8];
++                        }
++                    } else if style == 4 {
++                        // Subnormal F32 state and BF16-subnormal activations
++                        // (BF16 shares F32's exponent range).
++                        let tiny = f32::from_bits(1 << 16);
++                        for (i, x) in raw.iter_mut().enumerate() {
++                            if i % 3 != 0 {
++                                *x *= tiny * (1 + (next(&mut random) % 64)) as f32;
++                            }
++                        }
++                        for (i, s) in initial.iter_mut().enumerate() {
++                            if i % 2 == 0 {
++                                *s = f32::from_bits(next(&mut random) % 0x0080_0000)
++                                    * if i % 4 == 0 { 1.0 } else { -1.0 };
++                            }
++                        }
++                    } else if style == 5 {
++                        // Cancellation: alternating-sign large state and keys,
++                        // values near the resulting prediction.
++                        for (i, s) in initial.iter_mut().enumerate() {
++                            *s = if i % 2 == 0 { 3.0 } else { -3.0 }
++                                + (next(&mut random) % 8) as f32 * 1e-3;
++                        }
++                        for row in raw.chunks_exact_mut(c) {
++                            for (i, x) in row[..2 * hk * d].iter_mut().enumerate() {
++                                *x = if i % 2 == 0 { 8.0 } else { -8.0 };
++                            }
++                            for x in &mut row[2 * hk * d..] {
++                                *x = (next(&mut random) % 3) as f32 * 1e-2 - 1e-2;
++                            }
++                        }
++                    }
++                    let qkv = Guarded::new(&ctx, &raw, DType::BF16, &[m, c])?;
++                    let a = Guarded::new(&ctx, &a_values, DType::BF16, &[m, h])?;
++                    let b = Guarded::new(&ctx, &b_values, DType::BF16, &[m, h])?;
++                    let z = Guarded::new(&ctx, &z_values, DType::BF16, &[m, width])?;
++                    let a_log = Guarded::new(
++                        &ctx,
++                        &values(&mut random, h, 2.5, -2.0),
++                        DType::F32,
++                        &[h],
++                    )?;
++                    let dt_bias = Guarded::new(
++                        &ctx,
++                        &values(&mut random, h, 1.0, -0.5),
++                        DType::BF16,
++                        &[h],
++                    )?;
++                    let norm = Guarded::new(
++                        &ctx,
++                        &values(&mut random, d, 1.0, 0.5),
++                        DType::F32,
++                        &[d],
++                    )?;
++                    let zeros = vec![0.0; state_words];
++                    let reference_state =
++                        Guarded::new(&ctx, &initial, DType::F32, &[h, d, d])?;
++                    let pre_state = Guarded::new(&ctx, &initial, DType::F32, &[h, d, d])?;
++                    let final_state = Guarded::new(&ctx, &zeros, DType::F32, &[h, d, d])?;
++                    let in_place = Guarded::new(&ctx, &initial, DType::F32, &[h, d, d])?;
++                    let replayed: Vec<_> = (0..m)
++                        .map(|_| Guarded::new(&ctx, &zeros, DType::F32, &[h, d, d]))
++                        .collect::<Result<_>>()?;
++                    let blank = vec![0.0; m * width];
++                    let reference_out =
++                        Guarded::new(&ctx, &blank, DType::BF16, &[m, width])?;
++                    let candidate_out =
++                        Guarded::new(&ctx, &blank, DType::BF16, &[m, width])?;
++                    let in_place_out =
++                        Guarded::new(&ctx, &blank, DType::BF16, &[m, width])?;
++                    let sink = Guarded::new(&ctx, &blank, DType::BF16, &[m, width])?;
++                    let reference_prefix: Vec<_> = (0..m)
++                        .map(|_| Guarded::new(&ctx, &zeros, DType::F32, &[h, d, d]))
++                        .collect::<Result<_>>()?;
++                    let scale = 1.0 / (d as f32).sqrt();
++                    let pass = ctx.begin_concurrent()?;
++                    for row in 0..m {
++                        gdn_step_gated_fused(
++                            &ctx,
++                            &pass,
++                            &qkv.tensor.view(row * c, &[c])?,
++                            &a.tensor.view(row * h, &[h])?,
++                            &b.tensor.view(row * h, &[h])?,
++                            &a_log.tensor,
++                            &dt_bias.tensor,
++                            &reference_state.tensor,
++                            &z.tensor.view(row * width, &[width])?,
++                            &norm.tensor,
++                            &reference_out.tensor.view(row * width, &[width])?,
++                            scale,
++                            hk,
++                            1e-6,
++                            gate,
++                        )?;
++                        pass.level_barrier(&[
++                            &reference_state.tensor,
++                            &reference_out.tensor,
++                        ])?;
++                        copy_words(
++                            &ctx,
++                            &pass,
++                            &reference_state.tensor,
++                            &reference_prefix[row].tensor,
++                        )?;
++                        pass.level_barrier(&[&reference_prefix[row].tensor])?;
++                    }
++                    gdn_verify_gated_exact(
++                        &ctx,
++                        &pass,
++                        &qkv.tensor,
++                        &a.tensor,
++                        &b.tensor,
++                        &a_log.tensor,
++                        &dt_bias.tensor,
++                        &pre_state.tensor,
++                        &final_state.tensor,
++                        &z.tensor,
++                        &norm.tensor,
++                        &candidate_out.tensor,
++                        scale,
++                        hk,
++                        1e-6,
++                        gate,
++                    )?;
++                    gdn_verify_gated_exact(
++                        &ctx,
++                        &pass,
++                        &qkv.tensor,
++                        &a.tensor,
++                        &b.tensor,
++                        &a_log.tensor,
++                        &dt_bias.tensor,
++                        &in_place.tensor,
++                        &in_place.tensor,
++                        &z.tensor,
++                        &norm.tensor,
++                        &in_place_out.tensor,
++                        scale,
++                        hk,
++                        1e-6,
++                        gate,
++                    )?;
++                    pass.level_barrier(&[&final_state.tensor, &in_place.tensor])?;
++                    for (n, target) in replayed.iter().enumerate().map(|(i, t)| (i + 1, t))
++                    {
++                        gdn_replay_rows(
++                            &ctx,
++                            &pass,
++                            GdnStateLayout::KeyValue,
++                            &GdnReplayRows {
++                                qkv: &qkv.tensor.view(0, &[n, c])?,
++                                a: &a.tensor.view(0, &[n, h])?,
++                                b: &b.tensor.view(0, &[n, h])?,
++                            },
++                            &a_log.tensor,
++                            &dt_bias.tensor,
++                            &norm.tensor,
++                            &pre_state.tensor,
++                            &target.tensor,
++                            &sink.tensor,
++                            scale,
++                            hk,
++                            1e-6,
++                            gate,
++                        )?;
++                        pass.level_barrier(&[&target.tensor, &sink.tensor])?;
++                    }
++                    pass.commit_wait()?;
++                    let initial_bytes =
++                        Guarded::new(&ctx, &initial, DType::F32, &[h, d, d])?;
++                    let mut pairs = vec![
++                        ("pre-verify state", &initial_bytes, &pre_state),
++                        ("final state", &reference_state, &final_state),
++                        ("in-place state", &reference_state, &in_place),
++                        ("output", &reference_out, &candidate_out),
++                        ("in-place output", &reference_out, &in_place_out),
++                    ];
++                    for (expected, target) in reference_prefix.iter().zip(&replayed) {
++                        pairs.push(("replayed prefix state", expected, target));
++                        replay_cases += 1;
++                    }
++                    for (field, reference, candidate) in pairs {
++                        reference.canaries()?;
++                        candidate.canaries()?;
++                        ensure!(
++                            reference.tensor.raw_bytes()
++                                == candidate.tensor.raw_bytes(),
++                            "GDN register verify mismatch field={field} m={m} h={h} style={style} gate={gate:?}"
++                        );
++                        ensure!(
++                            candidate.tensor.to_f32()?.iter().all(|v| v.is_finite()),
++                            "nonfinite GDN verify result"
++                        );
++                        reference_hash.update(reference.tensor.raw_bytes());
++                        candidate_hash.update(candidate.tensor.raw_bytes());
++                        checked_bytes += reference.tensor.byte_len();
++                    }
++                    sink.canaries()?;
++                    cases += 1;
++                }
++            }
++        }
++    }
++    }
++    eprintln!(
++        "GDN register verify replay exact: cases={cases} replay_cases={replay_cases} checked_bytes={checked_bytes} reference_sha256={} candidate_sha256={}",
++        hex(&reference_hash.finish()),
++        hex(&candidate_hash.finish())
++    );
++    Ok(())
+ }
+ 
+ fn check_kernel(kernel: &'static str) -> Result<()> {
+@@ -244,6 +500,13 @@ fn check_kernel(kernel: &'static str) -> Result<()> {
+     Ok(())
+ }
+ 
++/// Synthetic 36-layer component timing of the verify recurrence (Lily
++/// geometry, distinct state allocations per layer): `m` ordinary decode
++/// steps in place, against one exact verify dispatch that reads the
++/// pre-verify state and writes the final state to the other buffer (the
++/// replay-rollback form; no per-row captures), and against the replay of
++/// `m - 1` rows a partial accept costs in the finish pass. The variant
++/// order rotates each round.
+ #[test]
+ #[ignore = "requires an exclusive physical Apple Silicon GPU slot; component timing only"]
+ fn gdn_verification_streaming_chain_timing() -> Result<()> {
+@@ -253,7 +516,8 @@ fn gdn_verification_streaming_chain_timing() -> Result<()> {
+     let c = (2 * hk + h) * d;
+     let width = h * d;
+     let state_words = h * d * d;
+-    for m in [2, 4] {
++    const VARIANTS: usize = 3;
++    for m in [1, 2, 3, 4, 9] {
+         let qkv = Tensor::from_f32_as_bf16(
+             &ctx,
+             &values(&mut random, m * c, 2.0, -1.0),
+@@ -279,82 +543,99 @@ fn gdn_verification_streaming_chain_timing() -> Result<()> {
+             Tensor::from_f32_as_bf16(&ctx, &values(&mut random, h, 1.0, -0.5), &[h])?;
+         let norm = Tensor::from_f32(&ctx, &values(&mut random, d, 1.0, 0.5), &[d])?;
+         let out = Tensor::zeros(&ctx, &[m, width], DType::BF16)?;
++        let sink = Tensor::zeros(&ctx, &[m, width], DType::BF16)?;
+         let initial = values(&mut random, state_words, 0.5, -0.25);
+-        let mut states = [Vec::new(), Vec::new(), Vec::new()];
+-        for _ in 0..layers {
+-            for variant in &mut states {
+-                variant.push((
++        let states: Vec<(Tensor, Tensor)> = (0..layers)
++            .map(|_| {
++                Ok((
+                     Tensor::from_f32(&ctx, &initial, &[h, d, d])?,
+-                    Tensor::zeros(&ctx, &[m - 1, h, d, d], DType::F32)?,
+-                ));
+-            }
+-        }
++                    Tensor::zeros(&ctx, &[h, d, d], DType::F32)?,
++                ))
++            })
++            .collect::<Result<_>>()?;
++        let scale = 1.0 / (d as f32).sqrt();
+         let mut samples = [Vec::new(), Vec::new(), Vec::new()];
+         let warmup = std::time::Instant::now();
+         let mut round = 0;
+         let mut measured = 0;
+         loop {
+             let timed = warmup.elapsed() >= std::time::Duration::from_secs(2);
+-            for order in 0..3 {
+-                let variant = (round + order) % 3;
++            for order in 0..VARIANTS {
++                let variant = (round + order) % VARIANTS;
++                if variant == 2 && m == 1 {
++                    continue;
++                }
+                 let pass = ctx.begin_concurrent()?;
+-                for (state, mid) in &states[variant] {
+-                    if variant == 0 {
+-                        for row in 0..m {
+-                            gdn_step_gated_fused(
++                for (state, other) in &states {
++                    match variant {
++                        0 => {
++                            for row in 0..m {
++                                gdn_step_gated_fused(
++                                    &ctx,
++                                    &pass,
++                                    &qkv.view(row * c, &[c])?,
++                                    &a.view(row * h, &[h])?,
++                                    &b.view(row * h, &[h])?,
++                                    &a_log,
++                                    &dt_bias,
++                                    other,
++                                    &z.view(row * width, &[width])?,
++                                    &norm,
++                                    &out.view(row * width, &[width])?,
++                                    scale,
++                                    hk,
++                                    1e-6,
++                                    GdnGate::Sigmoid,
++                                )?;
++                                pass.level_barrier(&[other, &out])?;
++                            }
++                        }
++                        1 => {
++                            gdn_verify_gated_exact(
+                                 &ctx,
+                                 &pass,
+-                                &qkv.view(row * c, &[c])?,
+-                                &a.view(row * h, &[h])?,
+-                                &b.view(row * h, &[h])?,
++                                &qkv,
++                                &a,
++                                &b,
+                                 &a_log,
+                                 &dt_bias,
+                                 state,
+-                                &z.view(row * width, &[width])?,
++                                other,
++                                &z,
+                                 &norm,
+-                                &out.view(row * width, &[width])?,
+-                                1.0 / (d as f32).sqrt(),
++                                &out,
++                                scale,
+                                 hk,
+                                 1e-6,
+                                 GdnGate::Sigmoid,
+                             )?;
+-                            pass.level_barrier(&[state, &out])?;
+-                            if row + 1 < m {
+-                                copy_words(
+-                                    &ctx,
+-                                    &pass,
+-                                    state,
+-                                    &mid.view(row * state_words, &[h, d, d])?,
+-                                )?;
+-                                pass.level_barrier(&[mid])?;
+-                            }
++                            pass.level_barrier(&[other, &out])?;
+                         }
+-                    } else {
+-                        let kernel = if variant == 1 {
+-                            "gdn_verify_gated_exact"
+-                        } else {
+-                            "gdn_verify_gated_exact_register"
+-                        };
+-                        gdn_verify_gated_exact_named(
+-                            &ctx,
+-                            &pass,
+-                            &qkv,
+-                            &a,
+-                            &b,
+-                            &a_log,
+-                            &dt_bias,
+-                            state,
+-                            &z,
+-                            &norm,
+-                            &out,
+-                            1.0 / (d as f32).sqrt(),
+-                            hk,
+-                            1e-6,
+-                            GdnGate::Sigmoid,
+-                            Some(mid),
+-                            kernel,
+-                        )?;
+-                        pass.level_barrier(&[state, mid, &out])?;
++                        2 => {
++                            let n = m - 1;
++                            gdn_replay_rows(
++                                &ctx,
++                                &pass,
++                                GdnStateLayout::KeyValue,
++                                &GdnReplayRows {
++                                    qkv: &qkv.view(0, &[n, c])?,
++                                    a: &a.view(0, &[n, h])?,
++                                    b: &b.view(0, &[n, h])?,
++                                },
++                                &a_log,
++                                &dt_bias,
++                                &norm,
++                                state,
++                                other,
++                                &sink,
++                                scale,
++                                hk,
++                                1e-6,
++                                GdnGate::Sigmoid,
++                            )?;
++                            pass.level_barrier(&[other, &sink])?;
++                        }
++                        _ => unreachable!(),
+                     }
+                 }
+                 let complete = pass.commit()?.wait_retain()?;
+@@ -375,13 +656,16 @@ fn gdn_verification_streaming_chain_timing() -> Result<()> {
+             }
+         }
+         for (variant, times) in samples.iter_mut().enumerate() {
++            if times.is_empty() {
++                continue;
++            }
+             times.sort_unstable_by(f64::total_cmp);
+             let mean = times.iter().sum::<f64>() / times.len() as f64;
+             let median = (times[8] + times[9]) * 0.5;
++            let name = ["decode_steps", "verify_final_only", "replay_m_minus_1"][variant];
+             eprintln!(
+-                "GDN verify streaming: m={m} variant={variant} layers={layers} state_bytes={} mid_bytes={} samples={} mean_us_per_layer={mean:.6} median_us_per_layer={median:.6}",
++                "GDN verify recurrence timing: m={m} variant={name} layers={layers} state_bytes={} samples={} mean_us_per_layer={mean:.3} median_us_per_layer={median:.3}",
+                 layers * state_words * 4,
+-                layers * (m - 1) * state_words * 4,
+                 times.len()
+             );
+         }
+diff --git a/vendor/lily-core/src/kernels/metal/gdn.metal b/vendor/lily-core/src/kernels/metal/gdn.metal
+index 7ccdae65..ae6f46b0 100644
+--- a/vendor/lily-core/src/kernels/metal/gdn.metal
++++ b/vendor/lily-core/src/kernels/metal/gdn.metal
+@@ -234,24 +234,30 @@ kernel void gdn_verify_gated_exact(device const bfloat* qkv [[buffer(0)]],
+ }
+ 
+ // Register-resident alternative of the same short scan. Each thread retains
+-// its state column; captures preserve the exact F32 row boundary for rollback.
++// its state column across the rows.
++// Modified by Stark: the state is read from `state_in` and only the final
++// row's state is written, to `state_out`; no per-row captures. Each thread
++// reads its whole column before it writes it, so `state_in` may alias
++// `state_out` (in place). A verify pass keeps the pre-verify state by
++// writing to a separate buffer; rollback reruns this same kernel from that
++// state over the accepted rows only (replay), which reproduces ordinary
++// decode's state bytes for every accepted prefix.
+ kernel void gdn_verify_gated_exact_register(device const bfloat* qkv [[buffer(0)]],
+                                            device const bfloat* a [[buffer(1)]],
+                                            device const bfloat* b [[buffer(2)]],
+                                            device const float* a_log [[buffer(3)]],
+                                            device const bfloat* dt_bias [[buffer(4)]],
+-                                           device float* state [[buffer(5)]],
++                                           device const float* state_in [[buffer(5)]],
+                                            device const bfloat* z [[buffer(6)]],
+                                            device const float* norm_w [[buffer(7)]],
+                                            device bfloat* out [[buffer(8)]],
+-                                           device float* mid [[buffer(9)]],
++                                           device float* state_out [[buffer(9)]],
+                                            constant uint& M [[buffer(10)]],
+                                            constant uint& H [[buffer(11)]],
+                                            constant uint& HK [[buffer(12)]],
+-                                           constant uint& mid_count [[buffer(13)]],
+-                                           constant float& scale [[buffer(14)]],
+-                                           constant float& eps [[buffer(15)]],
+-                                           constant uint& gate_act [[buffer(16)]],
++                                           constant float& scale [[buffer(13)]],
++                                           constant float& eps [[buffer(14)]],
++                                           constant uint& gate_act [[buffer(15)]],
+                                            uint h [[threadgroup_position_in_grid]],
+                                            uint tid [[thread_index_in_threadgroup]],
+                                            uint sg [[simdgroup_index_in_threadgroup]],
+@@ -265,7 +271,7 @@ kernel void gdn_verify_gated_exact_register(device const bfloat* qkv [[buffer(0)
+     threadgroup float inv_rms;
+     const uint C = (2 * HK + H) * DIM;
+     const uint hk = h / (H / HK);
+-    device float* st = state + (ulong)h * DIM * DIM;
++    device const float* st = state_in + (ulong)h * DIM * DIM;
+     float column[DIM];
+     for (uint k0 = 0; k0 < DIM; ++k0) {
+         column[k0] = st[k0 * DIM + tid];
+@@ -346,16 +352,11 @@ kernel void gdn_verify_gated_exact_register(device const bfloat* qkv [[buffer(0)
+         const float gate = float(z[at]);
+         const float act = gate_activation(gate, gate_act);
+         out[at] = bfloat(norm_w[tid] * rv * inv_rms * act);
+-        if (row < mid_count) {
+-            for (uint k0 = 0; k0 < DIM; ++k0) {
+-                const ulong index = ((ulong)h * DIM + k0) * DIM + tid;
+-                mid[(ulong)row * H * DIM * DIM + index] = column[k0];
+-            }
+-        }
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+     }
++    device float* final_state = state_out + (ulong)h * DIM * DIM;
+     for (uint k0 = 0; k0 < DIM; ++k0) {
+-        st[k0 * DIM + tid] = column[k0];
++        final_state[k0 * DIM + tid] = column[k0];
+     }
+ }
+ 
+@@ -2222,19 +2223,22 @@ kernel void gdn_normgate_value_key_mlx(
+ 
+ // Stark short-row verification adaptation of the qualified stock K1 above.
+ // Each thread keeps the same physical F32 state cells and the same SIMD
+-// reductions. Only the outer token loop and rollback captures are added.
++// reductions. Only the outer token loop is added. The state is read from
++// `state_in` and the final row's state written to `state_out` (which may
++// alias it: every thread reads its cells before writing them); rollback
++// reruns this kernel from the retained pre-verify state over the accepted
++// rows.
+ kernel void gdn_verify_raw_value_key_exact(
+     device const bfloat* qkv [[buffer(0)]],
+     device const bfloat* a_in [[buffer(1)]],
+     device const bfloat* b_in [[buffer(2)]],
+     device const float* A_log [[buffer(3)]],
+     device const bfloat* dt_bias [[buffer(4)]],
+-    device float* state [[buffer(5)]],
++    device const float* state [[buffer(5)]],
+     device bfloat* y [[buffer(6)]],
+-    device float* mid [[buffer(7)]],
++    device float* state_out [[buffer(7)]],
+     constant float& k_scale_f32 [[buffer(8)]],
+     constant uint& rows [[buffer(9)]],
+-    constant uint& captures [[buffer(10)]],
+     uint tg [[threadgroup_position_in_grid]],
+     uint lane [[thread_index_in_simdgroup]],
+     uint sg [[simdgroup_index_in_threadgroup]]) {
+@@ -2298,11 +2302,8 @@ kernel void gdn_verify_raw_value_key_exact(
+             for (int i = 0; i < 4; ++i) { st[j][i] = st[j][i] + kk[i] * delta; out += st[j][i] * qq[i]; }
+             out = simd_sum(out);
+             uint base = (hv * DV + dv) * DK + lane * 4;
+-            if (token < captures) {
+-                for (int i = 0; i < 4; ++i) mid[token * HV * DV * DK + base + i] = st[j][i];
+-            }
+             if (token + 1 == rows) {
+-                for (int i = 0; i < 4; ++i) state[base + i] = st[j][i];
++                for (int i = 0; i < 4; ++i) state_out[base + i] = st[j][i];
+             }
+             if (lane == 0) y[token * HV * DV + hv * DV + dv] = static_cast<T>(out);
+         }
+diff --git a/vendor/lily-core/src/kernels/metal/stark_decode_rows.metal b/vendor/lily-core/src/kernels/metal/stark_decode_rows.metal
+index d4936176..88cc28d7 100644
+--- a/vendor/lily-core/src/kernels/metal/stark_decode_rows.metal
++++ b/vendor/lily-core/src/kernels/metal/stark_decode_rows.metal
+@@ -137,3 +137,32 @@ STARK_PROJECTION_REUSE_Q8(3, float, f32)
+ STARK_PROJECTION_REUSE_Q8(4, float, f32)
+ #undef STARK_PROJECTION_REUSE_Q4
+ #undef STARK_PROJECTION_REUSE_Q8
++
++// Stark: staged-input variant of the Q4 projection reuse (see stark_q4_rows_stage).
++#define STARK_PROJECTION_REUSE_Q4_STAGED(M) \
++kernel void stark_projection_reuse_q4_bf16_staged_m##M( \
++    device const uint* codes [[buffer(0)]], \
++    device const bfloat* scales [[buffer(1)]], \
++    device const bfloat* biases [[buffer(2)]], \
++    device const float* xf [[buffer(3)]], \
++    device bfloat* output [[buffer(4)]], \
++    device const float* xsum [[buffer(5)]], \
++    constant uint& K [[buffer(6)]], constant uint& GS [[buffer(7)]], \
++    constant uint& N [[buffer(8)]], \
++    uint group [[threadgroup_position_in_grid]], \
++    uint lane [[thread_index_in_threadgroup]]) { \
++    const uint sublane = lane % 16; \
++    const uint channel = group * 2 + lane / 16; \
++    float sums[M]; \
++    stark_gemv_q4_packed_rows_sum_staged<M>( \
++        codes, scales, biases, xf, xsum, channel, sublane, K, GS, sums); \
++    if (sublane == 0) { \
++        _Pragma("clang loop unroll(full)") \
++        for (uint m = 0; m < M; ++m) \
++            output[(ulong)m * N + channel] = bfloat(sums[m]); \
++    } \
++}
++STARK_PROJECTION_REUSE_Q4_STAGED(2)
++STARK_PROJECTION_REUSE_Q4_STAGED(3)
++STARK_PROJECTION_REUSE_Q4_STAGED(4)
++#undef STARK_PROJECTION_REUSE_Q4_STAGED
+diff --git a/vendor/lily-core/src/kernels/metal/stark_gdn_projection_rows.metal b/vendor/lily-core/src/kernels/metal/stark_gdn_projection_rows.metal
+index db56b01f..ad0b2dbe 100644
+--- a/vendor/lily-core/src/kernels/metal/stark_gdn_projection_rows.metal
++++ b/vendor/lily-core/src/kernels/metal/stark_gdn_projection_rows.metal
+@@ -105,3 +105,340 @@ STARK_GDN_PROJECTION_ROWS(stark_q4_gdn_conv_rows_m2, 2)
+ STARK_GDN_PROJECTION_ROWS(stark_q4_gdn_conv_rows_m3, 3)
+ STARK_GDN_PROJECTION_ROWS(stark_q4_gdn_conv_rows_m4, 4)
+ #undef STARK_GDN_PROJECTION_ROWS
++
++// Stark: staged-input variant (see stark_q4_rows_stage).
++template <uint M>
++static inline void stark_q4_gdn_conv_rows_staged_body(
++    device const uint* codes, device const bfloat* scales,
++    device const bfloat* biases, device const float* xf, device const float* xsum,
++    device bfloat* qkv, device bfloat* z, device bfloat* a, device bfloat* b,
++    device const bfloat* window_in, device bfloat* window_out,
++    device const bfloat* conv_w, device bfloat* conv_out,
++    device bfloat* capture,
++    uint K, uint GS, uint C, uint V, uint H, uint KD, uint capture_enabled,
++    uint group, uint lane) {
++    constexpr uint LANES = 16;
++    const uint sublane = lane % LANES;
++    const uint channel = group * 2 + lane / LANES;
++    float sums[M];
++    stark_gemv_q4_packed_rows_sum_staged<M>(
++        codes, scales, biases, xf, xsum, channel, sublane, K, GS, sums);
++    if (sublane != 0) {
++        return;
++    }
++    if (channel < C) {
++        // These are exact BF16 window values represented as F32. Retaining
++        // them between rows removes only repeated loads/stores.
++        uint taps = KD - 1;
++        float win[8];
++        for (uint t = 0; t < taps; ++t) {
++            win[t] = float(window_in[channel * taps + t]);
++        }
++        for (uint m = 0; m < M; ++m) {
++            const bfloat projected = bfloat(sums[m]);
++            qkv[(ulong)m * C + channel] = projected;
++            if (capture_enabled != 0) {
++                capture[(ulong)m * C + channel] = projected;
++            }
++            float acc = 0.0f;
++            for (uint t = 0; t < taps; ++t) {
++                acc += win[t] * float(conv_w[t * C + channel]);
++            }
++            const float xc = float(projected);
++            acc += xc * float(conv_w[taps * C + channel]);
++            conv_out[(ulong)m * C + channel] =
++                bfloat(acc / (1.0f + exp(-acc)));
++            for (uint t = 0; t + 1 < taps; ++t) {
++                win[t] = win[t + 1];
++            }
++            win[taps - 1] = xc;
++        }
++        for (uint t = 0; t < taps; ++t) {
++            window_out[channel * taps + t] = bfloat(win[t]);
++        }
++        return;
++    }
++    uint col = channel - C;
++    if (col < V) {
++        for (uint m = 0; m < M; ++m) {
++            z[(ulong)m * V + col] = bfloat(sums[m]);
++        }
++        return;
++    }
++    col -= V;
++    if (col < H) {
++        for (uint m = 0; m < M; ++m) {
++            a[(ulong)m * H + col] = bfloat(sums[m]);
++        }
++        return;
++    }
++    col -= H;
++    for (uint m = 0; m < M; ++m) {
++        b[(ulong)m * H + col] = bfloat(sums[m]);
++    }
++}
++
++
++#define STARK_GDN_PROJECTION_ROWS_STAGED(NAME, M) \
++kernel void NAME( \
++    device const uint* codes [[buffer(0)]], \
++    device const bfloat* scales [[buffer(1)]], \
++    device const bfloat* biases [[buffer(2)]], \
++    device const float* xf [[buffer(3)]], \
++    device bfloat* qkv [[buffer(4)]], \
++    device bfloat* z [[buffer(5)]], \
++    device bfloat* a [[buffer(6)]], \
++    device bfloat* b [[buffer(7)]], \
++    device const bfloat* window_in [[buffer(8)]], \
++    device bfloat* window_out [[buffer(9)]], \
++    device const bfloat* conv_w [[buffer(10)]], \
++    device bfloat* conv_out [[buffer(11)]], \
++    device bfloat* capture [[buffer(12)]], \
++    constant uint& K [[buffer(14)]], \
++    constant uint& GS [[buffer(15)]], \
++    constant uint& C [[buffer(16)]], \
++    constant uint& V [[buffer(17)]], \
++    constant uint& H [[buffer(18)]], \
++    constant uint& capture_enabled [[buffer(19)]], \
++    constant uint& KD [[buffer(20)]], \
++    device const float* xsum [[buffer(13)]], \
++    uint group [[threadgroup_position_in_grid]], \
++    uint lane [[thread_index_in_threadgroup]]) { \
++    stark_q4_gdn_conv_rows_staged_body<M>( \
++        codes, scales, biases, xf, xsum, qkv, z, a, b, window_in, window_out, \
++        conv_w, conv_out, capture, K, GS, C, V, H, KD, capture_enabled, group, lane); \
++}
++STARK_GDN_PROJECTION_ROWS_STAGED(stark_q4_gdn_conv_rows_staged_m2, 2)
++STARK_GDN_PROJECTION_ROWS_STAGED(stark_q4_gdn_conv_rows_staged_m3, 3)
++STARK_GDN_PROJECTION_ROWS_STAGED(stark_q4_gdn_conv_rows_staged_m4, 4)
++#undef STARK_GDN_PROJECTION_ROWS_STAGED
++
++// Stark: threadgroup-parked input variant.
++template <uint M>
++static inline void stark_q4_gdn_conv_rows_tg_body(
++    device const uint* codes, device const bfloat* scales,
++    device const bfloat* biases, threadgroup const bfloat* input,
++    device bfloat* qkv, device bfloat* z, device bfloat* a, device bfloat* b,
++    device const bfloat* window_in, device bfloat* window_out,
++    device const bfloat* conv_w, device bfloat* conv_out,
++    device bfloat* capture,
++    uint K, uint GS, uint C, uint V, uint H, uint KD, uint capture_enabled,
++    uint group, uint lane) {
++    constexpr uint LANES = 16;
++    const uint sublane = lane % LANES;
++    const uint channel = group * 2 + lane / LANES;
++    float sums[M];
++    stark_gemv_q4_packed_rows_sum_tg<M>(
++        codes, scales, biases, input, channel, sublane, K, GS, sums);
++    if (sublane != 0) {
++        return;
++    }
++    if (channel < C) {
++        // These are exact BF16 window values represented as F32. Retaining
++        // them between rows removes only repeated loads/stores.
++        uint taps = KD - 1;
++        float win[8];
++        for (uint t = 0; t < taps; ++t) {
++            win[t] = float(window_in[channel * taps + t]);
++        }
++        for (uint m = 0; m < M; ++m) {
++            const bfloat projected = bfloat(sums[m]);
++            qkv[(ulong)m * C + channel] = projected;
++            if (capture_enabled != 0) {
++                capture[(ulong)m * C + channel] = projected;
++            }
++            float acc = 0.0f;
++            for (uint t = 0; t < taps; ++t) {
++                acc += win[t] * float(conv_w[t * C + channel]);
++            }
++            const float xc = float(projected);
++            acc += xc * float(conv_w[taps * C + channel]);
++            conv_out[(ulong)m * C + channel] =
++                bfloat(acc / (1.0f + exp(-acc)));
++            for (uint t = 0; t + 1 < taps; ++t) {
++                win[t] = win[t + 1];
++            }
++            win[taps - 1] = xc;
++        }
++        for (uint t = 0; t < taps; ++t) {
++            window_out[channel * taps + t] = bfloat(win[t]);
++        }
++        return;
++    }
++    uint col = channel - C;
++    if (col < V) {
++        for (uint m = 0; m < M; ++m) {
++            z[(ulong)m * V + col] = bfloat(sums[m]);
++        }
++        return;
++    }
++    col -= V;
++    if (col < H) {
++        for (uint m = 0; m < M; ++m) {
++            a[(ulong)m * H + col] = bfloat(sums[m]);
++        }
++        return;
++    }
++    col -= H;
++    for (uint m = 0; m < M; ++m) {
++        b[(ulong)m * H + col] = bfloat(sums[m]);
++    }
++}
++
++
++#define STARK_GDN_PROJECTION_ROWS_TG(NAME, M) \
++kernel void NAME( \
++    device const uint* codes [[buffer(0)]], \
++    device const bfloat* scales [[buffer(1)]], \
++    device const bfloat* biases [[buffer(2)]], \
++    device const bfloat* input [[buffer(3)]], \
++    device bfloat* qkv [[buffer(4)]], \
++    device bfloat* z [[buffer(5)]], \
++    device bfloat* a [[buffer(6)]], \
++    device bfloat* b [[buffer(7)]], \
++    device const bfloat* window_in [[buffer(8)]], \
++    device bfloat* window_out [[buffer(9)]], \
++    device const bfloat* conv_w [[buffer(10)]], \
++    device bfloat* conv_out [[buffer(11)]], \
++    device bfloat* capture [[buffer(12)]], \
++    constant uint& K [[buffer(13)]], \
++    constant uint& GS [[buffer(14)]], \
++    constant uint& C [[buffer(15)]], \
++    constant uint& V [[buffer(16)]], \
++    constant uint& H [[buffer(17)]], \
++    constant uint& capture_enabled [[buffer(18)]], \
++    constant uint& KD [[buffer(19)]], \
++    uint group [[threadgroup_position_in_grid]], \
++    uint tid [[thread_index_in_threadgroup]], \
++    uint threads [[threads_per_threadgroup]], \
++    uint sg [[simdgroup_index_in_threadgroup]], \
++    uint lane [[thread_index_in_simdgroup]]) { \
++    threadgroup bfloat parked[STARK_Q4_TG_ROWS_ELEMS]; \
++    stark_q4_tg_park(input, parked, M * K, tid, threads); \
++    const uint pair = group * (threads / 32) + sg; \
++    if (pair * 2 >= C + V + 2 * H) { \
++        return; \
++    } \
++    stark_q4_gdn_conv_rows_tg_body<M>( \
++        codes, scales, biases, parked, qkv, z, a, b, window_in, window_out, \
++        conv_w, conv_out, capture, K, GS, C, V, H, KD, capture_enabled, pair, lane); \
++}
++STARK_GDN_PROJECTION_ROWS_TG(stark_q4_gdn_conv_rows_tg_m2, 2)
++STARK_GDN_PROJECTION_ROWS_TG(stark_q4_gdn_conv_rows_tg_m3, 3)
++STARK_GDN_PROJECTION_ROWS_TG(stark_q4_gdn_conv_rows_tg_m4, 4)
++#undef STARK_GDN_PROJECTION_ROWS_TG
++
++// Stark: threadgroup-parked input and word-sum variant.
++template <uint M>
++static inline void stark_q4_gdn_conv_rows_tgx_body(
++    device const uint* codes, device const bfloat* scales,
++    device const bfloat* biases, threadgroup const bfloat* input, threadgroup const float* xsum,
++    device bfloat* qkv, device bfloat* z, device bfloat* a, device bfloat* b,
++    device const bfloat* window_in, device bfloat* window_out,
++    device const bfloat* conv_w, device bfloat* conv_out,
++    device bfloat* capture,
++    uint K, uint GS, uint C, uint V, uint H, uint KD, uint capture_enabled,
++    uint group, uint lane) {
++    constexpr uint LANES = 16;
++    const uint sublane = lane % LANES;
++    const uint channel = group * 2 + lane / LANES;
++    float sums[M];
++    stark_gemv_q4_packed_rows_sum_tgx<M>(
++        codes, scales, biases, input, xsum, channel, sublane, K, GS, sums);
++    if (sublane != 0) {
++        return;
++    }
++    if (channel < C) {
++        // These are exact BF16 window values represented as F32. Retaining
++        // them between rows removes only repeated loads/stores.
++        uint taps = KD - 1;
++        float win[8];
++        for (uint t = 0; t < taps; ++t) {
++            win[t] = float(window_in[channel * taps + t]);
++        }
++        for (uint m = 0; m < M; ++m) {
++            const bfloat projected = bfloat(sums[m]);
++            qkv[(ulong)m * C + channel] = projected;
++            if (capture_enabled != 0) {
++                capture[(ulong)m * C + channel] = projected;
++            }
++            float acc = 0.0f;
++            for (uint t = 0; t < taps; ++t) {
++                acc += win[t] * float(conv_w[t * C + channel]);
++            }
++            const float xc = float(projected);
++            acc += xc * float(conv_w[taps * C + channel]);
++            conv_out[(ulong)m * C + channel] =
++                bfloat(acc / (1.0f + exp(-acc)));
++            for (uint t = 0; t + 1 < taps; ++t) {
++                win[t] = win[t + 1];
++            }
++            win[taps - 1] = xc;
++        }
++        for (uint t = 0; t < taps; ++t) {
++            window_out[channel * taps + t] = bfloat(win[t]);
++        }
++        return;
++    }
++    uint col = channel - C;
++    if (col < V) {
++        for (uint m = 0; m < M; ++m) {
++            z[(ulong)m * V + col] = bfloat(sums[m]);
++        }
++        return;
++    }
++    col -= V;
++    if (col < H) {
++        for (uint m = 0; m < M; ++m) {
++            a[(ulong)m * H + col] = bfloat(sums[m]);
++        }
++        return;
++    }
++    col -= H;
++    for (uint m = 0; m < M; ++m) {
++        b[(ulong)m * H + col] = bfloat(sums[m]);
++    }
++}
++
++
++#define STARK_GDN_PROJECTION_ROWS_TGX(NAME, M) \
++kernel void NAME( \
++    device const uint* codes [[buffer(0)]], \
++    device const bfloat* scales [[buffer(1)]], \
++    device const bfloat* biases [[buffer(2)]], \
++    device const bfloat* input [[buffer(3)]], \
++    device bfloat* qkv [[buffer(4)]], \
++    device bfloat* z [[buffer(5)]], \
++    device bfloat* a [[buffer(6)]], \
++    device bfloat* b [[buffer(7)]], \
++    device const bfloat* window_in [[buffer(8)]], \
++    device bfloat* window_out [[buffer(9)]], \
++    device const bfloat* conv_w [[buffer(10)]], \
++    device bfloat* conv_out [[buffer(11)]], \
++    device bfloat* capture [[buffer(12)]], \
++    constant uint& K [[buffer(13)]], \
++    constant uint& GS [[buffer(14)]], \
++    constant uint& C [[buffer(15)]], \
++    constant uint& V [[buffer(16)]], \
++    constant uint& H [[buffer(17)]], \
++    constant uint& capture_enabled [[buffer(18)]], \
++    constant uint& KD [[buffer(19)]], \
++    uint group [[threadgroup_position_in_grid]], \
++    uint tid [[thread_index_in_threadgroup]], \
++    uint threads [[threads_per_threadgroup]], \
++    uint sg [[simdgroup_index_in_threadgroup]], \
++    uint lane [[thread_index_in_simdgroup]]) { \
++    threadgroup bfloat parked[STARK_Q4_TG_ROWS_ELEMS]; \
++    threadgroup float parked_sum[STARK_Q4_TG_ROWS_ELEMS / 8];     stark_q4_tgx_park(input, parked, parked_sum, M * K, tid, threads); \
++    const uint pair = group * (threads / 32) + sg; \
++    if (pair * 2 >= C + V + 2 * H) { \
++        return; \
++    } \
++    stark_q4_gdn_conv_rows_tgx_body<M>( \
++        codes, scales, biases, parked, parked_sum, qkv, z, a, b, window_in, window_out, \
++        conv_w, conv_out, capture, K, GS, C, V, H, KD, capture_enabled, pair, lane); \
++}
++STARK_GDN_PROJECTION_ROWS_TGX(stark_q4_gdn_conv_rows_tgx_m2, 2)
++STARK_GDN_PROJECTION_ROWS_TGX(stark_q4_gdn_conv_rows_tgx_m3, 3)
++STARK_GDN_PROJECTION_ROWS_TGX(stark_q4_gdn_conv_rows_tgx_m4, 4)
++#undef STARK_GDN_PROJECTION_ROWS_TGX
+diff --git a/vendor/lily-core/src/kernels/metal/stark_packed_rows.metal b/vendor/lily-core/src/kernels/metal/stark_packed_rows.metal
+index 5d40f7a3..d14b3b4a 100644
+--- a/vendor/lily-core/src/kernels/metal/stark_packed_rows.metal
++++ b/vendor/lily-core/src/kernels/metal/stark_packed_rows.metal
+@@ -40,3 +40,230 @@ static inline void stark_gemv_q4_packed_rows_sum(
+         }
+     }
+ }
++
++// Stark: staged row inputs for the shared-weight Q4 rows. The input terms of
++// dot_word_q4 that do not depend on the weight (each word's eight BF16
++// inputs widened to F32, and their sum `xs`) are computed once per row and
++// word by stark_q4_rows_stage instead of once per output channel. The
++// per-channel term `s * qx + b * xs` keeps dot_word_q4's expression and the
++// lane and reduction order of stark_gemv_q4_packed_rows_sum.
++kernel void stark_q4_rows_stage(device const bfloat* input [[buffer(0)]],
++                                device float* xf [[buffer(1)]],
++                                device float* xs [[buffer(2)]],
++                                constant uint& K [[buffer(3)]],
++                                uint2 at [[thread_position_in_grid]]) {
++    const uint words = K / 8;
++    const uint w = at.x;
++    const uint m = at.y;
++    if (w >= words) {
++        return;
++    }
++    device const bfloat4* xv = (device const bfloat4*)(input + (ulong)m * K);
++    float4 xlo = float4(xv[2 * w]);
++    float4 xhi = float4(xv[2 * w + 1]);
++    device float4* out = (device float4*)(xf + (ulong)m * K);
++    out[2 * w] = xlo;
++    out[2 * w + 1] = xhi;
++    xs[(ulong)m * words + w] = dot(xlo, float4(1.0f)) + dot(xhi, float4(1.0f));
++}
++
++static inline float stark_dot_word_q4_staged(uint word, float s, float b,
++                                             device const float4* xf,
++                                             float xs, uint w) {
++    float4 xlo = xf[2 * w];
++    float4 xhi = xf[2 * w + 1];
++    float4 qlo = float4(float((word >> 0) & 0xF), float((word >> 4) & 0xF),
++                        float((word >> 8) & 0xF), float((word >> 12) & 0xF));
++    float4 qhi = float4(float((word >> 16) & 0xF), float((word >> 20) & 0xF),
++                        float((word >> 24) & 0xF), float((word >> 28) & 0xF));
++    float qx = dot(qlo, xlo) + dot(qhi, xhi);
++    return s * qx + b * xs;
++}
++
++template <uint M>
++static inline void stark_gemv_q4_packed_rows_sum_staged(
++    device const uint* codes, device const bfloat* scales,
++    device const bfloat* biases, device const float* xf,
++    device const float* xsum, uint channel, uint sublane, uint K, uint GS,
++    thread float (&sums)[M]) {
++    constexpr uint LANES = 16;
++    const uint words = K / 8;
++    const uint blocks = words / 4;
++    const uint bpg = GS / 32;
++    const uint groups = K / GS;
++    device const uint4* wrow =
++        (device const uint4*)(codes + (ulong)channel * words);
++    _Pragma("clang loop unroll(full)")
++    for (uint m = 0; m < M; ++m) {
++        sums[m] = 0.0f;
++    }
++    for (uint i = sublane; i < blocks; i += LANES) {
++        const uint g = i / bpg;
++        const float s = float(scales[channel * groups + g]);
++        const float b = float(biases[channel * groups + g]);
++        const uint4 w4 = wrow[i];
++        _Pragma("clang loop unroll(full)")
++        for (uint m = 0; m < M; ++m) {
++            device const float4* xv = (device const float4*)(xf + (ulong)m * K);
++            const float4 x4 = ((device const float4*)(xsum + (ulong)m * words))[i];
++            sums[m] += stark_dot_word_q4_staged(w4.x, s, b, xv, x4.x, 4 * i)
++                + stark_dot_word_q4_staged(w4.y, s, b, xv, x4.y, 4 * i + 1)
++                + stark_dot_word_q4_staged(w4.z, s, b, xv, x4.z, 4 * i + 2)
++                + stark_dot_word_q4_staged(w4.w, s, b, xv, x4.w, 4 * i + 3);
++        }
++    }
++    for (uint off = LANES / 2; off > 0; off >>= 1) {
++        _Pragma("clang loop unroll(full)")
++        for (uint m = 0; m < M; ++m) {
++            sums[m] += simd_shuffle_down(sums[m], off);
++        }
++    }
++}
++
++// Stark: threadgroup-parked inputs for the shared-weight Q4 rows. Eight
++// simdgroups (sixteen output channels) share one copy of the M input rows in
++// threadgroup memory instead of each pair of channels reading them through
++// the device cache. Each channel keeps stark_gemv_q4_packed_rows_sum's lanes,
++// block order, dot_word_q4 expression and reduction.
++#define STARK_Q4_TG_ROWS_ELEMS 10240
++
++static inline float stark_dot_word_q4_tg(uint word, float s, float b,
++                                         threadgroup const bfloat4* xv, uint w) {
++    float4 xlo = float4(xv[2 * w]);
++    float4 xhi = float4(xv[2 * w + 1]);
++    float4 qlo = float4(float((word >> 0) & 0xF), float((word >> 4) & 0xF),
++                        float((word >> 8) & 0xF), float((word >> 12) & 0xF));
++    float4 qhi = float4(float((word >> 16) & 0xF), float((word >> 20) & 0xF),
++                        float((word >> 24) & 0xF), float((word >> 28) & 0xF));
++    float qx = dot(qlo, xlo) + dot(qhi, xhi);
++    float xs = dot(xlo, float4(1.0f)) + dot(xhi, float4(1.0f));
++    return s * qx + b * xs;
++}
++
++template <uint M>
++static inline void stark_gemv_q4_packed_rows_sum_tg(
++    device const uint* codes, device const bfloat* scales,
++    device const bfloat* biases, threadgroup const bfloat* input,
++    uint channel, uint sublane, uint K, uint GS,
++    thread float (&sums)[M]) {
++    constexpr uint LANES = 16;
++    const uint words = K / 8;
++    const uint blocks = words / 4;
++    const uint bpg = GS / 32;
++    const uint groups = K / GS;
++    device const uint4* wrow =
++        (device const uint4*)(codes + (ulong)channel * words);
++    _Pragma("clang loop unroll(full)")
++    for (uint m = 0; m < M; ++m) {
++        sums[m] = 0.0f;
++    }
++    for (uint i = sublane; i < blocks; i += LANES) {
++        const uint g = i / bpg;
++        const float s = float(scales[channel * groups + g]);
++        const float b = float(biases[channel * groups + g]);
++        const uint4 w4 = wrow[i];
++        _Pragma("clang loop unroll(full)")
++        for (uint m = 0; m < M; ++m) {
++            threadgroup const bfloat4* xv =
++                (threadgroup const bfloat4*)(input + m * K);
++            sums[m] += stark_dot_word_q4_tg(w4.x, s, b, xv, 4 * i)
++                + stark_dot_word_q4_tg(w4.y, s, b, xv, 4 * i + 1)
++                + stark_dot_word_q4_tg(w4.z, s, b, xv, 4 * i + 2)
++                + stark_dot_word_q4_tg(w4.w, s, b, xv, 4 * i + 3);
++        }
++    }
++    for (uint off = LANES / 2; off > 0; off >>= 1) {
++        _Pragma("clang loop unroll(full)")
++        for (uint m = 0; m < M; ++m) {
++            sums[m] += simd_shuffle_down(sums[m], off);
++        }
++    }
++}
++
++// Copies M rows of K BF16 inputs into threadgroup memory (all threads).
++static inline void stark_q4_tg_park(device const bfloat* input,
++                                    threadgroup bfloat* parked, uint count,
++                                    uint tid, uint threads) {
++    device const bfloat4* src = (device const bfloat4*)input;
++    threadgroup bfloat4* dst = (threadgroup bfloat4*)parked;
++    for (uint i = tid; i < count / 4; i += threads) {
++        dst[i] = src[i];
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++}
++
++// Stark: threadgroup-parked inputs plus each word's parked input sum (the
++// weight-independent `xs` term of dot_word_q4, computed once per threadgroup
++// with dot_word_q4's own expression instead of once per output channel).
++static inline float stark_dot_word_q4_tgx(uint word, float s, float b,
++                                          threadgroup const bfloat4* xv,
++                                          float xs, uint w) {
++    float4 xlo = float4(xv[2 * w]);
++    float4 xhi = float4(xv[2 * w + 1]);
++    float4 qlo = float4(float((word >> 0) & 0xF), float((word >> 4) & 0xF),
++                        float((word >> 8) & 0xF), float((word >> 12) & 0xF));
++    float4 qhi = float4(float((word >> 16) & 0xF), float((word >> 20) & 0xF),
++                        float((word >> 24) & 0xF), float((word >> 28) & 0xF));
++    float qx = dot(qlo, xlo) + dot(qhi, xhi);
++    return s * qx + b * xs;
++}
++
++template <uint M>
++static inline void stark_gemv_q4_packed_rows_sum_tgx(
++    device const uint* codes, device const bfloat* scales,
++    device const bfloat* biases, threadgroup const bfloat* input,
++    threadgroup const float* xsum, uint channel, uint sublane, uint K, uint GS,
++    thread float (&sums)[M]) {
++    constexpr uint LANES = 16;
++    const uint words = K / 8;
++    const uint blocks = words / 4;
++    const uint bpg = GS / 32;
++    const uint groups = K / GS;
++    device const uint4* wrow =
++        (device const uint4*)(codes + (ulong)channel * words);
++    _Pragma("clang loop unroll(full)")
++    for (uint m = 0; m < M; ++m) {
++        sums[m] = 0.0f;
++    }
++    for (uint i = sublane; i < blocks; i += LANES) {
++        const uint g = i / bpg;
++        const float s = float(scales[channel * groups + g]);
++        const float b = float(biases[channel * groups + g]);
++        const uint4 w4 = wrow[i];
++        _Pragma("clang loop unroll(full)")
++        for (uint m = 0; m < M; ++m) {
++            threadgroup const bfloat4* xv =
++                (threadgroup const bfloat4*)(input + m * K);
++            const float4 x4 = ((threadgroup const float4*)(xsum + m * words))[i];
++            sums[m] += stark_dot_word_q4_tgx(w4.x, s, b, xv, x4.x, 4 * i)
++                + stark_dot_word_q4_tgx(w4.y, s, b, xv, x4.y, 4 * i + 1)
++                + stark_dot_word_q4_tgx(w4.z, s, b, xv, x4.z, 4 * i + 2)
++                + stark_dot_word_q4_tgx(w4.w, s, b, xv, x4.w, 4 * i + 3);
++        }
++    }
++    for (uint off = LANES / 2; off > 0; off >>= 1) {
++        _Pragma("clang loop unroll(full)")
++        for (uint m = 0; m < M; ++m) {
++            sums[m] += simd_shuffle_down(sums[m], off);
++        }
++    }
++}
++
++// Parks M rows of K BF16 inputs and their per-word sums (all threads).
++static inline void stark_q4_tgx_park(device const bfloat* input,
++                                     threadgroup bfloat* parked,
++                                     threadgroup float* xsum, uint count,
++                                     uint tid, uint threads) {
++    device const bfloat4* src = (device const bfloat4*)input;
++    threadgroup bfloat4* dst = (threadgroup bfloat4*)parked;
++    for (uint i = tid; i < count / 8; i += threads) {
++        const bfloat4 lo = src[2 * i];
++        const bfloat4 hi = src[2 * i + 1];
++        dst[2 * i] = lo;
++        dst[2 * i + 1] = hi;
++        const float4 xlo = float4(lo);
++        const float4 xhi = float4(hi);
++        xsum[i] = dot(xlo, float4(1.0f)) + dot(xhi, float4(1.0f));
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++}
+diff --git a/vendor/lily-core/src/kernels/quant.rs b/vendor/lily-core/src/kernels/quant.rs
+index d7c84216..7a0ceabd 100644
+--- a/vendor/lily-core/src/kernels/quant.rs
++++ b/vendor/lily-core/src/kernels/quant.rs
+@@ -402,6 +402,31 @@ pub(crate) fn gemv_q4_gdn_conv_rows_exact(
+     capture: Option<&Tensor>,
+ ) -> Result<()> {
+     let (n, k) = check_quant(w)?;
++    gemv_q4_gdn_conv_rows_dispatch(
++        ctx, pass, w, input, qkv, z, a, b, window_in, window_out, conv_w, conv_out,
++        capture, None, n, k,
++    )
++}
++
++#[allow(clippy::too_many_arguments)]
++fn gemv_q4_gdn_conv_rows_dispatch(
++    ctx: &MetalContext,
++    pass: &ComputePass<'_>,
++    w: &QuantWeights,
++    input: &Tensor,
++    qkv: &Tensor,
++    z: &Tensor,
++    a: &Tensor,
++    b: &Tensor,
++    window_in: &Tensor,
++    window_out: &Tensor,
++    conv_w: &Tensor,
++    conv_out: &Tensor,
++    capture: Option<&Tensor>,
++    staged: Option<(&'static str, &Q4RowStage<'_>)>,
++    n: usize,
++    k: usize,
++) -> Result<()> {
+     ensure!(w.bits == 4 && n.is_multiple_of(2), "GDN rows require Q4 row pairs");
+     ensure!(input.shape().len() == 2, "GDN rows input must be [M,K]");
+     let m = input.shape()[0];
+@@ -437,31 +462,45 @@ pub(crate) fn gemv_q4_gdn_conv_rows_exact(
+     let (ib, io) = window_in.binding();
+     let (ob, oo) = window_out.binding();
+     ensure!(!(std::ptr::eq(ib, ob) && io == oo), "GDN rows windows must be distinct");
+-    let kernel = match m {
+-        1 => "stark_q4_gdn_conv_rows_m1",
+-        2 => "stark_q4_gdn_conv_rows_m2",
+-        3 => "stark_q4_gdn_conv_rows_m3",
+-        4 => "stark_q4_gdn_conv_rows_m4",
++    let variant = rows_variant();
++    let parked = staged.is_none() && variant != RowsVariant::Original && m >= 2;
++    let sums = variant == RowsVariant::ParkedSums;
++    let kernel = match (m, staged) {
++        (_, Some((name, _))) => name,
++        (2, None) if parked && sums => "stark_q4_gdn_conv_rows_tgx_m2",
++        (3, None) if parked && sums => "stark_q4_gdn_conv_rows_tgx_m3",
++        (4, None) if parked && sums => "stark_q4_gdn_conv_rows_tgx_m4",
++        (2, None) if parked => "stark_q4_gdn_conv_rows_tg_m2",
++        (3, None) if parked => "stark_q4_gdn_conv_rows_tg_m3",
++        (4, None) if parked => "stark_q4_gdn_conv_rows_tg_m4",
++        (1, None) => "stark_q4_gdn_conv_rows_m1",
++        (2, None) => "stark_q4_gdn_conv_rows_m2",
++        (3, None) => "stark_q4_gdn_conv_rows_m3",
++        (4, None) => "stark_q4_gdn_conv_rows_m4",
+         _ => unreachable!(),
+     };
+     let pipeline = ctx.pipeline(kernel, GDN_ROWS_SOURCE, MslVersion::V3_1)?;
++    let mut buffers = vec![
++        w.codes.binding(),
++        w.scales.binding(),
++        w.biases.binding(),
++        staged.map_or(input.binding(), |(_, s)| s.xf.binding()),
++        qkv.binding(),
++        z.binding(),
++        a.binding(),
++        b.binding(),
++        window_in.binding(),
++        window_out.binding(),
++        conv_w.binding(),
++        conv_out.binding(),
++        capture.unwrap_or(qkv).binding(),
++    ];
++    if let Some((_, s)) = staged {
++        buffers.push(s.xs.binding());
++    }
+     pass.dispatch_at(
+         &pipeline,
+-        &[
+-            w.codes.binding(),
+-            w.scales.binding(),
+-            w.biases.binding(),
+-            input.binding(),
+-            qkv.binding(),
+-            z.binding(),
+-            a.binding(),
+-            b.binding(),
+-            window_in.binding(),
+-            window_out.binding(),
+-            conv_w.binding(),
+-            conv_out.binding(),
+-            capture.unwrap_or(qkv).binding(),
+-        ],
++        &buffers,
+         &[
+             &u32_bytes(k),
+             &u32_bytes(w.group_size),
+@@ -471,6 +510,163 @@ pub(crate) fn gemv_q4_gdn_conv_rows_exact(
+             &u32_bytes(usize::from(capture.is_some())),
+             &u32_bytes(4),
+         ],
++        if parked {
++            ensure!(m * k <= 10240 && k.is_multiple_of(4), "parked GDN rows input too wide");
++            Grid::Threadgroups { groups: ((n / 2).div_ceil(8), 1, 1), threadgroup: (256, 1, 1) }
++        } else {
++            Grid::Threadgroups { groups: (n / 2, 1, 1), threadgroup: (32, 1, 1) }
++        },
++    )
++}
++
++/// Which shared-weight Q4 GDN rows kernel the plain entry point takes for
++/// two to four rows. `Original` (the shipped default) reads the input rows
++/// per channel pair. The rejected candidates (attempt 20261119-LILYROWS-02,
++/// projection follow-up) are kept for component timing and byte controls
++/// only: `Parked` parks the rows in threadgroup memory once per sixteen
++/// output channels, `ParkedSums` also parks each word's input sum. Both pass
++/// the synthetic byte tests; `ParkedSums` failed the real-model verify
++/// exactness control. Tests switch the variant per thread.
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub(crate) enum RowsVariant {
++    Original,
++    #[cfg_attr(not(test), allow(dead_code))]
++    Parked,
++    #[cfg_attr(not(test), allow(dead_code))]
++    ParkedSums,
++}
++
++thread_local! {
++    static ROWS_VARIANT: std::cell::Cell<RowsVariant> = const { std::cell::Cell::new(RowsVariant::Original) };
++}
++
++pub(crate) fn rows_variant() -> RowsVariant {
++    ROWS_VARIANT.with(|v| v.get())
++}
++
++#[cfg(test)]
++pub(crate) fn set_rows_variant(variant: RowsVariant) {
++    ROWS_VARIANT.with(|v| v.set(variant));
++}
++
++/// Staged row inputs for the shared-weight Q4 rows: `xf` (F32 `[M, K]`, the
++/// rows widened) and `xs` (F32 `[M, K/8]`, each word's eight-input sum, the
++/// `xs` term of `dot_word_q4`), computed once per row instead of once per
++/// output channel.
++pub(crate) struct Q4RowStage<'a> {
++    pub xf: &'a Tensor,
++    pub xs: &'a Tensor,
++}
++
++/// Fills `stage` from BF16 rows `x` (`[M, K]`).
++#[cfg(test)]
++pub(crate) fn stage_q4_rows(
++    ctx: &MetalContext,
++    pass: &ComputePass<'_>,
++    x: &Tensor,
++    stage: &Q4RowStage<'_>,
++) -> Result<()> {
++    ensure!(x.dtype() == DType::BF16 && x.shape().len() == 2, "Q4 stage input");
++    let (m, k) = (x.shape()[0], x.shape()[1]);
++    ensure!(k.is_multiple_of(32) && m > 0, "Q4 stage width");
++    ensure!(
++        stage.xf.dtype() == DType::F32
++            && stage.xf.numel() == m * k
++            && stage.xs.dtype() == DType::F32
++            && stage.xs.numel() == m * k / 8,
++        "Q4 stage geometry"
++    );
++    let pipeline = ctx.pipeline("stark_q4_rows_stage", DECODE_ROWS_SOURCE, MslVersion::V3_1)?;
++    pass.dispatch_at(
++        &pipeline,
++        &[x.binding(), stage.xf.binding(), stage.xs.binding()],
++        &[&u32_bytes(k)],
++        Grid::Threads { grid: (k / 8, m, 1), threadgroup: (64.min(k / 8), 1, 1) },
++    )
++}
++
++/// [`gemv_q4_gdn_conv_rows_exact`] reading staged rows (`stage` filled from
++/// `input` by [`stage_q4_rows`] earlier in the pass); two to four rows.
++#[allow(clippy::too_many_arguments)]
++#[cfg(test)]
++pub(crate) fn gemv_q4_gdn_conv_rows_staged(
++    ctx: &MetalContext,
++    pass: &ComputePass<'_>,
++    w: &QuantWeights,
++    input: &Tensor,
++    stage: &Q4RowStage<'_>,
++    qkv: &Tensor,
++    z: &Tensor,
++    a: &Tensor,
++    b: &Tensor,
++    window_in: &Tensor,
++    window_out: &Tensor,
++    conv_w: &Tensor,
++    conv_out: &Tensor,
++    capture: Option<&Tensor>,
++) -> Result<()> {
++    let (n, k) = check_quant(w)?;
++    let m = input.shape()[0];
++    ensure!(
++        (2..=4).contains(&m)
++            && w.group_size == 64
++            && stage.xf.numel() == m * k
++            && stage.xs.numel() == m * k / 8,
++        "staged GDN rows geometry"
++    );
++    // The unstaged entry point validates every other operand.
++    let kernel = match m {
++        2 => "stark_q4_gdn_conv_rows_staged_m2",
++        3 => "stark_q4_gdn_conv_rows_staged_m3",
++        _ => "stark_q4_gdn_conv_rows_staged_m4",
++    };
++    gemv_q4_gdn_conv_rows_dispatch(
++        ctx, pass, w, input, qkv, z, a, b, window_in, window_out, conv_w, conv_out,
++        capture, Some((kernel, stage)), n, k,
++    )
++}
++
++/// Shared-weight Q4/BF16 projection of two to four staged rows.
++#[cfg(test)]
++pub(crate) fn gemv_q4_rows_reuse_staged(
++    ctx: &MetalContext,
++    pass: &ComputePass<'_>,
++    w: &QuantWeights,
++    x: &Tensor,
++    stage: &Q4RowStage<'_>,
++    y: &Tensor,
++) -> Result<()> {
++    let (n, k) = check_quant(w)?;
++    let m = x.shape()[0];
++    ensure!(
++        w.bits == 4
++            && w.group_size == 64
++            && n.is_multiple_of(2)
++            && (2..=4).contains(&m)
++            && x.shape()[1] == k
++            && y.dtype() == DType::BF16
++            && y.numel() == m * n
++            && stage.xf.numel() == m * k
++            && stage.xs.numel() == m * k / 8,
++        "staged projection reuse geometry"
++    );
++    let name = match m {
++        2 => "stark_projection_reuse_q4_bf16_staged_m2",
++        3 => "stark_projection_reuse_q4_bf16_staged_m3",
++        _ => "stark_projection_reuse_q4_bf16_staged_m4",
++    };
++    let pipeline = ctx.pipeline(name, DECODE_ROWS_SOURCE, MslVersion::V3_1)?;
++    pass.dispatch_at(
++        &pipeline,
++        &[
++            w.codes.binding(),
++            w.scales.binding(),
++            w.biases.binding(),
++            stage.xf.binding(),
++            y.binding(),
++            stage.xs.binding(),
++        ],
++        &[&u32_bytes(k), &u32_bytes(w.group_size), &u32_bytes(n)],
+         Grid::Threadgroups { groups: (n / 2, 1, 1), threadgroup: (32, 1, 1) },
+     )
+ }
+@@ -479,6 +675,10 @@ pub(crate) fn gemv_q4_gdn_conv_rows_exact(
+ #[path = "gdn_projection_rows_tests.rs"]
+ mod gdn_projection_rows_tests;
+ 
++#[cfg(test)]
++#[path = "quant_rows_timing_tests.rs"]
++mod quant_rows_timing_tests;
++
+ /// Writes `out[N, K] = dequant(W)` in bf16.
+ fn dequant_to_bf16(
+     ctx: &MetalContext,
+diff --git a/vendor/lily-core/src/kernels/quant_rows_timing_tests.rs b/vendor/lily-core/src/kernels/quant_rows_timing_tests.rs
+new file mode 100644
+index 00000000..bd4ec432
+--- /dev/null
++++ b/vendor/lily-core/src/kernels/quant_rows_timing_tests.rs
+@@ -0,0 +1,329 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Synthetic component timing of the Q4 row-reuse projections at Lily's GDN
++//! dimensions (36 distinct weight allocations, rows 1 to 4). Timings only.
++use super::*;
++use objc2_metal::MTLComputePipelineState;
++
++fn word(seed: &mut u32) -> u32 {
++    *seed ^= *seed << 13;
++    *seed ^= *seed >> 17;
++    *seed ^= *seed << 5;
++    *seed
++}
++
++fn values(seed: &mut u32, count: usize, scale: f32) -> Vec<f32> {
++    (0..count)
++        .map(|_| (word(seed) % 4097) as f32 * scale / 4096.0 - scale / 2.0)
++        .collect()
++}
++
++fn q4(ctx: &MetalContext, seed: &mut u32, n: usize, k: usize) -> Result<QuantWeights> {
++    let codes: Vec<_> = (0..n * k / 8).map(|_| word(seed)).collect();
++    Ok(QuantWeights {
++        codes: Tensor::from_bytes(ctx, bytemuck::cast_slice(&codes), &[n, k / 8], DType::U32)?,
++        scales: Tensor::from_f32_as_bf16(ctx, &values(seed, n * k / 64, 0.01), &[n, k / 64])?,
++        biases: Tensor::from_f32_as_bf16(ctx, &values(seed, n * k / 64, 0.125), &[n, k / 64])?,
++        group_size: 64,
++        bits: 4,
++    })
++}
++
++fn time<F: Fn(&ComputePass<'_>) -> Result<()>>(ctx: &MetalContext, f: F) -> Result<f64> {
++    let pass = ctx.begin_concurrent()?;
++    f(&pass)?;
++    let done = pass.commit()?.wait_retain()?;
++    let t = done.timing()?;
++    Ok((t.gpu_end_secs - t.gpu_start_secs) * 1e3)
++}
++
++#[test]
++#[ignore = "exclusive physical Apple Silicon GPU slot; synthetic component timing only"]
++fn q4_row_reuse_projection_timing() -> Result<()> {
++    let ctx = MetalContext::new()?;
++    let mut seed = 0x5171_0a2b;
++    let layers = 36;
++    let (k_in, n_in) = (2560, 16480);
++    let (c, v, h) = (10240, 6144, 48);
++    let (k_out, n_out) = (6144, 2560);
++    let gdn_in: Vec<_> =
++        (0..layers).map(|_| q4(&ctx, &mut seed, n_in, k_in)).collect::<Result<_>>()?;
++    let gdn_out: Vec<_> =
++        (0..layers).map(|_| q4(&ctx, &mut seed, n_out, k_out)).collect::<Result<_>>()?;
++    let conv_w = Tensor::from_f32_as_bf16(&ctx, &values(&mut seed, 4 * c, 1.0), &[4, c])?;
++    let windows: Vec<_> = (0..2)
++        .map(|_| Tensor::from_f32_as_bf16(&ctx, &values(&mut seed, 3 * c, 1.0), &[c, 3]))
++        .collect::<Result<_>>()?;
++    for name in [
++        "stark_q4_gdn_conv_rows_m1",
++        "stark_q4_gdn_conv_rows_m2",
++        "stark_q4_gdn_conv_rows_m3",
++        "stark_q4_gdn_conv_rows_m4",
++    ] {
++        let p = ctx.pipeline(name, GDN_ROWS_SOURCE, MslVersion::V3_1)?;
++        eprintln!(
++            "pipeline {name}: max_threads={} exec_width={}",
++            p.pipeline.maxTotalThreadsPerThreadgroup(),
++            p.thread_execution_width()
++        );
++    }
++    for name in [
++        "stark_decode_rows_q4_bf16_2row",
++        "stark_projection_reuse_q4_bf16_m2",
++        "stark_projection_reuse_q4_bf16_m3",
++        "stark_projection_reuse_q4_bf16_m4",
++    ] {
++        let p = ctx.pipeline(name, DECODE_ROWS_SOURCE, MslVersion::V3_1)?;
++        eprintln!(
++            "pipeline {name}: max_threads={} exec_width={}",
++            p.pipeline.maxTotalThreadsPerThreadgroup(),
++            p.thread_execution_width()
++        );
++    }
++    for m in 1..=4 {
++        let x_in = Tensor::from_f32_as_bf16(&ctx, &values(&mut seed, m * k_in, 4.0), &[m, k_in])?;
++        let x_out =
++            Tensor::from_f32_as_bf16(&ctx, &values(&mut seed, m * k_out, 4.0), &[m, k_out])?;
++        let bf = DType::BF16;
++        let qkv = Tensor::zeros(&ctx, &[m, c], bf)?;
++        let z = Tensor::zeros(&ctx, &[m, v], bf)?;
++        let a = Tensor::zeros(&ctx, &[m, h], bf)?;
++        let b = Tensor::zeros(&ctx, &[m, h], bf)?;
++        let conv = Tensor::zeros(&ctx, &[m, c], bf)?;
++        let capture = Tensor::zeros(&ctx, &[m, c], bf)?;
++        let y = Tensor::zeros(&ctx, &[m, n_out], bf)?;
++        let run_in = |pass: &ComputePass<'_>| -> Result<()> {
++            for w in &gdn_in {
++                gemv_q4_gdn_conv_rows_exact(
++                    &ctx, pass, w, &x_in, &qkv, &z, &a, &b, &windows[0], &windows[1],
++                    &conv_w, &conv, Some(&capture),
++                )?;
++                pass.level_barrier(&[&qkv, &z, &a, &b, &conv, &capture, &windows[1]])?;
++            }
++            Ok(())
++        };
++        let run_out = |pass: &ComputePass<'_>| -> Result<()> {
++            for w in &gdn_out {
++                gemv_quant_rows_decode_exact(&ctx, pass, w, &x_out, &y)?;
++                pass.level_barrier(&[&y])?;
++            }
++            Ok(())
++        };
++        let f32t = DType::F32;
++        let (xf_in, xs_in) =
++            (Tensor::zeros(&ctx, &[m, k_in], f32t)?, Tensor::zeros(&ctx, &[m, k_in / 8], f32t)?);
++        let (xf_out, xs_out) = (
++            Tensor::zeros(&ctx, &[m, k_out], f32t)?,
++            Tensor::zeros(&ctx, &[m, k_out / 8], f32t)?,
++        );
++        let stage_in = Q4RowStage { xf: &xf_in, xs: &xs_in };
++        let stage_out = Q4RowStage { xf: &xf_out, xs: &xs_out };
++        let run_in_staged = |pass: &ComputePass<'_>| -> Result<()> {
++            for w in &gdn_in {
++                stage_q4_rows(&ctx, pass, &x_in, &stage_in)?;
++                pass.level_barrier(&[&xf_in, &xs_in])?;
++                gemv_q4_gdn_conv_rows_staged(
++                    &ctx, pass, w, &x_in, &stage_in, &qkv, &z, &a, &b, &windows[0],
++                    &windows[1], &conv_w, &conv, Some(&capture),
++                )?;
++                pass.level_barrier(&[&qkv, &z, &a, &b, &conv, &capture, &windows[1]])?;
++            }
++            Ok(())
++        };
++        let run_out_staged = |pass: &ComputePass<'_>| -> Result<()> {
++            for w in &gdn_out {
++                stage_q4_rows(&ctx, pass, &x_out, &stage_out)?;
++                pass.level_barrier(&[&xf_out, &xs_out])?;
++                gemv_q4_rows_reuse_staged(&ctx, pass, w, &x_out, &stage_out, &y)?;
++                pass.level_barrier(&[&y])?;
++            }
++            Ok(())
++        };
++        let run_in_parked = |pass: &ComputePass<'_>| -> Result<()> {
++            set_rows_variant(RowsVariant::Parked);
++            let result = run_in(pass);
++            set_rows_variant(RowsVariant::Original);
++            result
++        };
++        let run_in_sums = |pass: &ComputePass<'_>| -> Result<()> {
++            set_rows_variant(RowsVariant::ParkedSums);
++            let result = run_in(pass);
++            set_rows_variant(RowsVariant::Original);
++            result
++        };
++        let staged = m > 1;
++        let start = std::time::Instant::now();
++        while start.elapsed() < std::time::Duration::from_millis(1500) {
++            time(&ctx, run_in)?;
++            time(&ctx, run_out)?;
++            if staged {
++                time(&ctx, run_in_staged)?;
++                time(&ctx, run_out_staged)?;
++                time(&ctx, run_in_parked)?;
++                time(&ctx, run_in_sums)?;
++            }
++        }
++        let mut samples = [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()];
++        for _ in 0..15 {
++            samples[0].push(time(&ctx, run_in)?);
++            samples[1].push(time(&ctx, run_out)?);
++            if staged {
++                samples[2].push(time(&ctx, run_in_staged)?);
++                samples[3].push(time(&ctx, run_out_staged)?);
++                samples[4].push(time(&ctx, run_in_parked)?);
++                samples[5].push(time(&ctx, run_in_sums)?);
++            }
++        }
++        for (name, s) in ["gdn_in_proj_conv", "gdn_out_proj", "staged_in_proj_conv", "staged_out_proj", "parked_in_proj_conv", "parked_sums_in_proj_conv"]
++            .iter()
++            .zip(samples.iter_mut())
++            .filter(|(_, s)| !s.is_empty())
++        {
++            s.sort_by(f64::total_cmp);
++            eprintln!(
++                "q4 rows timing: m={m} stage={name} layers={layers} median_ms={:.3} min_ms={:.3}",
++                s[7], s[0]
++            );
++        }
++    }
++    Ok(())
++}
++
++/// Input styles: 0 ordinary, 1 subnormal-heavy, 2 cancellation (large equal
++/// magnitudes of alternating sign), 3 signed zeros and extremes.
++fn styled(seed: &mut u32, count: usize, style: u32) -> Vec<f32> {
++    let mut x = values(seed, count, 4.0);
++    for (i, v) in x.iter_mut().enumerate() {
++        match style {
++            1 if i % 4 != 0 => {
++                *v = f32::from_bits(word(seed) % 0x0080_0000)
++                    * if i % 2 == 0 { 1.0 } else { -1.0 }
++            }
++            2 => *v = if i % 2 == 0 { 96.0 } else { -96.0 } + (word(seed) % 4) as f32 * 0.25,
++            3 => *v = [0.0, -0.0, 3.0e38, -3.0e38, 1.0e-38, -1.0e-38][i % 6],
++            _ => {}
++        }
++    }
++    x
++}
++
++/// Guarded BF16 rows at an odd offset inside a canary-filled allocation.
++fn offset_rows(ctx: &MetalContext, data: &[f32], shape: &[usize]) -> Result<(Tensor, Tensor)> {
++    let storage = Tensor::zeros(ctx, &[data.len() + 8], DType::BF16)?;
++    storage.write_bytes(&vec![0xa5; storage.byte_len()])?;
++    let view = storage.view(4, shape)?;
++    let bf: Vec<_> = data.iter().copied().map(half::bf16::from_f32).collect();
++    view.write_bytes(bytemuck::cast_slice(&bf))?;
++    Ok((storage, view))
++}
++
++/// The staged shared-weight Q4 rows against the ordinary one-row decode
++/// projection (output projection) and against the byte-tested unstaged fused
++/// GDN rows kernel (input projection and convolution): three draws, four
++/// input styles, rows 2 to 4, offset views, Lily and small geometries.
++#[test]
++#[ignore = "requires a physical Apple Silicon Metal device"]
++fn staged_q4_rows_match_ordinary_decode_bytes() -> Result<()> {
++    let ctx = MetalContext::new()?;
++    let mut compared = 0usize;
++    let mut cases = 0usize;
++    for draw in 0..6u32 {
++        let mut seed = 0x51a6_e5d1 ^ draw.wrapping_mul(0x9e37_79b9);
++        for (n, k) in [(2560, 6144), (64, 256)] {
++            let w = q4(&ctx, &mut seed, n, k)?;
++            for m in 2..=4 {
++                for style in 0..4 {
++                    let (_xs_store, x) = offset_rows(&ctx, &styled(&mut seed, m * k, style), &[m, k])?;
++                    let reference = Tensor::zeros(&ctx, &[m, n], DType::BF16)?;
++                    let candidate = Tensor::zeros(&ctx, &[m, n], DType::BF16)?;
++                    let xf = Tensor::zeros(&ctx, &[m, k], DType::F32)?;
++                    let xsum = Tensor::zeros(&ctx, &[m, k / 8], DType::F32)?;
++                    let stage = Q4RowStage { xf: &xf, xs: &xsum };
++                    let pass = ctx.begin_concurrent()?;
++                    for row in 0..m {
++                        gemv_quant_rows_decode_exact(
++                            &ctx,
++                            &pass,
++                            &w,
++                            &x.view(row * k, &[1, k])?,
++                            &reference.view(row * n, &[1, n])?,
++                        )?;
++                    }
++                    stage_q4_rows(&ctx, &pass, &x, &stage)?;
++                    pass.level_barrier(&[&xf, &xsum])?;
++                    gemv_q4_rows_reuse_staged(&ctx, &pass, &w, &x, &stage, &candidate)?;
++                    pass.commit()?.wait()?;
++                    ensure!(
++                        reference.raw_bytes() == candidate.raw_bytes(),
++                        "staged reuse mismatch draw={draw} n={n} m={m} style={style}"
++                    );
++                    compared += reference.byte_len();
++                    cases += 1;
++                }
++            }
++        }
++        for (k, c, v, h) in [(2560, 10240, 6144, 48), (128, 192, 64, 2)] {
++            let n = c + v + 2 * h;
++            let w = q4(&ctx, &mut seed, n, k)?;
++            let conv_w = Tensor::from_f32_as_bf16(&ctx, &values(&mut seed, 4 * c, 1.0), &[4, c])?;
++            let window = Tensor::from_f32_as_bf16(&ctx, &values(&mut seed, 3 * c, 2.0), &[c, 3])?;
++            for m in 2..=4 {
++                for style in 0..4 {
++                    let (_xs_store, x) = offset_rows(&ctx, &styled(&mut seed, m * k, style), &[m, k])?;
++                    let bf = DType::BF16;
++                    let outs = |ctx: &MetalContext| -> Result<Vec<Tensor>> {
++                        [[m, c], [m, v], [m, h], [m, h], [c, 3], [m, c], [m, c]]
++                            .iter()
++                            .map(|s| Tensor::zeros(ctx, s, bf))
++                            .collect()
++                    };
++                    let (r, s) = (outs(&ctx)?, outs(&ctx)?);
++                    let xf = Tensor::zeros(&ctx, &[m, k], DType::F32)?;
++                    let xsum = Tensor::zeros(&ctx, &[m, k / 8], DType::F32)?;
++                    let stage = Q4RowStage { xf: &xf, xs: &xsum };
++                    let pass = ctx.begin_concurrent()?;
++                    set_rows_variant(RowsVariant::Original);
++                    gemv_q4_gdn_conv_rows_exact(
++                        &ctx, &pass, &w, &x, &r[0], &r[1], &r[2], &r[3], &window, &r[4],
++                        &conv_w, &r[5], Some(&r[6]),
++                    )?;
++                    stage_q4_rows(&ctx, &pass, &x, &stage)?;
++                    pass.level_barrier(&[&xf, &xsum])?;
++                    gemv_q4_gdn_conv_rows_staged(
++                        &ctx, &pass, &w, &x, &stage, &s[0], &s[1], &s[2], &s[3], &window,
++                        &s[4], &conv_w, &s[5], Some(&s[6]),
++                    )?;
++                    let mut variants = Vec::new();
++                    for variant in [RowsVariant::Parked, RowsVariant::ParkedSums] {
++                        let p = outs(&ctx)?;
++                        set_rows_variant(variant);
++                        let parked = gemv_q4_gdn_conv_rows_exact(
++                            &ctx, &pass, &w, &x, &p[0], &p[1], &p[2], &p[3], &window,
++                            &p[4], &conv_w, &p[5], Some(&p[6]),
++                        );
++                        set_rows_variant(RowsVariant::Original);
++                        parked?;
++                        variants.push(p);
++                    }
++                    pass.commit()?.wait()?;
++                    for (field, (a, b)) in r.iter().cycle().zip(variants.iter().flatten()).enumerate() {
++                        ensure!(
++                            a.raw_bytes() == b.raw_bytes(),
++                            "parked GDN rows mismatch field={field} draw={draw} c={c} m={m} style={style}"
++                        );
++                        compared += a.byte_len();
++                    }
++                    for (field, (a, b)) in r.iter().zip(&s).enumerate() {
++                        ensure!(
++                            a.raw_bytes() == b.raw_bytes(),
++                            "staged GDN rows mismatch field={field} draw={draw} c={c} m={m} style={style}"
++                        );
++                        compared += a.byte_len();
++                    }
++                    cases += 1;
++                }
++            }
++        }
++    }
++    eprintln!("staged Q4 rows exact: cases={cases} compared_bytes={compared}");
++    Ok(())
++}
+diff --git a/vendor/lily-core/src/qwen4exp/host_spec.rs b/vendor/lily-core/src/qwen4exp/host_spec.rs
+index cbe3fdca..21c9bf00 100644
+--- a/vendor/lily-core/src/qwen4exp/host_spec.rs
++++ b/vendor/lily-core/src/qwen4exp/host_spec.rs
+@@ -9,6 +9,7 @@ use super::model::{
+     AttnPos, BatchMode, DecodeState, LayerState, MAX_DRAFTS, Qwen4ExpModel, Scratch,
+ };
+ use super::ngram::NgramHasher;
++use super::spec::Rollback;
+ use crate::engine::DecodeStateApi;
+ use crate::kernels::{Rope, sample::SamplingParams};
+ use crate::metal::{BlitCopy, MetalContext};
+@@ -75,6 +76,11 @@ impl Qwen4ExpModel {
+         self.encode_batch(ctx, state, s, &ps, BatchMode::VerifyHost)?
+             .commit()?
+             .wait()?;
++        // The pass wrote every GDN layer's final state into the shadow and
++        // left the pre-verify state in place: make the final states current
++        // and keep the pre-verify ones for replay rollback.
++        let sp = s.spec.as_mut().ok_or_else(|| anyhow::anyhow!("candidate captures"))?;
++        state.swap_gdn_shadow(sp)?;
+         state.pos += m;
+         state.conv_slot = 1 - state.conv_slot;
+         if let Some(pst) = &mut state.ple {
+@@ -210,10 +216,15 @@ impl Qwen4ExpModel {
+         let hist_before = state.ple.as_ref().map(|p| p.hist);
+         // Decode updates one window in place. Preserve its original in the
+         // other slot so rollback can replay only committed projected inputs.
++        // Likewise keep each GDN layer's pre-verify state in the spec
++        // scratch's shadow: finish_host_verify replays the committed rows
++        // from it.
+         let slot = state.conv_slot;
++        let shadows = &s.spec.as_ref().ok_or_else(|| anyhow::anyhow!("no verify captures"))?.gdn_shadow;
+         let mut copies = Vec::new();
++        let mut gdn_index = 0;
+         for layer in &state.layers {
+-            if let LayerState::Gdn { conv_windows, .. } = layer {
++            if let LayerState::Gdn { state: recurrent, conv_windows, .. } = layer {
+                 copies.push(BlitCopy {
+                     src: &conv_windows[slot],
+                     src_offset: 0,
+@@ -221,6 +232,18 @@ impl Qwen4ExpModel {
+                     dst_offset: 0,
+                     len: conv_windows[slot].byte_len(),
+                 });
++                let shadow = shadows
++                    .get(gdn_index)
++                    .ok_or_else(|| anyhow::anyhow!("GDN shadow count"))?;
++                ensure!(shadow.byte_len() == recurrent.byte_len(), "GDN shadow geometry");
++                copies.push(BlitCopy {
++                    src: recurrent,
++                    src_offset: 0,
++                    dst: shadow,
++                    dst_offset: 0,
++                    len: recurrent.byte_len(),
++                });
++                gdn_index += 1;
+             }
+         }
+         if let Some(ple) = &state.ple {
+@@ -296,7 +319,7 @@ impl Qwen4ExpModel {
+             0,
+             verified.pos_before,
+             Some(&keep),
+-            (accepted + 1 < m).then_some((accepted, m)),
++            (accepted + 1 < m).then_some(Rollback::Replay { accepted, m }),
+             0,
+             &SamplingParams::greedy(),
+             0,
+diff --git a/vendor/lily-core/src/qwen4exp/model.rs b/vendor/lily-core/src/qwen4exp/model.rs
+index 5d515412..401b4988 100644
+--- a/vendor/lily-core/src/qwen4exp/model.rs
++++ b/vendor/lily-core/src/qwen4exp/model.rs
+@@ -1070,11 +1070,29 @@ impl Scratch {
+     }
+ }
+ 
++/// Rows a verify pass can hold: the pending token plus the drafts.
++pub(super) const VERIFY_ROWS: usize = MAX_DRAFTS + 1;
++
+ /// What a verify pass records so a draft pass can roll the recurrent state
+ /// back to the accepted prefix, plus the draft head's small buffers.
+ pub(super) struct SpecScratch {
++    /// Per GDN layer: F32 `[H, 128, 128]`, the other half of the layer's
++    /// double-buffered recurrent state. An exact verify pass reads the
++    /// layer's state and writes its final state here, and the host then
++    /// swaps the two (`swap_gdn_shadow`): from then until the next verify
++    /// pass this holds the pre-verify state that replay rollback reruns the
++    /// accepted rows from. No per-row states are kept.
++    pub(super) gdn_shadow: Vec<Tensor>,
++    /// Per GDN layer: bf16 `[VERIFY_ROWS * (C + 2H)]`, the verified rows'
++    /// recurrence inputs (convolved q/k/v rows, then the `a` rows, then the
++    /// `b` rows) for replay; see [`SpecScratch::replay_rows`].
++    pub(super) gdn_replay: Vec<Tensor>,
++    /// bf16 `[VERIFY_ROWS, H*128]`: where a replay's discarded row outputs go.
++    pub(super) gdn_replay_sink: Tensor,
+     /// Per GDN layer: F32 `[MAX_DRAFTS, H, 128, 128]`, the state after each
+-    /// verified row but the last.
++    /// verified row but the last. Only the GPU-sampled legacy path
++    /// (`verify`, `BatchMode::Verify`) uses it, so it is allocated on its
++    /// first use and is empty otherwise.
+     pub(super) mid: Vec<Tensor>,
+     /// Per GDN layer: bf16 `[MAX_DRAFTS + 1, C]`, the verified rows' conv inputs.
+     pub(super) conv_in: Vec<Tensor>,
+@@ -1107,17 +1125,26 @@ impl SpecScratch {
+             .iter()
+             .filter(|t| matches!(t, super::config::LayerType::LinearAttention))
+             .count();
+-        let rows = MAX_DRAFTS + 1;
++        let rows = VERIFY_ROWS;
+         Ok(Self {
+-            mid: (0..gdn_layers)
++            gdn_shadow: (0..gdn_layers)
+                 .map(|_| {
+                     Tensor::zeros(
+                         ctx,
+-                        &[MAX_DRAFTS, heads, GDN_HEAD_DIM, GDN_HEAD_DIM],
++                        &[heads, GDN_HEAD_DIM, GDN_HEAD_DIM],
+                         GDN_STATE_DTYPE,
+                     )
+                 })
+                 .collect::<Result<_>>()?,
++            gdn_replay: (0..gdn_layers)
++                .map(|_| Tensor::zeros(ctx, &[rows * (c + 2 * heads)], DType::BF16))
++                .collect::<Result<_>>()?,
++            gdn_replay_sink: Tensor::zeros(
++                ctx,
++                &[rows, heads * GDN_HEAD_DIM],
++                DType::BF16,
++            )?,
++            mid: Vec::new(),
+             conv_in: (0..gdn_layers)
+                 .map(|_| Tensor::zeros(ctx, &[rows, c], DType::BF16))
+                 .collect::<Result<_>>()?,
+@@ -1135,6 +1162,131 @@ impl SpecScratch {
+             chain_in: Tensor::zeros(ctx, &[1, cfg.hc_width()], DType::BF16)?,
+         })
+     }
++
++    /// GDN layer `gdn_index`'s replay inputs for the first `m` verified rows:
++    /// convolved q/k/v `[m, C]`, `a` `[m, H]` and `b` `[m, H]`.
++    pub(super) fn replay_rows(
++        &self,
++        gdn_index: usize,
++        m: usize,
++        c: usize,
++        heads: usize,
++    ) -> Result<(Tensor, Tensor, Tensor)> {
++        ensure!((1..=VERIFY_ROWS).contains(&m), "replay rows {m}");
++        let rows = &self.gdn_replay[gdn_index];
++        let qkv = rows.view(0, &[m, c])?;
++        let a = rows.view(VERIFY_ROWS * c, &[m, heads])?;
++        let b = rows.view(VERIFY_ROWS * (c + heads), &[m, heads])?;
++        Ok((qkv, a, b))
++    }
++
++    /// Allocates the legacy per-row state captures on first use.
++    fn ensure_legacy_mid(&mut self, ctx: &MetalContext, cfg: &Qwen4ExpConfig) -> Result<()> {
++        if self.mid.len() == self.gdn_shadow.len() {
++            return Ok(());
++        }
++        self.mid = (0..self.gdn_shadow.len())
++            .map(|_| {
++                Tensor::zeros(
++                    ctx,
++                    &[
++                        MAX_DRAFTS,
++                        cfg.linear_num_value_heads,
++                        GDN_HEAD_DIM,
++                        GDN_HEAD_DIM,
++                    ],
++                    GDN_STATE_DTYPE,
++                )
++            })
++            .collect::<Result<_>>()?;
++        Ok(())
++    }
++}
++
++impl Qwen4ExpModel {
++    /// Replay rollback of GDN layer `layer_index` (the `gdn_index`-th GDN
++    /// layer): reruns the exact verify recurrence from the pre-verify state in
++    /// the spec scratch's shadow over the first `rows` verified rows, writing
++    /// the state after them to `state_out` (the layer's current state).
++    #[allow(clippy::too_many_arguments)]
++    pub(super) fn encode_gdn_replay(
++        &self,
++        ctx: &MetalContext,
++        pass: &ComputePass<'_>,
++        layer_index: usize,
++        gdn_index: usize,
++        layout: GdnStateLayout,
++        spec: &SpecScratch,
++        rows: usize,
++        state_out: &Tensor,
++    ) -> Result<()> {
++        let cfg = &self.config;
++        let Mixer::Gdn(w) = &self.weights.layers[layer_index].mixer else {
++            anyhow::bail!("GDN state without GDN weights");
++        };
++        let (qkv, a, b) = spec.replay_rows(
++            gdn_index,
++            rows,
++            cfg.gdn_conv_channels(),
++            cfg.linear_num_value_heads,
++        )?;
++        crate::kernels::gdn::gdn_replay_rows(
++            ctx,
++            pass,
++            layout,
++            &crate::kernels::gdn::GdnReplayRows { qkv: &qkv, a: &a, b: &b },
++            &w.a_log,
++            &w.dt_bias,
++            &w.norm_w,
++            &spec.gdn_shadow[gdn_index],
++            state_out,
++            &spec.gdn_replay_sink,
++            self.gdn_scale,
++            cfg.linear_num_key_heads,
++            cfg.rms_norm_eps,
++            self.gdn_gate,
++        )
++    }
++}
++
++impl Scratch {
++    /// Allocates the legacy GPU-sampled path's per-row GDN state captures.
++    pub(super) fn ensure_legacy_spec_captures(
++        &mut self,
++        ctx: &MetalContext,
++        cfg: &Qwen4ExpConfig,
++    ) -> Result<()> {
++        let spec = self.spec.as_mut().ok_or_else(|| anyhow::anyhow!("no spec scratch"))?;
++        spec.ensure_legacy_mid(ctx, cfg)
++    }
++}
++
++impl DecodeState {
++    /// After an exact verify pass wrote every GDN layer's final state into
++    /// the spec scratch's shadow: makes those the layers' states and keeps
++    /// the pre-verify states in the shadow for replay rollback. Swapping
++    /// handles moves no data.
++    pub(super) fn swap_gdn_shadow(&mut self, spec: &mut SpecScratch) -> Result<()> {
++        let states: Vec<&mut Tensor> = self
++            .layers
++            .iter_mut()
++            .filter_map(|layer| match layer {
++                LayerState::Gdn { state, .. } => Some(state),
++                LayerState::Attn { .. } => None,
++            })
++            .collect();
++        ensure!(
++            states.len() == spec.gdn_shadow.len()
++                && states.iter().zip(&spec.gdn_shadow).all(|(state, shadow)| {
++                    shadow.shape() == state.shape() && shadow.dtype() == state.dtype()
++                }),
++            "GDN shadow geometry"
++        );
++        for (state, shadow) in states.into_iter().zip(&mut spec.gdn_shadow) {
++            std::mem::swap(state, shadow);
++        }
++        Ok(())
++    }
+ }
+ 
+ /// Where a batched attention pass runs: the position of its first row and,
+@@ -1428,12 +1580,18 @@ impl PrefillScratch {
+     }
+ }
+ 
+-/// What a verify pass records per layer for rollback: the GDN states after
+-/// each row but the last, and the rows' conv inputs (GDN and PLE) so the conv
+-/// windows can be rewound.
++/// What a verify pass records per layer for rollback: for an exact pass the
++/// GDN recurrence inputs of the rows (replay) and where the final state goes
++/// (the shadow, keeping the pre-verify state in place); for the legacy pass
++/// the GDN states after each row but the last; and the rows' conv inputs (GDN
++/// and PLE) so the conv windows can be rewound.
+ pub(super) struct Capture {
+     exact: bool,
+     pub(super) mid: Option<Tensor>,
++    /// Exact passes: `[m, C]` convolved q/k/v, `[m, H]` a and b rows.
++    pub(super) replay: Option<(Tensor, Tensor, Tensor)>,
++    /// Exact passes: the GDN final state's destination.
++    pub(super) state_out: Option<Tensor>,
+     pub(super) conv_in: Tensor,
+     pub(super) ple_conv_in: Option<Tensor>,
+ }
+@@ -1441,7 +1599,6 @@ pub(super) struct Capture {
+ /// Ordinary decode values copied into request-local speculative captures.
+ struct DecodeCapture<'a> {
+     row: usize,
+-    rows: usize,
+     spec: &'a SpecScratch,
+     hyper: &'a Tensor,
+ }
+@@ -2062,7 +2219,7 @@ impl Qwen4ExpModel {
+             1,
+             Draw { params: &greedy, step: state.pos },
+             None,
+-            Some(DecodeCapture { row, rows, spec, hyper }),
++            Some(DecodeCapture { row, spec, hyper }),
+         )?;
+         pass.end()
+     }
+@@ -2542,9 +2699,17 @@ impl Qwen4ExpModel {
+             };
+             let capture = match (spec, lstate) {
+                 (Some(sp), LayerState::Gdn { .. }) => {
+-                    let mid = (m > 1)
++                    let exact = matches!(mode, BatchMode::VerifyHost);
++                    // Exact passes keep no per-row states: the final state
++                    // goes to the shadow and the rows' recurrence inputs to
++                    // the replay rows (replay rollback). The legacy pass
++                    // captures the state after every row but the last.
++                    let mid = (!exact && m > 1)
+                         .then(|| {
+-                            sp.mid[gdn_index].view(
++                            let mid = sp.mid.get(gdn_index).ok_or_else(|| {
++                                anyhow::anyhow!("legacy GDN captures not allocated")
++                            })?;
++                            mid.view(
+                                 0,
+                                 &[
+                                     m - 1,
+@@ -2555,9 +2720,21 @@ impl Qwen4ExpModel {
+                             )
+                         })
+                         .transpose()?;
++                    let replay = exact
++                        .then(|| {
++                            sp.replay_rows(
++                                gdn_index,
++                                m,
++                                cfg.gdn_conv_channels(),
++                                cfg.linear_num_value_heads,
++                            )
++                        })
++                        .transpose()?;
+                     Some(Capture {
+-                        exact: matches!(mode, BatchMode::VerifyHost),
++                        exact,
+                         mid,
++                        replay,
++                        state_out: exact.then(|| sp.gdn_shadow[gdn_index].clone()),
+                         conv_in: prefix_rows(&sp.conv_in[gdn_index], m)?,
+                         ple_conv_in: sp
+                             .ple_conv_in
+@@ -2569,6 +2746,8 @@ impl Qwen4ExpModel {
+                 (Some(sp), LayerState::Attn { .. }) => Some(Capture {
+                     exact: matches!(mode, BatchMode::VerifyHost),
+                     mid: None,
++                    replay: None,
++                    state_out: None,
+                     conv_in: prefix_rows(&sp.conv_in[0], 0)?,
+                     ple_conv_in: sp
+                         .ple_conv_in
+@@ -2830,9 +3009,9 @@ impl Qwen4ExpModel {
+         self.trace_stage(ctx, pass, layer_index, "mixer_input", &ps.hc.mixed, ps.m)?;
+         match (&layer.mixer, lstate) {
+             (Mixer::Gdn(w), LayerState::Gdn { state, conv_windows, layout }) => {
+-                if profile_exact {
+-                    pass.profile_stage(crate::metal::stage_profile::Phase::Gdn)?;
+-                }
++                // Exact verify rows mark the GDN sub-stages inside
++                // `gdn_batched` (projection and convolution, recurrence,
++                // output projection), as ordinary decode does.
+                 self.gdn_batched(
+                     ctx,
+                     pass,
+@@ -3361,11 +3540,24 @@ impl Qwen4ExpModel {
+         layer_index: usize,
+     ) -> Result<()> {
+         let cfg = &self.config;
++        use crate::metal::stage_profile::Phase;
++        // Exact verify passes keep the rows' recurrence inputs for replay
++        // rollback: the convolution and the gate split write them straight
++        // into the layer's replay rows, which the recurrence then reads.
++        let replay = capture.and_then(|c| c.replay.as_ref());
++        let qkv_conv = replay.map_or(&ps.qkv_conv, |r| &r.0);
++        let gate_a = replay.map_or(&ps.a, |r| &r.1);
++        let gate_b = replay.map_or(&ps.b, |r| &r.2);
+         if let Some(c) = capture.filter(|c| c.exact && cfg.official_mlx_rounding()) {
+             ensure!(
+                 gdn_layout == GdnStateLayout::ValueKey,
+                 "official exact GDN layout"
+             );
++            let state_out = c
++                .state_out
++                .as_ref()
++                .ok_or_else(|| anyhow::anyhow!("exact GDN verify without a state output"))?;
++            pass.profile_stage(Phase::GdnInputProjections)?;
+             let projected = ps.stack.view(0, &[ps.m, w.in_proj.out_features()])?;
+             crate::kernels::official_q8_projection::gemv_gdn_decode_rows(
+                 ctx,
+@@ -3376,8 +3568,9 @@ impl Qwen4ExpModel {
+                 true,
+             )?;
+             pass.level_barrier(&[&projected])?;
+-            split_cols_bf16(ctx, pass, &projected, &[&ps.qkv, &ps.z, &ps.a, &ps.b])?;
+-            pass.level_barrier(&[&ps.qkv, &ps.z, &ps.a, &ps.b])?;
++            split_cols_bf16(ctx, pass, &projected, &[&ps.qkv, &ps.z, gate_a, gate_b])?;
++            pass.level_barrier(&[&ps.qkv, &ps.z, gate_a, gate_b])?;
++            pass.profile_stage(Phase::GdnConv)?;
+             copy_words(ctx, pass, &ps.qkv, &c.conv_in)?;
+             crate::kernels::gdn::conv1d_verify_value_key_exact(
+                 ctx,
+@@ -3386,37 +3579,35 @@ impl Qwen4ExpModel {
+                 &conv_windows[1 - conv_slot],
+                 &ps.qkv,
+                 &w.conv_w,
+-                &ps.qkv_conv,
++                qkv_conv,
+             )?;
+-            pass.level_barrier(&[
+-                &ps.qkv_conv,
+-                &conv_windows[1 - conv_slot],
+-                &c.conv_in,
+-            ])?;
++            pass.level_barrier(&[qkv_conv, &conv_windows[1 - conv_slot], &c.conv_in])?;
+             self.trace_stage(ctx, pass, layer_index, "gdn_qkv", &ps.qkv, ps.m)?;
+             self.trace_stage(ctx, pass, layer_index, "gdn_z", &ps.z, ps.m)?;
+-            self.trace_stage(ctx, pass, layer_index, "gdn_a", &ps.a, ps.m)?;
+-            self.trace_stage(ctx, pass, layer_index, "gdn_b", &ps.b, ps.m)?;
+-            self.trace_stage(ctx, pass, layer_index, "gdn_conv", &ps.qkv_conv, ps.m)?;
++            self.trace_stage(ctx, pass, layer_index, "gdn_a", gate_a, ps.m)?;
++            self.trace_stage(ctx, pass, layer_index, "gdn_b", gate_b, ps.m)?;
++            self.trace_stage(ctx, pass, layer_index, "gdn_conv", qkv_conv, ps.m)?;
++            pass.profile_stage(Phase::GdnRecurrence)?;
+             crate::kernels::gdn::gdn_verify_value_key_exact(
+                 ctx,
+                 pass,
+-                &ps.qkv_conv,
+-                &ps.a,
+-                &ps.b,
++                qkv_conv,
++                gate_a,
++                gate_b,
+                 &w.a_log,
+                 &w.dt_bias,
+                 gdn_state,
++                state_out,
+                 &ps.z,
+                 &w.norm_w,
+                 &ps.gdn_out,
+                 &ps.gdn_gated,
+                 self.gdn_scale,
+                 cfg.rms_norm_eps,
+-                c.mid.as_ref(),
+             )?;
+-            pass.level_barrier(&[&ps.gdn_gated, gdn_state])?;
++            pass.level_barrier(&[&ps.gdn_gated, state_out])?;
+             self.trace_stage(ctx, pass, layer_index, "gdn_gated", &ps.gdn_gated, ps.m)?;
++            pass.profile_stage(Phase::GdnOutProjection)?;
+             return crate::kernels::official_q8_projection::gemv_gdn_decode_rows(
+                 ctx,
+                 pass,
+@@ -3432,6 +3623,14 @@ impl Qwen4ExpModel {
+                 && cfg.linear_conv_kernel_dim == 4
+                 && w.in_proj.out_features().is_multiple_of(2)
+         });
++        let exact = capture.is_some_and(|c| c.exact);
++        if exact {
++            pass.profile_stage(if fused_capture.is_some() {
++                Phase::GdnInputProjectionConv
++            } else {
++                Phase::GdnInputProjections
++            })?;
++        }
+         if let Some(c) = fused_capture {
+             quant::gemv_q4_gdn_conv_rows_exact(
+                 ctx,
+@@ -3440,20 +3639,20 @@ impl Qwen4ExpModel {
+                 &ps.hc.mixed,
+                 &ps.qkv,
+                 &ps.z,
+-                &ps.a,
+-                &ps.b,
++                gate_a,
++                gate_b,
+                 &conv_windows[conv_slot],
+                 &conv_windows[1 - conv_slot],
+                 &w.conv_w,
+-                &ps.qkv_conv,
++                qkv_conv,
+                 Some(&c.conv_in),
+             )?;
+             pass.level_barrier(&[
+                 &ps.qkv,
+                 &ps.z,
+-                &ps.a,
+-                &ps.b,
+-                &ps.qkv_conv,
++                gate_a,
++                gate_b,
++                qkv_conv,
+                 &conv_windows[1 - conv_slot],
+                 &c.conv_in,
+             ])?;
+@@ -3469,12 +3668,7 @@ impl Qwen4ExpModel {
+                     &projected,
+                 )?;
+                 pass.level_barrier(&[&projected])?;
+-                split_cols_bf16(
+-                    ctx,
+-                    pass,
+-                    &projected,
+-                    &[&ps.qkv, &ps.z, &ps.a, &ps.b],
+-                )?;
++                split_cols_bf16(ctx, pass, &projected, &[&ps.qkv, &ps.z, gate_a, gate_b])?;
+             } else {
+                 project_stack_or_slices(
+                     ctx,
+@@ -3491,7 +3685,10 @@ impl Qwen4ExpModel {
+                     &s.dequant,
+                 )?;
+             }
+-            pass.level_barrier(&[&ps.qkv, &ps.z, &ps.a, &ps.b])?;
++            pass.level_barrier(&[&ps.qkv, &ps.z, gate_a, gate_b])?;
++            if exact {
++                pass.profile_stage(Phase::GdnConv)?;
++            }
+             if let Some(c) = capture {
+                 copy_words(ctx, pass, &ps.qkv, &c.conv_in)?;
+             }
+@@ -3515,27 +3712,33 @@ impl Qwen4ExpModel {
+                     &conv_windows[1 - conv_slot],
+                     &ps.qkv,
+                     &w.conv_w,
+-                    &ps.qkv_conv,
++                    qkv_conv,
+                     self.config.official_mlx_rounding(),
+                 )?;
+             }
+-            pass.level_barrier(&[&ps.qkv_conv, &conv_windows[1 - conv_slot]])?;
++            pass.level_barrier(&[qkv_conv, &conv_windows[1 - conv_slot]])?;
+         }
+         self.trace_stage(ctx, pass, layer_index, "gdn_qkv", &ps.qkv, ps.m)?;
+         self.trace_stage(ctx, pass, layer_index, "gdn_z", &ps.z, ps.m)?;
+-        self.trace_stage(ctx, pass, layer_index, "gdn_a", &ps.a, ps.m)?;
+-        self.trace_stage(ctx, pass, layer_index, "gdn_b", &ps.b, ps.m)?;
+-        self.trace_stage(ctx, pass, layer_index, "gdn_conv", &ps.qkv_conv, ps.m)?;
++        self.trace_stage(ctx, pass, layer_index, "gdn_a", gate_a, ps.m)?;
++        self.trace_stage(ctx, pass, layer_index, "gdn_b", gate_b, ps.m)?;
++        self.trace_stage(ctx, pass, layer_index, "gdn_conv", qkv_conv, ps.m)?;
+         if let Some(capture) = capture.filter(|c| c.exact) {
++            let state_out = capture
++                .state_out
++                .as_ref()
++                .ok_or_else(|| anyhow::anyhow!("exact GDN verify without a state output"))?;
++            pass.profile_stage(Phase::GdnRecurrenceNorm)?;
+             gdn_verify_gated_exact(
+                 ctx,
+                 pass,
+-                &ps.qkv_conv,
+-                &ps.a,
+-                &ps.b,
++                qkv_conv,
++                gate_a,
++                gate_b,
+                 &w.a_log,
+                 &w.dt_bias,
+                 gdn_state,
++                state_out,
+                 &ps.z,
+                 &w.norm_w,
+                 &ps.gdn_gated,
+@@ -3543,10 +3746,10 @@ impl Qwen4ExpModel {
+                 cfg.linear_num_key_heads,
+                 cfg.rms_norm_eps,
+                 self.gdn_gate,
+-                capture.mid.as_ref(),
+             )?;
+-            pass.level_barrier(&[&ps.gdn_gated, gdn_state])?;
++            pass.level_barrier(&[&ps.gdn_gated, state_out])?;
+             self.trace_stage(ctx, pass, layer_index, "gdn_gated", &ps.gdn_gated, ps.m)?;
++            pass.profile_stage(Phase::GdnOutProjection)?;
+             return project_mat_decode_exact(
+                 ctx,
+                 pass,
+@@ -4611,17 +4814,27 @@ impl Qwen4ExpModel {
+                             &s.qkv,
+                             &raw.view(capture.row * width, &[width])?,
+                         )?;
+-                        if capture.row + 1 < capture.rows {
+-                            let mid = &capture.spec.mid[gdn_index];
++                        // Replay rollback inputs: this row's convolved q/k/v
++                        // and gates (the pre-verify state was copied to the
++                        // shadow before the first row).
++                        let (qkv_rows, a_rows, b_rows) = capture.spec.replay_rows(
++                            gdn_index,
++                            VERIFY_ROWS,
++                            width,
++                            s.a.numel(),
++                        )?;
++                        for (source, rows) in
++                            [(&s.qkv_conv, &qkv_rows), (&s.a, &a_rows), (&s.b, &b_rows)]
++                        {
++                            let n = source.numel();
+                             copy_words(
+                                 ctx,
+                                 pass,
+-                                state,
+-                                &mid.view(capture.row * state.numel(), state.shape())?,
++                                source,
++                                &rows.view(capture.row * n, &[n])?,
+                             )?;
+-                            pass.level_barrier(&[mid])?;
+                         }
+-                        pass.level_barrier(&[raw])?;
++                        pass.level_barrier(&[raw, &capture.spec.gdn_replay[gdn_index]])?;
+                     }
+                     gdn_index += 1;
+                 }
+diff --git a/vendor/lily-core/src/qwen4exp/request_memory.rs b/vendor/lily-core/src/qwen4exp/request_memory.rs
+index ff344c20..a9c8a297 100644
+--- a/vendor/lily-core/src/qwen4exp/request_memory.rs
++++ b/vendor/lily-core/src/qwen4exp/request_memory.rs
+@@ -195,9 +195,10 @@ fn scratch(
+             .iter()
+             .filter(|t| matches!(t, LayerType::LinearAttention))
+             .count() as u128;
++        // Replay rollback: one shadow F32 state per GDN layer (the other half
++        // of its double-buffered state), no per-row state captures.
+         s.add(
+             &[
+-                MAX_DRAFTS as u128,
+                 c.linear_num_value_heads as u128,
+                 GDN_HEAD_DIM as u128,
+                 GDN_HEAD_DIM as u128,
+@@ -207,6 +208,23 @@ fn scratch(
+         )?;
+         let conv = (2 * c.linear_num_key_heads as u128 * c.linear_key_head_dim as u128)
+             + c.linear_num_value_heads as u128 * c.linear_value_head_dim as u128;
++        // Per GDN layer: replay inputs (convolved q/k/v, a, b rows) and the
++        // conv rollback inputs; one replay output sink.
++        s.add(
++            &[
++                (MAX_DRAFTS + 1) as u128 * (conv + 2 * c.linear_num_value_heads as u128),
++            ],
++            2,
++            gdn,
++        )?;
++        s.add(
++            &[
++                (MAX_DRAFTS + 1) as u128,
++                c.linear_num_value_heads as u128 * GDN_HEAD_DIM as u128,
++            ],
++            2,
++            1,
++        )?;
+         s.add(&[(MAX_DRAFTS + 1) as u128, conv], 2, gdn)?;
+         s.add(&[(MAX_DRAFTS + 1) as u128, c.hc_width() as u128], 2, 1)?;
+         s.add(&[(MAX_DRAFTS + 1) as u128, c.vocab_size as u128], 4, 1)?;
+@@ -718,6 +736,35 @@ mod tests {
+         assert!(tiny_after_large <= retained);
+     }
+ 
++    #[test]
++    fn mtp_scratch_charges_one_gdn_shadow_state_not_per_row_captures() {
++        let cfg = geometry();
++        let with = scratch(&cfg, KvFormat::Q8, 16384, 0, true).unwrap().bytes;
++        let without = scratch(&cfg, KvFormat::Q8, 16384, 0, false).unwrap().bytes;
++        let gdn = cfg
++            .layer_types
++            .iter()
++            .filter(|t| matches!(t, LayerType::LinearAttention))
++            .count() as u128;
++        let align = |bytes: u128| bytes.div_ceil(256) * 256;
++        let heads = cfg.linear_num_value_heads as u128;
++        let rows = (MAX_DRAFTS + 1) as u128;
++        let conv = cfg.gdn_conv_channels() as u128;
++        let state = heads * (GDN_HEAD_DIM as u128).pow(2) * 4;
++        // One shadow state per GDN layer, not MAX_DRAFTS per-row captures;
++        // replay inputs per layer and one replay sink; the conv rollback
++        // inputs, PLE conv inputs, verify logits and the 4 MiB control area
++        // as before.
++        let expected = gdn * align(state)
++            + gdn * align(rows * (conv + 2 * heads) * 2)
++            + align(rows * heads * GDN_HEAD_DIM as u128 * 2)
++            + gdn * align(rows * conv * 2)
++            + align(rows * cfg.hc_width() as u128 * 2)
++            + align(rows * cfg.vocab_size as u128 * 4)
++            + 4 * 1024 * 1024;
++        assert_eq!(with - without, expected);
++    }
++
+     #[test]
+     fn incremental_request_admission_charges_context_growth_overlap() {
+         let cfg = geometry();
+diff --git a/vendor/lily-core/src/qwen4exp/spec.rs b/vendor/lily-core/src/qwen4exp/spec.rs
+index deb28bce..d4f64f25 100644
+--- a/vendor/lily-core/src/qwen4exp/spec.rs
++++ b/vendor/lily-core/src/qwen4exp/spec.rs
+@@ -32,6 +32,14 @@
+ //! Outputs are exact: every emitted token is a draw from the trunk's own
+ //! distribution for its prefix; the drafts only decide how many rows a pass
+ //! can confirm.
++//!
++//! Modified by Stark: the exact host-sampled path (`verify_host_batched`,
++//! `BatchMode::VerifyHost`) keeps no per-row GDN states. Its verify pass
++//! writes each GDN layer's final state to the other half of a double buffer
++//! and keeps the rows' recurrence inputs; rollback ([`Rollback::Replay`])
++//! reruns the same recurrence from the retained pre-verify state over the
++//! committed rows. The per-row captures above remain only for this legacy
++//! GPU-sampled path and are allocated on its first use.
+ 
+ use anyhow::{Result, ensure};
+ 
+@@ -52,10 +60,31 @@ use crate::tensor::Tensor;
+ 
+ use super::model::{
+     AttnPos, BatchMode, DecodeState, LayerState, MAX_DRAFTS, Qwen4ExpModel, Scratch,
+-    SpecPending,
++    SpecPending, VERIFY_ROWS,
+ };
+ use super::ngram::NgramHasher;
+ 
++/// How a host-encoded draft pass rolls the GDN states back to `accepted`
++/// drafts of `m` verified rows (convolution windows rewind the same way for
++/// both).
++#[derive(Clone, Copy, Debug)]
++pub(super) enum Rollback {
++    /// After an exact verify pass (`BatchMode::VerifyHost`): rerun the
++    /// recurrence from the retained pre-verify state over the committed rows.
++    Replay { accepted: usize, m: usize },
++    /// After the legacy GPU-sampled pass (`BatchMode::Verify`): copy the
++    /// captured state after the accepted row.
++    Captured { accepted: usize, m: usize },
++}
++
++impl Rollback {
++    fn rows(self) -> (usize, usize) {
++        match self {
++            Self::Replay { accepted, m } | Self::Captured { accepted, m } => (accepted, m),
++        }
++    }
++}
++
+ impl Qwen4ExpModel {
+     /// Draft tokens per step, or 0 without the head.
+     pub fn max_drafts(&self) -> usize {
+@@ -105,6 +134,9 @@ impl Qwen4ExpModel {
+         // Room for this pass and the draft pass behind it (its chain rows);
+         // nothing runs, so the caches can grow.
+         self.ensure_room(ctx, state, s, m)?;
++        // This path rolls back by copying per-row state captures, which the
++        // exact host path does not keep.
++        s.ensure_legacy_spec_captures(ctx, &self.config)?;
+         let s = &*s;
+         let capacity = s.prefill.as_ref().expect("prefill scratch just ensured");
+         // The token-dependent inputs, ids and n-gram rows, are written before
+@@ -224,7 +256,7 @@ impl Qwen4ExpModel {
+                     0,
+                     pending.pos_before,
+                     Some(&keep),
+-                    Some((accepted, m)),
++                    Some(Rollback::Captured { accepted, m }),
+                     0,
+                     &SamplingParams::greedy(),
+                     0,
+@@ -535,7 +567,7 @@ impl Qwen4ExpModel {
+         chain_row: usize,
+         pos0: usize,
+         keep: Option<&Tensor>,
+-        rollback: Option<(usize, usize)>,
++        rollback: Option<Rollback>,
+         drafts: usize,
+         params: &SamplingParams,
+         draw0: usize,
+@@ -563,17 +595,39 @@ impl Qwen4ExpModel {
+ 
+         let pass = ctx.begin_concurrent()?;
+         pass.set_label("draft");
+-        if let Some((accepted, m)) = rollback {
++        if let Some(rollback) = rollback {
++            let (accepted, m) = rollback.rows();
++            ensure!(accepted + 1 < m && m <= VERIFY_ROWS, "invalid GDN rollback");
+             let heads = cfg.linear_num_value_heads;
+             let per_state = heads * GDN_HEAD_DIM * GDN_HEAD_DIM;
+             let mut gdn_index = 0usize;
+-            for lstate in &state.layers {
+-                if let LayerState::Gdn { state: st, conv_windows, .. } = lstate {
+-                    let mid = sp.mid[gdn_index].view(
+-                        accepted * per_state,
+-                        &[heads, GDN_HEAD_DIM, GDN_HEAD_DIM],
+-                    )?;
+-                    copy_words(ctx, &pass, &mid, st)?;
++            for (layer_index, lstate) in state.layers.iter().enumerate() {
++                if let LayerState::Gdn { state: st, conv_windows, layout } = lstate {
++                    match rollback {
++                        // Rerun the exact verify recurrence from the
++                        // pre-verify state over the committed rows only.
++                        Rollback::Replay { .. } => self.encode_gdn_replay(
++                            ctx,
++                            &pass,
++                            layer_index,
++                            gdn_index,
++                            *layout,
++                            sp,
++                            accepted + 1,
++                            st,
++                        )?,
++                        Rollback::Captured { .. } => {
++                            let mid = sp
++                                .mid
++                                .get(gdn_index)
++                                .ok_or_else(|| anyhow::anyhow!("no legacy GDN captures"))?
++                                .view(
++                                    accepted * per_state,
++                                    &[heads, GDN_HEAD_DIM, GDN_HEAD_DIM],
++                                )?;
++                            copy_words(ctx, &pass, &mid, st)?;
++                        }
++                    }
+                     let x = prefix_rows(&sp.conv_in[gdn_index], m)?;
+                     conv_window_rollback(
+                         ctx,

@@ -169,7 +169,7 @@ The upstream Metal shaders originate at the pinned revision. Stark modifies six 
 
 - `src/kernels/metal/hc.metal` adds cached-activation up/mix and row-axis verifier entry points reusing the original single-row bodies. These preserve weight staging, dot/reduction expressions and the BF16 activation boundary. Ordinary decode keeps its original dispatches.
 - `src/kernels/metal/vision.metal` uses the source-bound BF16 attention boundaries and bounded two-pass softmax described above.
-- `src/kernels/metal/gdn.metal` keeps the gated output's explicit BF16 round in a thread-local value. Its verifier scan retains one F32 state column per thread across up to four positions, preserving the decode expression order and recording F32 states for rollback. The ordinary recurrent-state helper and norm reduction remain unchanged.
+- `src/kernels/metal/gdn.metal` keeps the gated output's explicit BF16 round in a thread-local value. Its verifier scan retains one F32 state column per thread across the verified positions, preserving the decode expression order. It reads the state from `state_in` and writes only the final row's state to `state_out` (which may alias it); rollback reruns the same kernel over the accepted rows from the retained pre-verify state (see [MTP verify replay rollback and host round trips](#mtp-verify-replay-rollback-and-host-round-trips)). The ordinary recurrent-state helper and norm reduction remain unchanged.
 - `src/kernels/metal/attention.metal` adds row-axis query/key preparation copied from the decode bodies, preserving the norm reduction, BF16 rotary rounding and existing BF16/Q8 cache formats. Verifier attention retains the decode SDPA/QSA reductions.
 - `src/kernels/metal/quant.metal` adds GDN Q4 two-row input projection with a convolution epilogue. It calls the existing packed dot helper, preserves the BF16 projection boundary and copies the original convolution expression, tap order and window update. Other layouts retain separate projection and convolution.
 - `src/kernels/metal/moe.metal` adds a decode down/combine entry point whose row owner also performs the following hyperconnection injection. It copies the original dot and slot-ordered combine, retains the BF16 branch output, and applies the original F32 injection expression to that rounded branch. Decode orders both the branch output and residual streams before their next consumers. The original down/combine and injection kernels remain available for reference controls.
@@ -571,8 +571,9 @@ geometry, aligned nonzero offsets and output guards.
 
 The ValueKey verification additions in `gdn.metal` retain the existing
 MLX-Serve-derived K1 convolution, recurrence and norm/gate expressions. They
-scan at most four positions with F32 physical state captures after each
-rollback prefix, retaining the ordinary BF16 activation boundaries. Each
+scan at most four positions and write only the final physical F32 state;
+rollback replays the accepted prefix from the retained pre-verify state, as
+for the KeyValue layout. They retain the ordinary BF16 activation boundaries. Each
 path has component comparisons against ordinary decode. Full-model
 readout/rollback and sampled performance records are maintained separately.
 The optional 2,048-token prefill midpoint uses Lily's existing KeyValue
@@ -584,3 +585,51 @@ convolution dispatches for the capture-bearing pass, plus the draft-hidden
 row layout. The normal prefill entry point and non-Lily layouts remain separate.
 Lily's Apache-2.0 attribution applies. Operator and full-model qualification
 are tracked independently in the midpoint experiment record.
+
+## MTP verify replay rollback and host round trips
+
+Stark-local changes for attempts `20261119-LILYROWS-02` and
+`20261119-LILYHOST-01`, plus the head advance of `20261119-LILYDEPTH-01`
+(records in `docs/model-experiments/2026-11-19-lily-*.md`). The GDN replay
+rollback reimplements a technique read in the Sushi engine source (MIT, commit
+`297d1e2c`); no Sushi code was copied, and the changes use Lily's existing
+kernels and Stark's kernel style.
+
+- `src/kernels/metal/gdn.metal` and `src/kernels/gdn.rs`: the exact verify
+  recurrence (`gdn_verify_gated_exact_register` and the ValueKey verify scan)
+  reads `state_in` and writes only the final state to `state_out`, with no
+  per-row captures. The row count is a kernel parameter
+  (`GDN_VERIFY_MAX_ROWS = 16`). Expressions, reduction order and BF16
+  boundaries are unchanged.
+- `src/qwen4exp/model.rs`, `spec.rs` and `host_spec.rs`: `SpecScratch` holds a
+  per-layer GDN shadow state. A host verify pass writes each layer's final
+  state into the shadow and keeps the rows' recurrence inputs; the host then
+  swaps the two handles (`DecodeState::swap_gdn_shadow`). On a partial accept,
+  `finish_host_verify` reruns the same compiled recurrence from the shadow
+  over the committed rows (`Rollback::Replay`); the legacy GPU-sampled path
+  keeps its per-row captures (`Rollback::Captured`), allocated on first use.
+  The exact verify GDN branches also mark the decode stage-profile sub-phases.
+  `src/qwen4exp/request_memory.rs` charges one shadow state per GDN layer
+  instead of per-row captures.
+- `src/qwen4exp/host_spec.rs`: host draft steps and the verify graph are
+  encoded while the preceding pass runs and committed only after it completes
+  and the host wrote their input ids; a committed encoded verify checks that
+  position, convolution slot, capacity, scratch and GDN state buffers are
+  unchanged. Greedy samplers may chain all draft steps in one submission, each
+  proposal the device first-max argmax feeding the next step, reading back
+  only ids and status words. Verify rows are borrowed from the shared-storage
+  readout and validated when read. Draft, chain and verify waits poll the
+  completion event. `advance_head_host` writes the draft head's cache row for
+  the pending token with the existing cache-only `mtp_block_caches` (made
+  `pub(super)` in `model.rs`) for rounds whose proposals do not come from the
+  head. `src/qwen4exp/mod.rs` re-exports `EncodedVerification` and
+  `HostDrafts`.
+- `src/kernels/sample.rs` and `src/kernels/metal/stark_finite_readout.metal`:
+  `argmax_chain_f32` runs the existing `argmax_f32`, then
+  `stark_flag_tiny_selection_f32` flags a selected zero or subnormal logit,
+  where device and host comparisons may differ, and the existing nonfinite
+  readout guard. A flagged chain is discarded and the host reruns the round.
+
+Lily's Apache-2.0 attribution applies to the modified files. Exactness
+evidence (kernel byte tests, the private real-model verify and rollback
+control and end-to-end output hashes) is recorded in the attempt records.

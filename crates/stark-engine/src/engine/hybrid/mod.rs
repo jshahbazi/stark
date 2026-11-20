@@ -20,6 +20,8 @@ mod glm_metal;
 mod lily;
 pub mod math;
 mod memory;
+pub mod mtp_lookup;
+pub mod mtp_policy;
 pub mod profile;
 pub mod qwen;
 #[cfg(feature = "metal")]
@@ -115,6 +117,45 @@ pub trait MtpSampler {
         logits: &[f32],
         proposal: Option<u32>,
     ) -> Result<u32>;
+    /// True when every draft this sampler would draw is the first ID whose
+    /// finite logit no other logit exceeds, with no random draw: the device
+    /// may then select drafts by the same rule and report them through
+    /// [`Self::draft_point_mass`] instead of [`Self::draft`].
+    fn device_greedy_drafts(&self) -> bool {
+        false
+    }
+    /// Records a proposal whose draft distribution is the point mass on
+    /// `token`, without draft logits: a device-selected greedy draft or a
+    /// prompt-lookup draft. For a greedy sampler this is exactly what
+    /// [`Self::draft`] records for a row whose first maximum is `token`.
+    /// `target` then accepts it with min(1, p(token)) and on rejection draws
+    /// from p with `token` removed. Like [`Self::draft`], it does not require
+    /// the vocabulary size to be known yet; `target` checks the readout.
+    fn draft_point_mass(
+        &mut self,
+        token: u32,
+    ) -> Result<()> {
+        let _ = token;
+        Err(Error::Invalid("MTP point-mass proposal unsupported"))
+    }
+}
+
+/// Opt-in per-request MTP round scheduling. The default reproduces the fixed
+/// draft count with head drafts only.
+#[derive(Default)]
+pub struct MtpRoundOptions {
+    pub policy: mtp_policy::MtpPolicy,
+    /// Selects the greedy or sampled cost table.
+    pub greedy: bool,
+    /// Prompt-lookup context (prompt plus the first output token) and the
+    /// tokenizer's line-break ids. Request-scoped; never logged.
+    pub lookup: Option<(Vec<u32>, Arc<mtp_lookup::NewlineTokens>)>,
+}
+
+impl MtpRoundOptions {
+    pub fn is_default(&self) -> bool {
+        self.policy == mtp_policy::MtpPolicy::Fixed && self.lookup.is_none()
+    }
 }
 
 /// Aggregate request counters. No token, logit or probability data is retained.
@@ -127,6 +168,9 @@ pub struct MtpStats {
     pub draft_seconds: f64,
     pub verify_seconds: f64,
     pub rollback_seconds: f64,
+    /// Present only for requests that selected adaptive depth or lookup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<mtp_policy::MtpScheduleStats>,
 }
 
 /// Explicit device target-draw policy for the staged GLM native stream.
@@ -1087,6 +1131,43 @@ impl Model {
             _ => {
                 let _ = (first, remaining, drafts, sampler);
                 Err(Error::Unsupported("MTP unavailable"))
+            },
+        }
+    }
+
+    /// Whether [`Self::mtp_decode_with`] accepts adaptive depth and lookup.
+    pub fn supports_mtp_scheduling(&self) -> bool {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return model.supports_mtp();
+        }
+        false
+    }
+
+    /// Line-break ids of the loaded tokenizer, for the prompt-lookup gate.
+    pub fn newline_tokens(&self) -> mtp_lookup::NewlineTokens {
+        mtp_lookup::NewlineTokens::from_tokenizer(&self.tokenizer, self.vocab_size)
+    }
+
+    /// [`Self::mtp_decode`] with opt-in per-round depth planning and
+    /// prompt-lookup proposals; `drafts` is the per-round limit.
+    pub fn mtp_decode_with<'a>(
+        &'a mut self,
+        first: u32,
+        remaining: usize,
+        drafts: usize,
+        sampler: &'a mut dyn MtpSampler,
+        options: MtpRoundOptions,
+    ) -> Result<Box<dyn Iterator<Item = Result<u32>> + 'a>> {
+        if options.is_default() {
+            return self.mtp_decode(first, remaining, drafts, sampler);
+        }
+        match &mut self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => Ok(Box::new(model.mtp_decode_with(first, remaining, drafts, sampler, options)?)),
+            _ => {
+                let _ = (first, remaining, drafts, sampler, options);
+                Err(Error::Unsupported("MTP scheduling unavailable"))
             },
         }
     }

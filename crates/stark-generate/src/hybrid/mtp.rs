@@ -195,6 +195,34 @@ impl<'a> ExactMtpSampler<'a> {
         Ok(token)
     }
 
+    /// A point-mass draft: q(token) = 1 and 0 elsewhere, the same proposal
+    /// record `draft_inner` makes for a one-candidate distribution. The shared
+    /// target path then accepts with min(1, p(token)) and draws a rejection
+    /// from max(p - q, 0), which is p with `token` removed and renormalized.
+    /// Uses no randomness.
+    ///
+    /// Like `draft_inner`, an unknown vocabulary is allowed (a sampler whose
+    /// first token was not drawn through `sample_initial`); an id at or past a
+    /// known size is refused. Before any proposal is used, the verify pass
+    /// refuses ids outside the model vocabulary and `target` checks the
+    /// readout geometry, which also sizes the sampler.
+    fn point_mass_inner(
+        &mut self,
+        token: u32,
+    ) -> Result<()> {
+        if self.failed || self.phase != Phase::Drafting {
+            return Err(Error::Invalid("MTP draft after verification"));
+        }
+        if self.vocabulary.is_some_and(|size| token as usize >= size) {
+            return Err(Error::Invalid("MTP sampler vocabulary or state"));
+        }
+        self.proposals.push_back(Proposal {
+            token,
+            probabilities: ProbabilityLookup::Sparse(vec![(token as usize, 1.0)]),
+        });
+        Ok(())
+    }
+
     fn target_inner(
         &mut self,
         logits: &[f32],
@@ -287,6 +315,19 @@ impl MtpSampler for ExactMtpSampler<'_> {
         proposal: Option<u32>,
     ) -> Result<u32> {
         let result = self.target_inner(logits, proposal);
+        self.failed |= result.is_err();
+        result
+    }
+
+    fn device_greedy_drafts(&self) -> bool {
+        matches!(self.sampling, Sampling::Greedy {}) && !self.dense_filters && !self.failed
+    }
+
+    fn draft_point_mass(
+        &mut self,
+        token: u32,
+    ) -> Result<()> {
+        let result = self.point_mass_inner(token);
         self.failed |= result.is_err();
         result
     }
@@ -528,6 +569,126 @@ mod tests {
                 assert!((accepted_mass + rejected_mass - probability(&target, id)).abs() < 2e-15);
             }
         }
+    }
+
+    /// A lookup draft is a point mass. For every proposed id x, accepting
+    /// with min(1, p(x)) and drawing rejections from p without x recovers p.
+    #[test]
+    fn point_mass_rejection_equation_recovers_every_target_mass() {
+        let cases: &[&[f64]] = &[
+            &[0.2, 0.3, 0.5],
+            &[0.0, 0.0, 1.0],
+            &[0.25, 0.0, 0.75, 0.0],
+            &[1e-200, 1.0, 0.5],
+            &[0.5 + f64::EPSILON, 0.5 - f64::EPSILON],
+        ];
+        for &p in cases {
+            let target = from_weights(p);
+            for x in 0..p.len() {
+                let point = ProbabilityLookup::Sparse(vec![(x, 1.0)]);
+                let accept = acceptance_probability(probability(&target, x), point.get(x)).unwrap();
+                let residual = residual_distribution(&target, &point);
+                assert!(residual.as_ref().is_ok() || accept == 1.0);
+                for id in 0..p.len() {
+                    let accepted = if id == x {
+                        accept
+                    } else {
+                        0.0
+                    };
+                    let rejected = residual.as_ref().map_or(0.0, |r| (1.0 - accept) * probability(r, id));
+                    assert!((accepted + rejected - probability(&target, id)).abs() < 2e-15, "{p:?} {x} {id}");
+                }
+                if let Ok(residual) = &residual {
+                    assert!(probability(residual, x) == 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sampled_point_proposals_recover_target_distribution() {
+        let cases = [
+            (options(), vec![0.1_f32.ln(), 0.3_f32.ln(), 0.6_f32.ln()]),
+            (
+                Sampling::Stochastic {
+                    temperature: 0.7,
+                    top_k: Some(3),
+                    top_p: Some(0.9),
+                    min_p: Some(0.1),
+                },
+                vec![1.0, 2.0, -5.0, 0.0, 3.0],
+            ),
+        ];
+        for (sampling, target_logits) in cases {
+            let target = sampling_distribution(&target_logits, &sampling, None).unwrap();
+            let mut mapper = ProbabilityMapper::default();
+            for proposal in 0..target_logits.len() as u32 {
+                let mut counts = vec![0_usize; target_logits.len()];
+                let trials = 40_000;
+                for seed in 0..trials {
+                    let mut rng = seed as u64;
+                    let mut sampler = ExactMtpSampler::new(&sampling, &mut rng, &mut mapper);
+                    sampler.begin_round();
+                    sampler.draft_point_mass(proposal).unwrap();
+                    let draft_rng = sampler.draft_rng;
+                    let output = sampler.target(&target_logits, Some(proposal)).unwrap();
+                    assert!(sampler.draft_rng == draft_rng, "a point proposal draws no draft randomness");
+                    counts[output as usize] += 1;
+                }
+                for (id, &count) in counts.iter().enumerate() {
+                    assert!((count as f64 / trials as f64 - probability(&target, id)).abs() < 0.012);
+                    if probability(&target, id) == 0.0 {
+                        assert!(count == 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn greedy_point_proposals_are_an_argmax_compare_without_randomness() {
+        let sampling = Sampling::Greedy {};
+        let logits = [0.5, 3.0, 1.0, -2.0];
+        for proposal in 0..4 {
+            let mut rng = 5;
+            let mut mapper = ProbabilityMapper::default();
+            let mut sampler = ExactMtpSampler::new(&sampling, &mut rng, &mut mapper);
+            sampler.begin_round();
+            sampler.draft_point_mass(proposal).unwrap();
+            sampler.draft_point_mass(2).unwrap();
+            let output = sampler.target(&logits, Some(proposal)).unwrap();
+            assert_eq!(output, 1);
+            if proposal == 1 {
+                assert!(sampler.phase == Phase::Verifying && sampler.proposals.len() == 1);
+                assert_eq!(sampler.target(&logits, Some(2)).unwrap(), 1);
+            } else {
+                assert!(sampler.phase == Phase::Finished && sampler.proposals.is_empty());
+            }
+            assert!(*sampler.rng == 5);
+        }
+    }
+
+    #[test]
+    fn point_proposals_mix_with_lifecycle_checks_and_fail_closed() {
+        let sampling = options();
+        let mut rng = 0;
+        let mut mapper = ProbabilityMapper::default();
+        let mut sampler = ExactMtpSampler::new(&sampling, &mut rng, &mut mapper);
+        sampler.begin_round();
+        sampler.draft_point_mass(1).unwrap();
+        // A mismatched verify token is refused as for head drafts.
+        assert!(sampler.target(&[0.0, 1.0], Some(0)).is_err());
+        let mut sampler = ExactMtpSampler::new(&sampling, &mut rng, &mut mapper);
+        sampler.begin_round();
+        sampler.target(&[0.0, 1.0], None).unwrap();
+        // Out of vocabulary once the geometry is known, and after verification.
+        sampler.begin_round();
+        assert!(sampler.draft_point_mass(2).is_err());
+        let mut sampler = ExactMtpSampler::new(&sampling, &mut rng, &mut mapper);
+        sampler.begin_round();
+        sampler.draft_point_mass(0).unwrap();
+        sampler.target(&[5.0, -5.0], Some(0)).unwrap();
+        assert!(sampler.draft_point_mass(1).is_err());
     }
 
     #[test]
@@ -781,6 +942,180 @@ mod tests {
             assert!(result.is_err());
             sampler.begin_round();
             assert!(sampler.target(&[0.0, 1.0], None).is_err());
+        }
+    }
+
+    /// Device-selected greedy drafts must leave the sampler exactly as host
+    /// drafting from the same rows would: same proposals, q, outputs, RNG.
+    #[test]
+    fn greedy_point_mass_drafts_match_host_greedy_drafts() {
+        let sampling = Sampling::Greedy {};
+        let rows: [&[f32]; 4] =
+            [&[1.0, 3.0, 3.0, -0.0], &[0.0, -0.0, -1.0, -2.0], &[2.0, 1.0, 2.0, 0.0], &[-1.0, -1.0, -1.0, -1.0]];
+        let targets: [&[f32]; 4] =
+            [&[1.0, 3.0, 3.0, 0.0], &[-0.0, 0.0, 5.0, 5.0], &[0.0, 0.0, 0.0, 0.0], &[0.0, 1.0, 0.0, 0.0]];
+        for drafts in 1..=3 {
+            for rejection in 0..=drafts {
+                let mut outputs = Vec::new();
+                let mut rngs = Vec::new();
+                for device in [false, true] {
+                    let mut rng = 5;
+                    let mut mapper = ProbabilityMapper::default();
+                    let mut sampler = ExactMtpSampler::new(&sampling, &mut rng, &mut mapper);
+                    sampler.sample_initial(&[0.0, 1.0, 0.0, 0.0]).unwrap();
+                    assert!(sampler.device_greedy_drafts());
+                    sampler.begin_round();
+                    let mut proposals = Vec::new();
+                    for row in &rows[..drafts] {
+                        if device {
+                            let token = super::super::greedy_index(row).unwrap() as u32;
+                            sampler.draft_point_mass(token).unwrap();
+                            proposals.push(token);
+                        } else {
+                            proposals.push(sampler.draft(row).unwrap());
+                        }
+                    }
+                    let mut round = Vec::new();
+                    for i in 0..=drafts {
+                        let proposal = proposals.get(i).copied();
+                        // Force a rejection at `rejection` with a target
+                        // whose first maximum differs from the proposal.
+                        let row: Vec<f32> = match proposal {
+                            Some(token) if i == rejection => (0..4)
+                                .map(|id| {
+                                    if id == (token as usize + 1) % 4 {
+                                        9.0
+                                    } else {
+                                        0.0
+                                    }
+                                })
+                                .collect(),
+                            Some(token) => (0..4)
+                                .map(|id| {
+                                    if id == token as usize {
+                                        9.0
+                                    } else {
+                                        0.0
+                                    }
+                                })
+                                .collect(),
+                            None => targets[i % 4].to_vec(),
+                        };
+                        let token = sampler.target(&row, proposal).unwrap();
+                        round.push(token);
+                        if proposal != Some(token) {
+                            break;
+                        }
+                    }
+                    assert!(sampler.proposals.is_empty());
+                    outputs.push((proposals, round));
+                    rngs.push((*sampler.rng, sampler.draft_rng));
+                }
+                assert!(outputs[0] == outputs[1] && rngs[0] == rngs[1]);
+            }
+        }
+        // Out-of-range and post-verification point masses fail closed. An
+        // unsized sampler accepts one, as `draft` does (see
+        // `first_round_point_masses_before_the_sampler_is_sized`).
+        let mut rng = 0;
+        let mut mapper = ProbabilityMapper::default();
+        let mut sampler = ExactMtpSampler::new(&sampling, &mut rng, &mut mapper);
+        assert!(sampler.draft_point_mass(0).is_ok() && sampler.device_greedy_drafts());
+        let mut rng = 0;
+        let mut mapper = ProbabilityMapper::default();
+        let mut sampler = ExactMtpSampler::new(&sampling, &mut rng, &mut mapper);
+        sampler.sample_initial(&[0.0, 1.0]).unwrap();
+        assert!(sampler.draft_point_mass(2).is_err() && !sampler.device_greedy_drafts());
+        let mut rng = 0;
+        let mut mapper = ProbabilityMapper::default();
+        let mut sampler = ExactMtpSampler::new(&sampling, &mut rng, &mut mapper);
+        sampler.sample_initial(&[0.0, 1.0]).unwrap();
+        sampler.begin_round();
+        sampler.draft_point_mass(1).unwrap();
+        sampler.target(&[0.0, 1.0], Some(1)).unwrap();
+        assert!(sampler.draft_point_mass(1).is_err());
+        // Sampled requests keep host drafting: their q is not a point mass.
+        let stochastic = options();
+        let mut rng = 0;
+        let mut mapper = ProbabilityMapper::default();
+        assert!(!ExactMtpSampler::new(&stochastic, &mut rng, &mut mapper).device_greedy_drafts());
+    }
+
+    /// The first round of a request whose sampler has not been sized yet
+    /// (its first token did not come through `sample_initial`): device chain
+    /// point masses, prompt-lookup point masses and host drafts all record
+    /// their proposals, give the same outputs and RNG as each other, and the
+    /// first target readout sizes the sampler so later out-of-range ids and
+    /// changed geometry still fail closed. A sized sampler (the worker's case
+    /// today) behaves the same in its first round.
+    #[test]
+    fn first_round_point_masses_before_the_sampler_is_sized() {
+        let draft_rows: [&[f32]; 2] = [&[0.0, 4.0, 1.0, -1.0], &[2.0, 0.0, 2.0, 1.0]];
+        let accept = [0.0, 9.0, 0.0, 0.0];
+        let reject = [0.0, 0.0, 0.0, 9.0];
+        for sampling in [Sampling::Greedy {}, options()] {
+            let greedy = matches!(sampling, Sampling::Greedy {});
+            for sized in [false, true] {
+                for second_target in [&accept, &reject] {
+                    let mut results = Vec::new();
+                    // 0: host drafts (greedy only), 1: device chain point
+                    // masses, 2: lookup point masses of the same ids.
+                    for source in 0..3 {
+                        if source == 0 && !greedy {
+                            continue;
+                        }
+                        let mut rng = 9;
+                        let mut mapper = ProbabilityMapper::default();
+                        let mut sampler = ExactMtpSampler::new(&sampling, &mut rng, &mut mapper);
+                        if sized {
+                            sampler.sample_initial(&[0.0, 1.0, 0.0, 0.0]).unwrap();
+                        }
+                        assert!(sampler.vocabulary.is_some() == sized);
+                        sampler.begin_round();
+                        let proposals: Vec<u32> = if source == 0 {
+                            draft_rows.iter().map(|row| sampler.draft(row).unwrap()).collect()
+                        } else {
+                            let ids = [1, 0];
+                            for &id in &ids {
+                                sampler.draft_point_mass(id).unwrap();
+                            }
+                            ids.to_vec()
+                        };
+                        assert_eq!(proposals, [1, 0]);
+                        let mut round = vec![sampler.target(&accept, Some(proposals[0])).unwrap()];
+                        assert_eq!(sampler.vocabulary, Some(4));
+                        if round[0] == proposals[0] {
+                            round.push(sampler.target(second_target, Some(proposals[1])).unwrap());
+                            if round[1] == proposals[1] {
+                                round.push(sampler.target(&accept, None).unwrap());
+                            }
+                        }
+                        results.push((round, *sampler.rng, sampler.draft_rng));
+                        // Sized by the readout: an id past it is refused,
+                        // as is a readout of another geometry.
+                        sampler.begin_round();
+                        assert!(sampler.draft_point_mass(4).is_err());
+                        let mut rng = 9;
+                        let mut mapper = ProbabilityMapper::default();
+                        let mut sampler = ExactMtpSampler::new(&sampling, &mut rng, &mut mapper);
+                        sampler.begin_round();
+                        sampler.draft_point_mass(1).unwrap();
+                        sampler.target(&accept, Some(1)).unwrap();
+                        sampler.begin_round();
+                        sampler.draft_point_mass(1).unwrap();
+                        assert!(sampler.target(&[0.0, 9.0, 0.0], Some(1)).is_err());
+                    }
+                    assert!(results.windows(2).all(|pair| pair[0] == pair[1]));
+                    if greedy {
+                        let expected: &[u32] = if second_target == &accept {
+                            &[1, 1]
+                        } else {
+                            &[1, 3]
+                        };
+                        assert_eq!(results[0].0, expected);
+                    }
+                }
+            }
         }
     }
 }
