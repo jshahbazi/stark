@@ -1,0 +1,19 @@
+# Inkling 2 Mini first-milestone experiment
+
+Codex registered the protocol on 2026-11-20 from Stark `78310804` before timing model-bound GPU operations. These experiments inform a decision on native generation. [Port plan](../INKLING_2_MINI_PLAN.md)
+
+| Attempt | Question and preregistered control |
+| --- | --- |
+| 20261120-INKLING-01 | Measure the official three-pass, image-loaded checkpoint under the pinned Apple Ollama implementation. Establish serial prefill and useful decode budgets. |
+| 20261120-INKLING-02 | Measure the pinned Unsloth Q4_K_XL plus F16 projector under its own Metal build on the same requests. The quantization differs from the original. This comparison measures available product latency and throughput. |
+| 20261120-INKLING-03 | Screen an indexed NVFP4 Metal kernel on original routed expert weights. Check input quantization, channel ordering, weight scales, and projection accuracy against independent reference arithmetic. |
+| 20261120-INKLING-04 | Screen secondary costs on original weights using stock Apple MLX. Time the layer 20 MXFP8 gate/up and down, layer 6 four-message read and controllers, and representative local/global attention sublayers. Synthetic activations and historical KV constrain this to a component experiment. |
+
+## Registered method
+
+- Use the M5 Max, 128 GiB, macOS 26.7.2 (25G332). Preserve unrelated processes. Serialize our GPU consumers. Record competing activity, thermal state, memory pressure, and changes in stage eligibility when available.
+- Use identical raw UTF-8 fixtures on both runtimes. Request 512 or 4,096 input tokens, 256 output tokens, context 8,192, draft off, one sequence, greedy or temperature 1, unrestricted top-p, disabled top-k and unit repeat penalty. Vary the input and seed per window. Interleave lengths/modes. Reserve four spare windows per cell after the first eight. For a cross-runtime fixed-work pair, require matching model-tokenized input counts, full output length, no substantive prefix reuse, matching prompt digest and eligible host conditions. Disclose early stops, cache hits and missing controls. Keep natural-stop results separate. For separate processes use both launch orders where available.
+- Report cache-cold prefill with resident weights, useful decode excluding the first sampled token, first visible streaming chunk, request wall time, and memory where available. Preserve engine timing boundaries. No cross-engine output equality or speedup of Stark is presumed. The future 90% target applies to Stark serial execution against the same original artifact.
+- For NVFP4 test gate/up and down projections, finite outputs, exact reconstructed packed rows for the checked data, relative L2 at most 1e-4 and max absolute error at most 1e-3 times the maximum absolute reference output. Exercise one routed row and multiple rows, include per-expert scale and four-over-six activation quantization. Identify the source of input activations and route IDs. Report warm component time, dispatch boundaries, packing, activation cost and omitted stages. Use the 44 NVFP4 visits per token to assess the budget only for operations actually timed.
+- For the auxiliary MXFP8 screen, check activation quantize/dequantize against an independent E4M3 table with nearest-even rounding. Require zero unequal tested activation values and compare selected output rows to direct dequantization with FP64 dot products using the projection tolerances above. Time the two attention sublayers and four cross-pass gates at one and 32 synthetic rows, recording finite outputs and execution boundaries. Full layer and cache correctness remain open.
+- Numerical parity, image quality, prefix reuse, DSpark, installation, and product admission require further artifact-specific qualification. Keep private fixture content and model values out of reports. Retain summaries and hashes.
