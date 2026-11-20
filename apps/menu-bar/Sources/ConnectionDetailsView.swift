@@ -12,6 +12,7 @@ struct ConnectionDetailsView: View {
     @State private var inspectedModelID = ""
     @State private var portText = ""
     @State private var confirmRegeneration = false
+    @State private var hasMoreBelow = false
 
     private enum Section: String, CaseIterable {
         case apps = "Apps"
@@ -72,11 +73,21 @@ struct ConnectionDetailsView: View {
                 }
                 .padding(24).frame(maxWidth: .infinity, alignment: .leading)
             }
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.visibleRect.maxY + 1 < geometry.contentSize.height
+            } action: { _, hasMore in
+                hasMoreBelow = hasMore
+            }
             Divider()
             HStack {
                 Label("Only on this Mac · Keep Stark open", systemImage: "laptopcomputer")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
+                if hasMoreBelow {
+                    Label("Scroll for more", systemImage: "chevron.down")
+                        .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                    Spacer()
+                }
                 Button("Done", action: close).keyboardShortcut(.cancelAction)
             }.padding(.horizontal, 24).padding(.vertical, 14)
         }
