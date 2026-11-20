@@ -6,8 +6,10 @@
 #include "ggml-metal.h"
 #include "llama.h"
 
+#include <CommonCrypto/CommonDigest.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -28,10 +30,24 @@ std::vector<Capture> captures;
 ggml_backend_t metal = nullptr;
 struct Span { int visit, stage; double seconds; };
 std::vector<Span> spans;
+struct Readout {
+    int count, finite;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+};
+std::vector<Readout> readouts;
 bool profile = false;
 Clock::time_point previous;
 
 void silent_log(ggml_log_level, const char *, void *) {}
+bool record_readout(llama_context * context, int count) {
+    const float * logits = llama_get_logits_ith(context, -1);
+    if (!logits || count <= 0) return false;
+    Readout result{count, 0, {}};
+    for (int i = 0; i < count; ++i) result.finite += std::isfinite(logits[i]);
+    CC_SHA256(logits, count*sizeof(float), result.digest);
+    readouts.push_back(result);
+    return true;
+}
 bool target_bank(const ggml_tensor * node, int & layer, int & down) {
     if (node->op != GGML_OP_MUL_MAT_ID || node->src[0]->type != GGML_TYPE_NVFP4) return false;
     for (int physical : {6, 11}) {
@@ -63,9 +79,11 @@ std::vector<T> copy_rows(const ggml_tensor * t, int width, int channels, int tok
 bool capture_node(ggml_tensor * node, bool ask, void *) {
     if (profile) {
         const std::string name = ggml_get_name(node);
-        int visit, stage = -1;
-        if (std::sscanf(name.c_str(), "ffn_moe_logits-%d", &visit) == 1) stage = 0;
-        else if (std::sscanf(name.c_str(), "l_out-%d", &visit) == 1) stage = 1;
+        int visit, length = 0, stage = -1;
+        if (std::sscanf(name.c_str(), "ffn_moe_logits-%d%n", &visit, &length) == 1 &&
+            size_t(length) == name.size()) stage = 0;
+        else if (std::sscanf(name.c_str(), "l_out-%d%n", &visit, &length) == 1 &&
+                 size_t(length) == name.size()) stage = 1;
         if (stage < 0) return false;
         if (!ask) {
             auto now = Clock::now();
@@ -111,21 +129,32 @@ extern "C" int capture_visits(const char * path, const char * fixture, int rows)
     const int n = llama_tokenize(llama_model_get_vocab(model), fixture, std::strlen(fixture),
                                  tokens.data(), tokens.size(), true, false);
     int status = -3;
+    const int vocab_size = llama_vocab_n_tokens(llama_model_get_vocab(model));
     if (n >= rows + 2) {
         status = llama_decode(context, llama_batch_get_one(tokens.data(), rows));
+        if (status == 0 && !record_readout(context, vocab_size)) status = -5;
         if (status == 0) status = llama_decode(context, llama_batch_get_one(tokens.data()+rows, 1));
         llama_synchronize(context);
+        if (status == 0 && !record_readout(context, vocab_size)) status = -5;
         if (!status) {
             profile = true;
             previous = Clock::now();
             status = llama_decode(context, llama_batch_get_one(tokens.data()+rows+1, 1));
             llama_synchronize(context);
             profile = false;
+            if (status == 0 && !record_readout(context, vocab_size)) status = -5;
         }
     }
     llama_free(context);
     llama_model_free(model);
     return status == 0 ? int(captures.size()) : -4;
+}
+extern "C" int readout_count() { return int(readouts.size()); }
+extern "C" void readout_meta(int index, int32_t * counts, unsigned char * digest) {
+    const Readout & result = readouts.at(index);
+    counts[0] = result.count;
+    counts[1] = result.finite;
+    std::memcpy(digest, result.digest, sizeof(result.digest));
 }
 extern "C" int span_count() { return int(spans.size()); }
 extern "C" double read_span(int index, int32_t * visit, int32_t * stage) {

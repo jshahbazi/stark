@@ -17,6 +17,8 @@ follow. Update it when a study changes what a lever returned.
 
 ## Current result
 
+**Inkling 2 Mini first milestone (2026-11-20).** The [M5 Max study](2026-11-20-inkling-mini-m5-max.md) measures the original checkpoint and Unsloth Q4_K_XL with vision loaded and drafting off. Original serial decode at 4,096 inputs reached 26.13 tokens/s greedy and 25.30 sampled. A real-weight Metal test passed 26 numerical cells after moving the activation outer scale beyond the indexed dot product. The study defines the native port's first throughput floors and next implementation gate. [Machine-readable aggregates](data/inkling-mini-m5-max-2026-11-20.json)
+
 **Regular Decider v1.3 201-token smoke (2026-11-18).** The exact pinned 27B
 checkpoint loaded on an M5 Max with 128 GB memory and processed one cold text
 choice at [4.001 input tok/s](2026-11-18-regular-decider-300-token.md), with a

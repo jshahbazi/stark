@@ -5,6 +5,7 @@ import base64
 import binascii
 import ctypes
 import hashlib
+import io
 import json
 import os
 import re
@@ -59,7 +60,7 @@ def request(url, payload=None, timeout=600):
 def capture_diagnostics(stream, diagnostics):
     # Keep fixed fields only. The server can emit arbitrary content in diagnostics.
     for row in stream:
-        if re.search(rb"using device (MTL\d*|Metal|GPU)\b", row, re.IGNORECASE):
+        if re.search(rb"using device (MTL\d*|Metal|GPU)\b|ggml_metal_device_init: GPU name:", row, re.IGNORECASE):
             diagnostics["metal_selected"] = True
         match = re.search(rb"offloaded (\d+)/(\d+) layers to GPU", row)
         if match:
@@ -129,7 +130,7 @@ def completion(base_url, case, n_predict=256):
                 count += 1
     end = time.perf_counter_ns()
     epoch_end = time.time_ns()
-    if final is None or first is None:
+    if final is None or (first is None and n_predict != 1):
         raise RuntimeError("missing completion boundary")
     timings = final["timings"]
     measured = {k: case[k] for k in ("id", "window", "input_tokens", "mode", "seed", "prompt_sha256") if k in case}
@@ -144,12 +145,12 @@ def completion(base_url, case, n_predict=256):
             "stream_output_bytes": output_bytes,
             "replacement_seen": replacement_seen,
             "stream_token_ids_sha256": token_digest.hexdigest(),
-            "first_token_seconds": (first - t0) / 1e9,
+            "first_token_seconds": (first - t0) / 1e9 if first is not None else None,
             "ttft_seconds": (first_text - t0) / 1e9 if first_text is not None else None,
             "epoch_start_ns": epoch_start,
             "epoch_end_ns": epoch_end,
             "elapsed_seconds": (end - t0) / 1e9,
-            "client_decode_seconds": (end - first) / 1e9,
+            "client_decode_seconds": (end - first) / 1e9 if first is not None else None,
         }
     )
     measured["timings"] = {
@@ -226,6 +227,59 @@ def image_smoke(base_url):
     return summary
 
 
+def image_semantic_controls(base_url):
+    from PIL import Image, ImageDraw
+
+    hashes = {
+        "red": "450eefd702e7383de47de4ea92d111b8978b439ba94c1f709e2529abe9857f1a",
+        "blue": "21f4e6e7ae8680f2b343d490494761cd685b333724915835659e2811b725e0ad",
+    }
+    cases = []
+    for expected, fixture_sha in hashes.items():
+        image = Image.new("RGB", (120, 120), "white")
+        ImageDraw.Draw(image).rectangle((10, 10, 109, 109), fill=expected)
+        png = io.BytesIO()
+        image.save(png, format="PNG")
+        image_bytes = png.getvalue()
+        if hashlib.sha256(image_bytes).hexdigest() != fixture_sha:
+            raise ValueError("unexpected image fixture hash")
+        content = [
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64," + base64.b64encode(image_bytes).decode()},
+            },
+            {"type": "text", "text": "Answer with the single color name of the square."},
+        ]
+        payload = {
+            "messages": [{"role": "user", "content": content}],
+            "chat_template_kwargs": {"reasoning_effort": "none"},
+            "temperature": 0,
+            "repeat_penalty": 1,
+            "max_tokens": 64,
+            "stream": False,
+            "cache_prompt": False,
+        }
+        with request(base_url + "/v1/chat/completions", payload) as stream:
+            reply = json.load(stream)
+        choice = reply["choices"][0]
+        visible = choice["message"].get("content") or ""
+        used_colors = re.findall(r"\b(?:red|blue|green|yellow|purple|pink|black|white)\b", visible.lower())
+        cases.append(
+            {
+                "image_sha256": fixture_sha,
+                "contains_only_expected_color": bool(used_colors) and all(c == expected for c in used_colors),
+                "content_sha256": hashlib.sha256(visible.encode()).hexdigest(),
+                "content_bytes": len(visible.encode()),
+                "thinking_bytes": len((choice["message"].get("reasoning_content") or "").encode()),
+                "prompt_tokens": reply["usage"]["prompt_tokens"],
+                "output_tokens": reply["usage"]["completion_tokens"],
+                "cached": reply.get("timings", {}).get("cache_n"),
+                "stop": choice["finish_reason"],
+            }
+        )
+    return cases
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -240,7 +294,15 @@ def main():
     parser.add_argument("--windows", default="0,1,2,3")
     parser.add_argument("--cases", default="")
     parser.add_argument("--smoke-only", action="store_true")
+    parser.add_argument(
+        "--startup-only",
+        action="store_true",
+        help="Capture allowlisted initialization diagnostics at trace verbosity and issue no inference",
+    )
     parser.add_argument("--image-smoke", action="store_true", help="Run text/image controls after timed requests")
+    parser.add_argument(
+        "--image-semantic-controls", action="store_true", help="Run the two matched image fixtures with Pillow"
+    )
     parser.add_argument(
         "--token-controls", type=Path, help="Private one-token greedy fixtures run after timed requests"
     )
@@ -292,12 +354,14 @@ def main():
         "--ubatch-size",
         "512",
     ]
+    if args.startup_only:
+        options += ["--verbosity", "4"]
     try:
         publish({"kind": "host_before_load", "memory": host_memory(), "epoch_ns": time.time_ns()})
         start = time.perf_counter()
-        server = subprocess.Popen([str(args.server), *options], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        server = subprocess.Popen([str(args.server), *options], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         pid = server.pid
-        thread = threading.Thread(target=capture_diagnostics, args=(server.stderr, diagnostics), daemon=True)
+        thread = threading.Thread(target=capture_diagnostics, args=(server.stdout, diagnostics), daemon=True)
         thread.start()
         while time.perf_counter() - start < 360:
             if server is not None and server.poll() is not None:
@@ -332,6 +396,8 @@ def main():
         )
         if not props.get("modalities", {}).get("vision"):
             raise RuntimeError("image-loaded reference does not advertise vision")
+        if args.startup_only:
+            return
         warmup = next(x for x in cases if x["id"] == "g512-00")
         warm = completion(base_url, warmup, n_predict=4)
         publish({"kind": "warm", "result": warm, "memory": memory(pid)})
@@ -354,6 +420,8 @@ def main():
                 publish({"kind": "greedy_token_control", "result": completion(base_url, case, n_predict=1)})
         if args.image_smoke:
             publish({"kind": "image_control", "result": image_smoke(base_url), "memory": memory(pid)})
+        if args.image_semantic_controls:
+            publish({"kind": "image_semantic_controls", "cases": image_semantic_controls(base_url)})
         publish(
             {
                 "kind": "complete",

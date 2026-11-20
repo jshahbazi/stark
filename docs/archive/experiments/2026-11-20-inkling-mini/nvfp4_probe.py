@@ -171,6 +171,7 @@ def load_probe(path):
     lib.capture_visits.argtypes = [ct.c_char_p, ct.c_char_p, integer]
     lib.capture_meta.argtypes = [integer, ptr]
     lib.capture_copy.argtypes = [integer, ptr, ptr]
+    lib.readout_meta.argtypes = [integer, ptr, ptr]
     lib.read_span.argtypes = [integer, ptr, ptr]
     lib.read_span.restype = ct.c_double
     lib.probe_projection.argtypes = [integer] * 5 + [ptr, ct.c_size_t] + [ptr] * 5 + [integer, integer, ptr, integer]
@@ -217,7 +218,7 @@ def activation(lib, shader, x, repeats, dispatch_groups=1):
     )
 
 
-def request_cases(lib, gguf, tokens):
+def request_cases(lib, gguf, tokens, identities):
     # Public deterministic synthetic prose; activations and routes are computed by the actual GGUF.
     fixture = (
         "The observatory measured stellar brightness through several filters. "
@@ -235,6 +236,18 @@ def request_cases(lib, gguf, tokens):
         lib.capture_copy(index, arr.ctypes.data, ids.ctypes.data)
         if not np.isfinite(arr).all() or (ids < 0).any() or (ids >= 128).any():
             raise ValueError("invalid captured projections")
+        identities.append(
+            {
+                "physical": layer,
+                "bank": "down" if down else "gate_up",
+                "tokens": t,
+                "pass": len(found[layer, down, t]) + 1,
+                "finite_f32": arr.size,
+                "input_sha256": hashlib.sha256(arr).hexdigest(),
+                "route_slots": ids.size,
+                "route_ids_sha256": hashlib.sha256(ids).hexdigest(),
+            }
+        )
         found[layer, down, t].append((arr, ids))
     for layer in (6, 11):
         for down in (0, 1):
@@ -265,7 +278,21 @@ def main():
     lib = load_probe(args.lib)
     official = Official(args.official)
     gguf = {t.name: t for t in GGUFReader(args.gguf).tensors}
-    result = {"cases": [], "instrumented_spans": []}
+    result = {
+        "protocol": {
+            "official_revision": "6e7c8248f75265bdd4fbab5273304243b5d8c2cb",
+            "gguf_revision": "a98a3457c896cd784094c733e38ace2ac129ab74",
+            "llama_cpp_release": "b12572-mix-8eebad4",
+            "ollama_activation_commit": "6949a42ad24450cf567d7ce1ff7d278ebb3eb5d8",
+            "warmups": 2,
+            "repetitions": args.repeats,
+            "gates": {"relative_l2": 1e-4, "max_abs_over_ref_max": 1e-3, "nonfinite": 0},
+        },
+        "cases": [],
+        "instrumented_spans": [],
+        "captures": [],
+        "readouts": [],
+    }
 
     def checkpoint():
         temporary = args.output.with_suffix(".tmp")
@@ -291,7 +318,7 @@ def main():
         yield 0, 0, 1, x[:, None], ids[:, None]
         yield 0, 0, 1, x[None], ids[None]
         if not args.layer0_only:
-            yield from request_cases(lib, args.gguf, args.tokens)
+            yield from request_cases(lib, args.gguf, args.tokens, result["captures"])
 
     for layer, down, visit, inputs, ids in fixtures():
         key = (layer, down)
@@ -392,6 +419,15 @@ def main():
         visit, stage = ct.c_int(), ct.c_int()
         dt = lib.read_span(i, ct.byref(visit), ct.byref(stage))
         result["instrumented_spans"].append({"visit": visit.value, "stage": stage.value, "ms": dt * 1000})
+    for index, phase in enumerate(("prefill_last", "teacher_forced_decode", "instrumented_decode")):
+        if index >= lib.readout_count():
+            break
+        counts = np.empty(2, np.int32)
+        digest = ct.create_string_buffer(32)
+        lib.readout_meta(index, counts.ctypes.data, digest)
+        result["readouts"].append(
+            {"phase": phase, "logits": int(counts[0]), "finite": int(counts[1]), "f32_sha256": digest.raw.hex()}
+        )
     checkpoint()
 
 

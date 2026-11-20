@@ -22,6 +22,12 @@ def load_samples(paths, normalize):
     return samples
 
 
+def post_first_visible_rate(tokens, elapsed, first_visible):
+    if first_visible is None or elapsed <= first_visible or tokens < 2:
+        return None
+    return (tokens - 1) / (elapsed - first_visible)
+
+
 def ollama_sample(row):
     if "eval_count" not in row:
         return None
@@ -38,9 +44,13 @@ def ollama_sample(row):
             row["requested_outputs"] == row["eval_count"] == 256
             and row["prompt_eval_count"] == row["requested_input_tokens"]
             and row["prompt_eval_cached_count"] == 0
+            and row["done_reason"] == "length"
         ),
         "prefill_tokens_s": row["prefill_tps"],
         "decode_tokens_s": row["useful_decode_tps"],
+        "post_first_visible_tokens_s": post_first_visible_rate(
+            row["eval_count"], row["wall_seconds"], row["first_visible_seconds"]
+        ),
         "first_visible_s": row["first_visible_seconds"],
         "request_s": row["wall_seconds"],
     }
@@ -63,6 +73,9 @@ def gguf_sample(row):
         "valid": row["eligible"] and row["wanted_output"] == t["predicted_n"] == 256,
         "prefill_tokens_s": t["prompt_n"] / (t["prompt_ms"] / 1000),
         "decode_tokens_s": (t["predicted_n"] - 1) / (t["predicted_ms"] / 1000),
+        "post_first_visible_tokens_s": post_first_visible_rate(
+            t["predicted_n"], row["elapsed_seconds"], row["ttft_seconds"]
+        ),
         "first_visible_s": row["ttft_seconds"],
         "request_s": row["elapsed_seconds"],
     }
@@ -122,19 +135,31 @@ def compare(original, gguf):
     for label, pairs in sorted(groups.items()):
         pairs.sort(key=lambda p: p[0]["window"])
         pairs = pairs[:8]
-        entry = {"paired_cases": [a["id"] for a, _ in pairs]}
+        orders = ["original_first" if a["start_ns"] < b["start_ns"] else "unsloth_first" for a, b in pairs]
+        entry = {
+            "paired_cases": [a["id"] for a, _ in pairs],
+            "paired_count": len(pairs),
+            "meets_eight_pair_target": len(pairs) == 8,
+            "launch_order_counts": dict(Counter(orders)),
+        }
         for metric in (
             "prefill_tokens_s",
             "decode_tokens_s",
+            "post_first_visible_tokens_s",
             "first_visible_s",
             "request_s",
         ):
             a = [x[metric] for x, _ in pairs]
             b = [x[metric] for _, x in pairs]
+            ratios = [y / x for x, y in zip(a, b, strict=True)]
             entry[metric] = {
                 "original": distribution(a),
                 "unsloth": distribution(b),
-                "unsloth_over_original": distribution([y / x for x, y in zip(a, b, strict=True)]),
+                "unsloth_over_original": distribution(ratios),
+                "median_ratio_by_order": {
+                    order: statistics.median(r for r, o in zip(ratios, orders, strict=True) if o == order)
+                    for order in sorted(set(orders))
+                },
             }
         cells[label] = entry
     return {"cells": cells, "unmatched_or_ineligible": rejected}

@@ -79,6 +79,24 @@ def request(port, model, case, output_tokens):
     }
 
 
+def await_host(path):
+    """Read the external sampler's last observation before launching a request."""
+    started = time.monotonic()
+    while True:
+        with path.open("rb") as samples:
+            samples.seek(max(0, path.stat().st_size - 8192))
+            lines = samples.read().splitlines()
+        if lines:
+            try:
+                sample = json.loads(lines[-1])
+            except json.JSONDecodeError:
+                sample = {}
+            if time.time_ns() - sample.get("unix_ns", 0) < 10_000_000_000:
+                if sample.get("thermal") in (0, 1) and sample.get("pressure") == 1:
+                    return time.monotonic() - started
+        time.sleep(3)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, required=True)
@@ -88,6 +106,7 @@ def main():
     parser.add_argument("--windows", type=int, nargs="+", required=True)
     parser.add_argument("--output-tokens", type=int, default=256)
     parser.add_argument("--ids", nargs="+")
+    parser.add_argument("--host-samples", type=Path)
     args = parser.parse_args()
     cases = json.loads(args.workloads.read_text())["cases"]
     with args.receipts.open("x", encoding="utf-8", buffering=1) as out:
@@ -96,7 +115,9 @@ def main():
                 continue
             if hashlib.sha256(case["prompt"].encode()).hexdigest() != case["prompt_sha256"]:
                 raise ValueError(f"fixture hash mismatch for {case['id']}")
+            waited = await_host(args.host_samples) if args.host_samples else 0
             result = request(args.port, args.model, case, args.output_tokens)
+            result["host_wait_seconds"] = waited
             print(json.dumps(result), file=out)
             print(case["id"], result["prompt_eval_count"], result["eval_count"],
                   result["prompt_eval_cached_count"], round(result["wall_seconds"], 3), flush=True)
