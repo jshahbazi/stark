@@ -167,7 +167,7 @@ context limit, EOS IDs and MTP support vary by loaded model:
 | `request_budget_bytes`, `max_request_bytes` | Configured logical content budget and encoded request-line budget, including the newline; see [resource budget](WORKER_PROTOCOLS.md#resource-budget) |
 | `eos_token_ids` | Stop IDs from the model's generation metadata, always honoured |
 | `streaming`, `stop_sequences`, `cancellation` | Capability tags for the features below |
-| `mtp` | Loaded-model MTP support, recommended/maximum draft counts, supported operations and exact-sampling policy; see [MTP](#multi-token-prediction) |
+| `mtp` | Loaded-model MTP support, recommended/maximum draft counts, supported operations and exact-sampling policy; on scheduling backends also the round-scheduling policies and the model's default schedule (`default_policy`, `default_lookup`); see [MTP](#multi-token-prediction) |
 
 The configured context is a token admission boundary. Available memory and the configurable content/frame budgets still apply; accepting a model's published maximum does not qualify full-length numerical accuracy or performance.
 
@@ -224,8 +224,8 @@ Reply: `{"text":"...","token_count":N}`. An empty vector is valid. The whole vec
 | `sampling` | Optional, default `{"mode":"greedy"}`. See [Sampling](#sampling). |
 | `mtp` | Optional boolean, default `false`. `true` uses this model's `recommended_drafts`; `false` disables MTP. Unsupported models reject `true` with `mtp_not_supported`. Applies to text `generate` only. |
 | `mtp_drafts` | Optional explicit draft count, default 0. Nonzero values must fit the loaded model's `max_drafts`. Retained for advanced callers and benchmarks. Supply either `mtp` or `mtp_drafts`; supplying both, including `false` and `0`, is invalid. |
-| `mtp_policy` | Optional, `"fixed"` (default) or `"adaptive"`. Only on backends whose readiness `mtp` object lists `policies`. See [MTP round scheduling](#mtp-round-scheduling). |
-| `mtp_lookup` | Optional boolean, default `false`. `true` allows prompt-lookup proposals. Same availability as `mtp_policy`. |
+| `mtp_policy` | Optional, `"fixed"` or `"adaptive"`. Only on backends whose readiness `mtp` object lists `policies`. When omitted on a request with MTP on, the loaded model's readiness `default_policy` applies: `"adaptive"` on the pinned Lily Q4-XL artifact, `"fixed"` elsewhere. `"fixed"` opts out. See [MTP round scheduling](#mtp-round-scheduling). |
+| `mtp_lookup` | Optional boolean. `true` allows prompt-lookup proposals. When omitted on a request with MTP on, the loaded model's readiness `default_lookup` applies: `true` on the pinned Lily Q4-XL artifact, `false` elsewhere. `false` opts out. Same availability as `mtp_policy`. |
 | `stop_token_ids` | Optional, at most 256 distinct token IDs below `vocab_size`. Added to the model's EOS IDs; a model EOS cannot be removed. |
 | `stop` | Optional, at most four non-empty strings of at most 1,024 characters each. See [Stop sequences](#stop-sequences). |
 | `stream` | Optional boolean, default `false`. See [Streaming](#streaming). |
@@ -252,7 +252,7 @@ The terminal reply:
 | `reused_input_tokens` | Present only when prefix reuse is enabled: prompt tokens taken from the retained prefix instead of prefill, a multiple of `prefix_cache.chunk_tokens` below `input_tokens` |
 | `output_tokens_per_second` | `(sampled_tokens - 1) / decode_seconds`, or `null` when unmeasurable |
 | `timing_method` | `first-token-wall-clock-v1` |
-| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, the admitted `verification` route, and aggregate round, proposal, accepted-prefix-count, verified-row and phase-time counters when available. A request that selected a non-default `mtp_policy` or `mtp_lookup` also gets `policy`, `lookup` and `stats.schedule`; see [MTP round scheduling](#mtp-round-scheduling). |
+| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, the admitted `verification` route, and aggregate round, proposal, accepted-prefix-count, verified-row and phase-time counters when available. A request whose effective schedule is not the fixed policy with lookup off, whether selected by the request or by the model default, also gets `policy`, `lookup` and `stats.schedule`; see [MTP round scheduling](#mtp-round-scheduling). |
 
 The prefill figure is a wall-clock proxy that includes native state allocation, command encoding, GPU waiting and any lookahead decode the engine schedules before returning its first token. The output rate counts sampling steps after the first token, including a terminal stop token. Prompt tokenization is excluded from all timings. The prompt plus sampled tokens never exceed `context_tokens`; there is no silent truncation.
 
@@ -324,7 +324,11 @@ not carry a mode into later native requests. Current operations are text-only.
 
 Native Lily and official mixed-affine Qwen3.8 checkpoints with their trained
 head currently implement this capability. They recommend two drafts with a
-maximum of three. Lily-format weights report
+maximum of three. On the pinned image-loaded Lily Q4-XL artifact the
+recommended count is the limit of the default
+[adaptive schedule with prompt lookup](#mtp-round-scheduling), not a fixed
+depth: a request with `"mtp_drafts": 2` and no schedule selector plans zero to
+two drafts per round. Lily-format weights report
 `verification: "batched-decode-exact-v1"`; official mixed-affine weights
 report `verification: "batched-affine-decode-exact-v1"`.
 Responses retain the same route label. The generation worker loads
@@ -338,13 +342,32 @@ Requests on one worker remain serialized. With `--prefix-cache`, a request resum
 #### MTP round scheduling
 
 The native Qwen3.8 MTP routes above (Lily-format and official mixed-affine
-weights) also accept two opt-in, request-local scheduling selectors. The
+weights) also accept two request-local scheduling selectors. The
 adaptive policy's round-cost table was measured on the Lily Q4-XL artifact
-only and has not been retuned since the host round-trip changes; on other
-artifacts it is unqualified. Their readiness `mtp` object then adds
-`"policies": ["fixed", "adaptive"]`, `"default_policy": "fixed"` and
-`"lookup": true`; other backends report neither and refuse a non-default
-selector with `mtp_not_supported`.
+only, on the merged build of attempt `20261119-LILYMERGE-01` at 4,096 input
+tokens; on other artifacts it is unqualified. Their readiness `mtp` object then adds
+`"policies": ["fixed", "adaptive"]`, the loaded model's default schedule as
+`default_policy` and `default_lookup`, and `"lookup": true`; other backends
+report none of these and refuse a non-default selector with
+`mtp_not_supported`.
+
+The default schedule is model-level. Only the pinned image-loaded Lily Q4-XL
+generation artifact (`fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` at revision
+`0f94842e3682b49acace4daeb4cf2e65a6f94f83`, the same artifact identity that
+enables [midpoint prefix snapshots](#prefix-reuse)), loaded with its MTP head,
+defaults to the adaptive policy with prompt lookup (`"default_policy":
+"adaptive"`, `"default_lookup": true`), as selected by attempt
+`20261119-LILYADAPT-01`. Every other model, layout and backend defaults to the
+fixed policy with lookup off. The default applies only to a request with MTP
+on that omits a selector; an omitted selector takes the default and an
+explicit one always wins, so `"mtp_policy": "fixed"` and `"mtp_lookup": false`
+are the per-request opt-outs. A request with MTP off is unaffected, and the
+worker's `default_drafts` stays zero, so a request that names nothing still
+runs without MTP. Setting `STARK_LILY_MTP_ADAPTIVE=0` in the worker's
+environment, read once at load, keeps the pinned artifact on the fixed policy
+with lookup off. On that artifact, seeded sampled output of an MTP-enabled
+request without selectors differs from the output the previous default (the
+fixed policy) produced for the same seed; greedy output does not change.
 
 - `"mtp_policy": "adaptive"` chooses the draft count per round, from zero up
   to the request's limit, by maximizing expected tokens per millisecond from
@@ -352,7 +375,8 @@ selector with `mtp_not_supported`.
   loaded artifact. The plan depends only on acceptance history, the remaining
   budget and the sampling mode, never on measured time, so a request repeats
   exactly. With `mtp_drafts` the limit is that count; with `"mtp": true` or a
-  model default it is `max_drafts`. A zero-draft round runs one ordinary
+  model `default_drafts` it is `max_drafts`, whether the request named the
+  adaptive policy or the model default supplied it. A zero-draft round runs one ordinary
   decode step and an exact target draw.
 - `"mtp_lookup": true` proposes drafts from the prompt and committed output
   with no draft-head forward pass: a 4-gram index proposes the tokens that
@@ -364,18 +388,27 @@ selector with `mtp_not_supported`.
   when its expected rate is at least the head plan's. The index lives only in
   the decode stream and is never logged.
 
-Either selector needs MTP enabled; with MTP off it is
+An adaptive or lookup selector needs MTP enabled; with MTP off it is
 `invalid_generation_request`, as is an unknown policy, and `null` is invalid.
-Image requests keep MTP off and do not take these fields. Greedy output does
-not depend on either selector. Seeded sampled output with a selector is
+`"fixed"` and `false` remain accepted with MTP off.
+Image requests keep MTP off, do not take these fields and never receive the
+model default. Greedy output does
+not depend on the schedule. Seeded sampled output under a non-fixed schedule is
 reproducible but differs from the fixed schedule, as it does between draft
-counts. The prefix-reuse key is unchanged: the retained snapshot is captured
-during prompt prefill, before any round runs. Default requests keep the
-existing acknowledgement schema; a request with a non-default selector adds
-`policy` and `lookup`, and `stats.schedule` with `policy`, `lookup`, `limit`,
+counts, and under the adaptive policy it also depends on the planner's cost
+table. The prefix-reuse key is unchanged and does not include the schedule:
+the retained snapshot is captured during prompt prefill, before any round
+runs. A request whose effective schedule is the fixed policy with lookup off,
+including an explicit opt-out or the kill switch on the pinned artifact, keeps
+the existing acknowledgement schema. Any other effective schedule, whether the
+request selected it or the model default supplied it, adds `policy` and
+`lookup`, and `stats.schedule` with `policy`, `lookup`, `limit`,
 `head_rounds_by_depth` and `head_round_seconds_by_depth` (indexed by draft
 count), `lookup_rounds`, `lookup_proposed`, `lookup_accepted`,
-`lookup_round_seconds`, `head_advances` and `head_advance_seconds`. The
+`lookup_round_seconds`, `head_advances` and `head_advance_seconds`. When the
+adaptive policy ran, `stats.schedule.cost_table` names the planner's cost
+table (currently `"lily-q4-xl-lilymerge-01"`), so a caller can tell which
+planner produced a sampled result. The
 `rounds`, `proposed`, `accepted` and `verified_rows` counters include lookup
 rounds. No token, logit or probability data is reported.
 
@@ -419,7 +452,10 @@ Other supported layouts retain the serial verifier.
 
 The desktop backend defaults MTP off for Gemma and full-BF16 Qwen3.5-0.8B,
 following the measured speed comparison. Other supported models retain their
-existing default on. It remembers an explicit on/off preference per model;
+existing default on. An enabled request carries an explicit `mtp_drafts`
+equal to the worker's `recommended_drafts` and no schedule selector, so on
+the pinned Lily Q4-XL artifact the app runs the default adaptive schedule
+with prompt lookup at a limit of two drafts. It remembers an explicit on/off preference per model;
 its API can inherit or override that preference. See
 [the backend configuration contract](LOCAL_API.md#mtp-capabilities-and-per-model-preferences).
 Terminal `--mtp` applies only to that terminal session and does not modify the

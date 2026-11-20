@@ -51,6 +51,11 @@ pub struct RoundCosts {
 /// Greedy and sampled cost tables, selected by the request's sampling mode.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CostTable {
+    /// Stable identifier reported in `stats.schedule.cost_table` whenever the
+    /// adaptive policy plans with this table. Seeded sampled output under the
+    /// adaptive policy depends on the table's constants, so a new or retuned
+    /// table must carry a new identifier.
+    pub id: &'static str,
     pub greedy: RoundCosts,
     pub sampled: RoundCosts,
 }
@@ -78,6 +83,7 @@ impl CostTable {
     ///   advance; greedy lookup rounds of 2 and 3 proposals measured 24.71
     ///   and 30.50 ms, sampled 24.54 ms at 2).
     pub const LILY_Q4_XL_LILYMERGE_01: Self = Self {
+        id: "lily-q4-xl-lilymerge-01",
         greedy: RoundCosts {
             serial_ms: 13.75,
             verify_ms: &[12.80, 17.83, 22.86, 28.44],
@@ -441,6 +447,9 @@ pub struct MtpScheduleStats {
     /// Rounds without head drafts that wrote the head's cache row instead.
     pub head_advances: usize,
     pub head_advance_seconds: f64,
+    /// [`CostTable::id`] of the table the adaptive policy planned with;
+    /// `None` under the fixed policy, which reads no table.
+    pub cost_table: Option<&'static str>,
 }
 
 impl Serialize for MtpScheduleStats {
@@ -449,8 +458,11 @@ impl Serialize for MtpScheduleStats {
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         let slots = (self.limit + 1).min(DEPTH_SLOTS);
-        let mut state = serializer.serialize_struct("MtpScheduleStats", 11)?;
+        let mut state = serializer.serialize_struct("MtpScheduleStats", 11 + usize::from(self.cost_table.is_some()))?;
         state.serialize_field("policy", self.policy.name())?;
+        if let Some(cost_table) = self.cost_table {
+            state.serialize_field("cost_table", cost_table)?;
+        }
         state.serialize_field("lookup", &self.lookup)?;
         state.serialize_field("limit", &self.limit)?;
         state.serialize_field("head_rounds_by_depth", &self.head_rounds_by_depth[..slots])?;
@@ -499,6 +511,16 @@ impl RoundScheduler {
             #[cfg(test)]
             script: std::collections::VecDeque::new(),
         }
+    }
+
+    /// Records the identifier of the cost table `costs` came from. Reported
+    /// only when the adaptive policy plans with it.
+    pub fn with_cost_table(
+        mut self,
+        id: &'static str,
+    ) -> Self {
+        self.stats.cost_table = (self.policy == MtpPolicy::Adaptive).then_some(id);
+        self
     }
 
     /// An adaptive scheduler whose first rounds run the given head depths
@@ -869,8 +891,24 @@ mod tests {
         assert_eq!(value["policy"], "adaptive");
         assert_eq!(value["head_rounds_by_depth"], serde_json::json!([1, 0, 1, 0]));
         assert_eq!(value["head_advances"], 1);
+        assert!(value.get("cost_table").is_none());
         let mut fixed = RoundScheduler::new(MtpPolicy::Fixed, SAMPLED, 3, None);
         assert_eq!(fixed.plan(3), RoundPlan::Head(3));
         assert_eq!(fixed.plan(1), RoundPlan::Head(1));
+    }
+
+    #[stark_test]
+    fn adaptive_schedule_reports_its_cost_table_and_fixed_does_not() {
+        let table = CostTable::LILY_Q4_XL_LILYMERGE_01;
+        assert_eq!(table.id, "lily-q4-xl-lilymerge-01");
+        let adaptive = RoundScheduler::new(MtpPolicy::Adaptive, table.greedy, 2, None).with_cost_table(table.id);
+        let value = serde_json::to_value(adaptive.stats()).unwrap();
+        assert_eq!(value["cost_table"], "lily-q4-xl-lilymerge-01");
+        assert_eq!(value.as_object().unwrap().len(), 12);
+        let fixed = RoundScheduler::new(MtpPolicy::Fixed, table.sampled, 2, None).with_cost_table(table.id);
+        assert_eq!(fixed.stats().cost_table, None);
+        let value = serde_json::to_value(fixed.stats()).unwrap();
+        assert!(value.get("cost_table").is_none());
+        assert_eq!(value.as_object().unwrap().len(), 11);
     }
 }

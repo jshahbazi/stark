@@ -22,6 +22,14 @@ Add ``--reuse boundary`` for backends that resume only from a snapshot at the
 previous prompt's last full prefill chunk (native hybrid models).
 Add ``--vision`` to qualify text prefix reuse on an image-capable artifact,
 including invalidation across a completed synthetic image request.
+Add ``--mtp-policy adaptive`` and/or ``--mtp-lookup`` to also send the opt-in
+MTP round-scheduling selectors on extra cases. Those cases compare the cached
+worker with the same build without reuse; greedy ones must also equal the
+fixed schedule. The baseline worker is never sent a selector case; one probe
+records only its refusal code. A candidate whose readiness default schedule is
+not fixed gets explicit fixed-schedule opt-out cases that must equal the
+baseline, and its stochastic default MTP cases are not compared with the
+baseline.
 The pinned raw EXL3/FP8 pack also requires ``--download-receipt RECEIPT``;
 its complete original pack stays unchanged and its chat codec is adapted in RAM.
 """
@@ -683,8 +691,117 @@ def outcome(reply, tools, parser):
     return result
 
 
-def plan(turns, chunk, context, mtp_drafts, *, mtp_selection_key=False):
-    """The cached worker's request sequence: comparison cases and invalidating actions."""
+def selector_combinations(policy=None, lookup=False):
+    """Opt-in MTP scheduling selector payloads: each requested one alone, then both together."""
+    combinations = []
+    if policy == "adaptive":
+        combinations.append({"mtp_policy": "adaptive"})
+    if lookup:
+        combinations.append({"mtp_lookup": True})
+    if len(combinations) == 2:
+        combinations.append({"mtp_policy": "adaptive", "mtp_lookup": True})
+    return combinations
+
+
+FIXED_SCHEDULE = ("fixed", False)
+# Explicit per-request opt-out of a non-fixed model default.
+OPT_OUT = {"mtp_policy": "fixed", "mtp_lookup": False}
+
+
+def selector_label(selector):
+    parts = []
+    if "mtp_policy" in selector:
+        parts.append(selector["mtp_policy"])
+    if "mtp_lookup" in selector:
+        parts.append("lookup" if selector["mtp_lookup"] else "nolookup")
+    return "_".join(parts)
+
+
+def default_schedule(ready):
+    """The readiness default (policy, lookup) when it is not the fixed schedule; otherwise None."""
+    mtp = ready.get("mtp") or {}
+    schedule = (mtp.get("default_policy") or "fixed", mtp.get("default_lookup") is True)
+    return None if schedule == FIXED_SCHEDULE else schedule
+
+
+def effective_schedule(selector, default):
+    """The (policy, lookup) a request with these explicit selectors runs under the model default."""
+    policy, lookup = default or FIXED_SCHEDULE
+    return selector.get("mtp_policy", policy), selector.get("mtp_lookup", lookup)
+
+
+def fixed_schedule(options):
+    """The same request on the default fixed schedule."""
+    return {k: v for k, v in options.items() if k != "selector"}
+
+
+def is_greedy(options):
+    return (options.get("sampling") or {"mode": "greedy"})["mode"] == "greedy"
+
+
+def case_request(options, max_new):
+    request = {
+        "context": options["context"],
+        "max_new": max_new,
+        "sampling": options.get("sampling"),
+        "seed": options.get("seed", 0),
+        "mtp_drafts": options.get("mtp_drafts"),
+    }
+    request.update(options.get("selector") or {})
+    return request
+
+
+def schedule_record(reply, selector, default=None):
+    """Counts only: whether the reply acknowledged the effective schedule, and its integer work counters.
+
+    A non-fixed schedule must be named in ``policy``, ``lookup`` and
+    ``stats.schedule``; the fixed schedule keeps the plain acknowledgement.
+    """
+    mtp = reply.get("mtp") if "error" not in reply else None
+    if not isinstance(mtp, dict):
+        return {"acknowledged": False, "counts": None}
+    stats = mtp.get("stats") if isinstance(mtp.get("stats"), dict) else {}
+    schedule = stats.get("schedule") if isinstance(stats.get("schedule"), dict) else {}
+    policy, lookup = effective_schedule(selector, default)
+    if (policy, lookup) == FIXED_SCHEDULE:
+        acknowledged = (mtp.get("enabled") is True and "policy" not in mtp and "lookup" not in mtp
+                        and "schedule" not in stats)
+    else:
+        acknowledged = (mtp.get("enabled") is True and mtp.get("policy") == policy and mtp.get("lookup") is lookup
+                        and schedule.get("policy") == policy and schedule.get("lookup") is lookup)
+
+    def integer(value):
+        return type(value) is int or (isinstance(value, list) and all(type(item) is int for item in value))
+
+    counts = {name: value for name, value in stats.items() if "seconds" not in name and integer(value)}
+    counts.update({f"schedule_{name}": value for name, value in schedule.items()
+                   if "seconds" not in name and integer(value)})
+    return {"acknowledged": acknowledged, "counts": counts}
+
+
+def schedule_tracked(options, default):
+    """Selector requests, and every MTP request under a non-fixed model default."""
+    return options.get("selector") is not None or (default is not None and bool(options.get("mtp_drafts")))
+
+
+def selector_readiness(ready, mtp_drafts, selectors):
+    """Refuse to qualify selectors the candidate does not advertise, or without MTP."""
+    if not selectors:
+        return
+    mtp = ready.get("mtp") or {}
+    if not mtp_drafts:
+        raise SystemExit("MTP scheduling selectors require a positive MTP draft count")
+    if any("mtp_policy" in selector for selector in selectors) and "adaptive" not in (mtp.get("policies") or []):
+        raise SystemExit("candidate readiness does not list the adaptive MTP policy")
+    if any("mtp_lookup" in selector for selector in selectors) and mtp.get("lookup") is not True:
+        raise SystemExit("candidate readiness does not list MTP prompt lookup")
+
+
+def plan(turns, chunk, context, mtp_drafts, *, mtp_selection_key=False, selectors=(), default_schedule=None):
+    """The cached worker's request sequence: comparison cases and invalidating actions.
+
+    ``default_schedule`` is the candidate's non-fixed readiness default, or None.
+    """
     steps = []
 
     def case(label, ids, **options):
@@ -724,6 +841,36 @@ def plan(turns, chunk, context, mtp_drafts, *, mtp_selection_key=False):
             case("mtp_depth_restored", turns[-1], mtp_drafts=mtp_drafts)
         case("plain_after_mtp", turns[-1])
         case("plain_warm", turns[-1])
+        # A non-fixed model default: the explicit fixed-schedule opt-out, cold
+        # and warm, greedy and stochastic, must equal the baseline's fixed path.
+        if default_schedule is not None:
+            optout = {"mtp_drafts": mtp_drafts, "selector": OPT_OUT}
+            case("optout_after_plain", turns[-1], **optout)
+            case("optout_warm", turns[-1], **optout)
+            case("optout_repeat_stochastic", turns[-1], **optout, sampling=stochastic, seed=17)
+            case("default_after_optout", turns[-1], mtp_drafts=mtp_drafts)
+            case("optout_after_default", turns[-1], **optout)
+            case("plain_after_optout", turns[-1])
+            case("optout_stochastic_after_plain", turns[-1], **optout, sampling=stochastic, seed=29)
+            case("optout_stochastic_warm", turns[-1], **optout, sampling=stochastic, seed=29)
+            case("plain_after_optout_stochastic", turns[-1])
+            case("plain_after_optout_warm", turns[-1])
+        # Opt-in scheduling selectors. The documented key is MTP on/off only,
+        # so switching between fixed and selector schedules keeps the entry.
+        fixed = {} if default_schedule is None else {"selector": OPT_OUT}
+        for selector in selectors:
+            name = selector_label(selector)
+            mtp = {"mtp_drafts": mtp_drafts, "selector": selector}
+            case(f"{name}_after_plain", turns[-1], **mtp)
+            case(f"{name}_warm", turns[-1], **mtp)
+            case(f"{name}_repeat_stochastic", turns[-1], **mtp, sampling=stochastic, seed=17)
+            case(f"fixed_after_{name}", turns[-1], mtp_drafts=mtp_drafts, **fixed)
+            case(f"{name}_after_fixed", turns[-1], **mtp)
+            case(f"{name}_shorter", turns[-2], **mtp)
+            case(f"{name}_regrow", turns[-1], **mtp)
+            case(f"{name}_regrow_stochastic", turns[-1], **mtp, sampling=stochastic, seed=23)
+            case(f"plain_after_{name}", turns[-1])
+            case(f"plain_after_{name}_warm", turns[-1])
     for label in (*INVALIDATIONS, "tokenize_decode"):
         case(f"before_{label}", turns[-1])
         steps.append(("act", label, turns[-1], None))
@@ -802,12 +949,21 @@ def report(args, **counts):
     report_stage(args.progress, **counts)
 
 
-def run_cases(worker, steps, args, tools, parser, *, scopes=None, expectation=None):
-    """Run every case once per distinct request (all steps on a cached worker)."""
+def run_cases(worker, steps, args, tools, parser, *, scopes=None, expectation=None, send_selectors=True):
+    """Run every case once per distinct request (all steps on a cached worker).
+
+    Without scopes (reference workers) the second value maps comparison keys of
+    selector requests (and, under a non-fixed model default, of every MTP
+    request) to their schedule records. A greedy or explicit fixed-schedule
+    selector case also runs the same request without selector fields there;
+    ``send_selectors=False`` (a build that predates the selectors) runs only
+    that request.
+    """
     requested = max((options.get("mtp_drafts", 0) or 0
                      for kind, _, _, options in steps if kind == "case"), default=0)
     if requested:
         selected_mtp_drafts(worker.ready, requested)
+    default = default_schedule(worker.ready)
     outcomes, observed = {}, {}
     for kind, label, ids, options in steps:
         if kind == "act":
@@ -822,18 +978,21 @@ def run_cases(worker, steps, args, tools, parser, *, scopes=None, expectation=No
                 expectation.entry = None
             continue
         key = comparison_key(ids, options)
-        request = {
-            "context": options["context"],
-            "max_new": args.max_new,
-            "sampling": options.get("sampling"),
-            "seed": options.get("seed", 0),
-            "mtp_drafts": options.get("mtp_drafts"),
-        }
+        request = case_request(options, args.max_new)
+        selector = options.get("selector")
         if scopes is None:
-            if key not in outcomes:
-                report(args, case_start=label, input_tokens=len(ids))
-                outcomes[key] = outcome(generate(worker, ids, **request), tools, parser)
-                report(args, case=label, successful="error" not in outcomes[key])
+            runs = [(key, options)] if selector is None or send_selectors else []
+            if selector is not None and (is_greedy(options) or effective_schedule(selector, None) == FIXED_SCHEDULE):
+                fixed = fixed_schedule(options)
+                runs.append((comparison_key(ids, fixed), fixed))
+            for run_key, run_options in runs:
+                if run_key not in outcomes:
+                    report(args, case_start=label, input_tokens=len(ids))
+                    reply = generate(worker, ids, **case_request(run_options, args.max_new))
+                    outcomes[run_key] = outcome(reply, tools, parser)
+                    if schedule_tracked(run_options, default):
+                        observed[run_key] = schedule_record(reply, run_options.get("selector") or {}, default)
+                    report(args, case=label, successful="error" not in outcomes[run_key])
             continue
         cache_key = (
             scopes[options["scope"]],
@@ -856,6 +1015,10 @@ def run_cases(worker, steps, args, tools, parser, *, scopes=None, expectation=No
             <= {reused},
             "outcome": outcome(reply, tools, parser),
         }
+        if selector is not None:
+            observed[label]["fixed_key"] = comparison_key(ids, fixed_schedule(options))
+        if schedule_tracked(options, default):
+            observed[label]["schedule"] = schedule_record(reply, selector or {}, default)
         report(
             args,
             case=label,
@@ -926,8 +1089,12 @@ def run_exactness(args, template, codec, parser):
             raise SystemExit("synthetic session exceeds the requested context")
         if (len(turns[0]) - 1) // chunk == 0:
             raise SystemExit("first prompt must exceed one backend reuse chunk")
+        selectors = selector_combinations(getattr(args, "mtp_policy", None), getattr(args, "mtp_lookup", False))
+        selector_readiness(cached.ready, mtp_drafts, selectors)
+        default = default_schedule(cached.ready)
         steps = plan(turns, chunk, args.context, mtp_drafts,
-                     mtp_selection_key="mtp-selection" in settings.get("key", ""))
+                     mtp_selection_key="mtp-selection" in settings.get("key", ""), selectors=selectors,
+                     default_schedule=default)
         expectation = Expectation(chunk, args.reuse == "boundary")
         scopes = {"main": secrets.token_hex(16), "other": secrets.token_hex(16)}
         _, observed = run_cases(
@@ -940,15 +1107,23 @@ def run_exactness(args, template, codec, parser):
             expectation=expectation,
         )
     phase_seconds = {"cached": round(time.monotonic() - started, 1)}
-    references = {}
+    references, schedules, baseline_refusals = {}, {}, {}
     for name, binary in (("fresh", args.candidate), ("baseline", args.baseline)):
         report(args, phase=name)
         started = time.monotonic()
         with Worker(binary, args.model, progress=args.progress, vision=args.vision) as worker:
-            references[name], _ = run_cases(worker, steps, args, session.tools, parser)
+            references[name], schedules[name] = run_cases(
+                worker, steps, args, session.tools, parser, send_selectors=name != "baseline"
+            )
+            if name == "baseline":
+                # The baseline predates the selectors: record only how it refuses.
+                for selector in selectors:
+                    reply = generate(worker, turns[-1], context=args.context, max_new=1,
+                                     mtp_drafts=mtp_drafts, **selector)
+                    baseline_refusals[selector_label(selector)] = reply.get("error", "accepted")
         phase_seconds[name] = round(time.monotonic() - started, 1)
     checks, invalidations = [], []
-    for kind, label, _, _ in steps:
+    for kind, label, _, options in steps:
         if kind == "act":
             continue
         row = observed[label]
@@ -962,7 +1137,7 @@ def run_exactness(args, template, codec, parser):
                 and row["progress_consistent"],
                 "identical_to_fresh": row["outcome"] == references["fresh"][row["key"]],
                 "identical_to_baseline_worker": row["outcome"]
-                == references["baseline"][row["key"]],
+                == references["baseline"].get(row["key"]),
                 "output_sha256": row["outcome"].get("generated_sha256"),
                 "tool_calls": row["outcome"].get("tool_calls"),
                 "finish_reason": row["outcome"].get("finish_reason"),
@@ -970,6 +1145,8 @@ def run_exactness(args, template, codec, parser):
                 "successful": "error" not in row["outcome"],
             }
         )
+        if schedule_tracked(options, default):
+            checks[-1].update(selector_comparison(row, options, references, schedules, default))
     # Reuse must not survive a worker restart, even with the same host scope.
     report(args, phase="restart")
     with Worker(
@@ -1021,7 +1198,7 @@ def run_exactness(args, template, codec, parser):
         for check in checks
         if check["case"].startswith("follow_up_") and "stochastic" not in check["case"]
     ]
-    return {
+    result = {
         "chunk_tokens": chunk,
         "reuse_rule": args.reuse,
         "mtp_drafts": mtp_drafts,
@@ -1034,6 +1211,68 @@ def run_exactness(args, template, codec, parser):
             check["reused_input_tokens"] > 0 for check in follow_ups
         ),
     }
+    if selectors:
+        # Recorded only when opted in, so default records are unchanged.
+        result["mtp_selectors"] = {
+            "combinations": [selector_label(selector) for selector in selectors],
+            "candidate_policies": (cached.ready.get("mtp") or {}).get("policies"),
+            "candidate_lookup": (cached.ready.get("mtp") or {}).get("lookup"),
+            "baseline_refusals": baseline_refusals,
+        }
+    if default is not None:
+        # Recorded only for a candidate whose readiness default is not fixed.
+        result["mtp_default_schedule"] = {"policy": default[0], "lookup": default[1]}
+    return result
+
+
+def selector_comparison(row, options, references, schedules, default=None):
+    """Schedule rows: cached against uncached with the same options, plus the fixed-schedule rules.
+
+    Rows are selector requests and, under a non-fixed model default, every MTP
+    request. A greedy row must equal the fixed schedule. A row whose effective
+    schedule is fixed (the explicit opt-out) must equal the baseline worker,
+    stochastic included. A stochastic row on any other schedule has no baseline
+    counterpart: its baseline field is None and it rests on the cached/uncached
+    comparison alone. With a fixed model default the fixed-schedule counterpart
+    is the candidate's own request without selector fields; with a non-fixed
+    default it is the baseline worker's.
+    """
+    selector = options.get("selector")
+    greedy = is_greedy(options)
+    expects_fixed = effective_schedule(selector or {}, default) == FIXED_SCHEDULE
+    fixed_key = row.get("fixed_key", row["key"])
+    fixed_baseline = references["baseline"].get(fixed_key)
+    if default is None:
+        fixed_fresh = references["fresh"].get(fixed_key)
+    else:
+        fixed_fresh = fixed_baseline if greedy or expects_fixed else None
+    result = {
+        "mtp_selector": "default" if selector is None else selector_label(selector),
+        "greedy": greedy,
+        "identical_to_fixed_schedule": None if fixed_fresh is None else row["outcome"] == fixed_fresh,
+        "identical_to_baseline_worker": (
+            None if not (greedy or expects_fixed) or fixed_baseline is None else row["outcome"] == fixed_baseline
+        ),
+        "selector_acknowledged": row["schedule"]["acknowledged"],
+        "schedule_identical_to_fresh": row["schedule"] == schedules["fresh"].get(row["key"]),
+        "schedule_counts": row["schedule"]["counts"],
+    }
+    if expects_fixed:
+        result["expects_fixed_schedule"] = True
+    return result
+
+
+def check_passed(check):
+    base = check["successful"] and check["identical_to_fresh"] and check["reuse_matches_rule"]
+    if "mtp_selector" not in check:
+        return bool(base and check["identical_to_baseline_worker"])
+    selector = bool(base and check["selector_acknowledged"] and check["schedule_identical_to_fresh"])
+    if check["greedy"]:
+        return (selector and check["identical_to_fixed_schedule"] is True
+                and check["identical_to_baseline_worker"] is True)
+    if check.get("expects_fixed_schedule"):
+        return selector and check["identical_to_baseline_worker"] is True
+    return selector and check["identical_to_baseline_worker"] is None
 
 
 def run_timing(args, template, codec):
@@ -1114,13 +1353,7 @@ def run_timing(args, template, codec):
 def exactness_passed(exactness):
     return (
         bool(exactness["checks"])
-        and all(
-            check["successful"]
-            and check["identical_to_fresh"]
-            and check["identical_to_baseline_worker"]
-            and check["reuse_matches_rule"]
-            for check in exactness["checks"]
-        )
+        and all(check_passed(check) for check in exactness["checks"])
         and all(item["as_documented"] for item in exactness["invalidations"])
         and exactness["follow_ups_reuse"]
     )
@@ -1178,6 +1411,10 @@ def main():
     parser.add_argument("--mode", choices=("all", "exactness", "timing"), default="all")
     parser.add_argument("--mtp-drafts", type=int, choices=tuple(range(8)), default=None,
                         help="Select dense MTP depth 0..7; default uses the worker recommendation")
+    parser.add_argument("--mtp-policy", choices=("fixed", "adaptive"), default=None,
+                        help="Opt in: add cases that send \"mtp_policy\": \"adaptive\" (requires MTP)")
+    parser.add_argument("--mtp-lookup", action="store_true",
+                        help="Opt in: add cases that send \"mtp_lookup\": true (requires MTP)")
     parser.add_argument(
         "--progress",
         action="store_true",

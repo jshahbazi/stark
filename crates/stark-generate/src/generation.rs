@@ -592,6 +592,12 @@ pub(crate) trait GenerationBackend {
     fn supports_mtp_scheduling(&self) -> bool {
         false
     }
+    /// The round schedule for a request with MTP on that names neither
+    /// `mtp_policy` nor `mtp_lookup`. Fixed with lookup off unless the loaded
+    /// model qualified another one; requires scheduling support.
+    fn default_mtp_scheduling(&self) -> MtpScheduling {
+        MtpScheduling::default()
+    }
     fn mtp_metadata(&self) -> Option<Value> {
         None
     }
@@ -684,6 +690,7 @@ pub(crate) struct GenerationWorker<B: GenerationBackend> {
     backend: B,
     mtp: Option<MtpCapabilities>,
     default_mtp_drafts: u32,
+    default_mtp_scheduling: MtpScheduling,
     media: Option<MediaStore>,
     prepared: Option<PreparedRequest<B::PreparedImage>>,
     /// `Some(enabled)` when the host requested prefix reuse at startup.
@@ -721,11 +728,13 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         let mtp = backend.mtp_capabilities();
         let budget = Budget::from_environment()?;
         let default_drafts = backend.default_mtp_drafts();
+        let default_scheduling = backend.default_mtp_scheduling();
         if backend.vocab_size() == 0
             || backend.vocab_size() > u32::MAX as usize
             || backend.max_context_length() == Some(0)
             || !valid_ids(backend.eos_token_ids(), backend.vocab_size())
             || (default_drafts > 0 && mtp.is_none_or(|caps| default_drafts as usize > caps.max_drafts))
+            || (!default_scheduling.is_default() && (mtp.is_none() || !backend.supports_mtp_scheduling()))
             || mtp.is_some_and(|capabilities| {
                 capabilities.max_drafts == 0
                     || capabilities.max_drafts > u32::MAX as usize
@@ -751,6 +760,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             backend,
             mtp,
             default_mtp_drafts: default_drafts,
+            default_mtp_scheduling: default_scheduling,
             media,
             prepared: None,
             prefix_cache,
@@ -780,7 +790,10 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         enabled: Option<bool>,
         drafts: Option<u32>,
     ) -> Result<u32, &'static str> {
-        if self.backend.mtp_capabilities() != self.mtp || self.backend.default_mtp_drafts() != self.default_mtp_drafts {
+        if self.backend.mtp_capabilities() != self.mtp
+            || self.backend.default_mtp_drafts() != self.default_mtp_drafts
+            || self.backend.default_mtp_scheduling() != self.default_mtp_scheduling
+        {
             return Err("invalid_generation_output");
         }
         if enabled.is_some() && drafts.is_some() {
@@ -802,8 +815,10 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         Ok(drafts)
     }
 
-    /// Resolves the opt-in round scheduling selectors. Either needs MTP on and
-    /// a backend that supports it. Adaptive depth without an explicit draft
+    /// Resolves the round scheduling selectors. A non-default schedule needs
+    /// MTP on and a backend that supports it. With MTP on, an omitted selector
+    /// takes the loaded model's default; an explicit one always wins. With
+    /// MTP off no default applies. Adaptive depth without an explicit draft
     /// count plans up to the loaded model's limit.
     fn resolve_mtp_scheduling(
         &self,
@@ -812,14 +827,21 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         explicit_drafts: bool,
         drafts: &mut u32,
     ) -> Result<MtpScheduling, &'static str> {
-        let adaptive = match policy.as_deref() {
-            None | Some("fixed") => false,
-            Some("adaptive") => true,
+        let policy = match policy.as_deref() {
+            None => None,
+            Some("fixed") => Some(false),
+            Some("adaptive") => Some(true),
             Some(_) => return Err("invalid_generation_request"),
         };
+        let defaults = if *drafts > 0 {
+            self.default_mtp_scheduling
+        } else {
+            MtpScheduling::default()
+        };
+        let adaptive = policy.unwrap_or(defaults.adaptive);
         let scheduling = MtpScheduling {
             adaptive,
-            lookup: lookup.unwrap_or(false),
+            lookup: lookup.unwrap_or(defaults.lookup),
         };
         if scheduling.is_default() {
             return Ok(scheduling);
@@ -1547,7 +1569,8 @@ pub(crate) fn run_lines<B: GenerationBackend>(
     };
     if worker.mtp.is_some() && worker.backend.supports_mtp_scheduling() {
         readiness["mtp"]["policies"] = json!(["fixed", "adaptive"]);
-        readiness["mtp"]["default_policy"] = json!("fixed");
+        readiness["mtp"]["default_policy"] = json!(worker.default_mtp_scheduling.policy());
+        readiness["mtp"]["default_lookup"] = json!(worker.default_mtp_scheduling.lookup);
         readiness["mtp"]["lookup"] = json!(true);
     }
     if worker.media.is_some() && worker.backend.supports_images() {
@@ -1706,6 +1729,7 @@ mod tests {
         planning_allowed: bool,
         mtp_scheduling: bool,
         scheduling_requests: Vec<MtpScheduling>,
+        default_scheduling: MtpScheduling,
     }
 
     struct FakePreparedImage {
@@ -1783,6 +1807,9 @@ mod tests {
         }
         fn supports_mtp_scheduling(&self) -> bool {
             self.mtp_scheduling
+        }
+        fn default_mtp_scheduling(&self) -> MtpScheduling {
+            self.default_scheduling
         }
         fn effective_mtp_drafts(
             &self,
@@ -2072,6 +2099,7 @@ mod tests {
             planning_allowed: true,
             mtp_scheduling: false,
             scheduling_requests: Vec::new(),
+            default_scheduling: MtpScheduling::default(),
         })
         .unwrap()
     }
@@ -2296,6 +2324,232 @@ mod tests {
         off["mtp_policy"] = json!("fixed");
         assert!(post(&mut worker, off).get("error").is_none());
         assert_eq!(worker.backend.generation_calls, calls + 1);
+    }
+
+    const ADAPTIVE_LOOKUP: MtpScheduling = MtpScheduling {
+        adaptive: true,
+        lookup: true,
+    };
+
+    /// A scheduling backend whose loaded model defaults to the adaptive
+    /// policy with prompt lookup, like the pinned Lily Q4-XL artifact.
+    fn scheduled_default_worker() -> GenerationWorker<FakeBackend> {
+        let mut backend = worker().backend;
+        backend.mtp = Some(capabilities(3, 2));
+        backend.mtp_scheduling = true;
+        backend.default_scheduling = ADAPTIVE_LOOKUP;
+        GenerationWorker::new(backend).unwrap()
+    }
+
+    fn acknowledged_schedule(reply: &Value) -> (Value, Value) {
+        assert!(reply.get("error").is_none(), "{reply}");
+        (
+            reply["mtp"].get("policy").cloned().unwrap_or(Value::Null),
+            reply["mtp"].get("lookup").cloned().unwrap_or(Value::Null),
+        )
+    }
+
+    #[test]
+    fn model_default_schedule_applies_only_with_mtp_on_and_explicit_selectors_win() {
+        let mut worker = scheduled_default_worker();
+        let readiness = readiness(&mut worker);
+        assert_eq!(readiness["mtp"]["policies"], json!(["fixed", "adaptive"]));
+        assert_eq!(readiness["mtp"]["default_policy"], "adaptive");
+        assert_eq!(readiness["mtp"]["default_lookup"], true);
+        assert_eq!(readiness["mtp"]["lookup"], true);
+        assert_eq!(readiness["mtp"]["default_drafts"], 0);
+        assert_eq!(readiness["mtp"]["recommended_drafts"], 2);
+        // A request that names nothing keeps MTP off: no default applies and
+        // the acknowledgement schema is unchanged.
+        let mut off_requests = vec![standard()];
+        for (key, value) in [("mtp", json!(false)), ("mtp_drafts", json!(0))] {
+            let mut request = standard();
+            request[key] = value;
+            off_requests.push(request);
+        }
+        for request in off_requests {
+            let reply = post(&mut worker, request);
+            assert_eq!(reply["mtp"]["drafts"], 0);
+            assert_eq!(acknowledged_schedule(&reply), (Value::Null, Value::Null));
+        }
+        // `"mtp": true` under the default adaptive policy plans up to the
+        // model's limit; an explicit `mtp_drafts` is the limit.
+        let mut toggle = standard();
+        toggle["mtp"] = json!(true);
+        let reply = post(&mut worker, toggle);
+        assert_eq!(reply["mtp"]["drafts"], 3);
+        assert_eq!(acknowledged_schedule(&reply), (json!("adaptive"), json!(true)));
+        let mut explicit = standard();
+        explicit["mtp_drafts"] = json!(2);
+        let reply = post(&mut worker, explicit);
+        assert_eq!(reply["mtp"]["drafts"], 2);
+        assert_eq!(acknowledged_schedule(&reply), (json!("adaptive"), json!(true)));
+        // Per-request opt-outs.
+        let cases: [(&[(&str, Value)], u32, MtpScheduling, (Value, Value)); 6] = [
+            (
+                &[("mtp_drafts", json!(2)), ("mtp_policy", json!("fixed"))],
+                2,
+                MtpScheduling {
+                    adaptive: false,
+                    lookup: true,
+                },
+                (json!("fixed"), json!(true)),
+            ),
+            (
+                &[("mtp_drafts", json!(2)), ("mtp_lookup", json!(false))],
+                2,
+                MtpScheduling {
+                    adaptive: true,
+                    lookup: false,
+                },
+                (json!("adaptive"), json!(false)),
+            ),
+            (
+                &[("mtp_drafts", json!(2)), ("mtp_policy", json!("fixed")), ("mtp_lookup", json!(false))],
+                2,
+                MtpScheduling::default(),
+                (Value::Null, Value::Null),
+            ),
+            (
+                &[("mtp", json!(true)), ("mtp_policy", json!("fixed"))],
+                2,
+                MtpScheduling {
+                    adaptive: false,
+                    lookup: true,
+                },
+                (json!("fixed"), json!(true)),
+            ),
+            (
+                &[("mtp", json!(true)), ("mtp_lookup", json!(false))],
+                3,
+                MtpScheduling {
+                    adaptive: true,
+                    lookup: false,
+                },
+                (json!("adaptive"), json!(false)),
+            ),
+            (
+                &[("mtp", json!(true)), ("mtp_policy", json!("fixed")), ("mtp_lookup", json!(false))],
+                2,
+                MtpScheduling::default(),
+                (Value::Null, Value::Null),
+            ),
+        ];
+        for (fields, drafts, scheduling, acknowledged) in cases {
+            let mut request = standard();
+            for (key, value) in fields {
+                request[*key] = value.clone();
+            }
+            let reply = post(&mut worker, request);
+            assert_eq!(reply["mtp"]["drafts"], drafts, "{fields:?}");
+            assert_eq!(acknowledged_schedule(&reply), acknowledged, "{fields:?}");
+            assert_eq!(worker.backend.scheduling_requests.last(), Some(&scheduling), "{fields:?}");
+        }
+        // The opt-out with both selectors keeps today's exact schema.
+        let mut plain = standard();
+        plain["mtp_drafts"] = json!(2);
+        plain["mtp_policy"] = json!("fixed");
+        plain["mtp_lookup"] = json!(false);
+        let reply = post(&mut worker, plain);
+        let mut keys: Vec<&str> = reply["mtp"].as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["drafts", "enabled", "sampling", "verification"]);
+        assert_eq!(&worker.backend.mtp_requests[..5], [0, 0, 0, 3, 2]);
+        assert_eq!(
+            &worker.backend.scheduling_requests[..5],
+            [
+                MtpScheduling::default(),
+                MtpScheduling::default(),
+                MtpScheduling::default(),
+                ADAPTIVE_LOOKUP,
+                ADAPTIVE_LOOKUP
+            ]
+        );
+        // Requests accepted or refused with MTP off are unchanged.
+        let calls = worker.backend.generation_calls;
+        for (key, value) in [("mtp_policy", json!("adaptive")), ("mtp_lookup", json!(true))] {
+            let mut bad = standard();
+            bad[key] = value.clone();
+            assert_eq!(post(&mut worker, bad)["error"], "invalid_generation_request", "{key}");
+            let mut bad = standard();
+            bad["mtp"] = json!(false);
+            bad[key] = value;
+            assert_eq!(post(&mut worker, bad)["error"], "invalid_generation_request", "{key}");
+        }
+        let mut off = standard();
+        off["mtp_drafts"] = json!(0);
+        off["mtp_policy"] = json!("fixed");
+        off["mtp_lookup"] = json!(false);
+        let reply = post(&mut worker, off);
+        assert_eq!(acknowledged_schedule(&reply), (Value::Null, Value::Null));
+        assert_eq!(worker.backend.generation_calls, calls + 1);
+        assert_eq!(worker.backend.scheduling_requests.last(), Some(&MtpScheduling::default()));
+    }
+
+    #[test]
+    fn model_default_schedule_requires_scheduling_support_and_is_fenced() {
+        let mut backend = worker().backend;
+        backend.default_scheduling = ADAPTIVE_LOOKUP;
+        assert!(GenerationWorker::new(backend).is_err());
+        let mut backend = worker().backend;
+        backend.mtp = Some(capabilities(3, 2));
+        backend.default_scheduling = ADAPTIVE_LOOKUP;
+        assert!(GenerationWorker::new(backend).is_err());
+        let mut worker = scheduled_default_worker();
+        worker.backend.default_scheduling = MtpScheduling::default();
+        assert_eq!(worker.resolve_mtp(None, None), Err("invalid_generation_output"));
+        let mut request = standard();
+        request["mtp_drafts"] = json!(2);
+        let mut output = Vec::new();
+        assert_eq!(
+            worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output),
+            Err("native_operation_failed")
+        );
+        assert_eq!(serde_json::from_slice::<Value>(&output).unwrap()["error"], "invalid_generation_output");
+        assert_eq!(worker.backend.generation_calls, 0);
+    }
+
+    #[test]
+    fn fixed_default_backend_reports_and_acknowledges_as_before() {
+        let mut worker = mtp_worker(3, 2);
+        worker.backend.mtp_scheduling = true;
+        let scheduled = readiness(&mut worker);
+        assert_eq!(scheduled["mtp"]["default_policy"], "fixed");
+        assert_eq!(scheduled["mtp"]["default_lookup"], false);
+        for (key, value, drafts) in [("mtp", json!(true), 2), ("mtp_drafts", json!(3), 3)] {
+            let mut request = standard();
+            request[key] = value;
+            let reply = post(&mut worker, request);
+            assert_eq!(reply["mtp"]["drafts"], drafts);
+            let mut keys: Vec<&str> = reply["mtp"].as_object().unwrap().keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["drafts", "enabled", "sampling", "verification"]);
+        }
+        assert_eq!(worker.backend.scheduling_requests, [MtpScheduling::default(); 2]);
+        // A backend without scheduling reports no schedule fields at all.
+        let mut worker = mtp_worker(3, 2);
+        let unscheduled = readiness(&mut worker);
+        for field in ["policies", "default_policy", "default_lookup", "lookup"] {
+            assert!(unscheduled["mtp"].get(field).is_none(), "{field}");
+        }
+    }
+
+    #[test]
+    fn model_default_schedule_never_reaches_image_requests() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = scheduled_default_worker();
+        worker.backend.images = true;
+        worker.media = Some(MediaStore::open(&root.0).unwrap());
+        let mut text = standard();
+        text["mtp_drafts"] = json!(2);
+        assert_eq!(acknowledged_schedule(&post(&mut worker, text.clone())), (json!("adaptive"), json!(true)));
+        let prepared = post(&mut worker, image_prepare(&root));
+        let reply = post(&mut worker, image_generate(&prepared));
+        assert_eq!(reply["mtp"]["drafts"], 0);
+        assert_eq!(acknowledged_schedule(&reply), (Value::Null, Value::Null));
+        assert_eq!(acknowledged_schedule(&post(&mut worker, text)), (json!("adaptive"), json!(true)));
+        assert_eq!(worker.backend.mtp_requests, [2, 0, 2]);
+        assert_eq!(worker.backend.scheduling_requests, [ADAPTIVE_LOOKUP, MtpScheduling::default(), ADAPTIVE_LOOKUP]);
     }
 
     #[test]

@@ -1033,6 +1033,16 @@ impl GenerationBackend for HybridBackend {
     fn default_mtp_drafts(&self) -> u32 {
         self.model.default_mtp_drafts()
     }
+    fn default_mtp_scheduling(&self) -> MtpScheduling {
+        if !self.supports_mtp_scheduling() {
+            return MtpScheduling::default();
+        }
+        let schedule = self.model.default_mtp_schedule();
+        MtpScheduling {
+            adaptive: schedule.policy == mtp_policy::MtpPolicy::Adaptive,
+            lookup: schedule.lookup,
+        }
+    }
     fn effective_mtp_drafts(
         &self,
         options: &GenerationOptions,

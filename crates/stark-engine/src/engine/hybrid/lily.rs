@@ -1042,10 +1042,13 @@ impl LilyModel {
         self.last_full_readout = None;
         self.last_greedy = None;
         let schedule = (!options.is_default()).then(|| {
-            let costs = super::mtp_policy::CostTable::LILY_Q4_XL_LILYMERGE_01.for_mode(options.greedy);
+            let table = super::mtp_policy::CostTable::LILY_Q4_XL_LILYMERGE_01;
             let lookup =
                 options.lookup.map(|(context, newline)| super::mtp_lookup::PromptLookup::new(context, newline));
-            Box::new(super::mtp_policy::RoundScheduler::new(options.policy, costs, drafts, lookup))
+            Box::new(
+                super::mtp_policy::RoundScheduler::new(options.policy, table.for_mode(options.greedy), drafts, lookup)
+                    .with_cost_table(table.id),
+            )
         });
         if let Some(schedule) = &schedule {
             self.mtp_stats.schedule = Some(schedule.stats());

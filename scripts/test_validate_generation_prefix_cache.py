@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 _spec = importlib.util.spec_from_file_location(
@@ -17,7 +18,361 @@ harness = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(harness)
 
 
+HYBRID_KEY = "model-instance+context-tokens+cache-scope+mtp-enabled"
+
+
+class SyntheticTemplate:
+    """Renders a growing synthetic conversation whose earlier renders are prefixes of later ones."""
+
+    def render(self, **arguments):
+        return "x" * (100 * len(arguments["messages"]))
+
+
+class FakeWorker:
+    """A model-free worker with the documented boundary-snapshot reuse rule.
+
+    Greedy output depends only on the input; seeded stochastic output also
+    depends on the draft count and scheduling selector. The baseline predates
+    the selectors and refuses them as an unknown request field. ``faults``
+    injects candidate defects for negative controls.
+    """
+
+    chunk = 64
+    log: ClassVar[list] = []
+    faults = frozenset()
+    # The candidate's model default (policy, lookup); None is the fixed default.
+    default = None
+
+    def __init__(self, binary, model, *, prefix_cache=False, progress=False, vision=False):
+        self.binary = binary
+        self.prefix_cache = prefix_cache
+        self.vision = vision
+        self.entry = None
+        mtp = {"supported": True, "max_drafts": 3, "recommended_drafts": 2}
+        if binary == "candidate":
+            mtp.update(policies=["fixed", "adaptive"], default_policy="fixed", lookup=True)
+            if self.default is not None:
+                mtp.update(default_policy=self.default[0], default_lookup=self.default[1])
+        self.ready = {"ready": True, "mtp": mtp, "prefix_cache": {
+            "enabled": prefix_cache, "chunk_tokens": self.chunk, "key": HYBRID_KEY}}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return None
+
+    def tokenize(self, text):
+        return [index % 50 + 1 for index in range(len(text))]
+
+    def request(self, payload, *, cancel_after_first_progress=False):
+        operation = payload["operation"]
+        if operation in ("reset_cache", "discard_image"):
+            self.entry = None
+            return {"_progress": []}
+        if operation == "decode":
+            return {"text": "synthetic", "_progress": []}
+        self.log.append((self.binary, self.prefix_cache, payload))
+        selector = {k: payload[k] for k in ("mtp_policy", "mtp_lookup") if k in payload}
+        if selector and self.binary != "candidate":
+            return {"error": "invalid_request", "_progress": []}
+        ids, scope = payload["input_token_ids"], payload.get("cache_scope")
+        drafts = payload.get("mtp_drafts") or 0
+        if cancel_after_first_progress or len(ids) + payload["max_new_tokens"] > payload["context_tokens"]:
+            self.entry = None
+            return {"error": "generation_cancelled" if cancel_after_first_progress else "context_overflow",
+                    "_progress": []}
+        key = (scope, payload["context_tokens"], drafts > 0)
+        if "selector_in_key" in self.faults:
+            key += (tuple(sorted(selector.items())),)
+        reused = 0
+        if self.prefix_cache and scope is not None and self.entry is not None and self.entry[0] == key:
+            prefix = self.entry[1]
+            if len(ids) >= len(prefix) + 2 and ids[: len(prefix)] == prefix:
+                reused = len(prefix)
+        boundary = (len(ids) - 1) // self.chunk * self.chunk
+        self.entry = (key, ids[:boundary]) if self.prefix_cache and scope is not None and boundary else None
+        sampling = payload["sampling"]
+        default = self.default if self.binary == "candidate" else None
+        if "default_not_applied" in self.faults:
+            default = None
+        policy, lookup = default or ("fixed", False)
+        if "optout_ignored" not in self.faults or selector != {"mtp_policy": "fixed", "mtp_lookup": False}:
+            policy, lookup = payload.get("mtp_policy", policy), payload.get("mtp_lookup", lookup)
+        if "ignore_selector" in self.faults:
+            policy, lookup = "fixed", False
+        weight = (policy == "adaptive") + int(lookup) if drafts else 0
+        generated = [sum(ids) % 97, len(ids) % 89]
+        if sampling["mode"] != "greedy":
+            generated.append(payload["seed"] * 7 + drafts + 3 * weight)
+        if "selector_hit_drift" in self.faults and selector and reused:
+            generated.append(5)
+        reply = {"generated_token_ids": generated, "text": str(generated), "finish_reason": "length",
+                 "reused_input_tokens": reused, "_progress": []}
+        if drafts:
+            stats = {"rounds": 2, "proposed": 3, "accepted": 1, "verified_rows": 4, "draft_seconds": 0.5}
+            reply["mtp"] = {"enabled": True, "drafts": drafts, "stats": stats}
+            if (policy, lookup) != ("fixed", False):
+                reply["mtp"].update(policy=policy, lookup=lookup)
+                stats["schedule"] = {"policy": policy, "lookup": lookup, "limit": drafts,
+                                     "head_rounds_by_depth": [0, 1, 1][: drafts + 1],
+                                     "head_round_seconds_by_depth": [0.0, 0.1, 0.2][: drafts + 1],
+                                     "lookup_rounds": int(lookup), "lookup_proposed": 2 * int(lookup),
+                                     "lookup_accepted": int(lookup), "lookup_round_seconds": 0.1,
+                                     "head_advances": 0, "head_advance_seconds": 0.0}
+                if policy == "adaptive":
+                    stats["schedule"]["cost_table"] = "synthetic-table"
+        return reply
+
+
+def selector_args(**overrides):
+    values = {"candidate": "candidate", "baseline": "baseline", "model": "model", "progress": False,
+              "vision": False, "seed": 11, "first_tokens": 420, "tools": 1, "instruction_paragraphs": 1,
+              "follow_up_sentences": (4, 4, 8), "context": 2000, "max_new": 4, "reuse": "boundary",
+              "mtp_drafts": 2, "mtp_policy": "adaptive", "mtp_lookup": True}
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 class PrefixQualificationTests(unittest.TestCase):
+    def run_synthetic(self, faults=frozenset(), default=None, **overrides):
+        FakeWorker.log = []
+        with (patch.object(harness, "Worker", FakeWorker), patch.object(FakeWorker, "faults", faults),
+              patch.object(FakeWorker, "default", default)):
+            return harness.run_exactness(selector_args(**overrides), SyntheticTemplate(), {}, None)
+
+    def test_readiness_default_schedule_is_none_for_fixed_and_labels_opt_out(self):
+        self.assertIsNone(harness.default_schedule({}))
+        self.assertIsNone(harness.default_schedule({"mtp": {"default_policy": "fixed"}}))
+        self.assertIsNone(harness.default_schedule({"mtp": {"default_policy": "fixed", "default_lookup": False}}))
+        ready = {"mtp": {"default_policy": "adaptive", "default_lookup": True}}
+        self.assertEqual(harness.default_schedule(ready), ("adaptive", True))
+        self.assertEqual(harness.default_schedule({"mtp": {"default_lookup": True}}), ("fixed", True))
+        self.assertEqual(harness.selector_label(harness.OPT_OUT), "fixed_nolookup")
+        self.assertEqual(harness.effective_schedule(harness.OPT_OUT, ("adaptive", True)), ("fixed", False))
+        self.assertEqual(harness.effective_schedule({}, ("adaptive", True)), ("adaptive", True))
+        self.assertEqual(harness.effective_schedule({"mtp_lookup": False}, ("adaptive", True)), ("adaptive", False))
+
+    def test_fixed_acknowledgement_must_be_plain(self):
+        plain = {"mtp": {"enabled": True, "drafts": 2, "stats": {"rounds": 2}}}
+        self.assertTrue(harness.schedule_record(plain, harness.OPT_OUT, ("adaptive", True))["acknowledged"])
+        self.assertFalse(harness.schedule_record(plain, {}, ("adaptive", True))["acknowledged"])
+        named = {"mtp": {"enabled": True, "policy": "adaptive", "lookup": True, "stats": {
+            "rounds": 2, "schedule": {"policy": "adaptive", "lookup": True, "cost_table": "synthetic"}}}}
+        self.assertTrue(harness.schedule_record(named, {}, ("adaptive", True))["acknowledged"])
+        self.assertFalse(harness.schedule_record(named, harness.OPT_OUT, ("adaptive", True))["acknowledged"])
+        self.assertNotIn("schedule_cost_table", harness.schedule_record(named, {}, ("adaptive", True))["counts"])
+
+    def test_non_fixed_default_plan_adds_opt_out_cases_only_then(self):
+        turns = [[1, 2] * 550] * 3 + [[1, 2] * 600]
+        default = harness.plan(turns, 1024, 4096, 2)
+        self.assertEqual(default, harness.plan(turns, 1024, 4096, 2, default_schedule=None))
+        steps = harness.plan(turns, 1024, 4096, 2, default_schedule=("adaptive", True))
+        labels = [label for _, label, _, _ in steps]
+        added = [label for label in labels if label not in {row[1] for row in default}]
+        self.assertEqual(added, [
+            "optout_after_plain", "optout_warm", "optout_repeat_stochastic", "default_after_optout",
+            "optout_after_default", "plain_after_optout", "optout_stochastic_after_plain",
+            "optout_stochastic_warm", "plain_after_optout_stochastic", "plain_after_optout_warm"])
+        cases = {label: options for kind, label, _, options in steps if kind == "case"}
+        for label in ("optout_after_plain", "optout_warm", "optout_repeat_stochastic", "optout_stochastic_warm"):
+            self.assertEqual(cases[label]["selector"], harness.OPT_OUT)
+        self.assertNotIn("selector", cases["default_after_optout"])
+        self.assertEqual(cases["optout_stochastic_after_plain"]["sampling"]["mode"], "stochastic")
+        # The selector block's fixed step becomes the explicit opt-out under a non-fixed default.
+        with_selectors = harness.plan(turns, 1024, 4096, 2, default_schedule=("adaptive", True),
+                                      selectors=harness.selector_combinations("adaptive", True))
+        cases = {label: options for kind, label, _, options in with_selectors if kind == "case"}
+        self.assertEqual(cases["fixed_after_adaptive_lookup"]["selector"], harness.OPT_OUT)
+        legacy = harness.plan(turns, 1024, 4096, 2, selectors=harness.selector_combinations("adaptive", True))
+        self.assertNotIn("selector", {label: o for k, label, _, o in legacy if k == "case"}["fixed_after_adaptive"])
+
+    def test_adaptive_default_run_passes_with_and_without_selector_flags(self):
+        for flags in ({"mtp_policy": None, "mtp_lookup": False}, {}):
+            with self.subTest(flags=flags):
+                result = self.run_synthetic(default=("adaptive", True), **flags)
+                self.assertTrue(harness.exactness_passed(result))
+                self.assertEqual(result["mtp_default_schedule"], {"policy": "adaptive", "lookup": True})
+                rows = {check["case"]: check for check in result["checks"]}
+                for label in ("mtp_after_plain", "mtp_warm", "default_after_optout"):
+                    self.assertEqual(rows[label]["mtp_selector"], "default")
+                    self.assertTrue(rows[label]["identical_to_baseline_worker"])
+                    self.assertTrue(rows[label]["selector_acknowledged"])
+                # A stochastic default case is not compared with the fixed-schedule baseline.
+                self.assertIsNone(rows["mtp_repeat_stochastic"]["identical_to_baseline_worker"])
+                self.assertTrue(rows["mtp_repeat_stochastic"]["schedule_identical_to_fresh"])
+                for label in ("optout_after_plain", "optout_warm", "optout_repeat_stochastic",
+                              "optout_stochastic_after_plain", "optout_stochastic_warm"):
+                    self.assertTrue(rows[label]["expects_fixed_schedule"])
+                    self.assertTrue(rows[label]["identical_to_baseline_worker"])
+                self.assertEqual(rows["optout_after_plain"]["reused_input_tokens"], 0)
+                self.assertEqual(rows["optout_stochastic_after_plain"]["reused_input_tokens"], 0)
+                self.assertGreater(rows["optout_warm"]["reused_input_tokens"], 0)
+                self.assertGreater(rows["optout_stochastic_warm"]["reused_input_tokens"], 0)
+                self.assertGreater(rows["default_after_optout"]["reused_input_tokens"], 0)
+                self.assertNotIn("mtp_selector", rows["plain_warm"])
+                baseline = [p for binary, _, p in FakeWorker.log if binary == "baseline"]
+                self.assertEqual(sum("mtp_policy" in p or "mtp_lookup" in p for p in baseline),
+                                 len(result.get("mtp_selectors", {}).get("combinations", [])))
+
+    def test_default_schedule_defects_fail_qualification(self):
+        for fault, field in (("default_not_applied", "selector_acknowledged"),
+                             ("optout_ignored", "identical_to_baseline_worker")):
+            with self.subTest(fault=fault):
+                result = self.run_synthetic(faults=frozenset({fault}), default=("adaptive", True),
+                                            mtp_policy=None, mtp_lookup=False)
+                self.assertFalse(harness.exactness_passed(result))
+                self.assertTrue([check for check in result["checks"] if check.get(field) is False])
+
+    def test_stochastic_default_row_compared_with_baseline_cannot_pass(self):
+        row = {"successful": True, "identical_to_fresh": True, "reuse_matches_rule": True,
+               "mtp_selector": "default", "greedy": False, "selector_acknowledged": True,
+               "schedule_identical_to_fresh": True, "identical_to_fixed_schedule": None,
+               "identical_to_baseline_worker": None}
+        self.assertTrue(harness.check_passed(row))
+        for value in (True, False):
+            self.assertFalse(harness.check_passed({**row, "identical_to_baseline_worker": value}))
+        opt_out = {**row, "mtp_selector": "fixed_nolookup", "expects_fixed_schedule": True}
+        self.assertFalse(harness.check_passed(opt_out))
+        self.assertTrue(harness.check_passed({**opt_out, "identical_to_baseline_worker": True}))
+        self.assertFalse(harness.check_passed({**opt_out, "identical_to_baseline_worker": False}))
+
+    def test_selector_combinations_are_opt_in_and_labelled(self):
+        self.assertEqual(harness.selector_combinations(), [])
+        self.assertEqual(harness.selector_combinations("fixed", False), [])
+        self.assertEqual(harness.selector_combinations("adaptive"), [{"mtp_policy": "adaptive"}])
+        self.assertEqual(harness.selector_combinations(None, True), [{"mtp_lookup": True}])
+        both = harness.selector_combinations("adaptive", True)
+        self.assertEqual([harness.selector_label(s) for s in both], ["adaptive", "lookup", "adaptive_lookup"])
+        self.assertEqual(both[-1], {"mtp_policy": "adaptive", "mtp_lookup": True})
+
+    def test_default_plan_is_unchanged_without_selectors(self):
+        turns = [[1, 2] * 550] * 4
+        default = harness.plan(turns, 1024, 4096, 2)
+        self.assertEqual(default, harness.plan(turns, 1024, 4096, 2, selectors=()))
+        self.assertFalse(any("selector" in options for kind, _, _, options in default if kind == "case"))
+        self.assertFalse(any("adaptive" in label or "lookup" in label for _, label, _, _ in default))
+        # Without MTP no selector case can be planned.
+        self.assertEqual(harness.plan(turns, 1024, 4096, None, selectors=[{"mtp_lookup": True}]),
+                         harness.plan(turns, 1024, 4096, None))
+
+    def test_selector_plan_covers_plain_warm_stochastic_switch_and_plain_after(self):
+        turns = [[1, 2] * 550] * 3 + [[1, 2] * 600]
+        steps = harness.plan(turns, 1024, 4096, 2, selectors=[{"mtp_policy": "adaptive"}])
+        default = harness.plan(turns, 1024, 4096, 2)
+        labels = [label for _, label, _, _ in steps]
+        added = [label for label in labels if label not in {row[1] for row in default}]
+        self.assertEqual(added, [
+            "adaptive_after_plain", "adaptive_warm", "adaptive_repeat_stochastic", "fixed_after_adaptive",
+            "adaptive_after_fixed", "adaptive_shorter", "adaptive_regrow", "adaptive_regrow_stochastic",
+            "plain_after_adaptive", "plain_after_adaptive_warm"])
+        self.assertEqual(labels.index("adaptive_after_plain"), labels.index("plain_warm") + 1)
+        cases = {label: (ids, options) for kind, label, ids, options in steps if kind == "case"}
+        selector = {"mtp_policy": "adaptive"}
+        for label in ("adaptive_after_plain", "adaptive_warm", "adaptive_after_fixed", "adaptive_regrow"):
+            self.assertEqual(cases[label][1]["selector"], selector)
+            self.assertEqual(cases[label][1]["mtp_drafts"], 2)
+            self.assertTrue(harness.is_greedy(cases[label][1]))
+        self.assertEqual(cases["adaptive_repeat_stochastic"][1]["sampling"]["mode"], "stochastic")
+        self.assertNotIn("selector", cases["fixed_after_adaptive"][1])
+        self.assertEqual(cases["fixed_after_adaptive"][1]["mtp_drafts"], 2)
+        self.assertNotIn("mtp_drafts", cases["plain_after_adaptive"][1])
+        self.assertEqual(cases["adaptive_shorter"][0], turns[-2])
+        # The fixed-schedule counterpart of a greedy selector case is the existing warm MTP request.
+        self.assertEqual(harness.comparison_key(turns[-1], harness.fixed_schedule(cases["adaptive_warm"][1])),
+                         harness.comparison_key(turns[-1], cases["mtp_warm"][1]))
+        self.assertEqual(harness.case_request(cases["adaptive_warm"][1], 8)["mtp_policy"], "adaptive")
+        self.assertNotIn("mtp_policy", harness.case_request(cases["mtp_warm"][1], 8))
+
+    def test_selector_readiness_requires_mtp_and_advertised_selectors(self):
+        ready = {"mtp": {"supported": True, "max_drafts": 3, "policies": ["fixed", "adaptive"], "lookup": True}}
+        both = harness.selector_combinations("adaptive", True)
+        harness.selector_readiness(ready, 2, both)
+        harness.selector_readiness({}, None, [])
+        with self.assertRaisesRegex(SystemExit, "positive MTP draft count"):
+            harness.selector_readiness(ready, 0, both)
+        with self.assertRaisesRegex(SystemExit, "adaptive MTP policy"):
+            harness.selector_readiness({"mtp": {"lookup": True}}, 2, both)
+        with self.assertRaisesRegex(SystemExit, "prompt lookup"):
+            harness.selector_readiness({"mtp": {"policies": ["fixed", "adaptive"]}}, 2, both)
+
+    def test_schedule_record_keeps_only_integer_counts_and_checks_acknowledgement(self):
+        reply = {"mtp": {"enabled": True, "policy": "adaptive", "lookup": True, "stats": {
+            "rounds": 3, "draft_seconds": 0.5, "schedule": {
+                "policy": "adaptive", "lookup": True, "limit": 2, "head_rounds_by_depth": [1, 0, 2],
+                "head_round_seconds_by_depth": [0.1, 0.0, 0.2], "lookup_rounds": 1}}}}
+        record = harness.schedule_record(reply, {"mtp_policy": "adaptive", "mtp_lookup": True})
+        self.assertTrue(record["acknowledged"])
+        self.assertEqual(record["counts"], {"rounds": 3, "schedule_limit": 2,
+                                            "schedule_head_rounds_by_depth": [1, 0, 2],
+                                            "schedule_lookup_rounds": 1})
+        self.assertFalse(harness.schedule_record(reply, {"mtp_policy": "adaptive"})["acknowledged"])
+        self.assertEqual(harness.schedule_record({"error": "invalid_request"}, {"mtp_lookup": True}),
+                         {"acknowledged": False, "counts": None})
+
+    def test_synthetic_selector_run_passes_and_never_sends_selector_cases_to_baseline(self):
+        result = self.run_synthetic()
+        self.assertTrue(harness.exactness_passed(result))
+        self.assertEqual(result["mtp_selectors"]["combinations"], ["adaptive", "lookup", "adaptive_lookup"])
+        self.assertEqual(result["mtp_selectors"]["baseline_refusals"],
+                         {"adaptive": "invalid_request", "lookup": "invalid_request",
+                          "adaptive_lookup": "invalid_request"})
+        baseline_selector_requests = [payload for binary, _, payload in FakeWorker.log
+                                      if binary == "baseline" and ("mtp_policy" in payload or "mtp_lookup" in payload)]
+        # Only the three refusal probes, each one output token.
+        self.assertEqual([payload["max_new_tokens"] for payload in baseline_selector_requests], [1, 1, 1])
+        rows = {check["case"]: check for check in result["checks"]}
+        for name in ("adaptive", "lookup", "adaptive_lookup"):
+            self.assertEqual(rows[f"{name}_after_plain"]["reused_input_tokens"], 0)
+            for label in ("warm", "repeat_stochastic", "after_fixed", "regrow", "regrow_stochastic"):
+                self.assertGreater(rows[f"{name}_{label}"]["reused_input_tokens"], 0)
+            self.assertGreater(rows[f"fixed_after_{name}"]["reused_input_tokens"], 0)
+            self.assertEqual(rows[f"plain_after_{name}"]["reused_input_tokens"], 0)
+            greedy, stochastic = rows[f"{name}_warm"], rows[f"{name}_repeat_stochastic"]
+            self.assertTrue(greedy["identical_to_fixed_schedule"] and greedy["identical_to_baseline_worker"])
+            self.assertIsNone(stochastic["identical_to_baseline_worker"])
+            self.assertFalse(stochastic["identical_to_fixed_schedule"])
+            self.assertTrue(stochastic["identical_to_fresh"] and stochastic["schedule_identical_to_fresh"])
+            self.assertNotIn("draft_seconds", greedy["schedule_counts"])
+        self.assertNotIn("mtp_selector", rows["mtp_warm"])
+
+    def test_default_synthetic_run_sends_no_selector_and_keeps_its_schema(self):
+        result = self.run_synthetic(mtp_policy=None, mtp_lookup=False)
+        self.assertTrue(harness.exactness_passed(result))
+        self.assertNotIn("mtp_selectors", result)
+        self.assertFalse(any("mtp_policy" in payload or "mtp_lookup" in payload for _, _, payload in FakeWorker.log))
+        self.assertEqual({frozenset(check) for check in result["checks"]}, {frozenset({
+            "case", "input_tokens", "reused_input_tokens", "reuse_matches_rule", "identical_to_fresh",
+            "identical_to_baseline_worker", "output_sha256", "tool_calls", "finish_reason", "output_tokens",
+            "successful"})})
+
+    def test_selector_defects_fail_qualification(self):
+        for fault, field in (("selector_hit_drift", "identical_to_fresh"),
+                             ("selector_in_key", "reuse_matches_rule"),
+                             ("ignore_selector", "selector_acknowledged")):
+            with self.subTest(fault=fault):
+                result = self.run_synthetic(faults=frozenset({fault}), mtp_lookup=False)
+                self.assertFalse(harness.exactness_passed(result))
+                failing = [check for check in result["checks"] if not check.get(field, True)]
+                self.assertTrue(failing)
+                self.assertTrue(all("mtp_selector" in check or "adaptive" in check["case"] for check in failing))
+
+    def test_selector_pass_rule_requires_greedy_independence_and_no_stochastic_baseline(self):
+        greedy = {"successful": True, "identical_to_fresh": True, "reuse_matches_rule": True,
+                  "mtp_selector": "adaptive", "greedy": True, "selector_acknowledged": True,
+                  "schedule_identical_to_fresh": True, "identical_to_fixed_schedule": True,
+                  "identical_to_baseline_worker": True}
+        self.assertTrue(harness.check_passed(greedy))
+        for field in ("identical_to_fixed_schedule", "identical_to_baseline_worker"):
+            self.assertFalse(harness.check_passed({**greedy, field: None}))
+            self.assertFalse(harness.check_passed({**greedy, field: False}))
+        stochastic = {**greedy, "greedy": False, "identical_to_fixed_schedule": False,
+                      "identical_to_baseline_worker": None}
+        self.assertTrue(harness.check_passed(stochastic))
+        self.assertFalse(harness.check_passed({**stochastic, "identical_to_baseline_worker": True}))
+        self.assertFalse(harness.check_passed({**stochastic, "schedule_identical_to_fresh": False}))
+        self.assertFalse(harness.check_passed({**stochastic, "identical_to_fresh": False}))
+
     def test_vision_worker_staging_is_private_empty_and_removed_on_close(self):
         process = MagicMock()
         with (patch.object(harness.subprocess, "Popen", return_value=process) as spawn,

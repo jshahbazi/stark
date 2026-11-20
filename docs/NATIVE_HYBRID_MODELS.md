@@ -408,9 +408,16 @@ accept needs no GDN work. Convolution windows, the committed prefix and n-gram
 history are restored as before. Greedy requests select draft-head proposals
 on the device in one chained submission and read back only their ids; verify
 rows are borrowed from shared storage and validated as they are consumed, and
-rows after the first rejection are not read. The opt-in `mtp_policy` and
+rows after the first rejection are not read. The `mtp_policy` and
 `mtp_lookup` request selectors choose the draft count per round and propose
-drafts from the context without the head; see
+drafts from the context without the head. With MTP on and no selector, the
+pinned image-loaded Lily Q4-XL generation artifact defaults to the adaptive
+policy with prompt lookup; every other Lily and mixed-affine artifact defaults
+to the fixed policy with lookup off. `"mtp_policy": "fixed"` and
+`"mtp_lookup": false` opt out per request, and `STARK_LILY_MTP_ADAPTIVE=0`
+keeps that artifact on the fixed schedule for the worker's lifetime. On that
+artifact seeded sampled output of MTP-enabled requests differs from the
+previous fixed default; greedy output does not. See
 [MTP round scheduling](GENERATION.md#mtp-round-scheduling). A lookup round
 writes the head's cache row for the pending token with the cache-only head
 block, so the head's state after the round matches a head round. The
