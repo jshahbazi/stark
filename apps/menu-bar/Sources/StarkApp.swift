@@ -4063,6 +4063,9 @@ struct InstallView: View {
     @Binding var source: String
     @Binding var visionConversion: Bool
     @State private var supportNotice = false
+    @FocusState private var repositoryFocused: Bool
+    private let sourceFieldShape = RoundedRectangle(cornerRadius: 6)
+
     var body: some View {
         ScrollView { form }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -4105,20 +4108,44 @@ struct InstallView: View {
             if kind == "local" {
                 Text("Choose a prepared Stark model folder or a supported checkpoint folder. Imported models stay in the selected folder; keep that folder available.")
                     .font(.callout).foregroundStyle(.secondary)
-                HStack {
-                    Text(source.isEmpty ? "No folder selected" : source).lineLimit(2).truncationMode(.middle)
-                        .font(.callout).foregroundStyle(.secondary)
-                    Spacer()
+                HStack(spacing: 10) {
                     Button("Choose Folder…") {
                         let panel = NSOpenPanel()
                         panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
                         panel.prompt = "Choose Model"
                         if panel.runModal() == .OK { source = panel.url?.path ?? "" }
-                    }.disabled(engine.busy)
+                    }.controlSize(.large).fixedSize().disabled(engine.busy)
+                    Text(source.isEmpty ? "No folder selected" : source)
+                        .lineLimit(2).truncationMode(.middle)
+                        .foregroundStyle(source.isEmpty ? .secondary : .primary)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+                        .background(Color(nsColor: .textBackgroundColor), in: sourceFieldShape)
+                        .overlay(sourceFieldShape.strokeBorder(.secondary.opacity(0.65)))
+                        .help(source)
                 }
             } else {
-                TextField("Repository name or full Hugging Face URL", text: $source)
-                    .textFieldStyle(.roundedBorder).disabled(engine.busy).onSubmit { checkSource() }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Hugging Face repository").font(.callout.weight(.semibold))
+                        .accessibilityHidden(true)
+                    TextField("Hugging Face repository", text: $source,
+                              prompt: Text("Repository name or full Hugging Face URL"))
+                        .textFieldStyle(.plain)
+                        .focused($repositoryFocused)
+                        .onSubmit { checkSource() }
+                        .padding(.horizontal, 10)
+                        .frame(minHeight: 36)
+                        .background {
+                            sourceFieldShape.fill(Color(nsColor: .textBackgroundColor))
+                                .onTapGesture { repositoryFocused = true }
+                                .allowsHitTesting(!engine.busy)
+                        }
+                        .overlay(sourceFieldShape.strokeBorder(
+                            repositoryFocused ? Color.accentColor : Color.secondary.opacity(0.65),
+                            lineWidth: repositoryFocused ? 2 : 1
+                        ).allowsHitTesting(false))
+                        .disabled(engine.busy)
+                }
                 Text("Downloads and converts a supported model. Gated repositories use your existing Hugging Face sign-in.")
                     .font(.callout).foregroundStyle(.secondary)
             }
