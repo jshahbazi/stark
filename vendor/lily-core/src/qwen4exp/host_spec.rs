@@ -9,15 +9,28 @@ use super::model::{
     AttnPos, BatchMode, DecodeState, LayerState, MAX_DRAFTS, Qwen4ExpModel, Scratch,
 };
 use super::ngram::NgramHasher;
+use super::spec::Rollback;
 use crate::engine::DecodeStateApi;
-use crate::kernels::{Rope, sample::SamplingParams};
-use crate::metal::{BlitCopy, MetalContext};
+use crate::kernels::{
+    Rope,
+    sample::{CHAIN_ARGMAX_TINY, SamplingParams, argmax_chain_f32},
+};
+use crate::metal::{BlitCopy, EncodedPass, MetalContext};
 use crate::moe_ffn::{prefix_rows, project_mat};
+use crate::tensor::Tensor;
 
 /// Readouts for a pending token and its proposed successors. Consumed by
 /// `finish_host_verify` before the state can run another forward pass.
+///
+/// Stark-local: rows are borrowed from the shared-storage readout buffer
+/// instead of being copied, and each row is validated when it is read. A row
+/// the caller never reads (one after the first rejection) is neither copied
+/// nor scanned. The buffer is next written by the following round's first
+/// draft or verify pass, which the caller encodes and commits only after it
+/// has finished reading rows and has run `finish_host_verify`.
 pub struct HostVerification {
-    flat_logits: Vec<f32>,
+    readout: Tensor,
+    rows: usize,
     vocab_size: usize,
     pos_before: usize,
     hist_before: Option<[u32; 2]>,
@@ -25,11 +38,71 @@ pub struct HostVerification {
 }
 
 impl HostVerification {
-    /// Borrows complete vocabulary rows from the owned flat readout buffer.
-    /// The verifier validates divisibility before constructing this value.
-    pub fn logits(&self) -> ChunksExact<'_, f32> {
-        self.flat_logits.chunks_exact(self.vocab_size)
+    fn values(&self) -> Result<&[f32]> {
+        let values: &[f32] = bytemuck::try_cast_slice(self.readout.contents())
+            .map_err(|_| anyhow::anyhow!("candidate readout layout"))?;
+        ensure!(values.len() == self.rows * self.vocab_size, "candidate readout shape");
+        Ok(values)
     }
+
+    /// Verified rows in the batch: the pending token plus its proposals.
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// One complete vocabulary row, borrowed. A nonfinite value fails closed.
+    pub fn row(&self, row: usize) -> Result<&[f32]> {
+        ensure!(row < self.rows, "candidate readout row");
+        let values =
+            &self.values()?[row * self.vocab_size..(row + 1) * self.vocab_size];
+        ensure!(crate::finite_guard::all_finite(values), "candidate readout values");
+        Ok(values)
+    }
+
+    /// Every complete vocabulary row, borrowed, after validating all of them.
+    pub fn logits(&self) -> Result<ChunksExact<'_, f32>> {
+        let values = self.values()?;
+        ensure!(crate::finite_guard::all_finite(values), "candidate readout values");
+        Ok(values.chunks_exact(self.vocab_size))
+    }
+}
+
+/// A verify graph encoded ahead of its draft ids (Stark-local). The graph
+/// reads its input ids and n-gram rows from scratch buffers the host fills
+/// right before commit, so it can be encoded while the last draft pass runs.
+/// Committing checks that nothing it was encoded against has moved.
+pub struct EncodedVerification<'a> {
+    pass: EncodedPass<'a>,
+    rows: usize,
+    pos: usize,
+    conv_slot: usize,
+    capacity: usize,
+    scratch_ids: usize,
+    /// Buffer identities of the GDN recurrent states the graph reads. A
+    /// verify swaps them with the spec scratch's shadow (replay rollback),
+    /// so an encoding is only valid against the states current at encode.
+    gdn_states: Vec<usize>,
+}
+
+/// Identities of every GDN layer's current recurrent state buffer.
+fn gdn_state_identities(state: &DecodeState) -> Vec<usize> {
+    state
+        .layers
+        .iter()
+        .filter_map(|layer| match layer {
+            LayerState::Gdn { state, .. } => Some(state.identity()),
+            LayerState::Attn { .. } => None,
+        })
+        .collect()
+}
+
+/// One round's proposals and its verify graph, encoded ahead (Stark-local).
+pub struct HostDrafts<'a> {
+    pub proposals: Vec<u32>,
+    pub verify: EncodedVerification<'a>,
+    /// The device selected the proposals as greedy argmaxes; the sampler saw
+    /// no draft readout and must record each proposal as a point mass.
+    pub device_selected: bool,
 }
 
 impl Qwen4ExpModel {
@@ -43,6 +116,73 @@ impl Qwen4ExpModel {
         s: &mut Scratch,
         pending: u32,
         drafts: &[u32],
+    ) -> Result<HostVerification> {
+        self.prepare_host_verification(ctx, state, s, drafts.len() + 1)?;
+        let encoded = self.encode_host_verification(ctx, state, s, drafts.len() + 1)?;
+        self.verify_host_encoded(state, s, pending, drafts, encoded)
+    }
+
+    /// Grows the state and scratch for a verify batch of `rows`. Encoded
+    /// passes bind buffer addresses, so this must precede any early encode.
+    fn prepare_host_verification(
+        &self,
+        ctx: &MetalContext,
+        state: &mut DecodeState,
+        s: &mut Scratch,
+        rows: usize,
+    ) -> Result<()> {
+        ensure!(
+            state.spec.is_none()
+                && (1..=MAX_DRAFTS + 1).contains(&rows)
+                && self.weights.mtp.is_some()
+                && s.spec.is_some(),
+            "invalid candidate verification state"
+        );
+        state.ensure_capacity(ctx, state.pos + rows)?;
+        self.ensure_prefill_scratch(ctx, s, rows, state.capacity())
+    }
+
+    /// Encodes, without committing, the verify graph for `rows` rows at the
+    /// current position. Encoding reads no token value.
+    fn encode_host_verification<'a>(
+        &self,
+        ctx: &'a MetalContext,
+        state: &DecodeState,
+        s: &Scratch,
+        rows: usize,
+    ) -> Result<EncodedVerification<'a>> {
+        let capacity =
+            s.prefill.as_ref().ok_or_else(|| anyhow::anyhow!("candidate scratch"))?;
+        ensure!(
+            state.spec.is_none()
+                && (1..=MAX_DRAFTS + 1).contains(&rows)
+                && rows <= capacity.m
+                && state.pos + rows <= state.capacity(),
+            "invalid candidate verification state"
+        );
+        let ps = capacity.rows(rows)?;
+        let pass = self.encode_batch(ctx, state, s, &ps, BatchMode::VerifyHost)?;
+        Ok(EncodedVerification {
+            pass,
+            rows,
+            pos: state.pos,
+            conv_slot: state.conv_slot,
+            capacity: state.capacity(),
+            scratch_ids: capacity.ids.identity(),
+            gdn_states: gdn_state_identities(state),
+        })
+    }
+
+    /// Stages the batch's ids and n-gram rows, then commits a verify graph
+    /// encoded ahead (see [`Self::draft_host_encoding_verify`]) and waits
+    /// for it. The result equals [`Self::verify_host_batched`]'s.
+    pub fn verify_host_encoded(
+        &self,
+        state: &mut DecodeState,
+        s: &mut Scratch,
+        pending: u32,
+        drafts: &[u32],
+        encoded: EncodedVerification<'_>,
     ) -> Result<HostVerification> {
         ensure!(
             state.spec.is_none()
@@ -58,10 +198,17 @@ impl Qwen4ExpModel {
             "candidate input ID"
         );
         let m = tokens.len();
-        state.ensure_capacity(ctx, state.pos + m)?;
-        self.ensure_prefill_scratch(ctx, s, m, state.capacity())?;
         let capacity =
             s.prefill.as_ref().ok_or_else(|| anyhow::anyhow!("candidate scratch"))?;
+        ensure!(
+            encoded.rows == m
+                && encoded.pos == state.pos
+                && encoded.conv_slot == state.conv_slot
+                && encoded.capacity == state.capacity()
+                && encoded.scratch_ids == capacity.ids.identity()
+                && encoded.gdn_states == gdn_state_identities(state),
+            "candidate verification encoding changed"
+        );
         let ps = capacity.chunk(&tokens)?;
         if let (Some(w), Some(p), Some(pst)) = (
             self.weights.layers.iter().find_map(|l| l.ple.as_deref()),
@@ -72,9 +219,12 @@ impl Qwen4ExpModel {
         }
         let pos_before = state.pos;
         let hist_before = state.ple.as_ref().map(|p| p.hist);
-        self.encode_batch(ctx, state, s, &ps, BatchMode::VerifyHost)?
-            .commit()?
-            .wait()?;
+        encoded.pass.commit()?.wait_polled()?;
+        // The pass wrote every GDN layer's final state into the shadow and
+        // left the pre-verify state in place: make the final states current
+        // and keep the pre-verify ones for replay rollback.
+        let sp = s.spec.as_mut().ok_or_else(|| anyhow::anyhow!("candidate captures"))?;
+        state.swap_gdn_shadow(sp)?;
         state.pos += m;
         state.conv_slot = 1 - state.conv_slot;
         if let Some(pst) = &mut state.ple {
@@ -82,16 +232,72 @@ impl Qwen4ExpModel {
         }
         let sp =
             s.spec.as_ref().ok_or_else(|| anyhow::anyhow!("candidate captures"))?;
-        let values = prefix_rows(&sp.logits, m)?.to_f32()?;
-        ensure!(values.len() == m * self.config.vocab_size, "candidate readout shape");
-        ensure!(crate::finite_guard::all_finite(&values), "candidate readout values");
-        Ok(HostVerification {
-            flat_logits: values,
+        let verified = HostVerification {
+            readout: prefix_rows(&sp.logits, m)?,
+            rows: m,
             vocab_size: self.config.vocab_size,
             pos_before,
             hist_before,
             tokens,
-        })
+        };
+        verified.values()?;
+        Ok(verified)
+    }
+
+    /// Encodes one host draft step without committing. Step `i` reads the
+    /// input id the host writes to `mtp_ids[0]` before commit, and the head
+    /// residual of step `i - 1`; encoding reads no token value.
+    fn encode_host_draft_step<'a>(
+        &self,
+        ctx: &'a MetalContext,
+        state: &DecodeState,
+        s: &Scratch,
+        step: usize,
+    ) -> Result<EncodedPass<'a>> {
+        let mtp =
+            self.weights.mtp.as_ref().ok_or_else(|| anyhow::anyhow!("no MTP head"))?;
+        let mst = state.mtp.as_ref().ok_or_else(|| anyhow::anyhow!("no MTP state"))?;
+        let sp = s.spec.as_ref().ok_or_else(|| anyhow::anyhow!("no MTP scratch"))?;
+        let capacity =
+            s.prefill.as_ref().ok_or_else(|| anyhow::anyhow!("no head scratch"))?;
+        let ps = capacity.rows(1)?;
+        let wide = self.config.hc_width();
+        let ids = sp.mtp_ids.view(0, &[1])?;
+        let logits = sp.logits.view(0, &[1, self.config.vocab_size])?;
+        let hyper =
+            ps.mtp_hyper.as_ref().ok_or_else(|| anyhow::anyhow!("no head residual"))?;
+        let hidden = if step == 0 {
+            mst.hidden.view(0, &[1, wide])?
+        } else {
+            hyper.view(0, &[1, wide])?
+        };
+        let pass = ctx.begin_concurrent()?;
+        pass.set_label("host MTP draft");
+        self.mtp_block(
+            ctx,
+            &pass,
+            mtp,
+            mst,
+            &hidden,
+            &ids,
+            AttnPos::host(state.pos - 1 + step),
+            s,
+            &ps,
+            Rope::Delta(state.rope_delta),
+            &[],
+        )?;
+        self.hc_read_batched(ctx, &pass, &mtp.mixer, hyper, s, &ps)?;
+        project_mat(
+            ctx,
+            &pass,
+            &ps.hc.mixed,
+            mtp.head(&self.weights.lm_head),
+            &logits,
+            &s.dequant,
+        )?;
+        pass.level_barrier(&[&logits])?;
+        s.sync.signal_done(&pass)?;
+        pass.end()
     }
 
     /// Builds a short draft chain using the same complete-logit sampler as
@@ -111,7 +317,72 @@ impl Qwen4ExpModel {
         ensure!((first as usize) < self.config.vocab_size, "invalid host draft input");
         state.ensure_capacity(ctx, state.pos + drafts)?;
         self.ensure_prefill_scratch(ctx, s, 1, state.capacity())?;
-        let s = &*s;
+        self.draft_host_steps(ctx, state, s, first, drafts, sample, false)
+            .map(|(proposals, _)| proposals)
+    }
+
+    /// [`Self::draft_host`] with fewer host round trips (Stark-local); pass
+    /// the returned encoding to [`Self::verify_host_encoded`] with the same
+    /// `first` and proposals, or drop it to submit nothing.
+    ///
+    /// Each draft step after the first, and then the verify graph for
+    /// `first` plus the proposals, is encoded while the preceding pass runs.
+    /// Every pass still commits only after its predecessor completed and its
+    /// input ids were written, so the arithmetic, the sampler calls and their
+    /// order are those of `draft_host` then `verify_host_batched`.
+    ///
+    /// With `device_greedy` (a caller whose sampler drafts the first maximum
+    /// of each finite row and draws nothing at random), the steps instead
+    /// run as one device chain: the same step graphs, each proposal the
+    /// device argmax of its readout feeding the next step with no host read
+    /// in between, and only the proposal ids and per-step status words read
+    /// back. `sample` is then not called and `device_selected` is set; the
+    /// caller records each proposal as a point mass. A nonfinite readout
+    /// fails closed at the same step the host path would. If a selected
+    /// logit is a zero or subnormal, where device comparisons may differ from
+    /// the host's, the chain's result is discarded and the host path reruns
+    /// the whole round from the same state: the chain wrote only head cache
+    /// rows at this round's positions, which the rerun rewrites before
+    /// reading, and scratch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draft_host_encoding_verify<'a>(
+        &self,
+        ctx: &'a MetalContext,
+        state: &mut DecodeState,
+        s: &mut Scratch,
+        first: u32,
+        drafts: usize,
+        device_greedy: bool,
+        sample: &mut dyn FnMut(&[f32]) -> Result<u32>,
+    ) -> Result<HostDrafts<'a>> {
+        ensure!(state.spec.is_none() && state.pos > 0, "invalid host draft state");
+        ensure!((1..=MAX_DRAFTS).contains(&drafts), "invalid host draft count");
+        ensure!((first as usize) < self.config.vocab_size, "invalid host draft input");
+        // Grow first: the verify graph is encoded before its turn.
+        self.prepare_host_verification(ctx, state, s, drafts + 1)?;
+        if device_greedy
+            && let Some((proposals, verify)) =
+                self.draft_device_greedy(ctx, state, s, first, drafts)?
+        {
+            return Ok(HostDrafts { proposals, verify, device_selected: true });
+        }
+        let (proposals, verify) =
+            self.draft_host_steps(ctx, state, s, first, drafts, sample, true)?;
+        let verify =
+            verify.ok_or_else(|| anyhow::anyhow!("candidate verification missing"))?;
+        Ok(HostDrafts { proposals, verify, device_selected: false })
+    }
+
+    /// The device chain of [`Self::draft_host_encoding_verify`]. `None`
+    /// when a selection must be redone on the host.
+    fn draft_device_greedy<'a>(
+        &self,
+        ctx: &'a MetalContext,
+        state: &DecodeState,
+        s: &Scratch,
+        first: u32,
+        drafts: usize,
+    ) -> Result<Option<(Vec<u32>, EncodedVerification<'a>)>> {
         let mtp =
             self.weights.mtp.as_ref().ok_or_else(|| anyhow::anyhow!("no MTP head"))?;
         let mst = state.mtp.as_ref().ok_or_else(|| anyhow::anyhow!("no MTP state"))?;
@@ -120,39 +391,42 @@ impl Qwen4ExpModel {
             s.prefill.as_ref().ok_or_else(|| anyhow::anyhow!("no head scratch"))?;
         let ps = capacity.rows(1)?;
         let wide = self.config.hc_width();
-        let ids = sp.mtp_ids.view(0, &[1])?;
-        let logits = sp.logits.view(0, &[1, self.config.vocab_size])?;
-        let mut input = first;
-        let mut proposals = Vec::with_capacity(drafts);
+        let vocab = self.config.vocab_size;
+        let logits = sp.logits.view(0, &[1, vocab])?;
+        let row = sp.logits.view(0, &[vocab])?;
+        let hyper =
+            ps.mtp_hyper.as_ref().ok_or_else(|| anyhow::anyhow!("no head residual"))?;
+        // mtp_ids[0] carries the host input. Slots 1..=drafts hold the steps'
+        // status words; they are rewritten only by this round's rollback,
+        // after the host has read them. Proposals go to draft_tokens.
+        let first_id = sp.mtp_ids.view(0, &[1])?;
+        let status = sp.mtp_ids.view(1, &[drafts])?;
+        let pass = ctx.begin_concurrent()?;
+        pass.set_label("host MTP greedy draft chain");
         for i in 0..drafts {
-            ids.write_bytes(&input.to_le_bytes())?;
+            let input = if i == 0 {
+                first_id.clone()
+            } else {
+                sp.draft_tokens.view(i - 1, &[1])?
+            };
             let hidden = if i == 0 {
                 mst.hidden.view(0, &[1, wide])?
             } else {
-                ps.mtp_hyper
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("no head residual"))?
-                    .view(0, &[1, wide])?
+                hyper.view(0, &[1, wide])?
             };
-            let pass = ctx.begin_concurrent()?;
-            pass.set_label("host MTP draft");
             self.mtp_block(
                 ctx,
                 &pass,
                 mtp,
                 mst,
                 &hidden,
-                &ids,
+                &input,
                 AttnPos::host(state.pos - 1 + i),
                 s,
                 &ps,
                 Rope::Delta(state.rope_delta),
                 &[],
             )?;
-            let hyper = ps
-                .mtp_hyper
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("no head residual"))?;
             self.hc_read_batched(ctx, &pass, &mtp.mixer, hyper, s, &ps)?;
             project_mat(
                 ctx,
@@ -163,22 +437,143 @@ impl Qwen4ExpModel {
                 &s.dequant,
             )?;
             pass.level_barrier(&[&logits])?;
-            s.sync.signal_done(&pass)?;
-            pass.end()?.commit()?.wait()?;
-            let values = logits.to_f32()?;
+            argmax_chain_f32(
+                ctx,
+                &pass,
+                &row,
+                &s.sampler,
+                &sp.draft_tokens.view(i, &[1])?,
+                &sp.mtp_ids.view(1 + i, &[1])?,
+            )?;
+        }
+        s.sync.signal_done(&pass)?;
+        let pass = pass.end()?;
+        first_id.write_bytes(&first.to_le_bytes())?;
+        status.write_bytes(bytemuck::cast_slice(&vec![0u32; drafts]))?;
+        let pending = pass.commit()?;
+        // Dropping the committed chain on an encoding error waits for it.
+        let encoded = self.encode_host_verification(ctx, state, s, drafts + 1)?;
+        pending.wait_polled()?;
+        // Steps before the first nonzero word selected exactly as the host
+        // would, so that step saw the host's input: a nonfinite readout there
+        // is the host path's failure too. Later words are moot.
+        match status.to_u32()?.into_iter().find(|&word| word != 0) {
+            None => {}
+            Some(word) if word & CHAIN_ARGMAX_TINY != 0 && word != u32::MAX => {
+                return Ok(None);
+            }
+            Some(_) => anyhow::bail!("invalid host draft readout"),
+        }
+        let proposals = sp.draft_tokens.view(0, &[drafts])?.to_u32()?;
+        ensure!(
+            proposals.len() == drafts
+                && proposals.iter().all(|&t| (t as usize) < vocab),
+            "invalid host draft output"
+        );
+        Ok(Some((proposals, encoded)))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draft_host_steps<'a>(
+        &self,
+        ctx: &'a MetalContext,
+        state: &DecodeState,
+        s: &Scratch,
+        first: u32,
+        drafts: usize,
+        sample: &mut dyn FnMut(&[f32]) -> Result<u32>,
+        verify: bool,
+    ) -> Result<(Vec<u32>, Option<EncodedVerification<'a>>)> {
+        let sp = s.spec.as_ref().ok_or_else(|| anyhow::anyhow!("no MTP scratch"))?;
+        let ids = sp.mtp_ids.view(0, &[1])?;
+        let logits = sp.logits.view(0, &[1, self.config.vocab_size])?;
+        let mut input = first;
+        let mut proposals = Vec::with_capacity(drafts);
+        let mut next = Some(self.encode_host_draft_step(ctx, state, s, 0)?);
+        let mut encoded_verify = None;
+        for i in 0..drafts {
+            // The previous pass has completed: the GPU reads neither id.
+            ids.write_bytes(&input.to_le_bytes())?;
+            let pass = next
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("host draft step missing"))?
+                .commit()?;
+            // Encode the next pass while this one runs. If encoding fails,
+            // dropping the committed pass waits for the GPU first.
+            if i + 1 < drafts {
+                next = Some(self.encode_host_draft_step(ctx, state, s, i + 1)?);
+            } else if verify {
+                encoded_verify =
+                    Some(self.encode_host_verification(ctx, state, s, drafts + 1)?);
+            }
+            pass.wait_polled()?;
+            // Borrowed: no later pass that writes this row is committed until
+            // the sampler has returned.
+            let values: &[f32] = bytemuck::try_cast_slice(logits.contents())
+                .map_err(|_| anyhow::anyhow!("invalid host draft readout"))?;
             ensure!(
                 values.len() == self.config.vocab_size
-                    && crate::finite_guard::all_finite(&values),
+                    && crate::finite_guard::all_finite(values),
                 "invalid host draft readout"
             );
-            input = sample(&values)?;
+            input = sample(values)?;
             ensure!(
                 (input as usize) < self.config.vocab_size,
                 "invalid host draft output"
             );
             proposals.push(input);
         }
-        Ok(proposals)
+        Ok((proposals, encoded_verify))
+    }
+
+    /// Stark-local (attempt 20261119-LILYDEPTH-01): writes the draft head's
+    /// cache row for the pending input, the row the first `draft_host` step
+    /// writes, without its attention read, vocabulary readout or sampling.
+    /// A round whose proposals do not come from the head (prompt lookup, or
+    /// zero drafts before the end of the stream) calls this before
+    /// verification, so `finish_host_verify` leaves the head's caches as
+    /// after a head round: every committed position written in this
+    /// request, none left from an earlier one.
+    pub fn advance_head_host(
+        &self,
+        ctx: &MetalContext,
+        state: &mut DecodeState,
+        s: &mut Scratch,
+        first: u32,
+    ) -> Result<()> {
+        ensure!(state.spec.is_none() && state.pos > 0, "invalid head advance state");
+        ensure!((first as usize) < self.config.vocab_size, "invalid head advance input");
+        state.ensure_capacity(ctx, state.pos + 1)?;
+        self.ensure_prefill_scratch(ctx, s, 1, state.capacity())?;
+        let s = &*s;
+        let mtp =
+            self.weights.mtp.as_ref().ok_or_else(|| anyhow::anyhow!("no MTP head"))?;
+        let mst = state.mtp.as_ref().ok_or_else(|| anyhow::anyhow!("no MTP state"))?;
+        let sp = s.spec.as_ref().ok_or_else(|| anyhow::anyhow!("no MTP scratch"))?;
+        let capacity =
+            s.prefill.as_ref().ok_or_else(|| anyhow::anyhow!("no head scratch"))?;
+        let ps = capacity.rows(1)?;
+        let ids = sp.mtp_ids.view(0, &[1])?;
+        ids.write_bytes(&first.to_le_bytes())?;
+        let hidden = mst.hidden.view(0, &[1, self.config.hc_width()])?;
+        let pass = ctx.begin_concurrent()?;
+        pass.set_label("host MTP head advance");
+        self.mtp_block_caches(
+            ctx,
+            &pass,
+            mtp,
+            mst,
+            &hidden,
+            &ids,
+            state.pos - 1,
+            s,
+            &ps,
+            Rope::Delta(state.rope_delta),
+            &[],
+        )?;
+        s.sync.signal_done(&pass)?;
+        pass.end()?.commit()?.wait()?;
+        Ok(())
     }
 
     /// Executes ordinary decode for every proposed row, retaining its exact
@@ -210,10 +605,15 @@ impl Qwen4ExpModel {
         let hist_before = state.ple.as_ref().map(|p| p.hist);
         // Decode updates one window in place. Preserve its original in the
         // other slot so rollback can replay only committed projected inputs.
+        // Likewise keep each GDN layer's pre-verify state in the spec
+        // scratch's shadow: finish_host_verify replays the committed rows
+        // from it.
         let slot = state.conv_slot;
+        let shadows = &s.spec.as_ref().ok_or_else(|| anyhow::anyhow!("no verify captures"))?.gdn_shadow;
         let mut copies = Vec::new();
+        let mut gdn_index = 0;
         for layer in &state.layers {
-            if let LayerState::Gdn { conv_windows, .. } = layer {
+            if let LayerState::Gdn { state: recurrent, conv_windows, .. } = layer {
                 copies.push(BlitCopy {
                     src: &conv_windows[slot],
                     src_offset: 0,
@@ -221,6 +621,18 @@ impl Qwen4ExpModel {
                     dst_offset: 0,
                     len: conv_windows[slot].byte_len(),
                 });
+                let shadow = shadows
+                    .get(gdn_index)
+                    .ok_or_else(|| anyhow::anyhow!("GDN shadow count"))?;
+                ensure!(shadow.byte_len() == recurrent.byte_len(), "GDN shadow geometry");
+                copies.push(BlitCopy {
+                    src: recurrent,
+                    src_offset: 0,
+                    dst: shadow,
+                    dst_offset: 0,
+                    len: recurrent.byte_len(),
+                });
+                gdn_index += 1;
             }
         }
         if let Some(ple) = &state.ple {
@@ -242,19 +654,17 @@ impl Qwen4ExpModel {
         }
         let sp =
             s.spec.as_ref().ok_or_else(|| anyhow::anyhow!("no verify captures"))?;
-        let values = prefix_rows(&sp.logits, m)?.to_f32()?;
-        ensure!(
-            values.len() == m * self.config.vocab_size
-                && crate::finite_guard::all_finite(&values),
-            "invalid host verify readout"
-        );
-        Ok(HostVerification {
-            flat_logits: values,
+        let verified = HostVerification {
+            readout: prefix_rows(&sp.logits, m)?,
+            rows: m,
             vocab_size: self.config.vocab_size,
             pos_before,
             hist_before,
             tokens,
-        })
+        };
+        // The serial reference keeps validating every row up front.
+        let _ = verified.logits()?;
+        Ok(verified)
     }
 
     /// Keeps `accepted` proposals plus the pending input, restores recurrent
@@ -296,7 +706,7 @@ impl Qwen4ExpModel {
             0,
             verified.pos_before,
             Some(&keep),
-            (accepted + 1 < m).then_some((accepted, m)),
+            (accepted + 1 < m).then_some(Rollback::Replay { accepted, m }),
             0,
             &SamplingParams::greedy(),
             0,

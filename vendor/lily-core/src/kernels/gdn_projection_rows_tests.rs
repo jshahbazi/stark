@@ -95,6 +95,7 @@ fn fused_gdn_projection_rows_match_decode_and_all_rollback_prefixes() -> Result<
     let mut seed = 0x3b71_293d;
     let mut cases = 0;
     let mut rollback_prefix_cases = 0;
+    let mut replay_prefix_cases = 0;
     let mut compared_bytes = 0;
     let mut reference_hash = Sha256::new();
     let mut candidate_hash = Sha256::new();
@@ -274,6 +275,26 @@ fn fused_gdn_projection_rows_match_decode_and_all_rollback_prefixes() -> Result<
                             )?;
                             rollback_prefix_cases += 1;
                         }
+                        if c == 10240 {
+                            // Lily geometry: the recurrence over the fused
+                            // rows, with replay rollback from the retained
+                            // pre-verify state to every accepted prefix,
+                            // against ordinary decode steps.
+                            replay_prefix_cases += check_recurrence_replay(
+                                &ctx,
+                                &mut seed,
+                                m,
+                                &reference_raw.value,
+                                &reference_conv,
+                                &conv_out.value,
+                                &z.value,
+                                &a.value,
+                                &b.value,
+                                &mut reference_hash,
+                                &mut candidate_hash,
+                                &mut compared_bytes,
+                            )?;
+                        }
                         for tensor in [
                             &input,
                             &conv_w,
@@ -305,11 +326,135 @@ fn fused_gdn_projection_rows_match_decode_and_all_rollback_prefixes() -> Result<
         }
     }
     eprintln!(
-        "GDN projection rows exact: cases={cases} rollback_prefix_cases={rollback_prefix_cases} compared_bytes={compared_bytes} reference_sha256={} candidate_sha256={}",
+        "GDN projection rows exact: cases={cases} rollback_prefix_cases={rollback_prefix_cases} replay_prefix_cases={replay_prefix_cases} compared_bytes={compared_bytes} reference_sha256={} candidate_sha256={}",
         hex(&reference_hash.finish()),
         hex(&candidate_hash.finish())
     );
     Ok(())
+}
+
+/// Ordinary decode steps over the serially projected rows against one exact
+/// verify recurrence over the fused rows (final state to a separate buffer)
+/// and replays from the untouched pre-verify state to every prefix.
+#[allow(clippy::too_many_arguments)]
+fn check_recurrence_replay(
+    ctx: &MetalContext,
+    seed: &mut u32,
+    m: usize,
+    reference_raw: &Tensor,
+    reference_conv: &[Guarded],
+    conv_out: &Tensor,
+    z: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    reference_hash: &mut Sha256,
+    candidate_hash: &mut Sha256,
+    count: &mut usize,
+) -> Result<usize> {
+    use crate::kernels::gdn::{
+        GDN_HEAD_DIM, GdnGate, GdnReplayRows, GdnStateLayout, gdn_replay_rows,
+        gdn_step_gated_fused, gdn_verify_gated_exact,
+    };
+    let (hk, h, c, v) = (16, 48, 10240, 6144);
+    let n = c + v + 2 * h;
+    let d = GDN_HEAD_DIM;
+    let words = h * d * d;
+    let a_log = Tensor::from_f32(ctx, &values(seed, h, 2.0), &[h])?;
+    let dt_bias = Tensor::from_f32_as_bf16(ctx, &values(seed, h, 1.0), &[h])?;
+    let norm = Tensor::from_f32(ctx, &values(seed, d, 1.0), &[d])?;
+    let initial = values(seed, words, 0.5);
+    let reference_state = Tensor::from_f32(ctx, &initial, &[h, d, d])?;
+    let pre = Tensor::from_f32(ctx, &initial, &[h, d, d])?;
+    let pre_bytes = pre.raw_bytes().to_vec();
+    let fin = Tensor::zeros(ctx, &[h, d, d], DType::F32)?;
+    let out = Tensor::zeros(ctx, &[m, v], DType::BF16)?;
+    let reference_out = Tensor::zeros(ctx, &[m, v], DType::BF16)?;
+    let sink = Tensor::zeros(ctx, &[m, v], DType::BF16)?;
+    let mut prefixes = Vec::new();
+    for row in 0..m {
+        let pass = ctx.begin_concurrent()?;
+        let raw = reference_raw.view(row * n, &[n])?;
+        gdn_step_gated_fused(
+            ctx,
+            &pass,
+            &reference_conv[row].value,
+            &raw.view(c + v, &[h])?,
+            &raw.view(c + v + h, &[h])?,
+            &a_log,
+            &dt_bias,
+            &reference_state,
+            &raw.view(c, &[v])?,
+            &norm,
+            &reference_out.view(row * v, &[v])?,
+            1.0 / (d as f32).sqrt(),
+            hk,
+            1e-6,
+            GdnGate::Sigmoid,
+        )?;
+        pass.end()?.commit()?.wait()?;
+        prefixes.push(reference_state.raw_bytes().to_vec());
+    }
+    let replayed: Vec<_> = (0..m)
+        .map(|_| Tensor::zeros(ctx, &[h, d, d], DType::F32))
+        .collect::<Result<_>>()?;
+    let pass = ctx.begin_concurrent()?;
+    gdn_verify_gated_exact(
+        ctx,
+        &pass,
+        conv_out,
+        a,
+        b,
+        &a_log,
+        &dt_bias,
+        &pre,
+        &fin,
+        z,
+        &norm,
+        &out,
+        1.0 / (d as f32).sqrt(),
+        hk,
+        1e-6,
+        GdnGate::Sigmoid,
+    )?;
+    pass.level_barrier(&[&fin, &out])?;
+    for (rows, target) in replayed.iter().enumerate().map(|(i, t)| (i + 1, t)) {
+        gdn_replay_rows(
+            ctx,
+            &pass,
+            GdnStateLayout::KeyValue,
+            &GdnReplayRows {
+                qkv: &conv_out.view(0, &[rows, c])?,
+                a: &a.view(0, &[rows, h])?,
+                b: &b.view(0, &[rows, h])?,
+            },
+            &a_log,
+            &dt_bias,
+            &norm,
+            &pre,
+            target,
+            &sink,
+            1.0 / (d as f32).sqrt(),
+            hk,
+            1e-6,
+            GdnGate::Sigmoid,
+        )?;
+        pass.level_barrier(&[target, &sink])?;
+    }
+    pass.end()?.commit()?.wait()?;
+    compare(&pre_bytes, pre.raw_bytes(), "pre-verify state", reference_hash, candidate_hash, count)?;
+    compare(
+        reference_out.raw_bytes(),
+        out.raw_bytes(),
+        "recurrence output",
+        reference_hash,
+        candidate_hash,
+        count,
+    )?;
+    compare(&prefixes[m - 1], fin.raw_bytes(), "final state", reference_hash, candidate_hash, count)?;
+    for (expected, target) in prefixes.iter().zip(&replayed) {
+        compare(expected, target.raw_bytes(), "replayed state", reference_hash, candidate_hash, count)?;
+    }
+    Ok(m)
 }
 
 struct StreamingOutputs {

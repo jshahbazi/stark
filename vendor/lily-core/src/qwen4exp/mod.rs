@@ -11,7 +11,7 @@ pub mod model;
 pub mod ngram;
 pub mod positions;
 mod spec;
-pub use host_spec::HostVerification;
+pub use host_spec::{EncodedVerification, HostDrafts, HostVerification};
 mod vision;
 mod vision_weights;
 pub mod weights;

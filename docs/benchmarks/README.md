@@ -10,6 +10,11 @@ to them and must not broaden their claims. New studies need an attempt ID and
 linked source-bound evidence. Existing reports retain their original
 qualification; the ledger is not a completed historical backfill.
 
+Before starting a performance study, read the
+[performance playbook](../PERFORMANCE_PLAYBOOK.md): it lists what has been
+tried by lever, what failed and why, and the measurement rules these reports
+follow. Update it when a study changes what a lever returned.
+
 ## Current result
 
 **Regular Decider v1.3 201-token smoke (2026-11-18).** The exact pinned 27B
@@ -381,6 +386,7 @@ engine throughput results remain bound to their original timing windows.
 
 | Study | Date | Status |
 | --- | --- | --- |
+| [Sushi and Stark on Qwen3.8-Flash-Next](2026-11-19-sushi-flashnext-lily-assessment.md) | 2026-11-19 | Source and record reading only, no measurement: Sushi's higher published rate comes from cheaper and deeper speculative rounds under greedy code conditions, not from a faster one-row forward; no matched comparison exists |
 | [Qwen3.8 matched-checkpoint optimization](QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md) | 2026-10-30 | Current: same files and quantization, no speculation; maximum 66.81 vs 61.17 tok/s (+9.21%); numerical equivalence unestablished |
 | [Qwen3.8 same-checkpoint maximum throughput baseline](QWEN38_SAME_CHECKPOINT_STARK_MLX_SERVE_2026_10_30.md) | 2026-10-30 | Historical baseline before the matched-checkpoint optimization: maximum 58.13 vs 60.95 tok/s; source-bound evidence retained |
 | [Earlier Qwen3.8 Stark / MLX-Serve comparison](QWEN38_STARK_MLX_SERVE_2026_10_30.md) | 2026-10-30 | Historical different-pack comparison: maximum 79.52 vs 61.00 tok/s; does not isolate engine efficiency |

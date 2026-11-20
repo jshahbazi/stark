@@ -247,5 +247,6 @@ The Playground mode selects its interaction. The backend selects the native work
 
 - Scoring parity and generation acceptance records: [docs/validation](validation/).
 - Benchmark studies and the current comparison: [docs/benchmarks](benchmarks/README.md).
+- What has been tried to make models faster, by lever, with the gates and measurement rules: the [performance playbook](PERFORMANCE_PLAYBOOK.md).
 - Aggregate receipts with hashes: [provenance](../provenance/).
 - Historical milestone and run records: [docs/archive](archive/).

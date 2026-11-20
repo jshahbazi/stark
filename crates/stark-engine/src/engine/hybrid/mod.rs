@@ -20,6 +20,8 @@ mod glm_metal;
 mod lily;
 pub mod math;
 mod memory;
+pub mod mtp_lookup;
+pub mod mtp_policy;
 pub mod profile;
 pub mod qwen;
 #[cfg(feature = "metal")]
@@ -52,8 +54,38 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The pinned image-loaded Lily Q4-XL generation artifact. Its model-level
+/// defaults (midpoint prefix boundaries, the MTP round schedule) were
+/// qualified on this artifact only; no other layout inherits them.
+const LILY_Q4_XL_SOURCE: &str = "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl";
+const LILY_Q4_XL_REVISION: &str = "0f94842e3682b49acace4daeb4cf2e65a6f94f83";
+const LILY_Q4_XL_ARTIFACT_SHA256: &str = "18c7bcc1e97d1fefdd361472c2daa59d81d89fcd6f3a61983d995a032b44bfb4";
+
+fn pinned_lily_q4_xl(
+    source: &str,
+    revision: &str,
+    artifact_sha256: &str,
+) -> bool {
+    source == LILY_Q4_XL_SOURCE && revision == LILY_Q4_XL_REVISION && artifact_sha256 == LILY_Q4_XL_ARTIFACT_SHA256
+}
+
 fn lily_midpoint_enabled(control: Option<&OsStr>) -> bool {
     control != Some(OsStr::new("0"))
+}
+
+/// `STARK_LILY_MTP_ADAPTIVE=0` keeps the pinned artifact on the fixed
+/// schedule with lookup off; any other value, or none, keeps the default.
+fn lily_mtp_adaptive_enabled(control: Option<&OsStr>) -> bool {
+    control != Some(OsStr::new("0"))
+}
+
+/// The loaded model's MTP round schedule for a request with MTP on that
+/// names no `mtp_policy` or `mtp_lookup`. Fixed with lookup off everywhere
+/// except the pinned Lily Q4-XL artifact (attempt `20261119-LILYADAPT-01`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MtpScheduleDefault {
+    pub policy: mtp_policy::MtpPolicy,
+    pub lookup: bool,
 }
 
 /// Backend-owned recurrent state at a prompt prefix boundary. It remains
@@ -115,6 +147,45 @@ pub trait MtpSampler {
         logits: &[f32],
         proposal: Option<u32>,
     ) -> Result<u32>;
+    /// True when every draft this sampler would draw is the first ID whose
+    /// finite logit no other logit exceeds, with no random draw: the device
+    /// may then select drafts by the same rule and report them through
+    /// [`Self::draft_point_mass`] instead of [`Self::draft`].
+    fn device_greedy_drafts(&self) -> bool {
+        false
+    }
+    /// Records a proposal whose draft distribution is the point mass on
+    /// `token`, without draft logits: a device-selected greedy draft or a
+    /// prompt-lookup draft. For a greedy sampler this is exactly what
+    /// [`Self::draft`] records for a row whose first maximum is `token`.
+    /// `target` then accepts it with min(1, p(token)) and on rejection draws
+    /// from p with `token` removed. Like [`Self::draft`], it does not require
+    /// the vocabulary size to be known yet; `target` checks the readout.
+    fn draft_point_mass(
+        &mut self,
+        token: u32,
+    ) -> Result<()> {
+        let _ = token;
+        Err(Error::Invalid("MTP point-mass proposal unsupported"))
+    }
+}
+
+/// Opt-in per-request MTP round scheduling. The default reproduces the fixed
+/// draft count with head drafts only.
+#[derive(Default)]
+pub struct MtpRoundOptions {
+    pub policy: mtp_policy::MtpPolicy,
+    /// Selects the greedy or sampled cost table.
+    pub greedy: bool,
+    /// Prompt-lookup context (prompt plus the first output token) and the
+    /// tokenizer's line-break ids. Request-scoped; never logged.
+    pub lookup: Option<(Vec<u32>, Arc<mtp_lookup::NewlineTokens>)>,
+}
+
+impl MtpRoundOptions {
+    pub fn is_default(&self) -> bool {
+        self.policy == mtp_policy::MtpPolicy::Fixed && self.lookup.is_none()
+    }
 }
 
 /// Aggregate request counters. No token, logit or probability data is retained.
@@ -127,6 +198,9 @@ pub struct MtpStats {
     pub draft_seconds: f64,
     pub verify_seconds: f64,
     pub rollback_seconds: f64,
+    /// Present only for requests that selected adaptive depth or lookup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<mtp_policy::MtpScheduleStats>,
 }
 
 /// Explicit device target-draw policy for the staged GLM native stream.
@@ -266,6 +340,7 @@ pub struct Model {
     max_context: u32,
     eos: Vec<u32>,
     image_artifact: Option<image::artifact::ImageArtifact>,
+    mtp_schedule_default: MtpScheduleDefault,
 }
 
 impl Model {
@@ -423,12 +498,8 @@ impl Model {
                 // uses midpoint boundaries by default. Other mixed-affine
                 // layouts and the scoring loader retain physical boundaries.
                 let midpoint_control = std::env::var_os("STARK_LILY_PREFIX_MIDPOINT");
-                if image_artifact.as_ref().is_some_and(|artifact| {
-                    artifact.source == "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl"
-                        && artifact.revision == "0f94842e3682b49acace4daeb4cf2e65a6f94f83"
-                        && artifact.identity.artifact_sha256
-                            == "18c7bcc1e97d1fefdd361472c2daa59d81d89fcd6f3a61983d995a032b44bfb4"
-                }) && lily_midpoint_enabled(midpoint_control.as_deref())
+                if Self::pinned_lily_q4_xl_artifact(image_artifact.as_ref())
+                    && lily_midpoint_enabled(midpoint_control.as_deref())
                 {
                     model.enable_prefix_midpoint();
                 }
@@ -458,14 +529,45 @@ impl Model {
         if let Some(artifact) = &image_artifact {
             artifact.unchanged(path)?;
         }
-        Ok(Self {
+        let mut model = Self {
             forward,
             tokenizer,
             vocab_size,
             max_context,
             eos,
             image_artifact,
+            mtp_schedule_default: MtpScheduleDefault::default(),
+        };
+        // Only the pinned image-loaded Lily Q4-XL generation artifact, with
+        // its MTP head loaded, defaults to the adaptive schedule with prompt
+        // lookup. The switch is read once here, like the midpoint switch.
+        let schedule_control = std::env::var_os("STARK_LILY_MTP_ADAPTIVE");
+        if model.supports_mtp_scheduling()
+            && Self::pinned_lily_q4_xl_artifact(model.image_artifact.as_ref())
+            && lily_mtp_adaptive_enabled(schedule_control.as_deref())
+        {
+            model.mtp_schedule_default = MtpScheduleDefault {
+                policy: mtp_policy::MtpPolicy::Adaptive,
+                lookup: true,
+            };
+        }
+        Ok(model)
+    }
+
+    fn pinned_lily_q4_xl_artifact(artifact: Option<&image::artifact::ImageArtifact>) -> bool {
+        artifact.is_some_and(|artifact| {
+            pinned_lily_q4_xl(&artifact.source, &artifact.revision, &artifact.identity.artifact_sha256)
         })
+    }
+
+    /// The MTP round schedule for a request with MTP on that selects none.
+    /// Fixed with lookup off unless this model supports scheduling.
+    pub fn default_mtp_schedule(&self) -> MtpScheduleDefault {
+        if self.supports_mtp_scheduling() {
+            self.mtp_schedule_default
+        } else {
+            MtpScheduleDefault::default()
+        }
     }
 
     pub fn supports_images(&self) -> bool {
@@ -600,6 +702,7 @@ impl Model {
                 max_context,
                 eos,
                 image_artifact: None,
+                mtp_schedule_default: MtpScheduleDefault::default(),
             })
         }
         #[cfg(not(all(feature = "metal", target_os = "macos")))]
@@ -1091,6 +1194,43 @@ impl Model {
         }
     }
 
+    /// Whether [`Self::mtp_decode_with`] accepts adaptive depth and lookup.
+    pub fn supports_mtp_scheduling(&self) -> bool {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return model.supports_mtp();
+        }
+        false
+    }
+
+    /// Line-break ids of the loaded tokenizer, for the prompt-lookup gate.
+    pub fn newline_tokens(&self) -> mtp_lookup::NewlineTokens {
+        mtp_lookup::NewlineTokens::from_tokenizer(&self.tokenizer, self.vocab_size)
+    }
+
+    /// [`Self::mtp_decode`] with opt-in per-round depth planning and
+    /// prompt-lookup proposals; `drafts` is the per-round limit.
+    pub fn mtp_decode_with<'a>(
+        &'a mut self,
+        first: u32,
+        remaining: usize,
+        drafts: usize,
+        sampler: &'a mut dyn MtpSampler,
+        options: MtpRoundOptions,
+    ) -> Result<Box<dyn Iterator<Item = Result<u32>> + 'a>> {
+        if options.is_default() {
+            return self.mtp_decode(first, remaining, drafts, sampler);
+        }
+        match &mut self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => Ok(Box::new(model.mtp_decode_with(first, remaining, drafts, sampler, options)?)),
+            _ => {
+                let _ = (first, remaining, drafts, sampler, options);
+                Err(Error::Unsupported("MTP scheduling unavailable"))
+            },
+        }
+    }
+
     /// Continue a validated full-logit readout using the caller's sampler.
     /// The callback runs only for requested draws; cleanup never samples.
     pub fn sampled_decode<'a>(
@@ -1314,6 +1454,40 @@ mod tests {
         assert!(lily_midpoint_enabled(Some(OsStr::new("1"))));
         assert!(!lily_midpoint_enabled(Some(OsStr::new("0"))));
         assert!(lily_midpoint_enabled(Some(OsStr::new("unexpected"))));
+    }
+
+    #[stark_test]
+    fn lily_mtp_adaptive_defaults_on_with_zero_as_kill_switch() {
+        assert!(lily_mtp_adaptive_enabled(None));
+        assert!(lily_mtp_adaptive_enabled(Some(OsStr::new("1"))));
+        assert!(!lily_mtp_adaptive_enabled(Some(OsStr::new("0"))));
+        assert!(lily_mtp_adaptive_enabled(Some(OsStr::new("unexpected"))));
+        assert_eq!(
+            MtpScheduleDefault::default(),
+            MtpScheduleDefault {
+                policy: mtp_policy::MtpPolicy::Fixed,
+                lookup: false,
+            }
+        );
+    }
+
+    #[stark_test]
+    fn pinned_lily_q4_xl_identity_requires_source_revision_and_artifact_hash() {
+        assert!(pinned_lily_q4_xl(LILY_Q4_XL_SOURCE, LILY_Q4_XL_REVISION, LILY_Q4_XL_ARTIFACT_SHA256));
+        assert!(pinned_lily_q4_xl(
+            "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl",
+            "0f94842e3682b49acace4daeb4cf2e65a6f94f83",
+            "18c7bcc1e97d1fefdd361472c2daa59d81d89fcd6f3a61983d995a032b44bfb4",
+        ));
+        assert!(!pinned_lily_q4_xl(
+            "other/Qwen3.8-Flash-Next-lily-q4-xl",
+            LILY_Q4_XL_REVISION,
+            LILY_Q4_XL_ARTIFACT_SHA256
+        ));
+        assert!(!pinned_lily_q4_xl(LILY_Q4_XL_SOURCE, &"0".repeat(40), LILY_Q4_XL_ARTIFACT_SHA256));
+        assert!(!pinned_lily_q4_xl(LILY_Q4_XL_SOURCE, LILY_Q4_XL_REVISION, &"0".repeat(64)));
+        assert!(!pinned_lily_q4_xl("", "", ""));
+        assert!(!Model::pinned_lily_q4_xl_artifact(None));
     }
 
     #[stark_test]

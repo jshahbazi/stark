@@ -14,3 +14,22 @@ kernel void stark_reject_nonfinite_readout_f32(
         atomic_store_explicit(next_token, 0xffffffffu, memory_order_relaxed);
     }
 }
+
+// Marks a device argmax whose selected logit is a zero or subnormal. Device
+// comparisons may flush subnormals, so only then can the selection differ
+// from the host's IEEE first maximum; the host then redoes the selection.
+// A selected normal value is exact: every flushed operand is below it, and
+// comparisons between normal values are exact.
+kernel void stark_flag_tiny_selection_f32(
+    device const uint* logits_bits [[buffer(0)]],
+    device const uint* selected [[buffer(1)]],
+    device atomic_uint* flag [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint index [[thread_position_in_grid]]) {
+    if (index == 0) {
+        const uint id = selected[0];
+        if (id >= count || (logits_bits[id] & 0x7f800000u) == 0u) {
+            atomic_fetch_or_explicit(flag, 1u, memory_order_relaxed);
+        }
+    }
+}

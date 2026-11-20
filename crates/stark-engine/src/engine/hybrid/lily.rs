@@ -1012,6 +1012,19 @@ impl LilyModel {
         drafts: usize,
         sampler: &'a mut dyn MtpSampler,
     ) -> Result<MtpDecode<'a>> {
+        self.mtp_decode_with(first, remaining, drafts, sampler, super::MtpRoundOptions::default())
+    }
+
+    /// [`Self::mtp_decode`] with an opt-in round scheduler. `drafts` is the
+    /// per-round limit; the default options run exactly `drafts` head drafts.
+    pub fn mtp_decode_with<'a>(
+        &'a mut self,
+        first: u32,
+        remaining: usize,
+        drafts: usize,
+        sampler: &'a mut dyn MtpSampler,
+        options: super::MtpRoundOptions,
+    ) -> Result<MtpDecode<'a>> {
         if self.is_fenced()
             || !self.mtp_enabled
             || !self.mtp_capabilities().is_some_and(|capabilities| (1..=capabilities.max_drafts).contains(&drafts))
@@ -1028,7 +1041,20 @@ impl LilyModel {
         }
         self.last_full_readout = None;
         self.last_greedy = None;
+        let schedule = (!options.is_default()).then(|| {
+            let table = super::mtp_policy::CostTable::LILY_Q4_XL_LILYMERGE_01;
+            let lookup =
+                options.lookup.map(|(context, newline)| super::mtp_lookup::PromptLookup::new(context, newline));
+            Box::new(
+                super::mtp_policy::RoundScheduler::new(options.policy, table.for_mode(options.greedy), drafts, lookup)
+                    .with_cost_table(table.id),
+            )
+        });
+        if let Some(schedule) = &schedule {
+            self.mtp_stats.schedule = Some(schedule.stats());
+        }
         Ok(MtpDecode {
+            schedule,
             model: &self.model,
             context: &self.context,
             state: &mut self.state,
@@ -1316,36 +1342,179 @@ pub struct MtpDecode<'a> {
     verified: Option<HostVerification>,
     delivered: usize,
     stopped: bool,
+    /// Opt-in depth planner and prompt-lookup index; `None` runs `drafts`
+    /// head drafts every round.
+    schedule: Option<Box<super::mtp_policy::RoundScheduler>>,
 }
 
 impl MtpDecode<'_> {
-    fn round(&mut self) -> Result<()> {
-        self.verified = None;
-        self.delivered = 0;
-        self.sampler.begin_round();
-        let count = self.drafts.min(self.remaining.saturating_sub(1));
+    /// Point-mass lookup proposals, which do not come from the draft head.
+    /// Before the last round the head's cache row for the pending token is
+    /// written as the first head step would have.
+    fn undrafted_proposals(
+        &mut self,
+        tokens: Vec<u32>,
+        cap: usize,
+    ) -> Result<Vec<u32>> {
+        for &token in &tokens {
+            self.sampler.draft_point_mass(token)?;
+        }
+        if cap > 0 {
+            let started = Instant::now();
+            let _scope = profile::Scope::new("qwen.mtp.head_advance");
+            self.model
+                .advance_head_host(self.context, self.state, self.scratch, self.pending)
+                .map_err(|_| Error::Invalid("MTP head advance failed"))?;
+            if let Some(schedule) = &mut self.schedule {
+                schedule.record_head_advance(started.elapsed().as_secs_f64());
+            }
+        }
+        Ok(tokens)
+    }
+
+    /// A scheduled zero-draft round: one ordinary decode step of the pending
+    /// token and an exact target draw from its complete readout. With MTP
+    /// enabled the decode graph also writes the head's cache row and hidden
+    /// for that token, so the head is left as after a verify round that
+    /// accepted nothing. No verify captures, finish pass or head advance,
+    /// and nothing is encoded ahead: `round` returns here before any draft
+    /// or verify encoding.
+    fn serial_round(
+        &mut self,
+        round_started: Instant,
+    ) -> Result<()> {
         *self.usable = false;
         let started = Instant::now();
         let gpu_busy_before = gpu_busy_snapshot();
-        let proposals_result = if count > 0 {
-            let sampler = &mut *self.sampler;
+        let position = self.state.pos;
+        let pending = self.pending;
+        let pass_result = (|| -> Result<Vec<f32>> {
+            self.state
+                .ensure_capacity(self.context, position + 1)
+                .map_err(|_| Error::Invalid("MTP serial step capacity"))?;
+            self.scratch
+                .next_token
+                .view(0, &[1])
+                .and_then(|slot| slot.write_bytes(&pending.to_le_bytes()))
+                .map_err(|_| Error::Invalid("MTP serial step input"))?;
             self.model
-                .draft_host(self.context, self.state, self.scratch, self.pending, count, &mut |logits| {
-                    sampler.draft(logits).map_err(|_| std::io::Error::other("MTP draft selection failed").into())
-                })
+                .prepare_step_inputs(self.state, self.scratch, pending)
+                .map_err(|_| Error::Invalid("MTP serial step inputs"))?;
+            let greedy = SamplingParams::greedy();
+            let draw = Draw {
+                params: &greedy,
+                step: position,
+            };
+            self.model
+                .encode_decode_step(self.context, self.state, self.scratch, 0, 1, draw, None)
+                .and_then(|pass| pass.commit())
+                .and_then(|pass| pass.wait_polled())
+                .map_err(|_| Error::Invalid("MTP serial step failed"))?;
+            self.state.advance(1);
+            let logits = self.scratch.logits().to_f32().map_err(|_| Error::Invalid("MTP serial step readout"))?;
+            if logits.len() != self.model.config.vocab_size || !super::finite_guard::all_finite(&logits) {
+                return Err(Error::Invalid("MTP serial step readout values"));
+            }
+            Ok(logits)
+        })();
+        record_gpu_busy_delta("qwen.mtp.serial.gpu_busy", gpu_busy_before);
+        let logits = pass_result?;
+        record_gpu_profile();
+        let token = {
+            let _scope = profile::Scope::new("qwen.mtp.target_sampling");
+            self.sampler.target(&logits, None)?
+        };
+        if token as usize >= self.model.config.vocab_size {
+            return Err(Error::Invalid("MTP target output ID"));
+        }
+        let elapsed = started.elapsed().as_secs_f64();
+        self.stats.verify_seconds += elapsed;
+        profile::record("qwen.mtp.serial", elapsed, 0);
+        self.queue.push_back(token);
+        self.stats.rounds += 1;
+        self.stats.verified_rows += 1;
+        if let Some(schedule) = &mut self.schedule {
+            let plan = super::mtp_policy::RoundPlan::Head(0);
+            schedule.observe(&plan, 0, [token], round_started.elapsed().as_secs_f64());
+            self.stats.schedule = Some(schedule.stats());
+        }
+        self.pending = token;
+        self.remaining -= 1;
+        *self.usable = true;
+        Ok(())
+    }
+
+    /// One round. Composition of the opt-in schedule with the host round
+    /// trip work: a head plan of `d > 0` drafts (fixed or adaptive) drafts
+    /// through `draft_host_encoding_verify`, so a greedy sampler uses the
+    /// device chain and every head round encodes its verify graph ahead; a
+    /// lookup plan records point masses, advances the head cache row and
+    /// verifies with `verify_host_batched` (nothing encoded ahead); a
+    /// scheduled zero-draft plan returns through `serial_round` before any
+    /// encoding. The unscheduled last round (zero drafts) verifies the
+    /// pending token alone as before.
+    fn round(&mut self) -> Result<()> {
+        let round_started = Instant::now();
+        self.verified = None;
+        self.delivered = 0;
+        self.sampler.begin_round();
+        let cap = self.drafts.min(self.remaining.saturating_sub(1));
+        let plan = match &mut self.schedule {
+            Some(schedule) => schedule.plan(cap),
+            None => super::mtp_policy::RoundPlan::Head(cap),
+        };
+        let count = match &plan {
+            super::mtp_policy::RoundPlan::Head(count) => *count,
+            super::mtp_policy::RoundPlan::Lookup(_) => 0,
+        };
+        if count == 0 && self.schedule.is_some() && matches!(plan, super::mtp_policy::RoundPlan::Head(_)) {
+            return self.serial_round(round_started);
+        }
+        *self.usable = false;
+        let started = Instant::now();
+        let gpu_busy_before = gpu_busy_snapshot();
+        // The verify graph is encoded while the last draft pass runs. Greedy
+        // drafts may chain on the device; they are recorded as point masses.
+        let proposals_result = if let super::mtp_policy::RoundPlan::Lookup(tokens) = &plan {
+            self.undrafted_proposals(tokens.clone(), cap).map(|proposals| (proposals, None))
+        } else if count > 0 {
+            let sampler = &mut *self.sampler;
+            let device_greedy = sampler.device_greedy_drafts();
+            self.model
+                .draft_host_encoding_verify(
+                    self.context,
+                    self.state,
+                    self.scratch,
+                    self.pending,
+                    count,
+                    device_greedy,
+                    &mut |logits| {
+                        sampler.draft(logits).map_err(|_| std::io::Error::other("MTP draft selection failed").into())
+                    },
+                )
                 .map_err(|_| Error::Invalid("MTP draft failed"))
+                .and_then(|drafted| {
+                    if drafted.device_selected {
+                        drafted.proposals.iter().try_for_each(|&token| sampler.draft_point_mass(token))?;
+                    }
+                    Ok((drafted.proposals, Some(drafted.verify)))
+                })
         } else {
-            Ok(Vec::new())
+            Ok((Vec::new(), None))
         };
         record_gpu_busy_delta("qwen.mtp.draft.gpu_busy", gpu_busy_before);
-        let proposals = proposals_result?;
+        let (proposals, encoded_verify) = proposals_result?;
         let elapsed = started.elapsed().as_secs_f64();
         self.stats.draft_seconds += elapsed;
         profile::record("qwen.mtp.draft", elapsed, 0);
         let started = Instant::now();
         let gpu_busy_before = gpu_busy_snapshot();
-        let verified_result =
-            self.model.verify_host_batched(self.context, self.state, self.scratch, self.pending, &proposals);
+        let verified_result = match encoded_verify {
+            Some(encoded) => {
+                self.model.verify_host_encoded(self.state, self.scratch, self.pending, &proposals, encoded)
+            },
+            None => self.model.verify_host_batched(self.context, self.state, self.scratch, self.pending, &proposals),
+        };
         record_gpu_busy_delta("qwen.mtp.verify.gpu_busy", gpu_busy_before);
         let verified = verified_result.map_err(|error| {
             if profile::enabled() {
@@ -1372,7 +1541,10 @@ impl MtpDecode<'_> {
         let mut accepted = 0;
         {
             let _scope = profile::Scope::new("qwen.mtp.target_sampling");
-            for (i, readout) in verified.logits().enumerate() {
+            // Rows are borrowed and validated as they are consumed; rows
+            // after the first rejection are never read.
+            for i in 0..verified.rows() {
+                let readout = verified.row(i).map_err(|_| Error::Invalid("MTP verify failed"))?;
                 let proposal = proposals.get(i).copied();
                 let token = self.sampler.target(readout, proposal)?;
                 if token as usize >= self.model.config.vocab_size {
@@ -1397,6 +1569,10 @@ impl MtpDecode<'_> {
         self.stats.proposed += proposals.len();
         self.stats.accepted += accepted;
         self.stats.verified_rows += proposals.len() + 1;
+        if let Some(schedule) = &mut self.schedule {
+            schedule.observe(&plan, accepted, self.queue.iter().copied(), round_started.elapsed().as_secs_f64());
+            self.stats.schedule = Some(schedule.stats());
+        }
         self.pending = *self.queue.back().ok_or(Error::Invalid("MTP round has no output"))?;
         self.remaining -= self.queue.len();
         self.verified = Some(verified);
@@ -2012,7 +2188,7 @@ mod tests {
                 .model
                 .verify_host_batched(&model.context, &mut model.state, &mut model.scratch, token, &[])
                 .unwrap();
-            host_serial.push(verified.logits().next().unwrap().to_vec());
+            host_serial.push(verified.logits().unwrap().next().unwrap().to_vec());
             model.model.finish_host_verify(&model.context, &mut model.state, &model.scratch, &verified, 0).unwrap();
         }
         let mut comparisons = 0usize;
@@ -2086,10 +2262,10 @@ mod tests {
                         &tokens[1..width],
                     )
                     .unwrap();
-                for (actual, expected) in verified.logits().zip(&serial) {
+                for (actual, expected) in verified.logits().unwrap().zip(&serial) {
                     compare(actual, expected, 0);
                 }
-                for (actual, expected) in verified.logits().zip(&host_serial) {
+                for (actual, expected) in verified.logits().unwrap().zip(&host_serial) {
                     compare(actual, expected, 3);
                 }
                 model
@@ -2185,6 +2361,97 @@ mod tests {
                 compare(&next_head, &expected_head, 2);
             }
         }
+        // Device greedy draft chains: the same proposals, outputs, positions
+        // and post-drop state as host greedy drafting, at every depth and
+        // at early stops inside a verified group (the Drop rollback path).
+        struct GreedySampler {
+            device: bool,
+            proposals: VecDeque<u32>,
+            host_drafts: std::rc::Rc<std::cell::Cell<usize>>,
+            device_drafts: std::rc::Rc<std::cell::Cell<usize>>,
+        }
+        fn first_max(values: &[f32]) -> u32 {
+            let mut best = 0;
+            for index in 1..values.len() {
+                if values[index] > values[best] {
+                    best = index;
+                }
+            }
+            best as u32
+        }
+        impl MtpSampler for GreedySampler {
+            fn begin_round(&mut self) {
+                self.proposals.clear();
+            }
+            fn draft(
+                &mut self,
+                logits: &[f32],
+            ) -> Result<u32> {
+                self.host_drafts.set(self.host_drafts.get() + 1);
+                let token = first_max(logits);
+                self.proposals.push_back(token);
+                Ok(token)
+            }
+            fn target(
+                &mut self,
+                logits: &[f32],
+                proposal: Option<u32>,
+            ) -> Result<u32> {
+                if proposal.is_some() && self.proposals.pop_front() != proposal {
+                    return Err(Error::Invalid("fixture proposal order"));
+                }
+                Ok(first_max(logits))
+            }
+            fn device_greedy_drafts(&self) -> bool {
+                self.device
+            }
+            fn draft_point_mass(
+                &mut self,
+                token: u32,
+            ) -> Result<()> {
+                self.device_drafts.set(self.device_drafts.get() + 1);
+                self.proposals.push_back(token);
+                Ok(())
+            }
+        }
+        for drafts in 1..=3 {
+            for pulled in [0usize, 1, 2, 5, 8] {
+                let mut runs = Vec::new();
+                for device in [false, true] {
+                    let logits = prefill(&mut model);
+                    let host_drafts = std::rc::Rc::new(std::cell::Cell::new(0));
+                    let device_drafts = std::rc::Rc::new(std::cell::Cell::new(0));
+                    let mut sampler = GreedySampler {
+                        device,
+                        proposals: VecDeque::new(),
+                        host_drafts: host_drafts.clone(),
+                        device_drafts: device_drafts.clone(),
+                    };
+                    let mut stream = model.mtp_decode(first_max(&logits), 8, drafts, &mut sampler).unwrap();
+                    let mut outputs = Vec::new();
+                    for _ in 0..pulled {
+                        outputs.push(stream.next().unwrap().unwrap());
+                    }
+                    drop(stream);
+                    assert!(!model.is_fenced());
+                    assert!(model.position() == input.len() + pulled);
+                    if pulled > 0 {
+                        assert!(if device {
+                            host_drafts.get() == 0 && device_drafts.get() > 0
+                        } else {
+                            device_drafts.get() == 0 && host_drafts.get() > 0
+                        });
+                    }
+                    let next = match outputs.last() {
+                        Some(&token) => model.step(token).unwrap(),
+                        None => model.step(first_max(&logits)).unwrap(),
+                    };
+                    runs.push((outputs, next));
+                }
+                assert!(runs[0].0 == runs[1].0);
+                compare(&runs[1].1, &runs[0].1, 1);
+            }
+        }
         // Exercise the configured dense-to-sparse transition and four-token
         // index blocks against ordinary decode on identical fixed inputs.
         let dense_limit = model.model.config.indexer.dense_limit();
@@ -2210,7 +2477,7 @@ mod tests {
                     .model
                     .verify_host_batched(&model.context, &mut model.state, &mut model.scratch, fixed, &[fixed; 3])
                     .unwrap();
-                for (actual, reference) in verified.logits().zip(&expected) {
+                for (actual, reference) in verified.logits().unwrap().zip(&expected) {
                     compare(actual, reference, 0);
                 }
                 model
@@ -2257,6 +2524,141 @@ mod tests {
         // roundoff after batched catch-up: its actual q is always recorded
         // and corrected by exact rejection sampling against this target.
         assert!([0, 1, 3].iter().all(|&phase| phases[phase].unequal_values == 0));
+    }
+
+    /// Zero-draft rounds in the middle of a scheduled stream (attempt
+    /// `20261119-LILYMERGE-01`). A scripted schedule interleaves serial
+    /// rounds with draft rounds, and the host draft sampler proposes a wrong
+    /// token at chosen positions, so draft rounds right after a serial round
+    /// verify and roll back partially. Greedy targets must equal ordinary
+    /// decode token for token, and the state after the stream must continue
+    /// with bit-identical logits. Only counts leave this test.
+    #[stark_test]
+    #[ignore]
+    fn private_checkpoint_mtp_zero_draft_round_mid_stream_matches_serial() {
+        use crate::engine::hybrid::{MtpRoundOptions, mtp_policy};
+        let path = std::env::var_os("STARK_TEST_MODEL_PATH").expect("private model fixture path");
+        let path = Path::new(&path);
+        let tokenizer = tokenizers::Tokenizer::from_file(path.join("tokenizer.json"))
+            .unwrap_or_else(|_| panic!("private model tokenizer failed"));
+        let input = tokenizer
+            .encode("Hello.", false)
+            .unwrap_or_else(|_| panic!("private fixture tokenization failed"))
+            .get_ids()
+            .to_vec();
+        let mut model = LilyModel::load_with_mtp(path, true).unwrap();
+        let prefill = |model: &mut LilyModel| {
+            model.reset();
+            model.set_mtp_enabled(true).unwrap();
+            for &token in &input[..input.len() - 1] {
+                model.ingest(token).unwrap();
+            }
+            model.step(*input.last().unwrap()).unwrap()
+        };
+        fn first_max(values: &[f32]) -> u32 {
+            let mut best = 0;
+            for index in 1..values.len() {
+                if values[index] > values[best] {
+                    best = index;
+                }
+            }
+            best as u32
+        }
+        const OUTPUTS: usize = 24;
+        let logits = prefill(&mut model);
+        let first = first_max(&logits);
+        let mut reference = Vec::new();
+        let mut pending = first;
+        for _ in 0..OUTPUTS {
+            pending = first_max(&model.step(pending).unwrap());
+            reference.push(pending);
+        }
+        let reference_next = model.step(pending).unwrap();
+        // Round script: serial rounds (0) between draft rounds, and the
+        // (round, draft position) pairs whose proposal is made wrong.
+        let script = [2usize, 0, 3, 0, 0, 2, 1, 0, 3, 0, 2, 0, 3];
+        let wrong = [(2usize, 1usize), (5, 0), (8, 2), (10, 1), (12, 0)];
+        struct ScriptedSampler {
+            round: usize,
+            position: usize,
+            wrong: Vec<(usize, usize)>,
+            vocab: u32,
+            proposals: VecDeque<u32>,
+        }
+        impl MtpSampler for ScriptedSampler {
+            fn begin_round(&mut self) {
+                self.round += 1;
+                self.position = 0;
+                self.proposals.clear();
+            }
+            fn draft(
+                &mut self,
+                logits: &[f32],
+            ) -> Result<u32> {
+                let mut token = first_max(logits);
+                // `begin_round` has run once before the first round.
+                if self.wrong.contains(&(self.round - 1, self.position)) {
+                    token = (token + 1) % self.vocab;
+                }
+                self.position += 1;
+                self.proposals.push_back(token);
+                Ok(token)
+            }
+            fn target(
+                &mut self,
+                logits: &[f32],
+                proposal: Option<u32>,
+            ) -> Result<u32> {
+                if proposal.is_some() && self.proposals.pop_front() != proposal {
+                    return Err(Error::Invalid("fixture proposal order"));
+                }
+                Ok(first_max(logits))
+            }
+        }
+        let _ = prefill(&mut model);
+        let mut sampler = ScriptedSampler {
+            round: 0,
+            position: 0,
+            wrong: wrong.to_vec(),
+            vocab: model.model.config.vocab_size as u32,
+            proposals: VecDeque::new(),
+        };
+        let options = MtpRoundOptions {
+            policy: mtp_policy::MtpPolicy::Adaptive,
+            greedy: true,
+            lookup: None,
+        };
+        let mut stream = model.mtp_decode_with(first, OUTPUTS, 3, &mut sampler, options).unwrap();
+        stream.schedule = Some(Box::new(mtp_policy::RoundScheduler::scripted(
+            mtp_policy::CostTable::LILY_Q4_XL_LILYMERGE_01.greedy,
+            3,
+            script,
+        )));
+        let outputs: Vec<u32> = stream.by_ref().map(|token| token.unwrap()).collect();
+        drop(stream);
+        assert!(!model.is_fenced());
+        assert!(outputs == reference, "outputs differ from ordinary decode");
+        assert!(model.position() == input.len() + OUTPUTS);
+        let stats = model.mtp_stats;
+        let schedule = stats.schedule.unwrap();
+        // Serial rounds came before draft rounds, and draft rounds rejected.
+        assert!(schedule.head_rounds_by_depth[0] >= 6);
+        assert!(stats.accepted < stats.proposed);
+        let next = model.step(pending).unwrap();
+        let unequal = next.iter().zip(&reference_next).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "mtp_control": "zero_draft_mid_stream",
+                "rounds": stats.rounds,
+                "head_rounds_by_depth": &schedule.head_rounds_by_depth[..4],
+                "proposed": stats.proposed,
+                "accepted": stats.accepted,
+                "continuation_values": next.len(),
+                "continuation_unequal_values": unequal,
+            })
+        );
+        assert!(next.len() == reference_next.len() && unequal == 0);
     }
 
     #[stark_test]

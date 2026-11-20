@@ -264,6 +264,19 @@ distribution notices and refreshed menu bar app overlays. The distribution
 source inventory includes this notice, and packaged image qualification
 requires its delivered hash.
 
+The fixed-corpus benchmark `scripts/benchmark_lily_fixed_corpus.py` ports the
+seeded synthetic TypeScript corpus generator, the prose chunker and the
+request ladder of Sushi's release bench, `src/bench.zig` at commit
+`297d1e2cf360984340298cfcf86261abbc2eb223`, SHA-256
+`47de56fc083b72628861664b1412ac2cbb7fc8e729d5c04cf5b99f0448616ced`, so that
+Stark can be measured on the same token-id workload. Sushi is MIT licensed;
+its copyright and notice are preserved in
+[`LICENSE.sushi-reference`](../LICENSE.sushi-reference). The script is a
+measurement tool and is not part of the standalone distribution. No Sushi code
+is built, run or linked, and the prose text is supplied at run time rather than
+stored in this repository. See attempt `20261119-LILYBENCH-01` in
+[the experiment record](../docs/model-experiments/2026-11-19-lily-fixed-corpus-benchmark.md).
+
 Model weights, private fixtures, runtime executables, and host application archives are excluded. The original pinned upstream README is stored verbatim as [UPSTREAM_README.md](UPSTREAM_README.md); its relative links refer to the upstream tree and are not expected to resolve here. The current build and validation receipts identify the complete standalone source and executable hashes.
 
 ## Naming and compatibility

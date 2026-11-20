@@ -415,6 +415,50 @@ fn reject_nonfinite_readout_f32(
     pass.level_barrier(&[out])
 }
 
+/// Status bit [`argmax_chain_f32`] sets when its selection must be redone on
+/// the host: the selected logit is a zero or subnormal.
+pub const CHAIN_ARGMAX_TINY: u32 = 1;
+
+/// Stark-local greedy draw for a device draft chain: the first-max argmax of
+/// `logits` into `out`, which a later dispatch may consume as an input id,
+/// and a status word `flag` the host clears before commit. `out` always
+/// stays in range, so a nonfinite readout cannot put a sentinel into an
+/// embedding gather. Afterwards `flag` is 0 when `out` is exactly the host
+/// rule's choice (the first ID no logit exceeds under IEEE `>`, signed zeros
+/// equal), `u32::MAX` when the readout has a nonfinite value, and otherwise
+/// [`CHAIN_ARGMAX_TINY`]: the selected logit is a zero or subnormal, where
+/// device comparisons may flush subnormals and differ from the host.
+pub fn argmax_chain_f32(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    logits: &Tensor,
+    scratch: &SamplerScratch,
+    out: &Tensor,
+    flag: &Tensor,
+) -> Result<()> {
+    let count = logits.numel();
+    ensure!(
+        out.dtype() == DType::U32
+            && out.numel() == 1
+            && flag.dtype() == DType::U32
+            && flag.numel() == 1,
+        "chained argmax requires one U32 output and status word"
+    );
+    argmax_f32(ctx, pass, logits, &scratch.argmax_partials, out)?;
+    pass.level_barrier(&[out])?;
+    let kernel =
+        ctx.pipeline("stark_flag_tiny_selection_f32", FINITE_SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &kernel,
+        &[logits.binding(), out.binding(), flag.binding()],
+        &[&u32_bytes(count)],
+        Grid::Threads { grid: (1, 1, 1), threadgroup: (1, 1, 1) },
+    )?;
+    // Orders the status update before the nonfinite store, which wins.
+    pass.level_barrier(&[flag])?;
+    reject_nonfinite_readout_f32(ctx, pass, logits, flag)
+}
+
 /// The draft head's draw of one proposal: as [`sample_f32`], and under a
 /// sampler that samples the kept distribution goes to `dist` for the
 /// verify pass. Greedy proposals (an argmax) export nothing: the verify
@@ -472,6 +516,116 @@ pub fn uniform_for(seed: u64, step: u32) -> f32 {
 #[cfg(test)]
 mod stark_finite_tests {
     use super::*;
+
+    /// The host greedy rule: the first ID that no later logit exceeds under
+    /// IEEE `>` (signed zeros equal), defined only for finite readouts.
+    fn host_first_max(values: &[f32]) -> u32 {
+        let mut best = 0;
+        for index in 1..values.len() {
+            if values[index] > values[best] {
+                best = index;
+            }
+        }
+        best as u32
+    }
+
+    #[test]
+    #[ignore = "requires a physical Apple Silicon Metal device"]
+    fn chained_argmax_matches_host_first_max_and_flags_nonfinite_in_range() -> Result<()>
+    {
+        let ctx = MetalContext::new()?;
+        let mut word = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            word ^= word << 13;
+            word ^= word >> 7;
+            word ^= word << 17;
+            word
+        };
+        let mut checked = 0usize;
+        let mut tiny_cases = 0usize;
+        for count in [1usize, 2, 255, 256, 257, 4_097, 131_073, 248_320] {
+            let scratch = SamplerScratch::new(&ctx, count)?;
+            let logits = Tensor::zeros(&ctx, &[count], DType::F32)?;
+            let words = Tensor::zeros(&ctx, &[2], DType::U32)?;
+            let out = words.view(0, &[1])?;
+            let flag = words.view(1, &[1])?;
+            let mut run = |values: &[f32]| -> Result<(u32, u32)> {
+                logits.write_bytes(bytemuck::cast_slice(values))?;
+                words.write_bytes(bytemuck::cast_slice(&[0x1234_5678u32, 0]))?;
+                let pass = ctx.begin_concurrent()?;
+                argmax_chain_f32(&ctx, &pass, &logits, &scratch, &out, &flag)?;
+                pass.commit_wait()?;
+                let observed = words.to_u32()?;
+                Ok((observed[0], observed[1]))
+            };
+            let mut cases: Vec<Vec<f32>> = Vec::new();
+            // Positive, negative and tiny maxima, each with many exact ties,
+            // signed zeros and subnormals of both signs among the logits.
+            for offset in [1.0f32, -3.0, -1.0e6] {
+                for levels in [1u64, 2, 3, 1 << 20] {
+                    cases.push(
+                        (0..count)
+                            .map(|_| match next() % 9 {
+                                0 => -0.0,
+                                1 if offset < 0.0 => -f32::from_bits(1),
+                                1 => 0.0,
+                                2 if offset < -1.0 => -f32::MIN_POSITIVE,
+                                2 => f32::from_bits(1),
+                                _ => (next() % levels) as f32 / 7.0 + offset,
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            // A subnormal maximum among positive and negative zeros.
+            let mut tiny = vec![-0.0f32; count];
+            tiny[count / 2] = f32::from_bits(3);
+            tiny[count - 1] = f32::from_bits(3);
+            cases.push(tiny);
+            // Signed-zero maxima, with the negative zero first and last.
+            let mut zeros = vec![-1.0f32; count];
+            zeros[count - 1] = 0.0;
+            zeros[count / 3] = -0.0;
+            cases.push(zeros);
+            cases.push(vec![-f32::MAX; count]);
+            let mut late = vec![-f32::MAX; count];
+            late[count - 1] = f32::MAX;
+            late[count / 2] = f32::MAX;
+            cases.push(late);
+            for values in &cases {
+                let (id, status) = run(values)?;
+                let host = host_first_max(values);
+                let tiny = values[host as usize].to_bits() & 0x7f80_0000 == 0;
+                ensure!((id as usize) < count, "chained argmax output range");
+                // Exact whenever the status is clear; flagged iff the host
+                // maximum is a zero or subnormal.
+                ensure!(
+                    if tiny {
+                        status == CHAIN_ARGMAX_TINY
+                    } else {
+                        status == 0 && id == host
+                    },
+                    "chained argmax tie-break"
+                );
+                tiny_cases += usize::from(tiny);
+                checked += 1;
+            }
+            for bits in [0x7f80_0000u32, 0xff80_0000, 0x7fc0_0001, 0xffc0_0002] {
+                for position in [0, count / 2, count - 1] {
+                    let mut values = cases[0].clone();
+                    values[position] = f32::from_bits(bits);
+                    let (id, failed) = run(&values)?;
+                    ensure!(
+                        failed == u32::MAX && (id as usize) < count,
+                        "chained argmax nonfinite guard"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        ensure!(checked > tiny_cases && tiny_cases > 0, "chained argmax coverage");
+        Ok(())
+    }
 
     #[test]
     #[ignore = "requires a physical Apple Silicon Metal device"]

@@ -9,14 +9,17 @@ use std::{
 };
 
 use rayon::prelude::*;
-use stark_engine::engine::hybrid::{Model, NativeSampling, PrefixSnapshot, PreparedHybridImage, finite_guard, profile};
+use stark_engine::engine::hybrid::{
+    Model, MtpRoundOptions, NativeSampling, PrefixSnapshot, PreparedHybridImage, finite_guard, mtp_lookup, mtp_policy,
+    profile,
+};
 
 use crate::{
     cancel::CancelSignal,
     generation::{
         ContextPlanningRequest, GeneratedTokens, GenerationBackend, GenerationOptions, GenerationProgress,
-        ImageArtifactIdentity, MtpCapabilities, PreparedImageMetadata, ProgressCallback, Sampling, TextCallback,
-        admit_request_memory, collect_tokens_controlled, native_result_after_cleanup,
+        ImageArtifactIdentity, MtpCapabilities, MtpScheduling, PreparedImageMetadata, ProgressCallback, Sampling,
+        TextCallback, admit_request_memory, collect_tokens_controlled, native_result_after_cleanup,
     },
     prefix_cache::{self, BoundaryEntry},
     text_stop::StopFilter,
@@ -89,6 +92,9 @@ pub(crate) struct HybridBackend {
     /// The last successful request's snapshot, until its reply is written.
     pending_prefix: Option<BoundaryEntry<PrefixSnapshot>>,
     image_runtime_identity: Option<stark_engine::engine::MetalDeviceIdentity>,
+    /// Line-break ids of the loaded tokenizer for the prompt-lookup gate,
+    /// built on the first lookup request. Tokenizer metadata only.
+    mtp_newline: Option<std::sync::Arc<mtp_lookup::NewlineTokens>>,
 }
 
 pub(crate) struct HybridPreparedRequest {
@@ -322,6 +328,7 @@ impl HybridBackend {
     fn record_mtp_metadata(
         &mut self,
         drafts: u32,
+        scheduling: MtpScheduling,
     ) -> Result<(), &'static str> {
         self.last_mtp = None;
         if let Some(capabilities) = self.model.mtp_capabilities() {
@@ -338,6 +345,12 @@ impl HybridBackend {
                 "verification":capabilities.verification,
                 "stats":stats,
             }));
+            if !scheduling.is_default()
+                && let Some(fields) = self.last_mtp.as_mut().and_then(serde_json::Value::as_object_mut)
+            {
+                fields.insert("policy".to_owned(), serde_json::json!(scheduling.policy()));
+                fields.insert("lookup".to_owned(), serde_json::json!(scheduling.lookup));
+            }
         }
         Ok(())
     }
@@ -403,6 +416,7 @@ impl HybridBackend {
             prefix_cache: None,
             pending_prefix: None,
             image_runtime_identity,
+            mtp_newline: None,
         })
     }
 
@@ -521,6 +535,12 @@ impl HybridBackend {
         if self.profile_mode == Some(AggregateProfileMode::NativeHybrid) {
             self.native_prefill_snapshot = Some(profile::snapshot());
         }
+        let newline = if options.mtp_drafts > 0 && options.mtp_scheduling.lookup {
+            let model = &self.model;
+            Some(self.mtp_newline.get_or_insert_with(|| std::sync::Arc::new(model.newline_tokens())).clone())
+        } else {
+            None
+        };
         let model = &mut self.model;
         let probability_mapper = &mut self.probability_mapper;
         let nucleus_sampler = &mut self.nucleus_sampler;
@@ -549,8 +569,29 @@ impl HybridBackend {
                 mtp_sampler.sample_initial(&logits)?
             };
             let budget = (options.context_tokens as usize - input.len()).min(options.max_new_tokens as usize);
+            // Opt-in scheduling; the default options take the fixed path.
+            let round_options = MtpRoundOptions {
+                policy: if options.mtp_scheduling.adaptive {
+                    mtp_policy::MtpPolicy::Adaptive
+                } else {
+                    mtp_policy::MtpPolicy::Fixed
+                },
+                greedy: matches!(options.sampling, Sampling::Greedy {}),
+                lookup: newline.map(|newline| {
+                    let mut context = Vec::with_capacity(input.len() + 1);
+                    context.extend_from_slice(input);
+                    context.push(first);
+                    (context, newline)
+                }),
+            };
             let tail = model
-                .mtp_decode(first, budget.saturating_sub(1), options.mtp_drafts as usize, &mut mtp_sampler)
+                .mtp_decode_with(
+                    first,
+                    budget.saturating_sub(1),
+                    options.mtp_drafts as usize,
+                    &mut mtp_sampler,
+                    round_options,
+                )
                 .map_err(|_| "native_generation_failed")?
                 .map(|token| token.map(u64::from).map_err(|_| "native_generation_failed"));
             Box::new(std::iter::once(Ok(u64::from(first))).chain(tail))
@@ -749,7 +790,7 @@ impl GenerationBackend for HybridBackend {
             self.generate_inner(&prepared.tokens, 0, None, None, Some(prepared.image), options, on_text, on_progress);
         // MTP remains advertised for text on this loaded instance. Image
         // replies must still acknowledge zero drafts with current counters.
-        self.record_mtp_metadata(0)?;
+        self.record_mtp_metadata(0, MtpScheduling::default())?;
         self.model.reset();
         let result = native_result_after_cleanup(result, self.model.is_fenced());
         self.nucleus_sampler.clear();
@@ -933,7 +974,7 @@ impl GenerationBackend for HybridBackend {
                     Some(BoundaryEntry::new(snapshot, scope, options.context_tokens, &input[..boundary]));
             }
         }
-        self.record_mtp_metadata(options.mtp_drafts)?;
+        self.record_mtp_metadata(options.mtp_drafts, options.mtp_scheduling)?;
         self.model.reset();
         result = native_result_after_cleanup(result, self.model.is_fenced());
         if result.is_err() {
@@ -985,8 +1026,22 @@ impl GenerationBackend for HybridBackend {
     fn mtp_metadata(&self) -> Option<serde_json::Value> {
         self.last_mtp.clone()
     }
+    fn supports_mtp_scheduling(&self) -> bool {
+        self.model.supports_mtp_scheduling()
+            && self.model.mtp_capabilities().is_some_and(|caps| caps.sampling == "exact-rejection-v1")
+    }
     fn default_mtp_drafts(&self) -> u32 {
         self.model.default_mtp_drafts()
+    }
+    fn default_mtp_scheduling(&self) -> MtpScheduling {
+        if !self.supports_mtp_scheduling() {
+            return MtpScheduling::default();
+        }
+        let schedule = self.model.default_mtp_schedule();
+        MtpScheduling {
+            adaptive: schedule.policy == mtp_policy::MtpPolicy::Adaptive,
+            lookup: schedule.lookup,
+        }
     }
     fn effective_mtp_drafts(
         &self,
@@ -1100,12 +1155,6 @@ fn sampling_distribution(
     sampling: &Sampling,
     mapper: Option<&mut ProbabilityMapper>,
 ) -> Result<Distribution, &'static str> {
-    {
-        let _scope = profile::Scope::new("sample.finite");
-        if logits.is_empty() || !finite_guard::all_finite(logits) {
-            return Err("native_generation_failed");
-        }
-    }
     let Sampling::Stochastic {
         temperature,
         top_k,
@@ -1113,18 +1162,22 @@ fn sampling_distribution(
         min_p,
     } = sampling
     else {
-        let mut best = 0;
-        for index in 1..logits.len() {
-            if logits[index] > logits[best] {
-                best = index;
-            }
-        }
+        let best = {
+            let _scope = profile::Scope::new("sample.greedy");
+            greedy_index(logits).ok_or("native_generation_failed")?
+        };
         return Ok(Distribution {
             indices: vec![best],
             weights: vec![1.0],
             total: 1.0,
         });
     };
+    {
+        let _scope = profile::Scope::new("sample.finite");
+        if logits.is_empty() || !finite_guard::all_finite(logits) {
+            return Err("native_generation_failed");
+        }
+    }
     let indices = {
         let _scope = profile::Scope::new("sample.select");
         sampling_indices(logits, *top_k)?
@@ -1156,6 +1209,53 @@ fn sampling_distribution(
         weights: probabilities.into_iter().take(kept).collect(),
         total: cumulative,
     })
+}
+
+/// Greedy selection: the first ID whose logit no other logit exceeds under
+/// IEEE `>` (signed zeros compare equal), or `None` for an empty or
+/// nonfinite readout. Identical to the former scalar scan
+/// `if logits[i] > logits[best] { best = i }` and to the GPU `argmax_f32`
+/// tie-break on finite input. Lane maxima carry no loop-carried load, so both
+/// passes vectorize; finiteness is checked in the same pass as the maximum.
+fn greedy_index(logits: &[f32]) -> Option<usize> {
+    const LANES: usize = 32;
+    if logits.is_empty() {
+        return None;
+    }
+    let (chunks, tail) = logits.as_chunks::<LANES>();
+    let mut lanes = [logits[0]; LANES];
+    let mut nonfinite = [false; LANES];
+    for chunk in chunks {
+        for lane in 0..LANES {
+            let value = chunk[lane];
+            nonfinite[lane] |= !value.is_finite();
+            lanes[lane] = if value > lanes[lane] {
+                value
+            } else {
+                lanes[lane]
+            };
+        }
+    }
+    let mut max = logits[0];
+    for &value in lanes.iter().chain(tail) {
+        if !value.is_finite() {
+            return None;
+        }
+        if value > max {
+            max = value;
+        }
+    }
+    if nonfinite.iter().any(|&flag| flag) {
+        return None;
+    }
+    // `max` is a member of the maximal equivalence class under `==`; the
+    // first member of that class is exactly where the scalar scan settles.
+    let first_chunk = chunks.iter().position(|chunk| chunk.iter().fold(false, |found, &value| found | (value == max)));
+    let (base, values) = match first_chunk {
+        Some(at) => (at * LANES, &chunks[at][..]),
+        None => (chunks.len() * LANES, tail),
+    };
+    values.iter().position(|&value| value == max).map(|offset| base + offset)
 }
 
 /// Only the requested candidate prefix needs sorting. The comparison is the
@@ -1562,6 +1662,92 @@ mod tests {
         assert_eq!(sample(&[-1000.0, 1000.0], &options, &mut 99).unwrap(), 1);
         assert!(sample(&[f32::NAN], &Sampling::Greedy {}, &mut 0).is_err());
     }
+
+    /// The scalar scan `greedy_index` replaced, with its separate finite check.
+    fn scalar_greedy_reference(logits: &[f32]) -> Option<usize> {
+        if logits.is_empty() || !logits.iter().all(|value| value.is_finite()) {
+            return None;
+        }
+        let mut best = 0;
+        for index in 1..logits.len() {
+            if logits[index] > logits[best] {
+                best = index;
+            }
+        }
+        Some(best)
+    }
+
+    #[test]
+    fn greedy_index_matches_scalar_scan_on_ties_signed_zero_and_nonfinite_inputs() {
+        let nonfinite = [f32::NAN, -f32::NAN, f32::from_bits(0x7fc0_0001), f32::INFINITY, f32::NEG_INFINITY];
+        let mut cases: Vec<Vec<f32>> = vec![
+            vec![],
+            vec![0.0],
+            vec![-0.0, 0.0],
+            vec![0.0, -0.0],
+            vec![-f32::MAX; 97],
+            vec![f32::from_bits(1), -f32::from_bits(1), 0.0, -0.0],
+        ];
+        let mut word = 0x2545_f491_4f6c_dd1d_u64;
+        for length in [1, 2, 31, 32, 33, 63, 64, 65, 100, 1_000, 4_097, 248_320] {
+            for levels in [1_u64, 2, 7, 1 << 20] {
+                cases.push(
+                    (0..length)
+                        .map(|_| {
+                            word ^= word << 13;
+                            word ^= word >> 7;
+                            word ^= word << 17;
+                            match word % 5 {
+                                0 if levels > 2 => -0.0,
+                                1 if levels > 2 => 0.0,
+                                _ => (word % levels) as f32 / 3.0 - 1.0,
+                            }
+                        })
+                        .collect(),
+                );
+            }
+        }
+        let mut checked = 0;
+        for values in &cases {
+            assert_eq!(greedy_index(values), scalar_greedy_reference(values));
+            // Signed-zero maximum classes resolve to their first member.
+            let mut zeros = values
+                .iter()
+                .map(|&value| {
+                    if value > 0.0 {
+                        -1.0
+                    } else {
+                        value
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(greedy_index(&zeros), scalar_greedy_reference(&zeros));
+            // Ties placed in the first lane, the last lane, and the tail.
+            if !values.is_empty() {
+                let top = f32::MAX;
+                for at in [0, values.len() / 2, values.len() - 1, values.len().saturating_sub(33)] {
+                    let mut tied = values.clone();
+                    tied[at] = top;
+                    tied[values.len() - 1] = top;
+                    assert_eq!(greedy_index(&tied), scalar_greedy_reference(&tied));
+                }
+                for bad in nonfinite {
+                    for at in [0, values.len() / 2, values.len() - 1] {
+                        let saved = zeros[at];
+                        zeros[at] = bad;
+                        assert_eq!(greedy_index(&zeros), None);
+                        zeros[at] = saved;
+                    }
+                }
+            }
+            checked += 1;
+        }
+        assert!(checked == cases.len());
+        let distribution = sampling_distribution(&[0.0, 3.0, -0.0, 3.0], &Sampling::Greedy {}, None).unwrap();
+        assert!(distribution.indices == [1] && distribution.weights == [1.0] && distribution.total == 1.0);
+        assert!(sampling_distribution(&[0.0, f32::INFINITY], &Sampling::Greedy {}, None).is_err());
+    }
+
     #[test]
     fn stochastic_sampling_is_seeded_and_min_p_is_relative() {
         let options = Sampling::Stochastic {

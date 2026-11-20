@@ -234,24 +234,30 @@ kernel void gdn_verify_gated_exact(device const bfloat* qkv [[buffer(0)]],
 }
 
 // Register-resident alternative of the same short scan. Each thread retains
-// its state column; captures preserve the exact F32 row boundary for rollback.
+// its state column across the rows.
+// Modified by Stark: the state is read from `state_in` and only the final
+// row's state is written, to `state_out`; no per-row captures. Each thread
+// reads its whole column before it writes it, so `state_in` may alias
+// `state_out` (in place). A verify pass keeps the pre-verify state by
+// writing to a separate buffer; rollback reruns this same kernel from that
+// state over the accepted rows only (replay), which reproduces ordinary
+// decode's state bytes for every accepted prefix.
 kernel void gdn_verify_gated_exact_register(device const bfloat* qkv [[buffer(0)]],
                                            device const bfloat* a [[buffer(1)]],
                                            device const bfloat* b [[buffer(2)]],
                                            device const float* a_log [[buffer(3)]],
                                            device const bfloat* dt_bias [[buffer(4)]],
-                                           device float* state [[buffer(5)]],
+                                           device const float* state_in [[buffer(5)]],
                                            device const bfloat* z [[buffer(6)]],
                                            device const float* norm_w [[buffer(7)]],
                                            device bfloat* out [[buffer(8)]],
-                                           device float* mid [[buffer(9)]],
+                                           device float* state_out [[buffer(9)]],
                                            constant uint& M [[buffer(10)]],
                                            constant uint& H [[buffer(11)]],
                                            constant uint& HK [[buffer(12)]],
-                                           constant uint& mid_count [[buffer(13)]],
-                                           constant float& scale [[buffer(14)]],
-                                           constant float& eps [[buffer(15)]],
-                                           constant uint& gate_act [[buffer(16)]],
+                                           constant float& scale [[buffer(13)]],
+                                           constant float& eps [[buffer(14)]],
+                                           constant uint& gate_act [[buffer(15)]],
                                            uint h [[threadgroup_position_in_grid]],
                                            uint tid [[thread_index_in_threadgroup]],
                                            uint sg [[simdgroup_index_in_threadgroup]],
@@ -265,7 +271,7 @@ kernel void gdn_verify_gated_exact_register(device const bfloat* qkv [[buffer(0)
     threadgroup float inv_rms;
     const uint C = (2 * HK + H) * DIM;
     const uint hk = h / (H / HK);
-    device float* st = state + (ulong)h * DIM * DIM;
+    device const float* st = state_in + (ulong)h * DIM * DIM;
     float column[DIM];
     for (uint k0 = 0; k0 < DIM; ++k0) {
         column[k0] = st[k0 * DIM + tid];
@@ -346,16 +352,11 @@ kernel void gdn_verify_gated_exact_register(device const bfloat* qkv [[buffer(0)
         const float gate = float(z[at]);
         const float act = gate_activation(gate, gate_act);
         out[at] = bfloat(norm_w[tid] * rv * inv_rms * act);
-        if (row < mid_count) {
-            for (uint k0 = 0; k0 < DIM; ++k0) {
-                const ulong index = ((ulong)h * DIM + k0) * DIM + tid;
-                mid[(ulong)row * H * DIM * DIM + index] = column[k0];
-            }
-        }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
+    device float* final_state = state_out + (ulong)h * DIM * DIM;
     for (uint k0 = 0; k0 < DIM; ++k0) {
-        st[k0 * DIM + tid] = column[k0];
+        final_state[k0 * DIM + tid] = column[k0];
     }
 }
 
@@ -2222,19 +2223,22 @@ kernel void gdn_normgate_value_key_mlx(
 
 // Stark short-row verification adaptation of the qualified stock K1 above.
 // Each thread keeps the same physical F32 state cells and the same SIMD
-// reductions. Only the outer token loop and rollback captures are added.
+// reductions. Only the outer token loop is added. The state is read from
+// `state_in` and the final row's state written to `state_out` (which may
+// alias it: every thread reads its cells before writing them); rollback
+// reruns this kernel from the retained pre-verify state over the accepted
+// rows.
 kernel void gdn_verify_raw_value_key_exact(
     device const bfloat* qkv [[buffer(0)]],
     device const bfloat* a_in [[buffer(1)]],
     device const bfloat* b_in [[buffer(2)]],
     device const float* A_log [[buffer(3)]],
     device const bfloat* dt_bias [[buffer(4)]],
-    device float* state [[buffer(5)]],
+    device const float* state [[buffer(5)]],
     device bfloat* y [[buffer(6)]],
-    device float* mid [[buffer(7)]],
+    device float* state_out [[buffer(7)]],
     constant float& k_scale_f32 [[buffer(8)]],
     constant uint& rows [[buffer(9)]],
-    constant uint& captures [[buffer(10)]],
     uint tg [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]],
     uint sg [[simdgroup_index_in_threadgroup]]) {
@@ -2298,11 +2302,8 @@ kernel void gdn_verify_raw_value_key_exact(
             for (int i = 0; i < 4; ++i) { st[j][i] = st[j][i] + kk[i] * delta; out += st[j][i] * qq[i]; }
             out = simd_sum(out);
             uint base = (hv * DV + dv) * DK + lane * 4;
-            if (token < captures) {
-                for (int i = 0; i < 4; ++i) mid[token * HV * DV * DK + base + i] = st[j][i];
-            }
             if (token + 1 == rows) {
-                for (int i = 0; i < 4; ++i) state[base + i] = st[j][i];
+                for (int i = 0; i < 4; ++i) state_out[base + i] = st[j][i];
             }
             if (lane == 0) y[token * HV * DV + hv * DV + dv] = static_cast<T>(out);
         }

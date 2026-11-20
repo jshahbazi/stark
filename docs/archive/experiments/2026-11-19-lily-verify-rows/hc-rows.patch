@@ -1,0 +1,710 @@
+diff --git a/docs/model-experiments/2026-11-19-lily-hc-verify-rows.md b/docs/model-experiments/2026-11-19-lily-hc-verify-rows.md
+new file mode 100644
+index 00000000..4552df48
+--- /dev/null
++++ b/docs/model-experiments/2026-11-19-lily-hc-verify-rows.md
+@@ -0,0 +1,179 @@
++# 20261119-LILYROWS-01: shared-weight hyper-connection reads in MTP verify
++
++Registered and executed 2026-11-19. Owner: Claude (workstream `hc-rows`).
++State: completed (draft record; the orchestrator integrates the index and
++provenance).
++
++## Identity and state
++
++| Field | Value |
++| --- | --- |
++| Attempt ID / registered date / executed date / owner | 20261119-LILYROWS-01 / 2026-11-19 / 2026-11-19 / Claude, workstream `hc-rows` |
++| Kind | Kernel scheduling (MTP verify hyper-connection reads) |
++| Attempt state | Completed |
++| Result and acceptance criterion | Partial. Shared-weight exact down half: passed byte tests and the end-to-end hash gate. Shared-weight exact up half: failed (not byte-exact under fast math) and rejected. Target HC verify time of about 3.2/3.4/3.6 ms at 2/3/4 rows: not reached |
++| Evidence scope | Operator/component byte tests, synthetic-weight component timing, full-model end-to-end output hashes and timing (screening only) |
++| Promotion decision | Down half awaiting orchestrator qualification; up half rejected |
++| Disposition | Uncommitted change in the `hc-rows` worktree; not merged, released or installed |
++| Predecessor / related attempts / governing issue / PR | 20261119-SUSHI-02 (baseline profile), 20261116-LILY-REUSE-01 (projection reuse precedent, commit `63c7601f`); no PR |
++
++## Hypothesis and change
++
++- Problem: every MTP verify hyper-connection (HC) read runs the one-row
++  down and up bodies once per row on the grid's row axis
++  (`stark_hc_down_decode_rows`, `stark_hc_up_cached_rows_g<G>`). The
++  baseline stage profile shows HC verify GPU time of 2.91 ms (serial step),
++  4.26, 5.39 and 6.37 ms at 1 to 4 rows, about 1.15 ms per extra row.
++- Hypothesis: the per-row cost is repeated weight traffic, so reading each
++  weight word once for all rows (as projection reuse does) would flatten it.
++- Candidate: `hc_read_verify_exact` (Lily, non-official rounding path) now
++  encodes the down half with the existing shared-weight kernel
++  `hc_read_down_q8_m<rows>` (`hc_read_down_q8_rows`), which unpacks each Q8
++  word and loads each scale and bias once and keeps an independent
++  per-row accumulation with the MB=1 lane order. The up half keeps the
++  row-axis one-row cached body.
++- Fixed criteria set before the runs: byte equality of every output field
++  and row against the MB=1 bodies for all supported row counts, real
++  dimensions, edge geometries, zeros, subnormals and cancellation, offset
++  views and output canaries; then the real-model verify/rollback test and
++  the baseline output-hash gate for all eight arms.
++
++## Artifact, source and environment
++
++| Field | Baseline | Candidate |
++| --- | --- | --- |
++| Model family, exact checkpoint and upstream revision | `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` at `0f94842e3682b49acace4daeb4cf2e65a6f94f83` | Same |
++| Format/quantization | Lily Q4-XL; HC down/up/inject weights Q8 group 64 | Same |
++| Backend, vendor revision and local patch provenance | `vendor/lily-core` at base `4d09b550` | Base plus this workstream's HC call-site change |
++| Stark commit, dirty patch and executable hash | `4d09b550`; worker `5dfb90b6...298d` | `4d09b550` plus `runtime/patches/hc-rows.patch`; worker `d65919028cdb050fec4a8c8a47e303c712ac5910617872d3dabd9bf0d06363f8` |
++| Toolchains and build flags | Rust 1.98.1 release, `--locked` | Same; tests with `nightly-2026-10-01` |
++| Weight, activation, accumulation, recurrent-state and KV precision | Mixed Q4/Q8 weights, BF16 activations, F32 accumulation | Unchanged |
++| Selected kernel and materialization policies | Verify HC down: row-axis MB=1 body | Verify HC down: shared-weight `hc_read_down_q8_m<rows>`; up unchanged |
++| Hardware, OS, Metal toolchain | Apple M5 Max, 128 GB, Darwin 25.6.0, Metal front end 32023.883 | Same |
++| Memory | Not measured | No new buffers |
++
++## Workload and controls
++
++- Image-loaded default worker, 4,096-token frozen public code corpus, fresh
++  requests, arms g0 to g3 (greedy, 512 tokens) and s0 to s3 (temperature 1,
++  top-k 20, top-p 0.95, seed 42, 256 tokens), one repeat, host shared with
++  other agents (screening only), via the shared model-slot wrapper.
++- Component timing: `verifier_rows_streaming_timing` (ignored test in
++  `hc_tests.rs`), 97 distinct synthetic Q8 weight sets at H=2560, G=4,
++  R=320, group 64 (about 680 MB, so weights stream from DRAM), down and up
++  halves timed in separate chains, 12 measured passes per configuration in
++  rotating order after a 2 s warmup. The GPU was shared with other agents.
++- Prefix reuse and image paths: not affected (kernel substitution inside
++  the verify graph only); not separately exercised beyond the hash gate.
++
++## Attempt history and failures
++
++| Trial / source | What was attempted | Observation | Validity and disposition |
++| --- | --- | --- | --- |
++| A, cost location | Component timing of the existing row-axis kernels against shared-weight kernels | Row-axis down+up per pass of 97 reads: about 1.86, 2.38-2.49, 3.09-3.29, 3.83-4.03 ms at 1-4 rows. Even the non-exact prefill shared kernels still grow about 0.2-0.3 ms per row in the down half. Weight traffic is not the main per-row cost | Valid screening; see reading below |
++| B, down half | Existing `hc_read_down_q8_m{2,3,4}` as the verify down kernel | Byte-identical to the MB=1 body in all 1,080 cases (3 draws x 5 geometries x 4 row counts x 6 styles, with and without inject, plus up-only cases). About 0.06, 0.15-0.2, 0.2-0.25 ms faster per pass than the row-axis down at 2, 3, 4 rows | Adopted (pending orchestration) |
++| C, up half, register template | New `stark_hc_up_cached_shared_g<G>_m<MB>`: weights, scales and biases once per lane, per-row accumulation with the cached body's expression | IR identical per row to the one-row body, yet rows 1-3 differed in up to 300 of 2,560 bf16 outputs with subnormal streams and in single outputs on ordinary random inputs | Not exact; rejected |
++| C2 | Same with a rolled (unroll-disabled) per-row epilogue | Passed one draw of all styles; failed a second draw with one differing bf16 output (style random, rows 2, row 0) | Not exact; rejected |
++| C3 | Same with epilogue inputs parked in threadgroup memory | Failed G=1 subnormal cases | Not exact; rejected |
++| D, loop kernels | One threadgroup/simdgroup running the unchanged MB=1 down or cached up body for every row in turn (cache-resident weights) | Byte-exact, but slower than the row-axis kernels at every row count (serialized latency) | Rejected on speed |
++
++Diagnosis of the up failures: the AIR for the template matches the one-row
++body per row; the differences come from the GPU back-end's fast-math
++scheduling of the mix epilogue (`sigmoid(logit) * bf16(hyper * inv_rms *
++gain)` accumulation), which changes with the surrounding multi-row code.
++Inputs that keep the normalized streams normal were exact; subnormal
++streams and rare rounding boundaries were not. Source-level equivalence is
++therefore not sufficient for a shared-weight up kernel at this precision
++policy, and an empirically passing variant was found to be draw-dependent.
++
++## Correctness and lifecycle
++
++- Kernel byte tests (physical Metal, `nightly-2026-10-01`, release):
++  `verifier_shared_rows_match_ordinary_hc_bytes` (new) 1,080 cases,
++  4,620,960 compared bytes, 0 unequal, reference and candidate SHA-256
++  `5f0650be90410c2eb6f9b7d48f3d4b6d68814de42b00e1897d3a45573b6a49fe`;
++  `verifier_cached_rows_match_ordinary_hc_bytes` 128 cases, 699,360 bytes,
++  0 unequal; `cached_read_is_bit_identical_to_single_row` 28 cases, equal
++  hashes.
++- Real-model exactness test `private_checkpoint_mtp_verify_and_rollback_match_serial`:
++  passed (1 test, 54.7 s, model under the shared slot, `STARK_TEST_MODEL_PATH`;
++  the brief's `STARK_LILY_TEST_MODEL_PATH` name panics on the missing fixture
++  variable, which was a first invalid attempt).
++- End-to-end gate `runtime/agent-runs/hc-rows-1.json`: input hash matches
++  the baseline; output hashes and MTP work counts equal the baseline for all
++  eight arms.
++- No scratch, buffer or lifecycle change: the shared kernel writes the same
++  `[rows, ...]` outputs into the existing verify scratch.
++
++## Performance and memory
++
++Component timing (median GPU ms per pass of 97 HC reads, run 3 of 4, shared
++GPU; other runs agree within about 10 percent):
++
++| Rows | Row-axis down | Shared down (adopted) | Row-axis up (kept) | Shared up, not exact |
++| ---: | ---: | ---: | ---: | ---: |
++| 1 | 0.974 | 0.963 | 0.879 | 0.908 |
++| 2 | 1.185 | 1.087 | 1.302 | 0.929 |
++| 3 | 1.571 | 1.363 | 1.716 | 1.052 |
++| 4 | 1.899 | 1.681 | 2.134 | 1.523 |
++
++End-to-end screening (one repeat, shared host, uninstrumented): tok/s
++change against the baseline g0 +3.41, g1 +3.85, g2 +1.69, g3 +1.08, s0
++-2.32, s1 -2.54, s2 +0.23, s3 +3.69 percent. The MTP-off arms (g0, s0), which
++this change does not touch, moved by the same magnitude, so these are noise
++and no end-to-end speed claim is made.
++
++Stage profile (`qwen.mtp.verify.gpu.hc`, ms per verify pass):
++Two instrumented sessions on a contended host. In both, the untouched
++serial-step HC and GPU command totals were 10 to 20 percent above the
++baseline session, so absolute values are not comparable.
++
++| Session | Serial HC (s0) | 2 rows (s1) | 3 rows (s2) | 4 rows (s3) | Verify command at 2/3/4 rows |
++| --- | ---: | ---: | ---: | ---: | --- |
++| Baseline 20261119-SUSHI-02 | 2.907 | 4.257 | 5.389 | 6.374 | 19.52 / 25.29 / 30.96 |
++| `hc-rows-2` (s1-s3; warmup s0 only) | 3.295 (warmup) | 4.434 | 6.407 | 7.651 | 20.92 / 27.09 / 32.70 |
++| `hc-rows-3` (s0-s3) | 3.477 | 4.826 | 4.943 | 5.955 | 20.76 / 25.19 / 32.50 |
++
++The two candidate sessions disagree by up to 30 percent at 3 rows, so the
++in-model HC effect is inconclusive at this noise level. Run files:
++`runtime/agent-runs/hc-rows-2-staged.json`, `hc-rows-2-stages.jsonl`,
++`hc-rows-3-staged.json`, `hc-rows-3-stages.jsonl`.
++
++## Evidence, decision and limits
++
++- Reading: the per-row HC cost is mostly not weight traffic. In the down
++  half each of the 324 output-row threadgroups rereads the full 20 KB hyper
++  row and recomputes its squared norm, about 6.6 MB of cache traffic per
++  row per read, twice the weight bytes; in the up half each extra row adds
++  per-column unpack, dot and a four-way SIMD reduction plus the mix
++  epilogue. Sharing weight loads removes only part of this, and the up half
++  cannot share them exactly under the present fast-math compilation.
++- Adopted within scope: shared-weight down for Lily verify rows 2 to 4 (and
++  1). Rejected: every tested shared-weight up variant.
++- Row counts beyond 4 (to 9): the down kernel is a template on MB; adding
++  instantiations and raising `HC_FUSED_MAX_ROWS` would need its byte test
++  rerun at those counts. Not done.
++- Not verified: quiet-host timing; an in-model HC improvement (the stage sessions were
++  too noisy; the orchestrator's quiet A/B is needed).
++- Next action: an exact flattening of HC rows would need either a
++  multi-output-row down threadgroup that stages the normalized row once
++  (also a candidate for the one-row decode HC, about 20 percent of a serial
++  step), or an explicitly ordered (non-fast-math) one-row HC body adopted
++  for decode and verify together, which changes decode numerics and needs
++  its own precision qualification.
++
++## Local patch provenance (vendor/lily-core)
++
++- `src/qwen4exp/model.rs`: `hc_read_verify_exact` calls
++  `hc_read_down_q8_rows` (kernel `hc_read_down_q8_m<rows>`) instead of
++  `hc_read_down_q8_decode_rows`; import list adjusted.
++- `src/kernels/hc.rs`: documentation of the exactness reliance only.
++- `src/kernels/hc_tests.rs`: new byte test
++  `verifier_shared_rows_match_ordinary_hc_bytes` and diagnostic timing test
++  `verifier_rows_streaming_timing`; `GuardedTensor::rows` and
++  `ReadOutputs::rows` helpers.
++- No Metal source change. Sushi source was not read or adapted.
++
++## Follow-up history
++
++None yet.
+diff --git a/vendor/lily-core/src/kernels/hc.rs b/vendor/lily-core/src/kernels/hc.rs
+index 25c032cc..f3a13d96 100644
+--- a/vendor/lily-core/src/kernels/hc.rs
++++ b/vendor/lily-core/src/kernels/hc.rs
+@@ -571,7 +571,9 @@ pub fn hc_read_down_q8(
+ /// `[rows, G]`, `inv_rms` F32 `[rows, groups]`; `act_out` (`[rows, lowrank]`)
+ /// additionally receives `silu(down / groups)` (`silu_scaled_bf16`'s value)
+ /// for [`hc_read_up_mix_q8_rows`]. Row `m` of `down`, `inj` and `inv_rms` is
+-/// bit-identical to the single-row kernel on row `m` of `hyper`.
++/// bit-identical to the single-row kernel on row `m` of `hyper`. The exact
++/// verifier read relies on this: `verifier_shared_rows_match_ordinary_hc_bytes`
++/// compares every row count byte for byte against the MB=1 body.
+ #[allow(clippy::too_many_arguments)]
+ pub fn hc_read_down_q8_rows(
+     ctx: &MetalContext,
+diff --git a/vendor/lily-core/src/kernels/hc_tests.rs b/vendor/lily-core/src/kernels/hc_tests.rs
+index 5311f123..4b1016c0 100644
+--- a/vendor/lily-core/src/kernels/hc_tests.rs
++++ b/vendor/lily-core/src/kernels/hc_tests.rs
+@@ -148,6 +148,259 @@ fn verifier_cached_rows_match_ordinary_hc_bytes() -> Result<()> {
+     Ok(())
+ }
+ 
++/// Fills `values` with one of the HC byte-test input styles: 0 random, 1
++/// zeros, 2 alternating +-32 (cancellation), 3 signed zeros, subnormals and
++/// +-1, 4 random with per-row magnitudes 2^(4m), 5 random bf16 bit patterns
++/// with small exponents (subnormal-heavy) and both signs.
++fn hc_style_values(state: &mut u32, values: &mut [f32], row_len: usize, style: usize) {
++    for (i, v) in values.iter_mut().enumerate() {
++        match style {
++            1 => *v = 0.0,
++            2 => *v = if i.is_multiple_of(2) { 32.0 } else { -32.0 },
++            3 => {
++                *v = half::bf16::from_bits(
++                    [0x0000, 0x8000, 0x0001, 0x8001, 0x3f80, 0xbf80][i % 6],
++                )
++                .to_f32();
++            }
++            4 => *v *= (16.0f32).powi((i / row_len) as i32),
++            5 => {
++                let word = next_word(state);
++                let exponent = (word >> 16) % 6;
++                let bits = ((word & 0x8000) | (exponent << 7) | (word & 0x7f)) as u16;
++                *v = half::bf16::from_bits(bits).to_f32();
++            }
++            _ => {}
++        }
++    }
++}
++
++/// The verifier HC read as `hc_read_verify_exact` encodes it (the
++/// shared-weight `hc_read_down_q8_m<rows>` kernel, then the row-axis cached
++/// up body) against the MB=1 decode bodies, at every supported row count:
++/// three weight/input draws of production and edge geometries, with and
++/// without injection, offset input and output views, output canaries, and
++/// input styles covering zeros, subnormals, per-row magnitude spread and
++/// cancellation. The up half is also checked alone on activations, streams
++/// and inverse RMS values in the same styles. A shared-weight up kernel is
++/// not used: rearranged multi-row up bodies tried in attempt
++/// 20261119-LILYROWS-01 differed from the one-row body in single bf16
++/// outputs under the compiler's fast-math scheduling.
++#[test]
++#[ignore = "requires a physical Apple Silicon Metal device"]
++fn verifier_shared_rows_match_ordinary_hc_bytes() -> Result<()> {
++    let ctx = MetalContext::new()?;
++    let mut reference_hash = Sha256::new();
++    let mut candidate_hash = Sha256::new();
++    let (mut cases, mut checked_bytes) = (0usize, 0usize);
++    let geometries = [
++        (2560, 4, 320, 64),
++        (208, 4, 192, 64),
++        (192, 3, 128, 64),
++        (176, 1, 80, 16),
++        (64, 8, 64, 64),
++    ];
++    // Three independent weight/input draws per geometry.
++    let draws = [0x5348_5257u32, 0x2545_f491, 0x9e37_79b9]
++        .into_iter()
++        .flat_map(|seed| geometries.into_iter().map(move |geometry| (seed, geometry)));
++    for (seed, (h, g, r, gs)) in draws {
++        let mut state = seed ^ (h * 8 + g) as u32;
++        let k = h * g;
++        let down = q8_weight(&ctx, &mut state, r, k, gs)?;
++        let up = q8_weight(&ctx, &mut state, k, r, gs)?;
++        let inject_w = q8_weight(&ctx, &mut state, g, k, gs)?;
++        let norm_storage = Tensor::from_f32_as_bf16(
++            &ctx,
++            &random_values(&mut state, k + 4, 1.0, -0.5),
++            &[k + 4],
++        )?;
++        let norm = norm_storage.view(2, &[k])?;
++        for m in 1..=HC_FUSED_MAX_ROWS {
++            for style in 0..6 {
++                let mut x = random_values(&mut state, m * k + 4, 6.0, -3.0);
++                hc_style_values(&mut state, &mut x[2..], k, style);
++                let hyper_storage = Tensor::from_f32_as_bf16(&ctx, &x, &[m * k + 4])?;
++                let hyper = hyper_storage.view(2, &[m, k])?;
++                for with_inject in [true, false] {
++                    let inject = with_inject.then_some(&inject_w);
++                    let reference: Vec<_> = (0..m)
++                        .map(|_| ReadOutputs::new(&ctx, h, g, r))
++                        .collect::<Result<_>>()?;
++                    let candidate = ReadOutputs::rows(&ctx, m, h, g, r)?;
++                    let pass = ctx.begin_concurrent()?;
++                    for (row, out) in reference.iter().enumerate() {
++                        hc_read_down_q8_rows(
++                            &ctx,
++                            &pass,
++                            &hyper.view(row * k, &[1, k])?,
++                            &norm,
++                            &down,
++                            inject,
++                            &out.down.value,
++                            &out.inj.value,
++                            &out.inv_rms.value,
++                            &out.act.value,
++                            h,
++                            g,
++                            1e-6,
++                            1.0,
++                        )?;
++                    }
++                    hc_read_down_q8_rows(
++                        &ctx,
++                        &pass,
++                        &hyper,
++                        &norm,
++                        &down,
++                        inject,
++                        &candidate.down.value,
++                        &candidate.inj.value,
++                        &candidate.inv_rms.value,
++                        &candidate.act.value,
++                        h,
++                        g,
++                        1e-6,
++                        1.0,
++                    )?;
++                    pass.level_barrier(&[])?;
++                    for (row, out) in reference.iter().enumerate() {
++                        hc_read_up_mix_q8_cached(
++                            &ctx,
++                            &pass,
++                            &up,
++                            &out.act.value,
++                            &hyper.view(row * k, &[1, k])?,
++                            &norm,
++                            &out.inv_rms.value,
++                            &out.mixed.value,
++                            h,
++                            g,
++                            1.0,
++                        )?;
++                    }
++                    hc_read_up_mix_q8_cached_rows(
++                        &ctx,
++                        &pass,
++                        &up,
++                        &candidate.act.value,
++                        &hyper,
++                        &norm,
++                        &candidate.inv_rms.value,
++                        &candidate.mixed.value,
++                        h,
++                        g,
++                        1.0,
++                    )?;
++                    pass.commit_wait()?;
++                    for (index, (field, b)) in
++                        candidate.fields().into_iter().enumerate()
++                    {
++                        b.check_canaries()?;
++                        if !with_inject && field == "inject" {
++                            continue;
++                        }
++                        let bytes = b.value.raw_bytes();
++                        let stride = bytes.len() / m;
++                        for (row, out) in reference.iter().enumerate() {
++                            let a = out.fields()[index].1;
++                            a.check_canaries()?;
++                            let diff = a
++                                .value
++                                .raw_bytes()
++                                .chunks(2)
++                                .zip(bytes[row * stride..(row + 1) * stride].chunks(2))
++                                .filter(|(x, y)| x != y)
++                                .count();
++                            ensure!(
++                                diff == 0,
++                                "HC shared verifier mismatch: field={field} row={row} rows={m} h={h} g={g} r={r} gs={gs} inject={with_inject} style={style} unequal_elements={diff}"
++                            );
++                            reference_hash.update(a.value.raw_bytes());
++                        }
++                        candidate_hash.update(bytes);
++                        checked_bytes += bytes.len();
++                    }
++                    cases += 1;
++                }
++                // The up kernel alone on activations and inverse RMS values
++                // in the same styles (the end-to-end path only reaches SiLU
++                // outputs of the down logits).
++                let mut act_values = random_values(&mut state, m * r + 4, 8.0, -4.0);
++                hc_style_values(&mut state, &mut act_values[2..], r, style);
++                let mut hyper_up_values = random_values(&mut state, m * k, 6.0, -3.0);
++                hc_style_values(&mut state, &mut hyper_up_values, k, style);
++                let hyper_up =
++                    Tensor::from_f32_as_bf16(&ctx, &hyper_up_values, &[m, k])?;
++                let act_storage =
++                    Tensor::from_f32_as_bf16(&ctx, &act_values, &[m * r + 4])?;
++                let act = act_storage.view(2, &[m, r])?;
++                let rms_values = random_values(&mut state, m * g, 2.0, 0.001);
++                let inv_rms = Tensor::from_f32(&ctx, &rms_values, &[m, g])?;
++                let reference: Vec<_> = (0..m)
++                    .map(|_| GuardedTensor::new(&ctx, h, DType::BF16))
++                    .collect::<Result<_>>()?;
++                let candidate = GuardedTensor::rows(&ctx, m, h, DType::BF16)?;
++                let pass = ctx.begin_concurrent()?;
++                for (row, out) in reference.iter().enumerate() {
++                    hc_read_up_mix_q8_cached(
++                        &ctx,
++                        &pass,
++                        &up,
++                        &act.view(row * r, &[1, r])?,
++                        &hyper_up.view(row * k, &[1, k])?,
++                        &norm,
++                        &inv_rms.view(row * g, &[1, g])?,
++                        &out.value,
++                        h,
++                        g,
++                        1.0,
++                    )?;
++                }
++                hc_read_up_mix_q8_cached_rows(
++                    &ctx,
++                    &pass,
++                    &up,
++                    &act,
++                    &hyper_up,
++                    &norm,
++                    &inv_rms,
++                    &candidate.value,
++                    h,
++                    g,
++                    1.0,
++                )?;
++                pass.commit_wait()?;
++                candidate.check_canaries()?;
++                let bytes = candidate.value.raw_bytes();
++                let stride = bytes.len() / m;
++                for (row, out) in reference.iter().enumerate() {
++                    out.check_canaries()?;
++                    let a = out.value.raw_bytes();
++                    let b = &bytes[row * stride..(row + 1) * stride];
++                    let diff =
++                        a.chunks(2).zip(b.chunks(2)).filter(|(x, y)| x != y).count();
++                    ensure!(
++                        diff == 0,
++                        "HC shared verifier up-only mismatch: row={row} rows={m} h={h} g={g} r={r} gs={gs} style={style} unequal_elements={diff}"
++                    );
++                    reference_hash.update(out.value.raw_bytes());
++                }
++                candidate_hash.update(bytes);
++                checked_bytes += bytes.len();
++                cases += 1;
++            }
++        }
++    }
++    let (reference_hash, candidate_hash) =
++        (hex(&reference_hash.finish()), hex(&candidate_hash.finish()));
++    ensure!(reference_hash == candidate_hash, "HC shared verifier hashes differ");
++    println!(
++        "{{\"hc_shared_verifier_cases\":{cases},\"compared_bytes\":{checked_bytes},\"unequal_bytes\":0,\"reference_sha256\":\"{reference_hash}\",\"candidate_sha256\":\"{candidate_hash}\"}}"
++    );
++    Ok(())
++}
++
+ fn next_word(state: &mut u32) -> u32 {
+     *state ^= *state << 13;
+     *state ^= *state >> 17;
+@@ -193,9 +446,13 @@ struct GuardedTensor {
+ 
+ impl GuardedTensor {
+     fn new(ctx: &MetalContext, n: usize, dtype: DType) -> Result<Self> {
+-        let storage = Tensor::zeros(ctx, &[n + 4], dtype)?;
++        Self::rows(ctx, 1, n, dtype)
++    }
++
++    fn rows(ctx: &MetalContext, rows: usize, n: usize, dtype: DType) -> Result<Self> {
++        let storage = Tensor::zeros(ctx, &[rows * n + 4], dtype)?;
+         storage.write_bytes(&vec![0xa5; storage.byte_len()])?;
+-        let value = storage.view(2, &[1, n])?;
++        let value = storage.view(2, &[rows, n])?;
+         Ok(Self { storage, value })
+     }
+ 
+@@ -232,6 +489,22 @@ impl ReadOutputs {
+         })
+     }
+ 
++    fn rows(
++        ctx: &MetalContext,
++        rows: usize,
++        h: usize,
++        g: usize,
++        r: usize,
++    ) -> Result<Self> {
++        Ok(Self {
++            down: GuardedTensor::rows(ctx, rows, r, DType::BF16)?,
++            inj: GuardedTensor::rows(ctx, rows, g, DType::BF16)?,
++            inv_rms: GuardedTensor::rows(ctx, rows, g, DType::F32)?,
++            act: GuardedTensor::rows(ctx, rows, r, DType::BF16)?,
++            mixed: GuardedTensor::rows(ctx, rows, h, DType::BF16)?,
++        })
++    }
++
+     fn fields(&self) -> [(&str, &GuardedTensor); 5] {
+         [
+             ("down", &self.down),
+@@ -553,3 +826,176 @@ fn cached_read_streaming_chain_timing() -> Result<()> {
+     }
+     Ok(())
+ }
++
++/// Verifier HC read variants timed by [`verifier_rows_streaming_timing`].
++const VERIFY_TIMING_VARIANTS: [&str; 4] =
++    ["rowaxis_down", "rowaxis_up", "shared_down", "shared_up_not_exact"];
++
++struct VerifyTimingOutputs {
++    down: Tensor,
++    inj: Tensor,
++    inv_rms: Tensor,
++    act: Tensor,
++    mixed: Tensor,
++}
++
++#[allow(clippy::too_many_arguments)]
++fn encode_verify_timing_variant(
++    ctx: &MetalContext,
++    pass: &ComputePass<'_>,
++    variant: usize,
++    rows: usize,
++    hyper: &Tensor,
++    out: &VerifyTimingOutputs,
++    weights: &(Tensor, QuantWeights, QuantWeights, Option<QuantWeights>),
++    (h, g, r): (usize, usize, usize),
++) -> Result<()> {
++    let (norm, down, up, inject) = weights;
++    let k = g * h;
++    let hyper = hyper.view(0, &[rows, k])?;
++    let down_out = out.down.view(0, &[rows, r])?;
++    let inj_out = out.inj.view(0, &[rows, g])?;
++    let inv_rms = out.inv_rms.view(0, &[rows, g])?;
++    let act = out.act.view(0, &[rows, r])?;
++    let mixed = out.mixed.view(0, &[rows, h])?;
++    match variant {
++        0 | 2 => {
++            let f = if variant == 0 {
++                hc_read_down_q8_decode_rows
++            } else {
++                hc_read_down_q8_rows
++            };
++            f(
++                ctx,
++                pass,
++                &hyper,
++                norm,
++                down,
++                inject.as_ref(),
++                &down_out,
++                &inj_out,
++                &inv_rms,
++                &act,
++                h,
++                g,
++                1e-6,
++                1.0,
++            )
++        }
++        _ => {
++            let f = if variant == 1 {
++                hc_read_up_mix_q8_cached_rows
++            } else {
++                hc_read_up_mix_q8_rows
++            };
++            f(ctx, pass, up, &act, &hyper, norm, &inv_rms, &mixed, h, g, 1.0)
++        }
++    }
++}
++
++/// GPU time per HC read of each verifier variant at 1 to HC_FUSED_MAX_ROWS
++/// rows, over 97 distinct weight sets (the model's HC read count) so the
++/// weights stream from DRAM as they do in a verify pass. Down and up halves
++/// are timed in separate chains.
++#[test]
++#[ignore = "requires a physical Apple Silicon Metal device; diagnostic timing only"]
++fn verifier_rows_streaming_timing() -> Result<()> {
++    let ctx = MetalContext::new()?;
++    let mut random = 0x4843_5257u32;
++    let (h, g, r, gs, reads) = (2560, 4, 320, 64, 97);
++    let k = g * h;
++    let max_rows = HC_FUSED_MAX_ROWS;
++    let hyper = Tensor::from_f32_as_bf16(
++        &ctx,
++        &random_values(&mut random, max_rows * k, 6.0, -3.0),
++        &[max_rows, k],
++    )?;
++    let mut weights = Vec::new();
++    for index in 0..reads {
++        let norm = Tensor::from_f32_as_bf16(
++            &ctx,
++            &random_values(&mut random, k, 1.0, -0.5),
++            &[k],
++        )?;
++        let down = q8_weight(&ctx, &mut random, r, k, gs)?;
++        let up = q8_weight(&ctx, &mut random, k, r, gs)?;
++        let inject = if index + 1 == reads {
++            None
++        } else {
++            Some(q8_weight(&ctx, &mut random, g, k, gs)?)
++        };
++        weights.push((norm, down, up, inject));
++    }
++    let out = VerifyTimingOutputs {
++        down: Tensor::zeros(&ctx, &[max_rows, r], DType::BF16)?,
++        inj: Tensor::zeros(&ctx, &[max_rows, g], DType::BF16)?,
++        inv_rms: Tensor::zeros(&ctx, &[max_rows, g], DType::F32)?,
++        act: Tensor::zeros(&ctx, &[max_rows, r], DType::BF16)?,
++        mixed: Tensor::zeros(&ctx, &[max_rows, h], DType::BF16)?,
++    };
++    // Give the up chains a realistic activation and inverse RMS.
++    let pass = ctx.begin_concurrent()?;
++    encode_verify_timing_variant(
++        &ctx,
++        &pass,
++        0,
++        max_rows,
++        &hyper,
++        &out,
++        &weights[0],
++        (h, g, r),
++    )?;
++    pass.commit_wait()?;
++    let configs: Vec<(usize, usize)> = (1..=max_rows)
++        .flat_map(|rows| (0..VERIFY_TIMING_VARIANTS.len()).map(move |v| (rows, v)))
++        .collect();
++    let mut times = vec![Vec::new(); configs.len()];
++    let warmup = std::time::Instant::now();
++    let mut round = 0usize;
++    let mut measured_rounds = 0;
++    loop {
++        let timed = warmup.elapsed() >= std::time::Duration::from_secs(2);
++        for step in 0..configs.len() {
++            let index = (step + round) % configs.len();
++            let (rows, variant) = configs[index];
++            let pass = ctx.begin_concurrent()?;
++            for w in &weights {
++                encode_verify_timing_variant(
++                    &ctx,
++                    &pass,
++                    variant,
++                    rows,
++                    &hyper,
++                    &out,
++                    w,
++                    (h, g, r),
++                )?;
++                pass.level_barrier(&[&out.down, &out.mixed])?;
++            }
++            let completed = pass.commit()?.wait_retain()?;
++            let timing = completed.timing()?;
++            if timed {
++                times[index].push((timing.gpu_end_secs - timing.gpu_start_secs) * 1e3);
++            }
++        }
++        round += 1;
++        if timed {
++            measured_rounds += 1;
++            if measured_rounds == 12 {
++                break;
++            }
++        }
++    }
++    for (index, samples) in times.iter_mut().enumerate() {
++        let (rows, variant) = configs[index];
++        samples.sort_unstable_by(f64::total_cmp);
++        let median = (samples[5] + samples[6]) * 0.5;
++        eprintln!(
++            "HC verify timing: variant={} rows={rows} reads={reads} samples={} min_ms_per_pass={:.4} median_ms_per_pass={median:.4}",
++            VERIFY_TIMING_VARIANTS[variant],
++            samples.len(),
++            samples[0],
++        );
++    }
++    Ok(())
++}
+diff --git a/vendor/lily-core/src/qwen4exp/model.rs b/vendor/lily-core/src/qwen4exp/model.rs
+index 5d515412..b38f606d 100644
+--- a/vendor/lily-core/src/qwen4exp/model.rs
++++ b/vendor/lily-core/src/qwen4exp/model.rs
+@@ -50,10 +50,9 @@ use crate::kernels::hc::stock::{
+ };
+ use crate::kernels::hc::{
+     HC_FUSED_MAX_ROWS, fused_read_supported, hc_broadcast_bf16,
+-    hc_mix_bf16_with_rounding as hc_mix_bf16, hc_read_down_q8_decode_rows,
+-    hc_read_down_q8_rows, hc_read_up_mix_q8_cached, hc_read_up_mix_q8_cached_rows,
+-    hc_read_up_mix_q8_rows, official_hc_down_act_q8, official_hc_up_mix_q8,
+-    official_narrow_sigmoid_supported,
++    hc_mix_bf16_with_rounding as hc_mix_bf16, hc_read_down_q8_rows,
++    hc_read_up_mix_q8_cached, hc_read_up_mix_q8_cached_rows, hc_read_up_mix_q8_rows,
++    official_hc_down_act_q8, official_hc_up_mix_q8, official_narrow_sigmoid_supported,
+     rmsnorm_grouped_bf16_with_rounding as rmsnorm_grouped_bf16,
+     silu_scaled_bf16_with_rounding as silu_scaled_bf16,
+ };
+@@ -3051,7 +3050,10 @@ impl Qwen4ExpModel {
+             )?;
+             return pass.level_barrier(&[&out.mixed, &out.inj]);
+         }
+-        hc_read_down_q8_decode_rows(
++        // The shared-weight down kernel loads each weight word once for all
++        // rows and is byte-tested against the MB=1 body the decode step runs.
++        // The up half stays on the row-axis one-row body (see hc_tests.rs).
++        hc_read_down_q8_rows(
+             ctx,
+             pass,
+             hyper,

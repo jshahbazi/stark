@@ -89,6 +89,7 @@ Leave performance explicitly `not measured` when only functional tests were run.
 - Adoption/default decision and supporting commit/PR/build/installation evidence:
 - Untested models, formats, contexts, encoder paths, quality or lifecycle cases:
 - Next action and required evidence; link any superseding attempt without rewriting this result:
+- For a performance attempt: what changed in the [performance playbook](../PERFORMANCE_PLAYBOOK.md), or why nothing did:
 
 Keep prompts, completions, token vectors, probabilities, credentials, exception dumps and model/private evaluation files out of this document.
 
