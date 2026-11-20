@@ -178,6 +178,12 @@ A gain in a serial kernel does not reach speculation by itself. The verify pass 
 
 Source: [optimization history][hist], rows K01 to K24, U06 to U30 and F07; [llama.cpp assessment][assess].
 
+#### Inkling 2 Mini packed experts
+
+On the original three-pass Mini, test the weight layout and the activation scale at the actual kernel boundary. At 32 rows the Unsloth Metal indexed kernel with an early activation outer scale missed the registered relative L2 limit on both original layer 6 projections (about `1.6e-4`). Keeping the four-over-six inner values through the dot and restoring the scale afterward reduced both errors to about `5e-8` on the same inputs. Preserve the BF16 projection round before SwiGLU and apply routing weights before down-input quantization. [Component and model benchmarks](benchmarks/2026-11-20-inkling-mini-m5-max.md)
+
+Time the connected routed sublayer before multiplying an isolated graph latency by 44 logical visits. In a full-bank layer 0 MLX control, eight ordered singleton calls over distinct source inputs completed in 1.242 ms with one host wait (0.155 ms each). An individually synchronized singleton took 0.607–0.685 ms across sessions. The test reused a physical layer. A complete native token needs different layer weights, attention and the remaining stages. [Measurement boundaries](benchmarks/2026-11-20-inkling-mini-m5-max.md#original-weight-component-budget)
+
 ### 5. Speculative decoding
 
 #### The design that held
@@ -496,6 +502,7 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 | 2026-11-17, on a branch | [Speed review][fsreview], [speed experiments][fsexp], [agent grid][fsagent], [fresh grid][fsfresh], [kernel follow-up][fskernel] | Chunk size, prefill fusion, hyper-connection reuse, round-finish counts |
 | 2026-11-19 | [Sushi assessment][sushi], [round profile][profile], [HC rows][hc], [GDN replay][gdn], [MoE rows][moe], [host round trips][host], [depth policy][depth], [fixed-corpus benchmark][bench], [merged timing][merge] | Round profile and the six workstreams it opened |
 | 2026-11-19 to 11-20 | [Schedule gate][gate], [selector prefix reuse][selprefix], [schedule default][sched] | Matched-window gate over twelve cells, prefix reuse under the schedule options, the planner with lookup as the default on the pinned artifact |
+| 2026-11-20 | [Inkling 2 Mini first milestone](benchmarks/2026-11-20-inkling-mini-m5-max.md) | Original-weight NVFP4 scale ordering, routed sublayer timing with and without a host wait per call, MXFP8 and attention costs |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 
