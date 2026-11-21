@@ -9,6 +9,8 @@ use super::{session::read_shared, *};
 
 const TOP: usize = 8;
 const TILE: usize = 32;
+const ROWS64_QMM: Kernel = "ink_group_qmm_reused_guard_rows64";
+const EXPERIMENT_BUCKET: Kernel = "ink_group_bucket_experiment";
 const REPEATS: usize = 5;
 const PHYSICAL: usize = 10;
 const PROBE_FIELDS: usize = 5;
@@ -88,7 +90,18 @@ impl Nvfp4Probe {
 }
 
 fn run_slots(rows: usize) -> usize {
-    (rows * TOP).div_ceil(TILE) + EXPERTS - 1
+    run_slots_for(rows, TILE)
+}
+
+fn run_slots_for(
+    rows: usize,
+    tile: usize,
+) -> usize {
+    (rows * TOP).div_ceil(tile) + EXPERTS - 1
+}
+
+fn active_rows64(gpu: &Stream<'_>) -> bool {
+    gpu.runtime.source_text_active && gpu.runtime.nvfp4_probe.is_none() && gpu.runtime.grouped_qmm == ROWS64_QMM
 }
 
 pub(super) struct GroupedExperts {
@@ -339,7 +352,12 @@ impl GroupedExperts {
         } else {
             self.encode_router(gpu, &self.input, &layer.router, &layer.bias, rows);
         }
-        self.encode_buckets(gpu, &self.ids, rows);
+        let bucket = if matches!(layer.experts, Experts::Nvfp4 { .. }) && active_rows64(gpu) {
+            EXPERIMENT_BUCKET
+        } else {
+            "ink_group_bucket"
+        };
+        self.encode_buckets(gpu, &self.ids, rows, bucket);
         match &layer.experts {
             Experts::Nvfp4 {
                 up,
@@ -416,8 +434,9 @@ impl GroupedExperts {
         gpu: &mut Stream<'_>,
         ids: &Buffer,
         rows: usize,
+        kernel: Kernel,
     ) {
-        gpu.one("ink_group_bucket", &[ids, &self.order, &self.runs], (rows * TOP) as u32, (1, 1), EXPERTS);
+        gpu.one(kernel, &[ids, &self.order, &self.runs], (rows * TOP) as u32, (1, 1), EXPERTS);
     }
 
     fn encode_dot(
@@ -445,7 +464,11 @@ impl GroupedExperts {
         });
         let buffers =
             [&self.activation, &bank.codes, &bank.blocks, routing.runs, &self.quantum, &self.maxima, &self.projected];
-        let grid = (WIDTH / 64, run_slots(rows));
+        let grid = if active_rows64(gpu) {
+            (WIDTH / 32, run_slots_for(rows, 64))
+        } else {
+            (WIDTH / 64, run_slots(rows))
+        };
         if let Some(probe) = &gpu.runtime.nvfp4_probe
             && gpu.nvfp4_dots < PROBE_DOTS
         {
@@ -481,7 +504,7 @@ impl GroupedExperts {
             // The regular result overwrites every shadow result before the epilogue reads it.
             gpu.one("ink_group_qmm_probe", &buffers, [width as u32, 0, (ordinal * PROBE_FIELDS) as u32], grid, 128);
         } else {
-            let kernel = if gpu.runtime.source_text_active {
+            let kernel = if gpu.runtime.source_text_active && gpu.runtime.nvfp4_probe.is_none() {
                 gpu.runtime.grouped_qmm
             } else {
                 "ink_group_qmm"
@@ -553,6 +576,7 @@ impl GroupedExperts {
         let slots = run_slots(rows);
         let [up_kernel, down_kernel] = grouped_mxfp8_names(self.wide_mxfp8, self.source_mxfp8 && source_packed);
         gpu.one("ink_mxfp8_activation", &[&self.input, &self.up_inner], WIDTH as u32, (WIDTH / 32, rows), 32);
+        gpu.phase(PrefillPhase::Mxfp8Up);
         gpu.one(
             up_kernel,
             &[&self.up_inner, &self.order, &self.runs, &self.weights, &up.codes, &up.exponents, &out.middle],
@@ -560,7 +584,9 @@ impl GroupedExperts {
             (MID / 4, slots),
             128,
         );
+        gpu.phase(PrefillPhase::Mxfp8);
         gpu.one("ink_mxfp8_activation", &[&out.middle, &self.down_inner], MID as u32, (MID / 32, rows * TOP), 32);
+        gpu.phase(PrefillPhase::Mxfp8Down);
         gpu.one(
             down_kernel,
             &[&self.down_inner, &self.order, &self.runs, &down.codes, &down.exponents, &out.down],
@@ -568,6 +594,7 @@ impl GroupedExperts {
             (WIDTH / 4, slots),
             128,
         );
+        gpu.phase(PrefillPhase::Mxfp8);
         gpu.one("ink_group_combine", &[&out.down, &out.merged], (), (WIDTH / 128, rows), 128);
     }
 }
@@ -649,6 +676,27 @@ pub(super) fn enable_shared_scales(runtime: &mut Runtime) -> Result<()> {
     let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| kernel)?;
     runtime.pipelines.insert(kernel, pipeline);
     runtime.grouped_qmm = kernel;
+    Ok(())
+}
+
+pub(super) fn enable_rows64(runtime: &mut Runtime) -> Result<()> {
+    let options = MTLCompileOptions::new();
+    options.set_math_mode(MTLMathMode::Safe);
+    options.set_language_version(MTLLanguageVersion::Version4_0);
+    let shader = concat!(include_str!("experts.metal"), "\n", include_str!("grouped_pilot.metal"));
+    let source = format!(
+        "#include <metal_stdlib>\nusing namespace metal;\n#define INK_GROUP_QMM_REUSE_BOUND\n#define INK_GROUP_QMM_TILE_ROWS 64\n#define INK_GROUP_QMM_TILE_COLS 32\n#define ink_group_qmm {ROWS64_QMM}\n#define ink_group_bucket {EXPERIMENT_BUCKET}\n{shader}"
+    );
+    let library = runtime
+        .device
+        .new_library_with_source(&source, Some(&options))
+        .map_err(|_| "Inkling 64-row NVFP4 compilation failed")?;
+    for name in [ROWS64_QMM, EXPERIMENT_BUCKET] {
+        let function = library.new_function_with_name(name).ok_or(name)?;
+        let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
+        runtime.pipelines.insert(name, pipeline);
+    }
+    runtime.grouped_qmm = ROWS64_QMM;
     Ok(())
 }
 
@@ -952,7 +1000,7 @@ impl Trial {
             grouped.encode_router(gpu, &self.input, &self.router, &self.bias, rows);
             grouped.active_order()
         };
-        grouped.encode_buckets(gpu, routing.ids, rows);
+        grouped.encode_buckets(gpu, routing.ids, rows, "ink_group_bucket");
         grouped.encode_projected(gpu, &self.input, up, down, rows, routing, false, None);
     }
 
@@ -1193,7 +1241,7 @@ pub fn probe_prefill_expert_weights(
         ] {
             let scores = upload(device, scores)?;
             execute(&runtime, |gpu| {
-                grouped.encode_buckets(gpu, &ids, BATCH);
+                grouped.encode_buckets(gpu, &ids, BATCH, "ink_group_bucket");
                 let order = ExpertOrder {
                     ids: &ids,
                     weights: &scores,

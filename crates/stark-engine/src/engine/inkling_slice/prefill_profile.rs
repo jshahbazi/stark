@@ -33,6 +33,8 @@ pub(in crate::engine::inkling_slice) enum PrefillPhase {
     Nvfp4ProbeGuard,
     Nvfp4ProbeBare,
     Mxfp8,
+    Mxfp8Up,
+    Mxfp8Down,
     KeyValue,
     RelativeTable,
     LocalAttention,
@@ -65,6 +67,8 @@ struct Totals {
     probe_guard: f64,
     probe_bare: f64,
     mxfp8: f64,
+    mxfp8_up: f64,
+    mxfp8_down: f64,
     other: f64,
     attention_inputs: f64,
     expert_inputs: f64,
@@ -101,6 +105,8 @@ impl Totals {
             PrefillPhase::Nvfp4ProbeGuard => &mut self.probe_guard,
             PrefillPhase::Nvfp4ProbeBare => &mut self.probe_bare,
             PrefillPhase::Mxfp8 => &mut self.mxfp8,
+            PrefillPhase::Mxfp8Up => &mut self.mxfp8_up,
+            PrefillPhase::Mxfp8Down => &mut self.mxfp8_down,
             PrefillPhase::AttentionInputs => &mut self.attention_inputs,
             PrefillPhase::ExpertInputs => &mut self.expert_inputs,
             PrefillPhase::ExpertFinish => &mut self.expert_finish,
@@ -121,6 +127,8 @@ impl Totals {
             + self.attention()
             + self.nvfp4()
             + self.mxfp8
+            + self.mxfp8_up
+            + self.mxfp8_down
             + self.probe_exact
             + self.probe_guard
             + self.probe_bare
@@ -167,7 +175,7 @@ impl Totals {
             "global_query_kv_conversion_ms": self.global_packing,
             "global_mask_ms": self.global_mask,
             "global_gate_ms": self.global_gate,
-            "experts_ms": self.nvfp4() + self.mxfp8 + self.expert_combine,
+            "experts_ms": self.nvfp4() + self.mxfp8 + self.mxfp8_up + self.mxfp8_down + self.expert_combine,
             "nvfp4_experts_ms": self.nvfp4(),
             "nvfp4_routing_ms": self.experts + self.router_projection + self.route_select,
             "nvfp4_router_projection_ms": self.router_projection,
@@ -177,7 +185,9 @@ impl Totals {
             "nvfp4_gate_up_dot_ms": self.nvfp4_up_dot,
             "nvfp4_down_dot_ms": self.nvfp4_down_dot,
             "nvfp4_epilogue_ms": self.nvfp4_epilogue,
-            "mxfp8_experts_ms": self.mxfp8,
+            "mxfp8_experts_ms": self.mxfp8 + self.mxfp8_up + self.mxfp8_down,
+            "mxfp8_up_ms": self.mxfp8_up,
+            "mxfp8_down_ms": self.mxfp8_down,
             "nvfp4_probe_exact_ms": self.probe_exact,
             "nvfp4_probe_guard_only_ms": self.probe_guard,
             "nvfp4_probe_bare_ms": self.probe_bare,
@@ -516,7 +526,11 @@ fn profile_stock_case(
     let expected_seed = seed.values::<f32>("full.logits", "F32", &[1, 1, VOCABULARY])?;
     let expected_continuation = continuation.values::<f32>("full.logits", "F32", &[1, 1, VOCABULARY])?;
     let (mut plain, mut profiled, mut decode) = (Value::Null, Value::Null, Value::Null);
+    let (mut control_plain, mut control_profiled) = (Value::Null, Value::Null);
     let probe = session.runtime.nvfp4_probe.is_some();
+    let stock_qmm = "ink_group_qmm";
+    let selected_qmm = session.runtime.grouped_qmm;
+    let compare = !probe && selected_qmm != stock_qmm;
     let orders = [instrument_first, !instrument_first];
     let instruments = if probe {
         &[true][..]
@@ -524,49 +538,71 @@ fn profile_stock_case(
         &orders[..]
     };
     for &instrument in instruments {
-        session.reset();
-        let mut commands = Vec::with_capacity(STOCK_ROWS.len());
-        let start = std::time::Instant::now();
-        for rows in STOCK_ROWS {
-            let position = session.position;
-            let readout = position + rows == STOCK_INPUT;
-            if let Some(probe) = &mut session.runtime.nvfp4_probe {
-                probe.reverse = instrument_first ^ (position == 0);
-                probe.clear();
-            }
-            // Splitting all three serial tail graphs into encoder stages in
-            // one command exceeds the timestamp buffer. Keep its real command
-            // GPU time and profile the separate seed and decode graphs.
-            commands.push(stock_command(
-                session,
-                &tokens[position..position + rows],
-                readout,
-                (instrument && rows != 3).then_some(&mut *profiler),
-            )?);
-        }
-        let logits = session.read_logits()?;
-        let prefill_ms = start.elapsed().as_secs_f64() * 1000.0;
-        if !same_logits(&logits, &expected_seed) {
-            return Err("Inkling stock profile seed differs from pinned logits");
-        }
-        let result = json!({"harness_wall_ms": prefill_ms, "commands": commands});
-        if instrument {
-            profiled = result;
-            let live = session.step(tokens[STOCK_INPUT])?;
-            if !same_logits(&live, &expected_continuation) {
-                return Err("Inkling profiled stock prefill changed continuation logits");
-            }
+        let candidate_first = instrument ^ instrument_first;
+        let order = [candidate_first, !candidate_first];
+        let arms = if compare {
+            &order[..]
         } else {
-            plain = result;
-            decode = profile_stock_decode(session, profiler, tokens[STOCK_INPUT], &expected_continuation)?;
+            &[true][..]
+        };
+        for &candidate in arms {
+            session.runtime.grouped_qmm = if candidate {
+                selected_qmm
+            } else {
+                stock_qmm
+            };
+            session.reset();
+            let mut commands = Vec::with_capacity(STOCK_ROWS.len());
+            let start = std::time::Instant::now();
+            for rows in STOCK_ROWS {
+                let position = session.position;
+                let readout = position + rows == STOCK_INPUT;
+                if let Some(probe) = &mut session.runtime.nvfp4_probe {
+                    probe.reverse = instrument_first ^ (position == 0);
+                    probe.clear();
+                }
+                // Time the three-row tail as one real command. It would
+                // exceed the timestamp buffer if split into encoder stages.
+                commands.push(stock_command(
+                    session,
+                    &tokens[position..position + rows],
+                    readout,
+                    (instrument && rows != 3).then_some(&mut *profiler),
+                )?);
+            }
+            let logits = session.read_logits()?;
+            let prefill_ms = start.elapsed().as_secs_f64() * 1000.0;
+            if !same_logits(&logits, &expected_seed) {
+                return Err("Inkling stock profile seed differs from pinned logits");
+            }
+            let result = json!({"harness_wall_ms": prefill_ms, "commands": commands});
+            if instrument || compare {
+                let live = session.step(tokens[STOCK_INPUT])?;
+                if !same_logits(&live, &expected_continuation) {
+                    return Err("Inkling stock prefill changed continuation logits");
+                }
+            } else {
+                decode = profile_stock_decode(session, profiler, tokens[STOCK_INPUT], &expected_continuation)?;
+            }
+            *match (candidate, instrument) {
+                (true, false) => &mut plain,
+                (true, true) => &mut profiled,
+                (false, false) => &mut control_plain,
+                (false, true) => &mut control_profiled,
+            } = result;
         }
     }
+    session.runtime.grouped_qmm = selected_qmm;
     Ok(json!({
         "exact_pinned_seed_and_continuation": true,
         "instrumented_prefill_first": instrument_first,
         "uninstrumented_prefill": plain,
         "instrumented_prefill": profiled,
         "decode_at_same_stock_state": decode,
+        "prefill_same_loaded_control": compare.then(|| json!({
+            "uninstrumented_prefill": control_plain,
+            "instrumented_prefill": control_profiled,
+        })),
     }))
 }
 

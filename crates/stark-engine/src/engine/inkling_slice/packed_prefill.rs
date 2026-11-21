@@ -193,6 +193,9 @@ impl PackedPrefill {
             {
                 grouped_pilot::enable_shared_scales(runtime)?;
             }
+            if std::env::var_os("STARK_INKLING_EXPERIMENT_NVFP4_ROWS64").as_deref() == Some(std::ffi::OsStr::new("1")) {
+                grouped_pilot::enable_rows64(runtime)?;
+            }
             register(
                 runtime,
                 include_str!("prefill_relative_source.metal"),

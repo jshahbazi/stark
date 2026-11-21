@@ -94,7 +94,11 @@ kernel void ink_group_bucket(
     constant uint &routes [[buffer(3)]],
     uint expert [[thread_index_in_threadgroup]]) {
     constexpr uint EXPERTS = 128;
+#ifdef INK_GROUP_QMM_TILE_ROWS
+    constexpr uint TILE = INK_GROUP_QMM_TILE_ROWS;
+#else
     constexpr uint TILE = 32;
+#endif
     const uint run_slots = (routes + TILE - 1) / TILE + EXPERTS - 1;
     threadgroup uint route_prefix[EXPERTS], run_prefix[EXPERTS];
     uint count = 0;
@@ -218,7 +222,12 @@ kernel void ink_group_qmm(
     threadgroup uint counts[8];
 #endif
     constexpr uint Channels = 2304;
-    constexpr uint BM = 32, BN = 64, BK = 32, Workers = 128;
+#ifdef INK_GROUP_QMM_TILE_ROWS
+    constexpr uint BM = INK_GROUP_QMM_TILE_ROWS, BN = INK_GROUP_QMM_TILE_COLS;
+#else
+    constexpr uint BM = 32, BN = 64;
+#endif
+    constexpr uint BK = 32, Workers = BM * BN / 16;
 
     uint worker = thread_index_in_threadgroup, lane = thread_index_in_simdgroup,
          simd = simdgroup_index_in_threadgroup;
@@ -321,6 +330,31 @@ kernel void ink_group_qmm(
             bool safe = upper < nvfp4_exact_limit(smallest);
             // A tile can fail the common bound while individual entries pass.
             if (!safe) {
+#ifdef INK_GROUP_QMM_REUSE_BOUND
+                // The 16x32 M5 tensor result owns two rows and eight
+                // columns per lane. Registers 0/4 are a row pair.
+                uint first_register = 0;
+                const uint row0 = accumulator.get_multidimensional_index(first_register)[1];
+                const uint row1 = accumulator.get_multidimensional_index(4u)[1];
+                const float lhs0 = float(BK) * simd_shuffle(rowPeak, row0);
+                const float lhs1 = float(BK) * simd_shuffle(rowPeak, row1);
+                const int pow0 = simd_shuffle(rowQuantum, row0);
+                const int pow1 = simd_shuffle(rowQuantum, row1);
+                #pragma unroll
+                for (uint c = 0; c < 8; ++c) {
+                    const uint i = (c & 3u) | ((c & 4u) << 1);
+                    const uint col = accumulator.get_multidimensional_index(i)[0];
+                    const float rhs = simd_shuffle(columnPeak, col);
+                    const int q = simd_shuffle(columnQuantum, col);
+                    const float p0 = accumulator[i], p1 = accumulator[i + 4];
+                    before[i] = p0;
+                    before[i + 4] = p1;
+                    const float lim0 = nvfp4_exact_limit(min(nvfp4_binary_quantum(p0), pow0 + q));
+                    const float lim1 = nvfp4_exact_limit(min(nvfp4_binary_quantum(p1), pow1 + q));
+                    if (row0 < uint(valid) && !(abs(p0) + lhs0 * rhs < lim0)) replay |= 1u << i;
+                    if (row1 < uint(valid) && !(abs(p1) + lhs1 * rhs < lim1)) replay |= 1u << (i + 4);
+                }
+#else
                 for (uint i = 0; i < accumulator.get_capacity(); ++i) {
                     auto loc = accumulator.get_multidimensional_index(i);
                     uint row = loc[1], column = loc[0];
@@ -335,6 +369,7 @@ kernel void ink_group_qmm(
                     if (row < uint(valid) && !(bound < limit))
                         replay |= 1u << i;
                 }
+#endif
             }
 #ifdef INK_GROUP_QMM_PROBE
                 failedBlocks += !safe;

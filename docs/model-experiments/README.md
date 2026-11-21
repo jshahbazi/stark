@@ -2,6 +2,8 @@
 
 [Look up research and speed changes by model](../MODEL_RESEARCH.md), including benchmark comparisons and branch-only attempts. The [source index](source-index.md) groups individual reports by family and topic.
 
+- [20261121-INKPREFILL-10 · Inkling 2 Mini wider NVFP4 run tiles](2026-11-21-inkling-mini-nvfp4-run-tiles.md) compares exact grouped matrix tile sizes and MXFP8 fusion on the stock 4K schedule, and advances the 64 × 32 tile to worker timing.
+
 - [20261121-INKPROFILE-03 · Inkling 2 Mini NVFP4 guard and singleton router](2026-11-21-inkling-mini-nvfp4-router.md) measures occupancy and replay on stock expert routes, then screens shared scale metadata and an exact one-row router against the original worker.
 
 - [20261121-INKPROFILE-02 · Inkling 2 Mini stock 4K prefill and singleton decode](2026-11-21-inkling-mini-stock-profile.md) measures source-aligned prefill by stage, isolates the singleton router projection cost from the same 4K cache, and selects the next controlled kernel screens.
