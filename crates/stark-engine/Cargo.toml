@@ -63,12 +63,19 @@ metal = [
 
 grammar = ["dep:xgrammar", "dep:schemars"]
 
+# Bounded original-checkpoint decode diagnostic. Does not enable worker admission.
+inkling-slice = ["metal"]
+
 # Remove padded DeltaNet convolution tokens with exact arithmetic.
 direct-delta-conv = []
 
 # Cache CPU-side RoPE tables (up to 8192 positions, 8 MiB); GPU arithmetic is
 # unchanged.
 rope-cache = []
+
+[[example]]
+name = "inkling_slice"
+required-features = ["inkling-slice"]
 
 [build-dependencies]
 anyhow.workspace = true

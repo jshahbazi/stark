@@ -15,6 +15,9 @@ pub mod classifier_model;
 pub mod decider;
 #[cfg(unix)]
 pub mod hybrid;
+#[cfg(all(target_os = "macos", feature = "inkling-slice"))]
+#[doc(hidden)]
+pub mod inkling_slice;
 pub mod language_model;
 pub mod vision;
 
