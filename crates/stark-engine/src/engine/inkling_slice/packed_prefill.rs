@@ -66,12 +66,22 @@ impl PackedPrefill {
 
     pub(super) fn for_m5_worker(
         runtime: &mut Runtime,
+        layers: &mut [Layer],
         source_allowed: bool,
     ) -> Result<Self> {
         if source_allowed
             && Self::source_enabled()
-            && let Ok(packed) = Self::source_for_m5_worker(runtime)
+            && let Ok(mut packed) = Self::source_for_m5_worker(runtime)
         {
+            // Keep the source scheduler and ordinary grouped kernels if an
+            // optional fast pipeline or its scratch fails to initialize.
+            if runtime.grouped_qmm == "ink_group_qmm"
+                || std::env::var_os("STARK_INKLING_EXPERIMENT_NVFP4_ROWS64").as_deref()
+                    == Some(std::ffi::OsStr::new("1"))
+            {
+                let _ = grouped_pilot::enable_rows64(runtime);
+            }
+            let _ = packed.experts.enable_mxfp8_tensor(runtime, layers);
             return Ok(packed);
         }
         Self::new(runtime, M5_PACKED_ROWS, true, None, false, false, false)
@@ -193,9 +203,6 @@ impl PackedPrefill {
             {
                 grouped_pilot::enable_shared_scales(runtime)?;
             }
-            if std::env::var_os("STARK_INKLING_EXPERIMENT_NVFP4_ROWS64").as_deref() == Some(std::ffi::OsStr::new("1")) {
-                grouped_pilot::enable_rows64(runtime)?;
-            }
             register(
                 runtime,
                 include_str!("prefill_relative_source.metal"),
@@ -228,9 +235,6 @@ impl PackedPrefill {
         }
         if mxsrc {
             experts.enable_source_mxfp8(runtime)?;
-            if source.is_some() && grouped_pilot::mxfp8_tensor_requested() {
-                experts.enable_mxfp8_tensor(runtime)?;
-            }
         }
         if epilogue {
             experts.enable_source_epilogue(runtime)?;

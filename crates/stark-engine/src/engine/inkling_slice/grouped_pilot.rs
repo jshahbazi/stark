@@ -142,10 +142,6 @@ pub(super) fn mxfp8_tensor_audit_requested() -> bool {
     std::env::var_os("STARK_INKLING_EXPERIMENT_MXFP8_TENSOR_AUDIT").as_deref() == Some(std::ffi::OsStr::new("1"))
 }
 
-pub(super) fn mxfp8_tensor_requested() -> bool {
-    std::env::var_os("STARK_INKLING_EXPERIMENT_MXFP8_TENSOR").as_deref() == Some(std::ffi::OsStr::new("1"))
-}
-
 struct ExpertOrder<'a> {
     ids: &'a Buffer,
     weights: &'a Buffer,
@@ -221,6 +217,7 @@ impl GroupedExperts {
     pub(super) fn enable_mxfp8_tensor(
         &mut self,
         runtime: &mut Runtime,
+        layers: &mut [Layer],
     ) -> Result<()> {
         let options = MTLCompileOptions::new();
         options.set_math_mode(MTLMathMode::Safe);
@@ -260,12 +257,29 @@ impl GroupedExperts {
             runtime.pipelines.insert(name, pipeline);
         }
         let device = &runtime.device;
-        self.mxfp8_tensor = Some(Mxfp8Tensor {
+        let tensor = Mxfp8Tensor {
             input_norms: zeroed(device, self.capacity * TOP * size_of::<f32>())?,
             masks: zeroed(device, run_slots(self.capacity) * WIDTH * size_of::<u32>())?,
             counts: zeroed(device, MXFP8_DOTS * size_of::<u32>())?,
             false_certificates: zeroed(device, MXFP8_DOTS * size_of::<u32>())?,
-        });
+        };
+        // Publish the tensor workspace and norms only after every bank is ready.
+        let mut prepared = Vec::new();
+        for layer in layers {
+            if let Experts::Mxfp8 {
+                up,
+                down,
+            } = &mut layer.experts
+            {
+                let up_norms = up.build_tensor_norms(runtime, WIDTH)?;
+                let down_norms = down.build_tensor_norms(runtime, MID)?;
+                prepared.extend([(up, up_norms), (down, down_norms)]);
+            }
+        }
+        for (bank, norms) in prepared {
+            bank.tensor_norms = Some(norms);
+        }
+        self.mxfp8_tensor = Some(tensor);
         Ok(())
     }
 

@@ -492,8 +492,8 @@ fn profile_stock(
         return Err("Inkling stock profile requires the source-aligned M5 Max path");
     }
     let mut profiler = PrefillTiming::new(&session.runtime)?;
-    if grouped_pilot::mxfp8_tensor_requested() && !session.runtime.mxfp8_tensor_available {
-        return Err("Inkling MXFP8 tensor experiment is unavailable");
+    if grouped_pilot::mxfp8_tensor_audit_requested() && !session.runtime.mxfp8_tensor_available {
+        return Err("Inkling MXFP8 tensor audit requires the tensor path");
     }
     if nvfp4_probe {
         session.runtime.nvfp4_probe = Some(grouped_pilot::Nvfp4Probe::new(&mut session.runtime)?);
@@ -594,13 +594,13 @@ fn profile_stock_case(
                 return Err("Inkling stock profile seed differs from pinned logits");
             }
             let result = json!({"harness_wall_ms": prefill_ms, "commands": commands});
-            if instrument || compare {
+            if candidate && !instrument {
+                decode = profile_stock_decode(session, profiler, tokens[STOCK_INPUT], &expected_continuation)?;
+            } else {
                 let live = session.step(tokens[STOCK_INPUT])?;
                 if !same_logits(&live, &expected_continuation) {
                     return Err("Inkling stock prefill changed continuation logits");
                 }
-            } else {
-                decode = profile_stock_decode(session, profiler, tokens[STOCK_INPUT], &expected_continuation)?;
             }
             *match (candidate, instrument) {
                 (true, false) => &mut plain,

@@ -369,25 +369,25 @@ impl Mxfp8Bank {
         })
     }
 
-    fn prepare_tensor_norms(
-        &mut self,
+    fn build_tensor_norms(
+        &self,
         runtime: &Runtime,
         width: usize,
-    ) -> Result<()> {
-        if self.tensor_norms.is_none() {
-            let norms = zeroed(&runtime.device, EXPERTS * WIDTH * size_of::<f32>())?;
-            execute(runtime, |gpu| {
-                gpu.one(
-                    "ink_mx_weight_norm",
-                    &[&self.codes, &self.exponents, &norms],
-                    width as u32,
-                    (EXPERTS * WIDTH / 4, 1),
-                    128,
-                );
-            })?;
-            self.tensor_norms = Some(norms);
+    ) -> Result<Buffer> {
+        if let Some(norms) = &self.tensor_norms {
+            return Ok(norms.clone());
         }
-        Ok(())
+        let norms = zeroed(&runtime.device, EXPERTS * WIDTH * size_of::<f32>())?;
+        execute(runtime, |gpu| {
+            gpu.one(
+                "ink_mx_weight_norm",
+                &[&self.codes, &self.exponents, &norms],
+                width as u32,
+                (EXPERTS * WIDTH / 4, 1),
+                128,
+            );
+        })?;
+        Ok(norms)
     }
 }
 

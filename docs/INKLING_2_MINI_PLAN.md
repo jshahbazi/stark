@@ -6,6 +6,8 @@ The native slice passes short and 4K connected parity. One BF16 word in the atte
 
 The native worker uses the 48-visit target with per-visit state, original packed expert banks and a 200,058-token readout. On M5 Max, text prompts of at least 512 tokens at contexts up to 4,352 use 2,048-row source-aligned bulk prefill with drafting off. On a 4,096-token prompt the worker processes 2,048 and 2,044 packed rows, then three width-stable rows in one command and the final seed. Vision, draft-enabled requests, short text, and larger contexts use the existing native path. The source prefill can fall back at load if the old workspace fits the memory budget or source setup fails. [Native worker](../crates/stark-generate/src/inkling.rs) · [Native worker benchmark](benchmarks/2026-11-21-inkling-mini-native-worker.md) · [Vision attempt](model-experiments/2026-11-21-inkling-mini-vision.md)
 
+Eligible source prefill selects the 64 × 32 NVFP4 tile and compensated K32 MXFP8 replay by default. The worker can use ordinary grouped kernels if the faster kernels fail to initialize. `STARK_INKLING_SOURCE_PREFILL=0` selects the incumbent worker geometry. [Default-path verification](model-experiments/2026-11-21-inkling-mini-prefill-default.md)
+
 [Implementation retrospective](archive/runs/2026-11-21-inkling-mini-native-retrospective.md) · [Prefill and decode follow-up](INKLING_2_MINI_PERFORMANCE_FOLLOWUP.md)
 
 ## What to build against

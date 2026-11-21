@@ -249,6 +249,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Stock NVFP4 occupancy, scale sharing and one-row decode router](2026-11-21-inkling-mini-nvfp4-router.md) · Experiment, 2026-11-21
 - [Wider NVFP4 run tiles on the stock 4K graph](2026-11-21-inkling-mini-nvfp4-run-tiles.md) · Experiment, 2026-11-21
 - [Tensor MXFP8 with source-order replay and wider-tile NVFP4 scale sharing](2026-11-21-inkling-mini-mxfp8-tensor.md) · Experiment, 2026-11-21
+- [Default fast prefill with flags unset](2026-11-21-inkling-mini-prefill-default.md) · Experiment, 2026-11-21
 
 ### Protocols and aggregates
 
