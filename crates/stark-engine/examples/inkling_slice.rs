@@ -8,6 +8,21 @@ fn main() {
     fn run() -> Result<i32, &'static str> {
         let args: Vec<_> = std::env::args_os().skip(1).collect();
         use stark_engine::engine::inkling_slice::PrefillTraceMode;
+        if args.first().is_some_and(|arg| arg == "--profile-stock-4k") {
+            if args.len() < 4 {
+                return Err(
+                    "expected --profile-stock-4k, original SafeTensors, draft SafeTensors and stock oracle directories",
+                );
+            }
+            let oracles = args[3..].iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+            let report = stark_engine::engine::inkling_slice::profile_stock_4k(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                &oracles,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
         if args.first().is_some_and(|arg| arg == "--prefill-speed") {
             if args.len() != 5 {
                 return Err("expected --prefill-speed, original SafeTensors, private oracle, input length and variant");

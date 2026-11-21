@@ -445,6 +445,8 @@ Published rates are not comparable until the conditions match. The 2026-11-19 co
 
 Inkling’s packed source graph reached 772 tok/s in an uncached 4K worker session after matching the source’s BF16 boundaries, global matrix attention, route weight normalization, and the different MXFP8 gate/up and down lane layouts. A single fused FP32 convolution operation changed one BF16 cache word and propagated into hundreds of thousands of downstream words. Compare the first unequal intermediate before changing another kernel. Record the scheduler’s effective prefill widths alongside forced trace widths and capture the final prompt token’s seed logits. A continuation-only comparison can include errors from the singleton implementation after a matched prefill. Source-aligned wide batches and singleton repairs reproduced all 16 logit vectors from four stock-schedule captures. The final long paired session measured 683–685 tok/s prefill medians with 16 wins, about 23% lower request time and about 6% lower decode throughput within budget. [Inkling source precision experiments](model-experiments/2026-11-21-inkling-mini-packed-prefill.md#20261121-inkprefill-08--source-arithmetic-and-embedded-library)
 
+The stock Inkling 4K profile retained the two bulk commands, the three-row tail and the final seed. Grouped NVFP4 gate/up and down products used 2.78 s of 5.83 s instrumented command GPU time. Global mask generation used 0.017 s. Measure live expert tile utilization and exactness replay costs before rebuilding the grouped kernel. On the same restored 4K cache the source singleton took 2.39 ms more wall time than the legacy arithmetic at the paired median. The source router projection added 2.28 ms of instrumented GPU time, while selection and normalization were slightly faster. Screen a one-row projection specialization against the pinned arithmetic. [Stock stage profile](model-experiments/2026-11-21-inkling-mini-stock-profile.md)
+
 ## Correctness gates
 
 A speed change that is meant to leave output alone has to pass all of these, in this order of cost:
@@ -544,6 +546,7 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 | 2026-11-21 | [Inkling 2 Mini short-prefix projection](benchmarks/2026-11-21-inkling-mini-short-projection.md) | Source-dispatched BF16 dot order, short and 4K connected parity, paired no-regression test |
 | 2026-11-21 | [Inkling 2 Mini native worker](benchmarks/2026-11-21-inkling-mini-native-worker.md) | Grouped 4K worker prefill, greedy and sampled decode budgets, final slice reruns |
 | 2026-11-21 | [Inkling 2 Mini packed prefill](model-experiments/2026-11-21-inkling-mini-packed-prefill.md) | Contiguous prefill buffers, exact kernel screens, matrix precision limits and cold worker comparison |
+| 2026-11-21 | [Inkling 2 Mini stock 4K and singleton profile](model-experiments/2026-11-21-inkling-mini-stock-profile.md) | Stock prefill stage attribution, same-cache source router projection cost and selected follow-up screens |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 

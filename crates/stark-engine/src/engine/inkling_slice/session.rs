@@ -26,7 +26,7 @@ mod target_validation;
 
 use packed_prefill::PackedPrefill;
 use prefill::PrefillLanes;
-pub use prefill_profile::{profile_packed_prefill, profile_prefill};
+pub use prefill_profile::{profile_packed_prefill, profile_prefill, profile_stock_4k};
 pub use prefill_trace::{PrefillTraceMode, trace_packed_prefill, trace_prefill};
 pub use target_validation::{measure_full, measure_full_budget, measure_prefill, measure_prefill_speed};
 
@@ -576,23 +576,33 @@ impl Session {
         tokens: &[u32],
         readout: bool,
     ) -> Result<()> {
+        let result = self.encode_append(tokens, readout, None);
+        self.finish_append(result, tokens.len())
+    }
+
+    fn encode_append(
+        &self,
+        tokens: &[u32],
+        readout: bool,
+        profile: Option<&mut PrefillTiming>,
+    ) -> Result<Timing> {
         if let Some(packed) = &self.packed_prefill
             && tokens.len() >= PackedPrefill::MIN_ROWS
             && self.active_dspark().is_none()
         {
             packed.upload(tokens);
-            let result = execute(&self.runtime, |gpu| packed.encode(self, gpu, tokens.len(), readout));
-            return self.finish_append(result, tokens.len());
+            return execute_with_profile(&self.runtime, profile, |gpu| packed.encode(self, gpu, tokens.len(), readout));
         }
         if let Some(lanes) = &self.prefill_lanes
             && tokens.len() > 1
             && (!self.runtime.source_text_active || tokens.len() > 3)
         {
             let inputs = tokens.iter().copied().map(TokenInput::Text).collect::<Vec<_>>();
-            let result = execute(&self.runtime, |gpu| self.encode_prefill_rows(gpu, lanes, &inputs, readout));
-            return self.finish_append(result, tokens.len());
+            return execute_with_profile(&self.runtime, profile, |gpu| {
+                self.encode_prefill_rows(gpu, lanes, &inputs, readout)
+            });
         }
-        let result = execute(&self.runtime, |gpu| {
+        execute_with_profile(&self.runtime, profile, |gpu| {
             let dspark = self.active_dspark();
             for (index, &token) in tokens.iter().enumerate() {
                 let last = index + 1 == tokens.len();
@@ -608,8 +618,7 @@ impl Session {
                     draft.commit(gpu, &self.draft_features, position);
                 }
             }
-        });
-        self.finish_append(result, tokens.len())
+        })
     }
 
     fn append_image(
@@ -670,14 +679,19 @@ impl Session {
     ) {
         let flow = &self.flow;
         let features = features.then_some(&self.draft_features);
+        gpu.phase(PrefillPhase::Other);
         self.encode_embedding(gpu, flow, input);
         let mut blocks = 0;
         for (index, (&physical, visit)) in PHYSICAL.iter().zip(&self.visits).enumerate() {
             let state = self.visit_input(index, physical, &mut blocks);
+            gpu.phase(PrefillPhase::AttentionInputs);
             Self::prepare_visit(gpu, flow, index, features);
             self.layers[physical].encode(gpu, visit, flow, &flow.partial, state, position);
         }
-        self.finish_forward(gpu, flow, blocks, readout, features);
+        if readout || features.is_some() {
+            gpu.phase(PrefillPhase::Readout);
+            self.finish_forward(gpu, flow, blocks, readout, features);
+        }
     }
 
     fn encode_embedding(

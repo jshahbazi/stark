@@ -363,7 +363,11 @@ impl GroupedExperts {
             ((width / 32).div_ceil(128), rows * TOP),
             128,
         );
-        gpu.phase(PrefillPhase::Nvfp4Dot);
+        gpu.phase(if gather {
+            PrefillPhase::Nvfp4UpDot
+        } else {
+            PrefillPhase::Nvfp4DownDot
+        });
         gpu.one(
             "ink_group_qmm",
             &[&self.activation, &bank.codes, &bank.blocks, routing.runs, &self.quantum, &self.maxima, &self.projected],

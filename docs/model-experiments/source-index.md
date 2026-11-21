@@ -245,6 +245,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Faster 128-row native prefill](2026-11-21-inkling-mini-faster-prefill.md) · Experiment, 2026-11-21
 - [4K prefill budget and batched RMS](2026-11-21-inkling-mini-prefill-budget.md) · Experiment, 2026-11-21
 - [Packed prefill, rejected kernels and source-aligned worker](2026-11-21-inkling-mini-packed-prefill.md) · Experiment, 2026-11-21
+- [Stock 4K prefill and singleton decode attribution](2026-11-21-inkling-mini-stock-profile.md) · Experiment, 2026-11-21
 
 ### Protocols and aggregates
 

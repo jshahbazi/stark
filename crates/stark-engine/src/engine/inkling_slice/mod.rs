@@ -22,8 +22,8 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use session::prefill_profile::{PrefillPhase, PrefillTiming};
 pub use session::{
     PrefillTraceMode, Session, Snapshot, VOCABULARY, measure_dspark, measure_full, measure_full_budget,
-    measure_prefill, measure_prefill_speed, profile_packed_prefill, profile_prefill, trace_packed_prefill,
-    trace_prefill,
+    measure_prefill, measure_prefill_speed, profile_packed_prefill, profile_prefill, profile_stock_4k,
+    trace_packed_prefill, trace_prefill,
 };
 pub use validation::measure;
 pub use vision::{INKLING_IMAGE_TOKEN, ImageEmbeddings, measure_vision};
@@ -559,6 +559,9 @@ impl Layer {
         gpu: &mut Stream<'_>,
         s: &Scratch,
     ) {
+        if matches!(self.experts, Experts::Mxfp8 { .. }) {
+            gpu.phase(PrefillPhase::Mxfp8);
+        }
         self.route_experts(gpu, s);
         match &self.experts {
             Experts::Nvfp4 {
@@ -570,6 +573,7 @@ impl Layer {
                 down,
             } => Self::mxfp8(gpu, s, up, down),
         }
+        gpu.phase(PrefillPhase::ExpertCombine);
         gpu.one("ink_expert_sum", &[&s.down, &s.experts], WIDTH as u32, (WIDTH / 128, 1), 128);
     }
 
@@ -578,8 +582,15 @@ impl Layer {
         gpu: &mut Stream<'_>,
         s: &Scratch,
     ) {
+        let nvfp4 = matches!(self.experts, Experts::Nvfp4 { .. });
+        if nvfp4 {
+            gpu.phase(PrefillPhase::RouterProjection);
+        }
         if gpu.runtime.source_text_active {
             gpu.one("ink_prefill_router_source", &[&s.mlp_input, &self.router, &s.logits], 1u32, (4, 1), 32);
+            if nvfp4 {
+                gpu.phase(PrefillPhase::RouteSelect);
+            }
             gpu.one(
                 "ink_singleton_route_weights",
                 &[&s.logits, &self.bias, &s.routes, &s.route_weights],
@@ -590,6 +601,9 @@ impl Layer {
             return;
         }
         gpu.one("ink_router_logits", &[&s.mlp_input, &self.router, &s.logits], WIDTH as u32, (EXPERTS, 1), 32);
+        if nvfp4 {
+            gpu.phase(PrefillPhase::RouteSelect);
+        }
         gpu.one("ink_router_select", &[&s.logits, &self.bias, &s.routes, &s.route_weights], (), (1, 1), 128);
     }
 
@@ -599,7 +613,9 @@ impl Layer {
         up: &Bank,
         down: &Bank,
     ) {
+        gpu.phase(PrefillPhase::Nvfp4Quant);
         gpu.one("ink_nvfp4_activation", &[&s.mlp_input, &s.up_inner, &s.up_max], WIDTH as u32, (1, 1), 256);
+        gpu.phase(PrefillPhase::Nvfp4UpDot);
         gpu.one(
             if gpu.runtime.source_text_active {
                 "ink_nvfp4_up_source"
@@ -611,7 +627,9 @@ impl Layer {
             (MID / 4, 8),
             128,
         );
+        gpu.phase(PrefillPhase::Nvfp4Quant);
         gpu.one("ink_nvfp4_activation", &[&s.mid, &s.down_inner, &s.down_max], MID as u32, (8, 1), 256);
+        gpu.phase(PrefillPhase::Nvfp4DownDot);
         gpu.one(
             "ink_nvfp4_down",
             &[&s.down_inner, &s.down_max, &s.routes, &down.codes, &down.blocks, &down.maxima, &s.down],
@@ -698,6 +716,7 @@ impl Layer {
         cache: &Visit,
         position: usize,
     ) {
+        gpu.phase(PrefillPhase::AttentionDense);
         for ((input, weight, out, rows), name) in self.attention_projections(s).into_iter().zip(trace::RAW_PROJECTIONS)
         {
             gpu.project(binding(input), weight, out, WIDTH, rows);
@@ -709,8 +728,10 @@ impl Layer {
             }
         }
         self.attention_read_cache(gpu, s, cache, position);
+        gpu.phase(PrefillPhase::AttentionDense);
         gpu.project(binding(&s.attended), &self.output, &s.attn_raw, 3072, WIDTH);
         s.record(gpu, "attn_raw", &s.attn_raw);
+        gpu.phase(PrefillPhase::ExpertInputs);
         Self::convolution(
             gpu,
             binding(&s.attn_raw),
@@ -743,7 +764,9 @@ impl Layer {
             64
         };
         let args = [position as u32, width, window, shards];
+        gpu.phase(PrefillPhase::KeyValue);
         self.attention_write_cache(gpu, s, cache, args);
+        gpu.phase(PrefillPhase::RelativeTable);
         if gpu.runtime.source_text_active {
             gpu.one(
                 "ink_prefill_relative_table_source",
@@ -755,6 +778,11 @@ impl Layer {
         } else {
             gpu.one("ink_relative_table", &[&s.r, &self.relative, &s.table], (), (HEADS * LOCAL / 128, 1), 128);
         }
+        gpu.phase(if self.local {
+            PrefillPhase::LocalAttention
+        } else {
+            PrefillPhase::GlobalAttention
+        });
         let (parts_kernel, gate_kernel, parts_groups, gate_groups, shape) = if gpu.runtime.pinned_m5 {
             (
                 "ink_attention_source_parts",
@@ -931,8 +959,10 @@ impl Layer {
         state: VisitInput,
         position: usize,
     ) {
+        gpu.phase(PrefillPhase::ExpertInputs);
         self.expert_inputs(gpu, flow, partial, s, state);
         self.experts(gpu, s);
+        gpu.phase(PrefillPhase::ExpertFinish);
         self.finish_experts(gpu, cache, partial, s, binding(&s.experts), state, position);
     }
 
@@ -1151,6 +1181,7 @@ struct Timing {
     dispatches: usize,
     wall_ms: f64,
     gpu_ms: f64,
+    encode_ms: f64,
 }
 
 fn execute(
@@ -1182,6 +1213,7 @@ fn execute_with_profile(
     if let Some((_, profile)) = gpu.profile.as_mut() {
         profile.before_submit(gpu.dispatches);
     }
+    let encode_ms = start.elapsed().as_secs_f64() * 1000.0;
     command.commit();
     command.wait_until_completed();
     if command.status() != MTLCommandBufferStatus::Completed {
@@ -1190,6 +1222,7 @@ fn execute_with_profile(
     let timing = Timing {
         dispatches: gpu.dispatches,
         wall_ms: start.elapsed().as_secs_f64() * 1000.0,
+        encode_ms,
         gpu_ms: (command.gpu_end_time() - command.gpu_start_time()) * 1000.0,
     };
     if let Some((_, profile)) = gpu.profile {

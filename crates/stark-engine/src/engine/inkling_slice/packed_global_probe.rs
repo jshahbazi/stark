@@ -153,6 +153,7 @@ impl GlobalProbe {
     ) {
         let extent = start + rows;
         assert!(extent <= MAX_KEYS && extent <= visit.capacity);
+        gpu.phase(PrefillPhase::GlobalPacking);
         gpu.one(
             "ink_global_probe_kv",
             &[&visit.keys, &visit.values, &packed.keys, &packed.values, &self.keys, &self.values],
@@ -170,6 +171,7 @@ impl GlobalProbe {
             };
             let queries = end - offset;
             let keys = start + end;
+            gpu.phase(PrefillPhase::GlobalPacking);
             gpu.one(
                 "ink_global_probe_query",
                 &[&packed.q, &self.query],
@@ -177,6 +179,7 @@ impl GlobalProbe {
                 (QUERY / 128, queries),
                 128,
             );
+            gpu.phase(PrefillPhase::GlobalMask);
             gpu.one(
                 "ink_global_probe_mask",
                 &[&packed.table, &packed.sink, &self.mask],
@@ -184,7 +187,9 @@ impl GlobalProbe {
                 (keys.div_ceil(128), HEADS * queries),
                 128,
             );
+            gpu.phase(PrefillPhase::GlobalAttention);
             self.encode_matrix(gpu, extent, queries, keys);
+            gpu.phase(PrefillPhase::GlobalGate);
             gpu.one(
                 "ink_global_probe_gate",
                 &[&self.output, &packed.gate, &packed.attended],

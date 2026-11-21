@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Opt-in Metal stage attribution for the connected grouped prefill graph.
+//! Opt-in Metal stage attribution for grouped prefill and single-token decode.
 
 use metal::{
     MTL_COUNTER_ERROR_VALUE, MTLCommonCounterSet, MTLComputePassDescriptor, MTLCounterSampleBuffer,
@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 
 use super::*;
 
-// Include the individual NVFP4 phases as well as setup and readout.
-const SAMPLE_COUNT: usize = (2 + PHYSICAL.len() * 16) * 2;
+// Both stock bulk commands fit in this buffer, including the global subtiles.
+const SAMPLE_COUNT: usize = 2048;
 type Encoder = Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -24,9 +24,21 @@ pub(in crate::engine::inkling_slice) enum PrefillPhase {
     RelativeCacheAttention,
     Experts,
     Nvfp4Quant,
-    Nvfp4Dot,
+    Nvfp4UpDot,
+    Nvfp4DownDot,
+    RouterProjection,
+    RouteSelect,
     Nvfp4Epilogue,
     Mxfp8,
+    KeyValue,
+    RelativeTable,
+    LocalAttention,
+    GlobalAttention,
+    GlobalPacking,
+    GlobalMask,
+    GlobalGate,
+    ExpertCombine,
+    Readout,
 }
 
 struct Span {
@@ -41,13 +53,25 @@ struct Totals {
     relative_cache_attention: f64,
     experts: f64,
     nvfp4_quant: f64,
-    nvfp4_dot: f64,
+    nvfp4_up_dot: f64,
+    nvfp4_down_dot: f64,
+    router_projection: f64,
+    route_select: f64,
     nvfp4_epilogue: f64,
     mxfp8: f64,
     other: f64,
     attention_inputs: f64,
     expert_inputs: f64,
     expert_finish: f64,
+    key_value: f64,
+    relative_table: f64,
+    local_attention: f64,
+    global_attention: f64,
+    global_packing: f64,
+    global_mask: f64,
+    global_gate: f64,
+    expert_combine: f64,
+    readout: f64,
 }
 
 impl Totals {
@@ -62,28 +86,59 @@ impl Totals {
             PrefillPhase::RelativeCacheAttention => &mut self.relative_cache_attention,
             PrefillPhase::Experts => &mut self.experts,
             PrefillPhase::Nvfp4Quant => &mut self.nvfp4_quant,
-            PrefillPhase::Nvfp4Dot => &mut self.nvfp4_dot,
+            PrefillPhase::Nvfp4UpDot => &mut self.nvfp4_up_dot,
+            PrefillPhase::Nvfp4DownDot => &mut self.nvfp4_down_dot,
+            PrefillPhase::RouterProjection => &mut self.router_projection,
+            PrefillPhase::RouteSelect => &mut self.route_select,
             PrefillPhase::Nvfp4Epilogue => &mut self.nvfp4_epilogue,
             PrefillPhase::Mxfp8 => &mut self.mxfp8,
             PrefillPhase::AttentionInputs => &mut self.attention_inputs,
             PrefillPhase::ExpertInputs => &mut self.expert_inputs,
             PrefillPhase::ExpertFinish => &mut self.expert_finish,
+            PrefillPhase::KeyValue => &mut self.key_value,
+            PrefillPhase::RelativeTable => &mut self.relative_table,
+            PrefillPhase::LocalAttention => &mut self.local_attention,
+            PrefillPhase::GlobalAttention => &mut self.global_attention,
+            PrefillPhase::GlobalPacking => &mut self.global_packing,
+            PrefillPhase::GlobalMask => &mut self.global_mask,
+            PrefillPhase::GlobalGate => &mut self.global_gate,
+            PrefillPhase::ExpertCombine => &mut self.expert_combine,
+            PrefillPhase::Readout => &mut self.readout,
         } += ms;
     }
 
     fn sum(&self) -> f64 {
         self.attention_dense
-            + self.relative_cache_attention
+            + self.attention()
             + self.nvfp4()
             + self.mxfp8
             + self.attention_inputs
             + self.expert_inputs
             + self.expert_finish
+            + self.expert_combine
+            + self.readout
             + self.other
     }
 
+    fn attention(&self) -> f64 {
+        self.relative_cache_attention
+            + self.key_value
+            + self.relative_table
+            + self.local_attention
+            + self.global_attention
+            + self.global_packing
+            + self.global_mask
+            + self.global_gate
+    }
+
     fn nvfp4(&self) -> f64 {
-        self.experts + self.nvfp4_quant + self.nvfp4_dot + self.nvfp4_epilogue
+        self.experts
+            + self.router_projection
+            + self.route_select
+            + self.nvfp4_quant
+            + self.nvfp4_up_dot
+            + self.nvfp4_down_dot
+            + self.nvfp4_epilogue
     }
 
     fn report(
@@ -92,19 +147,32 @@ impl Totals {
     ) -> Value {
         json!({
             "attention_dense_ms": self.attention_dense,
-            "relative_cache_attention_ms": self.relative_cache_attention,
-            "experts_ms": self.nvfp4() + self.mxfp8,
+            "relative_cache_attention_ms": self.attention(),
+            "kv_conv_norm_and_cache_ms": self.key_value,
+            "relative_table_ms": self.relative_table,
+            "local_attention_ms": self.local_attention,
+            "global_attention_ms": self.global_attention,
+            "global_query_kv_conversion_ms": self.global_packing,
+            "global_mask_ms": self.global_mask,
+            "global_gate_ms": self.global_gate,
+            "experts_ms": self.nvfp4() + self.mxfp8 + self.expert_combine,
             "nvfp4_experts_ms": self.nvfp4(),
-            "nvfp4_routing_ms": self.experts,
+            "nvfp4_routing_ms": self.experts + self.router_projection + self.route_select,
+            "nvfp4_router_projection_ms": self.router_projection,
+            "nvfp4_route_selection_and_weights_ms": self.route_select,
             "nvfp4_quant_ms": self.nvfp4_quant,
-            "nvfp4_dot_ms": self.nvfp4_dot,
+            "nvfp4_dot_ms": self.nvfp4_up_dot + self.nvfp4_down_dot,
+            "nvfp4_gate_up_dot_ms": self.nvfp4_up_dot,
+            "nvfp4_down_dot_ms": self.nvfp4_down_dot,
             "nvfp4_epilogue_ms": self.nvfp4_epilogue,
             "mxfp8_experts_ms": self.mxfp8,
-            "other_ms": self.other + self.attention_inputs + self.expert_inputs + self.expert_finish,
+            "other_ms": self.other + self.readout + self.attention_inputs + self.expert_inputs + self.expert_finish,
             "attention_inputs_ms": self.attention_inputs,
             "expert_inputs_ms": self.expert_inputs,
             "expert_finish_ms": self.expert_finish,
-            "embedding_readout_ms": self.other,
+            "expert_combine_ms": self.expert_combine,
+            "embedding_readout_ms": self.other + self.readout,
+            "readout_ms": self.readout,
             "command_gap_ms": (gpu_ms - self.sum()).max(0.0),
             "whole_command_gpu_ms": gpu_ms,
         })
@@ -352,4 +420,175 @@ fn profile(
         "stages": profiler.totals.report(gpu_ms),
         "tiles": tiles,
     }))
+}
+
+const STOCK_ROWS: [usize; 4] = [2048, 2044, 3, 1];
+const STOCK_INPUT: usize = 4096;
+const STOCK_CONTEXT: usize = 4352;
+
+/// Attribute the deployed prefill geometry and the next target token on a real
+/// stock-schedule oracle. Instrumentation is compared with the same commands
+/// without Metal counter attachments.
+pub fn profile_stock_4k(
+    checkpoint: &Path,
+    draft: &Path,
+    oracles: &[std::path::PathBuf],
+) -> Result<Value> {
+    if oracles.is_empty() {
+        return Err("Inkling stock profile requires at least one oracle");
+    }
+    let mut session = Session::load(checkpoint, STOCK_CONTEXT)?;
+    session.load_dspark(draft)?;
+    session.set_batched_prefill(true, true)?;
+    if !session.runtime.source_text_active || session.prefill_batch_rows() != STOCK_ROWS[0] {
+        return Err("Inkling stock profile requires the source-aligned M5 Max path");
+    }
+    let mut profiler = PrefillTiming::new(&session.runtime)?;
+    let mut cases = Vec::with_capacity(oracles.len());
+    for (index, oracle) in oracles.iter().enumerate() {
+        cases.push(profile_stock_case(&mut session, &mut profiler, oracle, index % 2 == 1)?);
+    }
+    Ok(json!({
+        "input_tokens": STOCK_INPUT,
+        "context_tokens": STOCK_CONTEXT,
+        "prefill_command_rows": STOCK_ROWS,
+        "decode_start_position": STOCK_INPUT,
+        "vision_and_dspark_resident": true,
+        "drafting": false,
+        "cases": cases,
+    }))
+}
+
+fn profile_stock_case(
+    session: &mut Session,
+    profiler: &mut PrefillTiming,
+    oracle: &Path,
+    instrument_first: bool,
+) -> Result<Value> {
+    let seed = Tensors::open(&oracle.join("row-0.safetensors"))?;
+    let continuation = Tensors::open(&oracle.join("row-1.safetensors"))?;
+    if seed.values::<u32>("start", "U32", &[1])?[0] as usize != STOCK_INPUT - 1 {
+        return Err("Inkling stock oracle must capture the 4K prefill seed");
+    }
+    let tokens =
+        Tensors::open(&oracle.join("tokens.safetensors"))?.values::<u32>("tokens", "U32", &[STOCK_INPUT + 3])?;
+    if tokens.iter().any(|&token| token as usize >= VOCABULARY) {
+        return Err("Inkling token is outside the vocabulary");
+    }
+    let expected_seed = seed.values::<f32>("full.logits", "F32", &[1, 1, VOCABULARY])?;
+    let expected_continuation = continuation.values::<f32>("full.logits", "F32", &[1, 1, VOCABULARY])?;
+    let (mut plain, mut profiled, mut decode) = (Value::Null, Value::Null, Value::Null);
+    for instrument in [instrument_first, !instrument_first] {
+        session.reset();
+        let mut commands = Vec::with_capacity(STOCK_ROWS.len());
+        let start = std::time::Instant::now();
+        for rows in STOCK_ROWS {
+            let position = session.position;
+            let readout = position + rows == STOCK_INPUT;
+            // Splitting all three serial tail graphs into encoder stages in
+            // one command exceeds the timestamp buffer. Keep its real command
+            // GPU time and profile the separate seed and decode graphs.
+            commands.push(stock_command(
+                session,
+                &tokens[position..position + rows],
+                readout,
+                (instrument && rows != 3).then_some(&mut *profiler),
+            )?);
+        }
+        let logits = session.read_logits()?;
+        let prefill_ms = start.elapsed().as_secs_f64() * 1000.0;
+        if !same_logits(&logits, &expected_seed) {
+            return Err("Inkling stock profile seed differs from pinned logits");
+        }
+        let result = json!({"harness_wall_ms": prefill_ms, "commands": commands});
+        if instrument {
+            profiled = result;
+            let live = session.step(tokens[STOCK_INPUT])?;
+            if !same_logits(&live, &expected_continuation) {
+                return Err("Inkling profiled stock prefill changed continuation logits");
+            }
+        } else {
+            plain = result;
+            decode = profile_stock_decode(session, profiler, tokens[STOCK_INPUT], &expected_continuation)?;
+        }
+    }
+    Ok(json!({
+        "exact_pinned_seed_and_continuation": true,
+        "instrumented_prefill_first": instrument_first,
+        "uninstrumented_prefill": plain,
+        "instrumented_prefill": profiled,
+        "decode_at_same_stock_state": decode,
+    }))
+}
+
+fn profile_stock_decode(
+    session: &mut Session,
+    profiler: &mut PrefillTiming,
+    token: u32,
+    expected: &[f32],
+) -> Result<Value> {
+    let snapshot = session.snapshot()?;
+    let mut source_runs = Vec::new();
+    let mut legacy_runs = Vec::new();
+    let mut legacy_logits = None;
+    // Alternate the order of source and legacy singletons across both timing
+    // arms. Only the diagnostic switches precision; the cache is the same
+    // stock-prefilled state in every run.
+    for (index, instrument) in [false, true, true, false].into_iter().enumerate() {
+        for source in [index % 2 == 0, index % 2 != 0] {
+            session.restore(&snapshot)?;
+            session.runtime.source_text_active = source;
+            let result = stock_command(session, &[token], true, instrument.then_some(&mut *profiler));
+            session.runtime.source_text_active = true;
+            let command = result?;
+            let started = std::time::Instant::now();
+            let logits = session.read_logits()?;
+            let read_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let reference = if source {
+                expected
+            } else {
+                legacy_logits.get_or_insert_with(|| logits.clone()).as_slice()
+            };
+            if !same_logits(&logits, reference) {
+                return Err("Inkling stock singleton profile changed same-mode logits");
+            }
+            let runs = if source {
+                &mut source_runs
+            } else {
+                &mut legacy_runs
+            };
+            runs.push(json!({"instrumented": instrument, "read_logits_ms": read_ms, "command": command}));
+        }
+    }
+    Ok(json!({"source": source_runs, "legacy_arithmetic_control": legacy_runs}))
+}
+
+fn stock_command(
+    session: &mut Session,
+    tokens: &[u32],
+    readout: bool,
+    mut profiler: Option<&mut PrefillTiming>,
+) -> Result<Value> {
+    let start = session.position;
+    let timing = session.encode_append(tokens, readout, profiler.as_deref_mut())?;
+    let stages = profiler.map(|profile| profile.tile.report(timing.gpu_ms));
+    let stats = json!({
+        "start_position": start,
+        "rows": tokens.len(),
+        "dispatches": timing.dispatches,
+        "command_wall_ms": timing.wall_ms,
+        "encode_ms": timing.encode_ms,
+        "submit_and_wait_ms": timing.wall_ms - timing.encode_ms,
+        "gpu_ms": timing.gpu_ms,
+        "stages": stages,
+    });
+    session.finish_append(Ok(timing), tokens.len())?;
+    Ok(stats)
+}
+
+fn same_logits(
+    actual: &[f32],
+    expected: &[f32],
+) -> bool {
+    actual.len() == expected.len() && actual.iter().zip(expected).all(|(a, b)| a.to_bits() == b.to_bits())
 }

@@ -474,6 +474,7 @@ impl PackedPrefill {
     ) {
         let window = usize::from(layer.local) * LOCAL;
         let args = [start as u32, rows as u32, visit.capacity as u32, window as u32];
+        gpu.phase(PrefillPhase::KeyValue);
         self.convolution(
             gpu,
             &self.k,
@@ -521,6 +522,7 @@ impl PackedPrefill {
                 (KV / 128, backing),
                 128,
             );
+            gpu.phase(PrefillPhase::RelativeTable);
             gpu.one(
                 "ink_prefill_relative_table_source",
                 &[&self.r, &layer.relative, &self.table],
@@ -528,6 +530,7 @@ impl PackedPrefill {
                 (LOCAL / 32, (rows * HEADS).div_ceil(16)),
                 32,
             );
+            gpu.phase(PrefillPhase::LocalAttention);
             gpu.one(
                 "ink_prefill_relative_source",
                 &[&self.q, keys, values, &self.table, &self.sink, &self.gate, &self.attended],
@@ -538,6 +541,7 @@ impl PackedPrefill {
         } else if rows > 64
             && let Some(global) = self.source_for_rows(rows).and_then(|source| source.global.as_ref())
         {
+            gpu.phase(PrefillPhase::RelativeTable);
             gpu.one(
                 "ink_prefill_relative_table_source",
                 &[&self.r, &layer.relative, &self.table],
@@ -549,6 +553,7 @@ impl PackedPrefill {
         } else {
             self.exact_attention(gpu, layer, visit, args, start, rows);
         }
+        gpu.phase(PrefillPhase::KeyValue);
         gpu.one(
             "ink_packed_commit_kv",
             &[&self.keys, &self.values, &visit.keys, &visit.values],
@@ -567,6 +572,7 @@ impl PackedPrefill {
         start: usize,
         rows: usize,
     ) {
+        gpu.phase(PrefillPhase::RelativeTable);
         gpu.one(
             "ink_packed_attention_table",
             &[&self.r, &layer.relative, &self.table],
@@ -574,6 +580,11 @@ impl PackedPrefill {
             (LOCAL / 128, rows * HEADS),
             128,
         );
+        gpu.phase(if layer.local {
+            PrefillPhase::LocalAttention
+        } else {
+            PrefillPhase::GlobalAttention
+        });
         for offset in (0..rows).step_by(ATTENTION_SUBTILE) {
             let live = (rows - offset).min(ATTENTION_SUBTILE);
             let params = [args[0], args[1], args[2], args[3], offset as u32];
@@ -742,7 +753,6 @@ impl PackedPrefill {
                     ],
                 );
             }
-            gpu.phase(PrefillPhase::RelativeCacheAttention);
             self.attention(gpu, layer, visit, start, rows);
             if let Some(taps) = taps {
                 taps.packed_stages(

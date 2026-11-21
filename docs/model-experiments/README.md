@@ -2,6 +2,8 @@
 
 [Look up research and speed changes by model](../MODEL_RESEARCH.md), including benchmark comparisons and branch-only attempts. The [source index](source-index.md) groups individual reports by family and topic.
 
+- [20261121-INKPROFILE-02 · Inkling 2 Mini stock 4K prefill and singleton decode](2026-11-21-inkling-mini-stock-profile.md) measures source-aligned prefill by stage, isolates the singleton router projection cost from the same 4K cache, and selects the next controlled kernel screens.
+
 - [20261121-INKPREFILL-06–09 · Inkling 2 Mini packed prefill](2026-11-21-inkling-mini-packed-prefill.md) measures contiguous activations, eight-route MXFP8, and the source-shaped Metal graph and numerical gates on the M5 Max.
 
 - [20261121-INKPREFILL-05 · Inkling 2 Mini 4K prefill budget](2026-11-21-inkling-mini-prefill-budget.md) measures the 128-row bottlenecks, tests wider groups and several matrix and staging changes, and qualifies batched controller RMS with direct expert bindings.
