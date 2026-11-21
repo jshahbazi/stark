@@ -105,7 +105,7 @@ impl Parity {
         for (&a, &b) in actual.iter().zip(expected) {
             finite &= a.is_finite() && b.is_finite();
             let diff = (a as f64 - b as f64).abs();
-            self.unequal += usize::from(a != b);
+            self.unequal += usize::from(a.to_bits() != b.to_bits());
             sum += (b as f64).powi(2);
             residual += diff * diff;
             peak = peak.max((b as f64).abs());
@@ -130,6 +130,105 @@ struct Checks<'a> {
 }
 
 impl Checks<'_> {
+    fn boundaries(
+        &mut self,
+        visit: &Visit,
+        stage_metrics: &mut BTreeMap<String, Parity>,
+    ) -> Result<()> {
+        let Some(trace) = &visit.scratch.trace else {
+            return Ok(());
+        };
+        for point in &trace.points {
+            let name = format!("{}.trace.{}", self.index, point.name);
+            let shape = [ROWS, point.values];
+            let range = self.row * point.values..(self.row + 1) * point.values;
+            let (actual, expected) = if point.dtype == "BF16" {
+                let values = self.fixture.values::<u16>(&name, point.dtype, &shape)?;
+                (expand(contents::<u16>(&point.buffer, point.values, 0)), expand(&values[range]))
+            } else {
+                let values = self.fixture.values::<f32>(&name, point.dtype, &shape)?;
+                (contents::<f32>(&point.buffer, point.values, 0).to_vec(), values[range].to_vec())
+            };
+            stage_metrics.entry(name).or_default().add(&actual, &expected, 0.0);
+        }
+        Ok(())
+    }
+
+    fn project_replays(
+        &self,
+        runtime: &Runtime,
+        layer: &Layer,
+        stage_metrics: &mut BTreeMap<String, Parity>,
+    ) -> Result<()> {
+        let norm = trace::ATTN_NORM;
+        let raw = trace::RAW_PROJECTIONS;
+        let stages = [
+            (trace::CONTROLLER_PAIR[0], trace::CONTROLLER_RANK[0], &layer.gates[0].down, 2 * WIDTH, 64),
+            (trace::CONTROLLER_PAIR[1], trace::CONTROLLER_RANK[1], &layer.gates[1].down, 2 * WIDTH, 64),
+            (trace::CONTROLLER_PAIR[2], trace::CONTROLLER_RANK[2], &layer.gates[2].down, 2 * WIDTH, 64),
+            (trace::CONTROLLER_PAIR[3], trace::CONTROLLER_RANK[3], &layer.gates[3].down, 2 * WIDTH, 64),
+            (norm[0], raw[0], &layer.q, WIDTH, 3072),
+            (norm[1], raw[1], &layer.k, WIDTH, KV),
+            (norm[2], raw[2], &layer.v, WIDTH, KV),
+            (norm[0], raw[3], &layer.r, WIDTH, HEADS * 16),
+            (norm[0], raw[4], &layer.attn_gate, WIDTH, 3072),
+            (norm[0], raw[5], &layer.sink, WIDTH, HEADS),
+            ("attended", "attn_raw", &layer.output, 3072, WIDTH),
+        ];
+        for (from, to, weight, cols, rows) in stages {
+            let from = format!("{}.trace.{from}", self.index);
+            let to = format!("{}.trace.{to}", self.index);
+            if !self.fixture.contains(&from) || !self.fixture.contains(&to) {
+                continue;
+            }
+            let source = self.fixture.values::<u16>(&from, "BF16", &[ROWS, cols])?;
+            let expected = self.fixture.values::<u16>(&to, "BF16", &[ROWS, rows])?;
+            let input = zeroed(&runtime.device, cols * 2)?;
+            let output = zeroed(&runtime.device, rows * 2)?;
+            write(&input, 0, &source[self.row * cols..(self.row + 1) * cols]);
+            let expected = expand(&expected[self.row * rows..(self.row + 1) * rows]);
+            execute(runtime, |gpu| gpu.project(binding(&input), weight, &output, cols, rows))?;
+            let actual = expand(contents::<u16>(&output, rows, 0));
+            stage_metrics.entry(to).or_default().add(&actual, &expected, 0.0);
+        }
+        Ok(())
+    }
+
+    fn norm_replays(
+        &self,
+        runtime: &Runtime,
+        layer: &Layer,
+        stage_metrics: &mut BTreeMap<String, Parity>,
+    ) -> Result<()> {
+        for slot in 0..4 {
+            let from = format!("{}.trace.{}", self.index, trace::CONTROLLER_OUT[slot]);
+            let to = if slot == 3 {
+                format!("{}.mlp_input", self.index)
+            } else {
+                format!("{}.trace.{}", self.index, trace::ATTN_NORM[slot])
+            };
+            if !self.fixture.contains(&from) || !self.fixture.contains(&to) {
+                continue;
+            }
+            let src = self.fixture.values::<f32>(&from, "F32", &[ROWS, WIDTH])?;
+            let expected = self.fixture.values::<u16>(&to, "BF16", &[ROWS, WIDTH])?;
+            let range = self.row * WIDTH..(self.row + 1) * WIDTH;
+            let input = zeroed(&runtime.device, WIDTH * 4)?;
+            let output = zeroed(&runtime.device, WIDTH * 2)?;
+            let weights = if slot == 3 {
+                &layer.mlp_norm
+            } else {
+                &layer.qkv_norm[slot]
+            };
+            write(&input, 0, &src[range.clone()]);
+            let expected = expand(&expected[range]);
+            execute(runtime, |gpu| gpu.norm(binding(&input), weights, binding(&output), true))?;
+            let actual = expand(contents::<u16>(&output, WIDTH, 0));
+            stage_metrics.entry(to).or_default().add(&actual, &expected, 0.0);
+        }
+        Ok(())
+    }
+
     fn compare(
         &mut self,
         name: &str,
@@ -290,8 +389,13 @@ fn check_parity(
 ) -> Result<Value> {
     let local = Layer::load(model, &runtime.device, 10)?;
     let global = Layer::load(model, &runtime.device, 11)?;
-    let first = Visit::new(&runtime.device, true)?;
-    let second = Visit::new(&runtime.device, false)?;
+    let mut first = Visit::new(&runtime.device, true)?;
+    let mut second = Visit::new(&runtime.device, false)?;
+    first.scratch.trace = trace::Trace::allocate(&runtime.device, fixture, 10)?;
+    second.scratch.trace = trace::Trace::allocate(&runtime.device, fixture, 11)?;
+    let mut boundaries = BTreeMap::new();
+    let mut projection_replays = BTreeMap::new();
+    let mut norm_replays = BTreeMap::new();
     let flow = Flow::new(&runtime.device)?;
     seed_visit(fixture, &first)?;
     seed_visit(fixture, &second)?;
@@ -322,8 +426,14 @@ fn check_parity(
         })?;
         checks.row = row;
         checks.visit(10, &first)?;
+        checks.boundaries(&first, &mut boundaries)?;
+        checks.project_replays(runtime, &local, &mut projection_replays)?;
+        checks.norm_replays(runtime, &local, &mut norm_replays)?;
         checks.expert_replay(runtime, &local, &first.scratch)?;
         checks.visit(11, &second)?;
+        checks.boundaries(&second, &mut boundaries)?;
+        checks.project_replays(runtime, &global, &mut projection_replays)?;
+        checks.norm_replays(runtime, &global, &mut norm_replays)?;
         checks.expert_replay(runtime, &global, &second.scratch)?;
     }
     let cache_mismatches = untouched_cache_mismatches(fixture, 10, &first, position)?
@@ -364,6 +474,9 @@ fn check_parity(
         "sequential_positions": ROWS,
         "physical_layers": [10, 11],
         "route_rows": ROWS * 2,
+        "intermediate_boundaries": boundaries,
+        "projection_replays": projection_replays,
+        "norm_replays": norm_replays,
         "connected": {
             "passed": connected_passed,
             "route_set_mismatches": checks.route_misses,
@@ -464,6 +577,7 @@ fn benchmark(
         "nvfp4_visits": visits.len(),
         "global_visits": visits.iter().filter(|visit| visit.capacity != LOCAL).count(),
         "gated_visits": 24,
+        "pinned_m5_controller_and_attention": runtime.pinned_m5,
         "command_buffers_per_step": 1,
         "compute_encoders_per_step": 1,
         "completion_waits_per_step": 1,

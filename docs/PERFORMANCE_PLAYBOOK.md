@@ -186,6 +186,8 @@ Time the connected routed sublayer before multiplying an isolated graph latency 
 
 On the M5 Max, the native original-weight 44-visit slice took 27.35 ms median wall at 4K with one completion. It covered attention and cache mutation, cross-pass gates, block residuals and NVFP4. Test the expert path at exact BF16 ingress and again with its actual upstream producer. At physical layer 10, a 0.246% worst-row relative L2 difference before the router and quantizer grew to 8.96% after the expert sum. All 18,432 final BF16 expert values matched at identical ingress across the two visits in the same fixture. Check the upstream BF16 boundary with the pinned runtime before optimizing the packed products. [Native timing and parity controls](benchmarks/2026-11-21-inkling-mini-native-slice.md)
 
+Capture the first differing boundary with live cache state. In the pinned Ollama follow-up, matching the residual mix and RMS order repaired the initial BF16 controller input; source-order controller expansion and attention passed the 4K connected gate. The 44-visit diagnostic moved from 27.23 to 24.84 ms on the same controlled workload, with a median paired wall ratio of 0.912 and one completion. One short global expert row still missed its gate. A padded BF16 projection candidate made identical-input parity worse than the single-row SIMD dot and was archived. [Live capture and paired budget](benchmarks/2026-11-21-inkling-mini-pinned-oracle.md)
+
 ### 5. Speculative decoding
 
 #### The design that held
@@ -506,6 +508,7 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 | 2026-11-19 to 11-20 | [Schedule gate][gate], [selector prefix reuse][selprefix], [schedule default][sched] | Matched-window gate over twelve cells, prefix reuse under the schedule options, the planner with lookup as the default on the pinned artifact |
 | 2026-11-20 | [Inkling 2 Mini first milestone](benchmarks/2026-11-20-inkling-mini-m5-max.md) | Original-weight NVFP4 scale ordering, routed sublayer timing with and without a host wait per call, MXFP8 and attention costs |
 | 2026-11-21 | [Inkling 2 Mini native decode slice](benchmarks/2026-11-21-inkling-mini-native-slice.md) | Single-stream 44-visit budget, exact-ingress expert replay and connected BF16 parity failure |
+| 2026-11-21 | [Inkling 2 Mini pinned-runtime follow-up](benchmarks/2026-11-21-inkling-mini-pinned-oracle.md) | Live BF16 boundary, connected 4K parity and paired serial timing |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 

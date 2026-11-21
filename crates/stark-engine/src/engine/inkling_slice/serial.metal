@@ -28,9 +28,8 @@ kernel void ink_matvec(
     if (lane == 0) y[row] = bfloat(sum);
 }
 
-// Each source is RMS-normalized, including the current FP32 residual partial.
-// At a block boundary the pending attention output becomes the single partial
-// while the old partial is appended to the frozen block list.
+// Materialize the FP32 rounding boundaries of the source's RMS, scaled
+// query dot, softmax, and weighted residual sum in one dispatch.
 kernel void ink_mix(
     device const float *sources [[buffer(0)]], device const float *partial [[buffer(1)]],
     device const float *queries [[buffer(2)]], device float *result [[buffer(3)]],
@@ -38,82 +37,91 @@ kernel void ink_mix(
     uint tid [[thread_index_in_threadgroup]], uint simd [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
-    threadgroup float sums[8];
-    threadgroup float dots[8];
-    threadgroup float scales[5];
+    threadgroup float sums[18];
+    threadgroup float dots[18];
+    threadgroup float inverse;
     threadgroup float scores[5];
+    float4 units[5];
     uint count = args.x + args.y;
     for (uint s = 0; s < count; ++s) {
         device const float *row = s == args.x ? partial : sources + s * ink_width;
-        float norm = 0, dot = 0;
-        for (uint i = tid; i < ink_width; i += 256) {
-            float x = row[i];
-            norm = fma(x, x, norm);
-            if (count > 1) dot = fma(x, queries[q * ink_width + i], dot);
-        }
+        float4 batch = *reinterpret_cast<device const float4 *>(row + tid * 4);
+        float norm = 0;
+        for (uint i = 0; i < 4; ++i) norm += batch[i] * batch[i];
         norm = simd_sum(norm);
-        dot = simd_sum(dot);
-        if (lane == 0) {
-            sums[simd] = norm;
-            dots[simd] = dot;
+        if (lane == 0) sums[simd] = norm;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (simd == 0) {
+            float total = simd_sum(lane < 18 ? sums[lane] : 0.f);
+            if (lane == 0) inverse = metal::precise::rsqrt(total / ink_width + 1e-6f);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (tid == 0) {
-            float sum = 0, dp = 0;
-            for (uint j = 0; j < 8; ++j) {
-                sum += sums[j];
-                dp += dots[j];
-            }
-            scales[s] = rsqrt(sum / float(ink_width) + 1e-6f);
-            scores[s] = dp * scales[s] / 48.0f;
+        units[s] = batch * inverse;
+        if (count == 1) {
+            *reinterpret_cast<device float4 *>(result + tid * 4) = units[s];
+            return;
+        }
+        {
+#pragma clang fp contract(off) reassociate(off)
+            float4 query = *reinterpret_cast<device const float4 *>(queries + q * ink_width + tid * 4);
+            query = query * 0.020833333333333332f;
+            float dot = 0;
+            for (uint i = 0; i < 4; ++i) dot += units[s][i] * query[i];
+            dot = simd_sum(dot);
+            if (lane == 0) dots[simd] = dot;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (simd == 0) {
+            float total = simd_sum(lane < 18 ? dots[lane] : 0.f);
+            if (lane == 0) scores[s] = total;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     if (tid == 0) {
         float peak = -INFINITY;
         for (uint s = 0; s < count; ++s) peak = max(peak, scores[s]);
-        float sum = 0;
+        float total = 0;
         for (uint s = 0; s < count; ++s) {
-            scores[s] = exp(scores[s] - peak);
-            sum += scores[s];
+            scores[s] = fast::exp(scores[s] - peak);
+            total += scores[s];
         }
-        for (uint s = 0; s < count; ++s) scores[s] *= scales[s] / sum;
+        float scale = 1.f / total;
+        for (uint s = 0; s < count; ++s) scores[s] *= scale;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint i = tid; i < ink_width; i += 256) {
-        float out = 0;
-        for (uint s = 0; s < count; ++s) {
-            device const float *row = s == args.x ? partial : sources + s * ink_width;
-            out = fma(scores[s], row[i], out);
-        }
-        result[q * ink_width + i] = out;
+    {
+#pragma clang fp contract(off) reassociate(off)
+        float4 out = 0;
+        for (uint s = 0; s < count; ++s) out += units[s] * scores[s];
+        *reinterpret_cast<device float4 *>(result + q * ink_width + tid * 4) = out;
     }
 }
 
+// The source RMS reduction reads four adjacent values per thread and reduces
+// the 18 SIMD partial sums in one SIMD operation for a 2304-wide input.
 kernel void ink_norm(
     device const float *x [[buffer(0)]], device const bfloat *weight [[buffer(1)]],
     device bfloat *out [[buffer(2)]], constant uint &weighted [[buffer(3)]],
-    uint row [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint tid [[thread_index_in_threadgroup]],
     uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]
 ) {
-    threadgroup float sums[8];
+    threadgroup float sums[18];
     threadgroup float scale;
+    float4 value = *reinterpret_cast<device const float4 *>(x + tid * 4);
     float sum = 0;
-    x += row * ink_width;
-    out += row * ink_width;
-    for (uint i = tid; i < ink_width; i += 256) sum = fma(x[i], x[i], sum);
+    for (uint i = 0; i < 4; ++i) sum += value[i] * value[i];
     sum = simd_sum(sum);
     if (lane == 0) sums[simd] = sum;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid == 0) {
-        sum = 0;
-        for (uint i = 0; i < 8; ++i) sum += sums[i];
-        scale = rsqrt(sum / float(ink_width) + 1e-6f);
+    if (simd == 0) {
+        sum = simd_sum(lane < 18 ? sums[lane] : 0.f);
+        if (lane == 0) scale = metal::precise::rsqrt(sum / ink_width + 1e-6f);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint i = tid; i < ink_width; i += 256) {
-        float value = x[i] * scale;
-        out[i] = bfloat(weighted ? value * float(weight[i]) : value);
+    for (uint i = 0; i < 4; ++i) {
+        uint j = tid * 4 + i;
+        float unit = value[i] * scale;
+        out[j] = bfloat(weighted ? float(weight[j]) * unit : unit);
     }
 }
 
@@ -310,4 +318,9 @@ kernel void ink_after_experts(
 kernel void ink_copy(device const float *src [[buffer(0)]], device float *dst [[buffer(1)]],
                      uint i [[thread_position_in_grid]]) {
     dst[i] = src[i];
+}
+
+kernel void ink_trace_copy(device const uint *src [[buffer(0)]], device uint *dst [[buffer(1)]],
+                           constant uint &words [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+    if (i < words) dst[i] = src[i];
 }

@@ -1,5 +1,7 @@
 # Model change and experiment ledger
 
+- [20261121-INKLING-04–06 · Inkling 2 Mini live Ollama parity](2026-11-21-inkling-mini-pinned-oracle.md) fixes the first BF16 mismatch and passes the two-visit 4K connected gate against the pinned runtime. One short global expert row remains outside tolerance.
+
 - [20261121-INKLING-01–03 · Inkling 2 Mini native decode slice](2026-11-21-inkling-mini-native-slice.md) records a 27.35 ms 44-visit 4K budget, exact-ingress NVFP4 parity and a connected numerical failure after BF16 ingress differences.
 
 - [20261120-INKLING-01–04 · Inkling 2 Mini first milestone](2026-11-20-inkling-mini-milestone-1.md) measures the original and Unsloth image-loaded serial references. On the M5 Max, all 26 delayed-scale NVFP4 projection cases passed. The 26.65 ms weighted stage estimate supports a bounded native serial prototype.

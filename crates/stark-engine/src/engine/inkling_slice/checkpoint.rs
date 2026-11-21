@@ -24,6 +24,13 @@ pub(super) struct Tensors {
 }
 
 impl Tensors {
+    pub(super) fn contains(
+        &self,
+        name: &str,
+    ) -> bool {
+        self.tensors.contains_key(name)
+    }
+
     pub(super) fn open(path: &Path) -> Result<Self> {
         let mut file = File::open(path).map_err(|_| "cannot open SafeTensors")?;
         let size = file.metadata().map_err(|_| "cannot inspect SafeTensors")?.len();

@@ -4,6 +4,7 @@
 //! admit the family until the missing epilogue and normal entry points qualify.
 
 mod checkpoint;
+mod trace;
 mod validation;
 
 use std::{collections::HashMap, ptr::NonNull};
@@ -11,8 +12,8 @@ use std::{collections::HashMap, ptr::NonNull};
 use checkpoint::Tensors;
 use metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandBufferExt, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
-    MTLCompileOptions, MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, MTLDeviceExt, MTLLanguageVersion,
-    MTLLibraryExt, MTLMathMode, MTLResourceOptions, MTLSize,
+    MTLCompileOptions, MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, MTLDeviceExt, MTLGPUFamily,
+    MTLLanguageVersion, MTLLibraryExt, MTLMathMode, MTLResourceOptions, MTLSize,
 };
 use objc2::{rc::Retained, runtime::ProtocolObject};
 pub use validation::measure;
@@ -53,6 +54,7 @@ struct Runtime {
     device: Retained<Device>,
     queue: Queue,
     pipelines: HashMap<Kernel, Pipeline>,
+    pinned_m5: bool,
 }
 
 impl Runtime {
@@ -62,7 +64,13 @@ impl Runtime {
         let options = MTLCompileOptions::new();
         options.set_math_mode(MTLMathMode::Safe);
         options.set_language_version(MTLLanguageVersion::Version4_0);
-        let source = concat!(include_str!("serial.metal"), "\n", include_str!("experts.metal"));
+        let source = concat!(
+            include_str!("serial.metal"),
+            "\n",
+            include_str!("experts.metal"),
+            "\n",
+            include_str!("attention_source.metal")
+        );
         let library = device
             .new_library_with_source(source, Some(&options))
             .map_err(|_| "Inkling Metal library compilation failed")?;
@@ -76,6 +84,8 @@ impl Runtime {
             "ink_relative_table",
             "ink_attention_parts",
             "ink_attention_gate",
+            "ink_attention_source_parts",
+            "ink_attention_source_gate",
             "ink_after_attention",
             "ink_after_experts",
             "ink_router_logits",
@@ -85,6 +95,7 @@ impl Runtime {
             "ink_nvfp4_down",
             "ink_expert_sum",
             "ink_copy",
+            "ink_trace_copy",
         ];
         let mut pipelines = HashMap::new();
         for name in names {
@@ -92,10 +103,23 @@ impl Runtime {
             let pipeline = device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
             pipelines.insert(name, pipeline);
         }
+        let pinned_m5 = device.name() == "Apple M5 Max"
+            && device.supports_family(MTLGPUFamily::Apple10)
+            && device.supports_family(MTLGPUFamily::Metal4);
+        if pinned_m5 {
+            const NAME: &str = "ink_controller_source";
+            let library = device
+                .new_library_with_source(include_str!("controller_source.metal"), Some(&options))
+                .map_err(|_| NAME)?;
+            let function = library.new_function_with_name(NAME).ok_or(NAME)?;
+            let pipeline = device.new_compute_pipeline_state_with_function(&function).map_err(|_| NAME)?;
+            pipelines.insert(NAME, pipeline);
+        }
         Ok(Self {
             device,
             queue,
             pipelines,
+            pinned_m5,
         })
     }
 }
@@ -187,7 +211,13 @@ impl Stream<'_> {
         partial_live: bool,
         rows: usize,
     ) {
-        self.one("ink_mix", &[blocks, partial, queries, out], [count as u32, u32::from(partial_live)], (rows, 1), 256);
+        self.one(
+            "ink_mix",
+            &[blocks, partial, queries, out],
+            [count as u32, u32::from(partial_live)],
+            (rows, 1),
+            WIDTH / 4,
+        );
     }
 
     fn norm(
@@ -197,7 +227,7 @@ impl Stream<'_> {
         output: Binding<'_>,
         weighted: bool,
     ) {
-        self.dispatch("ink_norm", &[input, binding(weights), output], u32::from(weighted), (1, 1), 256);
+        self.dispatch("ink_norm", &[input, binding(weights), output], u32::from(weighted), (1, 1), WIDTH / 4);
     }
 }
 
@@ -388,18 +418,29 @@ impl Layer {
             let msg = (&s.messages, slot * WIDTH * 4);
             gpu.norm(input, scale, binding(&s.controller_pair), false);
             gpu.norm(msg, scale, (&s.controller_pair, WIDTH * 2), false);
+            s.record(gpu, trace::CONTROLLER_PAIR[slot], &s.controller_pair);
             let gate = &self.gates[slot];
             gpu.project(binding(&s.controller_pair), &gate.down, &s.compressed, 2 * WIDTH, 64);
+            s.record(gpu, trace::CONTROLLER_RANK[slot], &s.compressed);
+            let (kernel, groups, threads) = if gpu.runtime.pinned_m5 {
+                ("ink_controller_source", WIDTH / 32, 32)
+            } else {
+                ("ink_controller_expand", WIDTH / 4, 128)
+            };
             gpu.dispatch(
-                "ink_controller_expand",
+                kernel,
                 &[binding(&s.compressed), binding(&gate.gain), binding(&gate.forget), input, msg, binding(&s.gated)],
                 (),
-                (WIDTH / 4, 1),
-                128,
+                (groups, 1),
+                threads,
             );
+            s.record(gpu, trace::CONTROLLER_OUT[slot], &s.gated);
             gpu.norm(binding(&s.gated), scale, binding(output), true);
         } else {
             gpu.norm(input, scale, binding(output), true);
+        }
+        if slot < 3 {
+            s.record(gpu, trace::ATTN_NORM[slot], output);
         }
     }
 
@@ -464,15 +505,19 @@ impl Layer {
         cache: &Visit,
         position: usize,
     ) {
-        for (input, weight, out, rows) in [
+        for ((input, weight, out, rows), name) in [
             (&s.qkv_input[0], &self.q, &s.q, 3072),
             (&s.qkv_input[1], &self.k, &s.k, KV),
             (&s.qkv_input[2], &self.v, &s.v, KV),
             (&s.qkv_input[0], &self.r, &s.r, HEADS * 16),
             (&s.qkv_input[0], &self.attn_gate, &s.attn_gate, 3072),
             (&s.qkv_input[0], &self.sink, &s.sink, HEADS),
-        ] {
+        ]
+        .into_iter()
+        .zip(trace::RAW_PROJECTIONS)
+        {
             gpu.project(binding(input), weight, out, WIDTH, rows);
+            s.record(gpu, name, out);
         }
         if let Some(dynamic) = &self.dynamic {
             for (i, weight) in dynamic.iter().enumerate() {
@@ -485,7 +530,13 @@ impl Layer {
         } else {
             0
         };
-        let args = [position as u32, width, window, 0];
+        let visible = (position + 1).min(cache.capacity);
+        let shards = if visible < LOCAL {
+            32
+        } else {
+            64
+        };
+        let args = [position as u32, width, window, shards];
         Self::convolution(
             gpu,
             &s.k,
@@ -514,22 +565,35 @@ impl Layer {
             128,
         );
         gpu.one("ink_relative_table", &[&s.r, &self.relative, &s.table], (), (HEADS * LOCAL / 128, 1), 128);
-        let parts = (position + 1).min(cache.capacity).div_ceil(32);
+        let (parts_kernel, gate_kernel, parts_groups, gate_groups, shape) = if gpu.runtime.pinned_m5 {
+            (
+                "ink_attention_source_parts",
+                "ink_attention_source_gate",
+                (shards as usize / 4, HEADS),
+                (8, HEADS),
+                [shards, shards],
+            )
+        } else {
+            let parts = visible.div_ceil(32);
+            (
+                "ink_attention_parts",
+                "ink_attention_gate",
+                (parts, HEADS),
+                (HEADS, 1),
+                [parts as u32, width.div_ceil(32)],
+            )
+        };
         gpu.one(
-            "ink_attention_parts",
+            parts_kernel,
             &[&s.q, &cache.keys, &cache.values, &s.table, &s.sink, &s.parts],
             args,
-            (parts, HEADS),
+            parts_groups,
             128,
         );
-        gpu.one(
-            "ink_attention_gate",
-            &[&s.parts, &s.attn_gate, &s.attended],
-            [parts as u32, width.div_ceil(32)],
-            (HEADS, 1),
-            128,
-        );
+        gpu.one(gate_kernel, &[&s.parts, &s.attn_gate, &s.attended], shape, gate_groups, 128);
+        s.record(gpu, "attended", &s.attended);
         gpu.project(binding(&s.attended), &self.output, &s.attn_raw, 3072, WIDTH);
+        s.record(gpu, "attn_raw", &s.attn_raw);
         Self::convolution(gpu, &s.attn_raw, &self.attn_conv, None, &cache.conv[2], &s.attention, WIDTH, position);
     }
 
@@ -558,6 +622,7 @@ impl Layer {
                     3
                 },
             );
+            s.record(gpu, "attn_mixed", &s.mixed);
         }
         if state.later {
             gpu.mix(&flow.previous, partial, self.gate_queries.as_ref().unwrap(), &s.messages, 2, false, 4);
@@ -581,8 +646,10 @@ impl Layer {
         }
         gpu.one("ink_after_attention", &[partial, &s.attention], u32::from(state.boundary), (WIDTH / 128, 1), 128);
         gpu.mix(&flow.blocks, partial, &self.mlp_query, &s.mixed, state.blocks + usize::from(state.boundary), true, 1);
+        s.record(gpu, "mlp_mixed", &s.mixed);
         self.norms(gpu, s, binding(&s.mixed), &s.mlp_input, 3, state.later);
         self.experts(gpu, s);
+        s.record(gpu, "router_logits", &s.logits);
         Self::convolution(gpu, &s.experts, &self.mlp_conv, None, &cache.conv[3], &s.mlp, WIDTH, position);
         gpu.one("ink_after_experts", &[partial, &s.mlp], (), (WIDTH / 128, 1), 128);
         if state.capture {
@@ -618,6 +685,7 @@ impl Flow {
 }
 
 struct Scratch {
+    trace: Option<trace::Trace>,
     mixed: Buffer,
     messages: Buffer,
     controller_pair: Buffer,
@@ -653,6 +721,19 @@ struct Scratch {
     partial_debug: Buffer,
 }
 
+impl Scratch {
+    fn record(
+        &self,
+        gpu: &mut Stream<'_>,
+        name: &str,
+        source: &Buffer,
+    ) {
+        if let Some(trace) = &self.trace {
+            trace.encode(gpu, name, source);
+        }
+    }
+}
+
 struct Visit {
     capacity: usize,
     keys: Buffer,
@@ -679,6 +760,7 @@ impl Visit {
             values: bf(capacity * KV)?,
             conv: [bf(3 * KV)?, bf(3 * KV)?, bf(3 * WIDTH)?, bf(3 * WIDTH)?],
             scratch: Scratch {
+                trace: None,
                 mixed: wide(3 * WIDTH)?,
                 messages: wide(4 * WIDTH)?,
                 controller_pair: bf(2 * WIDTH)?,
@@ -695,7 +777,7 @@ impl Visit {
                 conv_k: bf(KV)?,
                 conv_v: bf(KV)?,
                 table: bf(HEADS * LOCAL)?,
-                parts: wide(HEADS * capacity.div_ceil(32) * 130)?,
+                parts: wide(HEADS * capacity.div_ceil(32).max(64) * 130)?,
                 attended: bf(3072)?,
                 attn_raw: bf(WIDTH)?,
                 attention: bf(WIDTH)?,

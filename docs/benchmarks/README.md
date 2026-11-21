@@ -21,6 +21,8 @@ follow. Update it when a study changes what a lever returned.
 
 **Inkling 2 Mini native slice (2026-11-21).** The 44 NVFP4 visits with local/global attention, cross-pass gates and persistent state writes ran in 27.35 ms median wall on one Metal command stream. Exact-ingress expert replay passed. Connected slice parity failed. [M5 Max diagnostic](2026-11-21-inkling-mini-native-slice.md)
 
+**Inkling 2 Mini pinned-runtime follow-up (2026-11-21).** The connected two-visit 4K control now passes with bit-identical expert outputs. One short-prefix global expert row remains outside tolerance. The 44-visit diagnostic still fits the 4K budget. [Live parity and paired timing](2026-11-21-inkling-mini-pinned-oracle.md)
+
 **Regular Decider v1.3 201-token smoke (2026-11-18).** The exact pinned 27B
 checkpoint loaded on an M5 Max with 128 GB memory and processed one cold text
 choice at [4.001 input tok/s](2026-11-18-regular-decider-300-token.md), with a
