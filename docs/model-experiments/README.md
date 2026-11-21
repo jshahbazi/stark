@@ -1,5 +1,7 @@
 # Model change and experiment ledger
 
+[Look up research and speed changes by model](../MODEL_RESEARCH.md), including benchmark comparisons and branch-only attempts. The [source index](source-index.md) groups individual reports by family and topic.
+
 - [20261120-LILYSCHED-01: Lily Q4-XL default MTP schedule](2026-11-20-lily-mtp-schedule-default.md): on the pinned image-loaded Lily Q4-XL artifact only, an MTP-enabled text request that names no schedule now runs the adaptive policy with prompt lookup; `"mtp_policy": "fixed"`, `"mtp_lookup": false` and `STARK_LILY_MTP_ADAPTIVE=0` opt out, the worker's `default_drafts` stays zero and the prefix-reuse key is unchanged. On the real model the default path equals the previous worker with explicit selectors hash for hash, the opt-out and the kill switch equal the previous fixed schedule, all eight frozen baseline arms reproduce with the kill switch, and the prefix validator passes 77 of 77 checks. Seeded sampled output of such requests changes; greedy output does not. The app requests two drafts, so its default is the adaptive schedule at a limit of two. Uncommitted and not installed at registration; the app end to end and memory were not exercised. Follow-up, 2026-11-20: on 24 natural requests through the chat template (coding, planning, prose; greedy and sampled) the default is level with two fixed drafts, 0.989 to 1.017 of it in every cell and 1.15 to 1.39 times MTP off, so it holds where the two earlier default changes lost and gains nothing there.
 
 - [20261119-LILYADAPT-01: Lily MTP schedule, matched-window gate for a default](2026-11-19-lily-mtp-schedule-default-gate.md): 648 requests in fourteen sessions on prose and code, greedy and sampled, at 4,096, 16,384 and 32,768 input tokens, each arm on the same windows and seeds, judged by a rule written before the results. Geometric-mean rate against MTP off: adaptive with lookup 1.218, adaptive 1.215, one fixed draft 1.193, two fixed drafts 1.155. Two fixed drafts, the app's default until now, are slower than MTP off on prose at 4,096 tokens (0.956 greedy, 0.952 sampled). Adaptive with lookup is selected; at the app's limit of two it scores 1.193 against 1.133 on its own eight cells. A supplement of sampled long-context windows, registered before its results, changed the outcome from "no change". One artifact, one unscreened host, raw continuation, one sampled setting.
@@ -169,7 +171,7 @@ from this retrospective.
    the next test. A component pass, synthetic kernel speedup or unscreened timing
    observation does not establish a production full-model gain. Name each exact
    artifact whose qualification remains missing.
-6. Add the entry to this index and link its ID from the implementation PR. Update
+6. Add the entry to this ledger and the [source index by model](source-index.md), and link its ID from the implementation PR. For a performance attempt, record its scoped change or timing limitation in the [family speed history](../MODEL_RESEARCH.md#record-the-next-result). Update
    the current model-support/reference page only when the evidence supports a
    capability change. When a new comparison supersedes a benchmark, update its
    current/superseded index without changing the historical measurements.

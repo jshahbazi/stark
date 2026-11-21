@@ -173,7 +173,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) before changi
 | Menu bar app | `apps/menu-bar/`; [build and usage](apps/menu-bar/README.md) |
 | CLI launcher, installer, release | `scripts/stark`, `install.sh`, `scripts/`; [installation](docs/INSTALLATION.md), [releasing](docs/RELEASING.md) |
 | Checks and validation | [CI](docs/CI.md), [validation records](docs/validation/), [benchmarks](docs/benchmarks/README.md) |
-| Model changes and experiments | [Attempt ledger and template](docs/model-experiments/README.md), [image-support findings](docs/model-experiments/2026-11-08-image-support-retrospective.md) |
+| Model research and benchmarks | [Look up prior work and speed changes by model](docs/MODEL_RESEARCH.md), [attempt ledger and template](docs/model-experiments/README.md), [image-support findings](docs/model-experiments/2026-11-08-image-support-retrospective.md) |
 | Performance work | [Performance playbook](docs/PERFORMANCE_PLAYBOOK.md): what to try, in order, when making a model faster or bringing up a new family, what each lever returned, and how to measure it. Read it first and update it with each attempt |
 | Website | `website/`; [setup and publishing](website/README.md) |
 
