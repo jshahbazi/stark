@@ -10,6 +10,8 @@ For comparing a new family against it: Lily is a 48-layer hybrid, 36 GDN recurre
 
 ## Keeping this page current
 
+Find the baseline, rejected candidates and source-bound speed history for the target family in [model research and benchmarks](MODEL_RESEARCH.md).
+
 This page is maintained. Read it before optimizing a model or bringing up a new family, and update it in the same change as the experiment record whenever an attempt:
 
 - changes what a lever returned, or tries a lever on another family or artifact;

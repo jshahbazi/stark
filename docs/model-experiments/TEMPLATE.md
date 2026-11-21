@@ -73,12 +73,14 @@ Include setup/admission/compile failures that block execution, numerical mismatc
 
 ## Performance and memory
 
-| Metric and measurement boundary | Baseline | Candidate | Repeats/dispersion | Eligibility and conclusion |
-| --- | --- | --- | --- | --- |
-| Tokenization/rendering/planning | | | | |
-| First token / prefill | | | | |
-| Useful decode / end-to-end rate | | | | |
-| Observed peak memory / retained payload | | | | |
+| Metric, unit and measurement boundary | Baseline | Candidate | Change and statistic | Repeats/dispersion | Eligibility and conclusion |
+| --- | --- | --- | --- | --- | --- |
+| Tokenization/rendering/planning | | | | | |
+| First token / prefill | | | | | |
+| Useful decode / end-to-end rate | | | | | |
+| Observed peak memory / retained payload | | | | | |
+
+Name both arms and the direction of the comparison. For example, report a reduction in median first-token seconds or an increase in paired decode throughput. Use `no eligible pair` or `not measured` where applicable. After recording the result, link the report in the [source index](source-index.md) and add the scoped change and disposition to the applicable [family speed history](../MODEL_RESEARCH.md#record-the-next-result). Adjust relative links for the report's directory.
 
 Leave performance explicitly `not measured` when only functional tests were run. Separate component gains from whole-request gains; separate available-memory estimates, payload accounting, RSS and actual reservations. Record exclusions and regressions even when correctness passes.
 

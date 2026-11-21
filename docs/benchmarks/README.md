@@ -1,5 +1,7 @@
 # Benchmarks
 
+For prior work on a particular family, use [model research and benchmarks](../MODEL_RESEARCH.md). The family speed histories link each before/after comparison to its source.
+
 Measured results, each bound to the source revision, build and host named inside it. This index says which result is current and which has been superseded. Earlier archived comparison artifacts are under [archive/experiments](../archive/experiments/). Each report states where its source-bound aggregates are retained.
 
 Track each proposed optimization, failed approach and promotion decision in the

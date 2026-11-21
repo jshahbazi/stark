@@ -75,6 +75,8 @@ jobs:
           scope: quality-debug-no-default-features
       - name: Check repository security policy
         run: uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py
+      - name: Check model research index coverage and links
+        run: uv run --python 3.13.13 python scripts/model_research.py --check
       - name: Test dependency-report gate
         run: uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py --test
       - name: Test standalone installation contracts
