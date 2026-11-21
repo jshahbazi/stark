@@ -26,7 +26,7 @@ mod target_validation;
 
 use packed_prefill::PackedPrefill;
 use prefill::PrefillLanes;
-pub use prefill_profile::{profile_packed_prefill, profile_prefill, profile_stock_4k};
+pub use prefill_profile::{probe_stock_nvfp4, profile_packed_prefill, profile_prefill, profile_stock_4k};
 pub use prefill_trace::{PrefillTraceMode, trace_packed_prefill, trace_prefill};
 pub use target_validation::{measure_full, measure_full_budget, measure_prefill, measure_prefill_speed};
 

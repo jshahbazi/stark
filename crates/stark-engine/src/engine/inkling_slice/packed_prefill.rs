@@ -179,11 +179,20 @@ impl PackedPrefill {
             ],
         )?;
         if source.is_some() {
-            register(
-                runtime,
-                include_str!("prefill_dense_source.metal"),
-                &["ink_prefill_dense_source", "ink_prefill_router_source", "ink_prefill_select_source"],
-            )?;
+            let mut kernels =
+                vec!["ink_prefill_dense_source", "ink_prefill_router_source", "ink_prefill_select_source"];
+            if std::env::var_os("STARK_INKLING_EXPERIMENT_SINGLETON_ROUTER").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+            {
+                kernels.push("ink_singleton_router_source");
+                runtime.singleton_router = "ink_singleton_router_source";
+            }
+            register(runtime, include_str!("prefill_dense_source.metal"), &kernels)?;
+            if std::env::var_os("STARK_INKLING_EXPERIMENT_NVFP4_SHARED_SCALES").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+            {
+                grouped_pilot::enable_shared_scales(runtime)?;
+            }
             register(
                 runtime,
                 include_str!("prefill_relative_source.metal"),

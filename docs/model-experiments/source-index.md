@@ -246,6 +246,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [4K prefill budget and batched RMS](2026-11-21-inkling-mini-prefill-budget.md) · Experiment, 2026-11-21
 - [Packed prefill, rejected kernels and source-aligned worker](2026-11-21-inkling-mini-packed-prefill.md) · Experiment, 2026-11-21
 - [Stock 4K prefill and singleton decode attribution](2026-11-21-inkling-mini-stock-profile.md) · Experiment, 2026-11-21
+- [Stock NVFP4 occupancy, scale sharing and one-row decode router](2026-11-21-inkling-mini-nvfp4-router.md) · Experiment, 2026-11-21
 
 ### Protocols and aggregates
 

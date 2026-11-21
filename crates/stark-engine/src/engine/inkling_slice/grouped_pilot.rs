@@ -11,6 +11,81 @@ const TOP: usize = 8;
 const TILE: usize = 32;
 const REPEATS: usize = 5;
 const PHYSICAL: usize = 10;
+const PROBE_FIELDS: usize = 5;
+const PROBE_DOTS: usize = 44 * 2;
+const PROBE_SAMPLE: [usize; 6] = [0, 1, 42, 43, 84, 85];
+
+pub(super) struct Nvfp4Probe {
+    counts: Buffer,
+    pub(super) reverse: bool,
+}
+
+impl Nvfp4Probe {
+    pub(super) fn new(runtime: &mut Runtime) -> Result<Self> {
+        let kernel = "ink_group_qmm_probe";
+        let options = MTLCompileOptions::new();
+        options.set_math_mode(MTLMathMode::Safe);
+        options.set_language_version(MTLLanguageVersion::Version4_0);
+        let library = runtime
+            .device
+            .new_library_with_source(
+                concat!(
+                    "#include <metal_stdlib>\nusing namespace metal;\n",
+                    "#define INK_GROUP_QMM_PROBE\n#define ink_group_qmm ink_group_qmm_probe\n",
+                    include_str!("experts.metal"),
+                    "\n",
+                    include_str!("grouped_pilot.metal"),
+                ),
+                Some(&options),
+            )
+            .map_err(|_| "Inkling NVFP4 telemetry compilation failed")?;
+        let function = library.new_function_with_name(kernel).ok_or(kernel)?;
+        let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| kernel)?;
+        runtime.pipelines.insert(kernel, pipeline);
+        let counts = zeroed(&runtime.device, (PROBE_DOTS + PROBE_SAMPLE.len() * 3) * PROBE_FIELDS * 4)?;
+        Ok(Self {
+            counts,
+            reverse: false,
+        })
+    }
+
+    pub(super) fn clear(&self) {
+        // Each preceding command has completed before the shared counters are cleared.
+        unsafe { self.counts.contents().as_ptr().cast::<u8>().write_bytes(0, self.counts.length()) };
+    }
+
+    pub(super) fn report(
+        &self,
+        rows: usize,
+    ) -> Result<Value> {
+        let count = read_shared::<u32>(&self.counts, PROBE_DOTS * PROBE_FIELDS);
+        let mut phases = Vec::with_capacity(2);
+        for (phase, width) in [WIDTH, MID].into_iter().enumerate() {
+            let mut totals = [0u64; PROBE_FIELDS];
+            for record in count.chunks_exact(PROBE_FIELDS).skip(phase).step_by(2) {
+                if record[1] as usize != rows * TOP || record[0] == 0 {
+                    return Err("Inkling NVFP4 telemetry did not cover every real routed row");
+                }
+                for (total, value) in totals.iter_mut().zip(record) {
+                    *total += u64::from(*value);
+                }
+            }
+            let [live_tiles, routed_rows, active_blocks, guard_failures, replay_entries] = totals;
+            phases.push(json!({
+                "phase": if phase == 0 { "gate_up" } else { "down" },
+                "live_run_tiles": live_tiles,
+                "launched_run_slots": run_slots(rows) * (PROBE_DOTS / 2),
+                "routed_rows": routed_rows,
+                "live_row_capacity": live_tiles * TILE as u64,
+                "active_simd_blocks": active_blocks,
+                "guard_failed_simd_blocks": guard_failures,
+                "replay_entries": replay_entries,
+                "eligible_output_kblocks": routed_rows * WIDTH as u64 * (width / 32) as u64,
+            }));
+        }
+        Ok(json!({"timed_dot_ordinals": PROBE_SAMPLE, "occupancy": phases}))
+    }
+}
 
 fn run_slots(rows: usize) -> usize {
     (rows * TOP).div_ceil(TILE) + EXPERTS - 1
@@ -368,13 +443,51 @@ impl GroupedExperts {
         } else {
             PrefillPhase::Nvfp4DownDot
         });
-        gpu.one(
-            "ink_group_qmm",
-            &[&self.activation, &bank.codes, &bank.blocks, routing.runs, &self.quantum, &self.maxima, &self.projected],
-            width as u32,
-            (WIDTH / 64, run_slots(rows)),
-            128,
-        );
+        let buffers =
+            [&self.activation, &bank.codes, &bank.blocks, routing.runs, &self.quantum, &self.maxima, &self.projected];
+        let grid = (WIDTH / 64, run_slots(rows));
+        if let Some(probe) = &gpu.runtime.nvfp4_probe
+            && gpu.nvfp4_dots < PROBE_DOTS
+        {
+            let ordinal = gpu.nvfp4_dots;
+            gpu.nvfp4_dots += 1;
+            let buffers =
+                [buffers[0], buffers[1], buffers[2], buffers[3], buffers[4], buffers[5], buffers[6], &probe.counts];
+            if let Some(sample) = PROBE_SAMPLE.iter().position(|&dot| dot == ordinal) {
+                let phases =
+                    [PrefillPhase::Nvfp4ProbeExact, PrefillPhase::Nvfp4ProbeGuard, PrefillPhase::Nvfp4ProbeBare];
+                let order = if probe.reverse {
+                    [2, 1, 0]
+                } else {
+                    [0, 1, 2]
+                };
+                for mode in order {
+                    gpu.phase(phases[mode]);
+                    let slot = PROBE_DOTS + sample * 3 + mode;
+                    gpu.one(
+                        "ink_group_qmm_probe",
+                        &buffers,
+                        [width as u32, mode as u32, (slot * PROBE_FIELDS) as u32],
+                        grid,
+                        128,
+                    );
+                }
+                gpu.phase(if gather {
+                    PrefillPhase::Nvfp4UpDot
+                } else {
+                    PrefillPhase::Nvfp4DownDot
+                });
+            }
+            // The regular result overwrites every shadow result before the epilogue reads it.
+            gpu.one("ink_group_qmm_probe", &buffers, [width as u32, 0, (ordinal * PROBE_FIELDS) as u32], grid, 128);
+        } else {
+            let kernel = if gpu.runtime.source_text_active {
+                gpu.runtime.grouped_qmm
+            } else {
+                "ink_group_qmm"
+            };
+            gpu.one(kernel, &buffers, width as u32, grid, 128);
+        }
     }
 
     fn encode_projected(
@@ -513,6 +626,29 @@ fn register_grouped_mxfp8(
         let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
         runtime.pipelines.insert(name, pipeline);
     }
+    Ok(())
+}
+
+pub(super) fn enable_shared_scales(runtime: &mut Runtime) -> Result<()> {
+    let kernel = "ink_group_qmm_shared_scales";
+    let options = MTLCompileOptions::new();
+    options.set_math_mode(MTLMathMode::Safe);
+    options.set_language_version(MTLLanguageVersion::Version4_0);
+    let source = concat!(
+        "#include <metal_stdlib>\nusing namespace metal;\n",
+        "#define INK_GROUP_QMM_SHARED_SCALES\n#define ink_group_qmm ink_group_qmm_shared_scales\n",
+        include_str!("experts.metal"),
+        "\n",
+        include_str!("grouped_pilot.metal")
+    );
+    let library = runtime
+        .device
+        .new_library_with_source(source, Some(&options))
+        .map_err(|_| "Inkling shared-scale NVFP4 compilation failed")?;
+    let function = library.new_function_with_name(kernel).ok_or(kernel)?;
+    let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| kernel)?;
+    runtime.pipelines.insert(kernel, pipeline);
+    runtime.grouped_qmm = kernel;
     Ok(())
 }
 

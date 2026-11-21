@@ -29,6 +29,9 @@ pub(in crate::engine::inkling_slice) enum PrefillPhase {
     RouterProjection,
     RouteSelect,
     Nvfp4Epilogue,
+    Nvfp4ProbeExact,
+    Nvfp4ProbeGuard,
+    Nvfp4ProbeBare,
     Mxfp8,
     KeyValue,
     RelativeTable,
@@ -58,6 +61,9 @@ struct Totals {
     router_projection: f64,
     route_select: f64,
     nvfp4_epilogue: f64,
+    probe_exact: f64,
+    probe_guard: f64,
+    probe_bare: f64,
     mxfp8: f64,
     other: f64,
     attention_inputs: f64,
@@ -91,6 +97,9 @@ impl Totals {
             PrefillPhase::RouterProjection => &mut self.router_projection,
             PrefillPhase::RouteSelect => &mut self.route_select,
             PrefillPhase::Nvfp4Epilogue => &mut self.nvfp4_epilogue,
+            PrefillPhase::Nvfp4ProbeExact => &mut self.probe_exact,
+            PrefillPhase::Nvfp4ProbeGuard => &mut self.probe_guard,
+            PrefillPhase::Nvfp4ProbeBare => &mut self.probe_bare,
             PrefillPhase::Mxfp8 => &mut self.mxfp8,
             PrefillPhase::AttentionInputs => &mut self.attention_inputs,
             PrefillPhase::ExpertInputs => &mut self.expert_inputs,
@@ -112,6 +121,9 @@ impl Totals {
             + self.attention()
             + self.nvfp4()
             + self.mxfp8
+            + self.probe_exact
+            + self.probe_guard
+            + self.probe_bare
             + self.attention_inputs
             + self.expert_inputs
             + self.expert_finish
@@ -166,6 +178,9 @@ impl Totals {
             "nvfp4_down_dot_ms": self.nvfp4_down_dot,
             "nvfp4_epilogue_ms": self.nvfp4_epilogue,
             "mxfp8_experts_ms": self.mxfp8,
+            "nvfp4_probe_exact_ms": self.probe_exact,
+            "nvfp4_probe_guard_only_ms": self.probe_guard,
+            "nvfp4_probe_bare_ms": self.probe_bare,
             "other_ms": self.other + self.readout + self.attention_inputs + self.expert_inputs + self.expert_finish,
             "attention_inputs_ms": self.attention_inputs,
             "expert_inputs_ms": self.expert_inputs,
@@ -434,6 +449,24 @@ pub fn profile_stock_4k(
     draft: &Path,
     oracles: &[std::path::PathBuf],
 ) -> Result<Value> {
+    profile_stock(checkpoint, draft, oracles, false)
+}
+
+/// Measure tile utilization and shadow exactness controls on real stock routes.
+pub fn probe_stock_nvfp4(
+    checkpoint: &Path,
+    draft: &Path,
+    oracles: &[std::path::PathBuf],
+) -> Result<Value> {
+    profile_stock(checkpoint, draft, oracles, true)
+}
+
+fn profile_stock(
+    checkpoint: &Path,
+    draft: &Path,
+    oracles: &[std::path::PathBuf],
+    nvfp4_probe: bool,
+) -> Result<Value> {
     if oracles.is_empty() {
         return Err("Inkling stock profile requires at least one oracle");
     }
@@ -444,6 +477,9 @@ pub fn profile_stock_4k(
         return Err("Inkling stock profile requires the source-aligned M5 Max path");
     }
     let mut profiler = PrefillTiming::new(&session.runtime)?;
+    if nvfp4_probe {
+        session.runtime.nvfp4_probe = Some(grouped_pilot::Nvfp4Probe::new(&mut session.runtime)?);
+    }
     let mut cases = Vec::with_capacity(oracles.len());
     for (index, oracle) in oracles.iter().enumerate() {
         cases.push(profile_stock_case(&mut session, &mut profiler, oracle, index % 2 == 1)?);
@@ -455,6 +491,8 @@ pub fn profile_stock_4k(
         "decode_start_position": STOCK_INPUT,
         "vision_and_dspark_resident": true,
         "drafting": false,
+        "grouped_nvfp4_kernel": if nvfp4_probe { "ink_group_qmm_probe" } else { session.runtime.grouped_qmm },
+        "singleton_router_kernel": session.runtime.singleton_router,
         "cases": cases,
     }))
 }
@@ -478,13 +516,24 @@ fn profile_stock_case(
     let expected_seed = seed.values::<f32>("full.logits", "F32", &[1, 1, VOCABULARY])?;
     let expected_continuation = continuation.values::<f32>("full.logits", "F32", &[1, 1, VOCABULARY])?;
     let (mut plain, mut profiled, mut decode) = (Value::Null, Value::Null, Value::Null);
-    for instrument in [instrument_first, !instrument_first] {
+    let probe = session.runtime.nvfp4_probe.is_some();
+    let orders = [instrument_first, !instrument_first];
+    let instruments = if probe {
+        &[true][..]
+    } else {
+        &orders[..]
+    };
+    for &instrument in instruments {
         session.reset();
         let mut commands = Vec::with_capacity(STOCK_ROWS.len());
         let start = std::time::Instant::now();
         for rows in STOCK_ROWS {
             let position = session.position;
             let readout = position + rows == STOCK_INPUT;
+            if let Some(probe) = &mut session.runtime.nvfp4_probe {
+                probe.reverse = instrument_first ^ (position == 0);
+                probe.clear();
+            }
             // Splitting all three serial tail graphs into encoder stages in
             // one command exceeds the timestamp buffer. Keep its real command
             // GPU time and profile the separate seed and decode graphs.
@@ -528,6 +577,9 @@ fn profile_stock_decode(
     expected: &[f32],
 ) -> Result<Value> {
     let snapshot = session.snapshot()?;
+    let candidate_router = session.runtime.singleton_router;
+    let original_router = "ink_prefill_router_source";
+    let compare_router = candidate_router != original_router;
     let mut source_runs = Vec::new();
     let mut legacy_runs = Vec::new();
     let mut legacy_logits = None;
@@ -537,14 +589,18 @@ fn profile_stock_decode(
     for (index, instrument) in [false, true, true, false].into_iter().enumerate() {
         for source in [index % 2 == 0, index % 2 != 0] {
             session.restore(&snapshot)?;
-            session.runtime.source_text_active = source;
+            session.runtime.source_text_active = source || compare_router;
+            if compare_router && !source {
+                session.runtime.singleton_router = original_router;
+            }
             let result = stock_command(session, &[token], true, instrument.then_some(&mut *profiler));
             session.runtime.source_text_active = true;
+            session.runtime.singleton_router = candidate_router;
             let command = result?;
             let started = std::time::Instant::now();
             let logits = session.read_logits()?;
             let read_ms = started.elapsed().as_secs_f64() * 1000.0;
-            let reference = if source {
+            let reference = if source || compare_router {
                 expected
             } else {
                 legacy_logits.get_or_insert_with(|| logits.clone()).as_slice()
@@ -560,7 +616,40 @@ fn profile_stock_decode(
             runs.push(json!({"instrumented": instrument, "read_logits_ms": read_ms, "command": command}));
         }
     }
-    Ok(json!({"source": source_runs, "legacy_arithmetic_control": legacy_runs}))
+    if compare_router {
+        let read = |session: &Session| {
+            session
+                .visits
+                .iter()
+                .flat_map(|visit| {
+                    let scratch = &visit.scratch;
+                    [(&scratch.logits, EXPERTS), (&scratch.routes, 8), (&scratch.route_weights, 8)]
+                        .into_iter()
+                        .flat_map(|(buffer, count)| read_shared::<u32>(buffer, count))
+                })
+                .collect::<Vec<_>>()
+        };
+        session.restore(&snapshot)?;
+        session.runtime.singleton_router = original_router;
+        let result = session.step(token);
+        session.runtime.singleton_router = candidate_router;
+        result?;
+        let original = read(session);
+        session.restore(&snapshot)?;
+        session.step(token)?;
+        if original != read(session) {
+            return Err("Inkling singleton router logits, IDs or weights differed from the source kernel");
+        }
+    }
+    if compare_router {
+        Ok(json!({
+            "source": source_runs,
+            "original_source_router_control": legacy_runs,
+            "exact_router_logits_ids_weights": true,
+        }))
+    } else {
+        Ok(json!({"source": source_runs, "legacy_arithmetic_control": legacy_runs}))
+    }
 }
 
 fn stock_command(
@@ -572,6 +661,13 @@ fn stock_command(
     let start = session.position;
     let timing = session.encode_append(tokens, readout, profiler.as_deref_mut())?;
     let stages = profiler.map(|profile| profile.tile.report(timing.gpu_ms));
+    let nvfp4 = session
+        .runtime
+        .nvfp4_probe
+        .as_ref()
+        .filter(|_| tokens.len() >= 2044)
+        .map(|probe| probe.report(tokens.len()))
+        .transpose()?;
     let stats = json!({
         "start_position": start,
         "rows": tokens.len(),
@@ -581,6 +677,7 @@ fn stock_command(
         "submit_and_wait_ms": timing.wall_ms - timing.encode_ms,
         "gpu_ms": timing.gpu_ms,
         "stages": stages,
+        "nvfp4": nvfp4,
     });
     session.finish_append(Ok(timing), tokens.len())?;
     Ok(stats)

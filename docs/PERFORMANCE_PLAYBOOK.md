@@ -447,6 +447,8 @@ Inkling’s packed source graph reached 772 tok/s in an uncached 4K worker sessi
 
 The stock Inkling 4K profile retained the two bulk commands, the three-row tail and the final seed. Grouped NVFP4 gate/up and down products used 2.78 s of 5.83 s instrumented command GPU time. Global mask generation used 0.017 s. Measure live expert tile utilization and exactness replay costs before rebuilding the grouped kernel. On the same restored 4K cache the source singleton took 2.39 ms more wall time than the legacy arithmetic at the paired median. The source router projection added 2.28 ms of instrumented GPU time, while selection and normalization were slightly faster. Screen a one-row projection specialization against the pinned arithmetic. [Stock stage profile](model-experiments/2026-11-21-inkling-mini-stock-profile.md)
 
+The next Inkling control found 89% row fill on active 32-row runs at stock widths. Actual replay affected at most 0.33% of down output K-block entries. Removing replay saved 2.5–4.0% in the shadow timing, and bypassing the guard as well saved another 33–35% of exact shadow time with fewer telemetry updates. Test guard work before rebuilding the replay loop. Shared scales and a vector-loaded singleton router both passed short and stock 4K controls. The shared-scale worker trial improved 4K prefill by 1.61–1.77% at paired medians. The exact one-row router saved 0.92 ms in the projection stage and improved worker useful decode by 1.64–2.52%, with all eight worker pairs faster. Both remain opt-in screens. [NVFP4 and singleton router study](model-experiments/2026-11-21-inkling-mini-nvfp4-router.md)
+
 ## Correctness gates
 
 A speed change that is meant to leave output alone has to pass all of these, in this order of cost:
@@ -547,6 +549,7 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 | 2026-11-21 | [Inkling 2 Mini native worker](benchmarks/2026-11-21-inkling-mini-native-worker.md) | Grouped 4K worker prefill, greedy and sampled decode budgets, final slice reruns |
 | 2026-11-21 | [Inkling 2 Mini packed prefill](model-experiments/2026-11-21-inkling-mini-packed-prefill.md) | Contiguous prefill buffers, exact kernel screens, matrix precision limits and cold worker comparison |
 | 2026-11-21 | [Inkling 2 Mini stock 4K and singleton profile](model-experiments/2026-11-21-inkling-mini-stock-profile.md) | Stock prefill stage attribution, same-cache source router projection cost and selected follow-up screens |
+| 2026-11-21 | [Inkling 2 Mini NVFP4 and singleton router](model-experiments/2026-11-21-inkling-mini-nvfp4-router.md) | Real-route tile occupancy, guard and FP32 replay attribution, plus exact shared scales and singleton projection trials |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 

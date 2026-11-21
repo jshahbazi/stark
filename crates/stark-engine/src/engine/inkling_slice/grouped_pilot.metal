@@ -201,11 +201,22 @@ kernel void ink_group_qmm(
     device const int *quantum [[buffer(4)]],
     device const float *maxima [[buffer(5)]],
     device float *result [[buffer(6)]],
+#ifdef INK_GROUP_QMM_PROBE
+    device atomic_uint *stats [[buffer(7)]],
+    constant uint3 &probe [[buffer(8)]],
+#else
     constant uint &Width [[buffer(7)]],
+#endif
     uint2 threadgroup_position_in_grid [[threadgroup_position_in_grid]],
     uint thread_index_in_threadgroup [[thread_index_in_threadgroup]],
     uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
     uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]]) {
+#ifdef INK_GROUP_QMM_PROBE
+    const uint Width = probe.x, mode = probe.y;
+    stats += probe.z;
+    uint failedBlocks = 0, replayEntries = 0;
+    threadgroup uint counts[8];
+#endif
     constexpr uint Channels = 2304;
     constexpr uint BM = 32, BN = 64, BK = 32, Workers = 128;
 
@@ -219,6 +230,10 @@ kernel void ink_group_qmm(
     uint tileRow = (simd / (BN / 32)) * 16, tileColumn = (simd % (BN / 32)) * 32;
     threadgroup bfloat decodedWeights[BN * BK];
     threadgroup float final[BM * BN];
+#ifdef INK_GROUP_QMM_SHARED_SCALES
+    threadgroup float scalePeak[Workers];
+    threadgroup int scaleQuantum[Workers];
+#endif
     using Shape = metal::dextents<int32_t, 2>;
     using Strides = metal::array<int32_t, 2>;
     using ActivationTile = metal::tensor<device bfloat, Shape, metal::tensor_inline>;
@@ -235,6 +250,18 @@ kernel void ink_group_qmm(
     // possible FP32 prefix, including prefixes rounded to a coarser power of two.
     int smallest = 127;
     for (uint offset = 0; offset < Width; offset += BK) {
+#ifdef INK_GROUP_QMM_SHARED_SCALES
+        const uint channel = col0 + worker / 2, at = offset + (worker % 2) * 16;
+        const uint wr = expert * Channels + channel;
+        const float gain = ink_e4m3_positive(scales[wr * (Width / 16) + at / 16]);
+        scalePeak[worker] = abs(gain) * 6.f;
+        scaleQuantum[worker] = nvfp4_binary_quantum(gain) - 1;
+        for (uint i = 0; i < 2; ++i) {
+            const uint word = weights[wr * (Width / 8) + at / 8 + i];
+            for (uint j = 0; j < 8; ++j)
+                decodedWeights[worker * 16 + i * 8 + j] = bfloat(ink_fp4_code((word >> (4 * j)) & 15u) * gain);
+        }
+#else
         for (uint i = worker; i < BN * (BK / 8); i += Workers) {
             uint channel = col0 + i / (BK / 8), at = offset + (i % (BK / 8)) * 8;
             uint wr = expert * Channels + channel;
@@ -247,14 +274,25 @@ kernel void ink_group_qmm(
             for (uint j = 0; j < 8; ++j)
                 decodedWeights[i * 8 + j] = bfloat(ink_fp4_code((word >> (4 * j)) & 15u) * gain);
         }
+#endif
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (tileRow < rows) {
             int valid = int(min(16u, rows - tileRow));
+            float before[16] = {};
+            uint replay = 0;
+#ifdef INK_GROUP_QMM_PROBE
+            if (mode != 2) {
+#endif
             uint block = (start + tileRow + min(lane, 15u)) * (Width / BK) + offset / BK;
             float rowPeak = lane < uint(valid) ? maxima[block] : 0.f;
             float inputPeak = simd_max(rowPeak);
             int rowQuantum = lane < uint(valid) ? quantum[block] : 127;
             int minInputQuantum = simd_min(rowQuantum);
+#ifdef INK_GROUP_QMM_SHARED_SCALES
+            const uint scale = (tileColumn + lane) * 2;
+            int weightQuantum = min(127, min(scaleQuantum[scale], scaleQuantum[scale + 1]));
+            float weightPeak = max(scalePeak[scale], scalePeak[scale + 1]);
+#else
             int weightQuantum = 127;
             float weightPeak = 0;
             for (uint h = 0; h < BK / 16; ++h) {
@@ -265,6 +303,7 @@ kernel void ink_group_qmm(
                 weightQuantum = min(weightQuantum, nvfp4_binary_quantum(gain) - 1);
                 weightPeak = max(weightPeak, abs(gain) * 6.f);
             }
+#endif
             smallest = min(smallest, minInputQuantum + simd_min(weightQuantum));
             float columnPeak = weightPeak;
             int columnQuantum = weightQuantum;
@@ -280,8 +319,6 @@ kernel void ink_group_qmm(
             // Native FP32 arithmetic flushes subnormal intermediates; the
             // matrix unit can preserve them. Replay if a prefix can be subnormal.
             bool safe = upper < nvfp4_exact_limit(smallest);
-            float before[16] = {};
-            uint replay = 0;
             // A tile can fail the common bound while individual entries pass.
             if (!safe) {
                 for (uint i = 0; i < accumulator.get_capacity(); ++i) {
@@ -299,6 +336,12 @@ kernel void ink_group_qmm(
                         replay |= 1u << i;
                 }
             }
+#ifdef INK_GROUP_QMM_PROBE
+                failedBlocks += !safe;
+                replayEntries += popcount(replay);
+                if (mode == 1) replay = 0;
+            }
+#endif
             auto lhs = ActivationTile((device bfloat *)activation + (start + tileRow) * Width + offset,
                                       Shape(BK, valid), Strides{1, int(Width)});
             auto rhs = WeightTile(decodedWeights + tileColumn * BK, Shape(BK, 32), Strides{1, BK});
@@ -319,6 +362,25 @@ kernel void ink_group_qmm(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
+#ifdef INK_GROUP_QMM_PROBE
+    const uint replayCount = simd_sum(replayEntries);
+    if (lane == 0) {
+        counts[simd * 2] = failedBlocks;
+        counts[simd * 2 + 1] = replayCount;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (worker == 0) {
+        if (col0 == 0) {
+            atomic_fetch_add_explicit(stats, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(stats + 1, rows, memory_order_relaxed);
+        }
+        if (mode != 2) {
+            atomic_fetch_add_explicit(stats + 2, (rows > 16 ? 4 : 2) * (Width / BK), memory_order_relaxed);
+            atomic_fetch_add_explicit(stats + 3, counts[0] + counts[2] + counts[4] + counts[6], memory_order_relaxed);
+            atomic_fetch_add_explicit(stats + 4, counts[1] + counts[3] + counts[5] + counts[7], memory_order_relaxed);
+        }
+    }
+#endif
     accumulator.store(ResultTile(final + tileRow * BN + tileColumn, Shape(32, 16), Strides{1, BN}));
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint i = worker; i < rows * BN; i += Workers) {

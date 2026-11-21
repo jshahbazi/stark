@@ -22,8 +22,8 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use session::prefill_profile::{PrefillPhase, PrefillTiming};
 pub use session::{
     PrefillTraceMode, Session, Snapshot, VOCABULARY, measure_dspark, measure_full, measure_full_budget,
-    measure_prefill, measure_prefill_speed, profile_packed_prefill, profile_prefill, profile_stock_4k,
-    trace_packed_prefill, trace_prefill,
+    measure_prefill, measure_prefill_speed, probe_stock_nvfp4, profile_packed_prefill, profile_prefill,
+    profile_stock_4k, trace_packed_prefill, trace_prefill,
 };
 pub use validation::measure;
 pub use vision::{INKLING_IMAGE_TOKEN, ImageEmbeddings, measure_vision};
@@ -72,6 +72,9 @@ struct Runtime {
     pipelines: HashMap<Kernel, Pipeline>,
     pinned_m5: bool,
     source_text_active: bool,
+    singleton_router: Kernel,
+    grouped_qmm: Kernel,
+    nvfp4_probe: Option<grouped_pilot::Nvfp4Probe>,
 }
 
 impl Runtime {
@@ -154,6 +157,9 @@ impl Runtime {
             pipelines,
             pinned_m5,
             source_text_active: false,
+            singleton_router: "ink_prefill_router_source",
+            grouped_qmm: "ink_group_qmm",
+            nvfp4_probe: None,
         })
     }
 }
@@ -162,6 +168,7 @@ struct Stream<'a> {
     encoder: Option<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>>,
     runtime: &'a Runtime,
     dispatches: usize,
+    nvfp4_dots: usize,
     profile: Option<(&'a ProtocolObject<dyn MTLCommandBuffer>, &'a mut PrefillTiming)>,
 }
 
@@ -171,6 +178,13 @@ impl Stream<'_> {
         phase: PrefillPhase,
     ) {
         if let Some((command, profile)) = self.profile.as_mut() {
+            let phase = if self.runtime.nvfp4_probe.is_some()
+                && matches!(phase, PrefillPhase::GlobalPacking | PrefillPhase::GlobalMask | PrefillPhase::GlobalGate)
+            {
+                PrefillPhase::GlobalAttention
+            } else {
+                phase
+            };
             profile.transition(command, &mut self.encoder, self.dispatches, phase);
         }
     }
@@ -587,7 +601,7 @@ impl Layer {
             gpu.phase(PrefillPhase::RouterProjection);
         }
         if gpu.runtime.source_text_active {
-            gpu.one("ink_prefill_router_source", &[&s.mlp_input, &self.router, &s.logits], 1u32, (4, 1), 32);
+            gpu.one(gpu.runtime.singleton_router, &[&s.mlp_input, &self.router, &s.logits], 1u32, (4, 1), 32);
             if nvfp4 {
                 gpu.phase(PrefillPhase::RouteSelect);
             }
@@ -1206,6 +1220,7 @@ fn execute_with_profile(
         encoder: Some(encoder),
         runtime,
         dispatches: 0,
+        nvfp4_dots: 0,
         profile: profile.map(|profile| (&*command, profile)),
     };
     encode(&mut gpu);
