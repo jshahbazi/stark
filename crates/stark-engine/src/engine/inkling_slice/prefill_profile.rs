@@ -35,6 +35,7 @@ pub(in crate::engine::inkling_slice) enum PrefillPhase {
     Mxfp8,
     Mxfp8Up,
     Mxfp8Down,
+    Mxfp8Replay,
     KeyValue,
     RelativeTable,
     LocalAttention,
@@ -69,6 +70,7 @@ struct Totals {
     mxfp8: f64,
     mxfp8_up: f64,
     mxfp8_down: f64,
+    mxfp8_replay: f64,
     other: f64,
     attention_inputs: f64,
     expert_inputs: f64,
@@ -107,6 +109,7 @@ impl Totals {
             PrefillPhase::Mxfp8 => &mut self.mxfp8,
             PrefillPhase::Mxfp8Up => &mut self.mxfp8_up,
             PrefillPhase::Mxfp8Down => &mut self.mxfp8_down,
+            PrefillPhase::Mxfp8Replay => &mut self.mxfp8_replay,
             PrefillPhase::AttentionInputs => &mut self.attention_inputs,
             PrefillPhase::ExpertInputs => &mut self.expert_inputs,
             PrefillPhase::ExpertFinish => &mut self.expert_finish,
@@ -129,6 +132,7 @@ impl Totals {
             + self.mxfp8
             + self.mxfp8_up
             + self.mxfp8_down
+            + self.mxfp8_replay
             + self.probe_exact
             + self.probe_guard
             + self.probe_bare
@@ -175,7 +179,7 @@ impl Totals {
             "global_query_kv_conversion_ms": self.global_packing,
             "global_mask_ms": self.global_mask,
             "global_gate_ms": self.global_gate,
-            "experts_ms": self.nvfp4() + self.mxfp8 + self.mxfp8_up + self.mxfp8_down + self.expert_combine,
+            "experts_ms": self.nvfp4() + self.mxfp8 + self.mxfp8_up + self.mxfp8_down + self.mxfp8_replay + self.expert_combine,
             "nvfp4_experts_ms": self.nvfp4(),
             "nvfp4_routing_ms": self.experts + self.router_projection + self.route_select,
             "nvfp4_router_projection_ms": self.router_projection,
@@ -185,7 +189,8 @@ impl Totals {
             "nvfp4_gate_up_dot_ms": self.nvfp4_up_dot,
             "nvfp4_down_dot_ms": self.nvfp4_down_dot,
             "nvfp4_epilogue_ms": self.nvfp4_epilogue,
-            "mxfp8_experts_ms": self.mxfp8 + self.mxfp8_up + self.mxfp8_down,
+            "mxfp8_experts_ms": self.mxfp8 + self.mxfp8_up + self.mxfp8_down + self.mxfp8_replay,
+            "mxfp8_replay_ms": self.mxfp8_replay,
             "mxfp8_up_ms": self.mxfp8_up,
             "mxfp8_down_ms": self.mxfp8_down,
             "nvfp4_probe_exact_ms": self.probe_exact,
@@ -487,14 +492,24 @@ fn profile_stock(
         return Err("Inkling stock profile requires the source-aligned M5 Max path");
     }
     let mut profiler = PrefillTiming::new(&session.runtime)?;
+    if grouped_pilot::mxfp8_tensor_requested() && !session.runtime.mxfp8_tensor_available {
+        return Err("Inkling MXFP8 tensor experiment is unavailable");
+    }
     if nvfp4_probe {
         session.runtime.nvfp4_probe = Some(grouped_pilot::Nvfp4Probe::new(&mut session.runtime)?);
     }
+    session.runtime.mxfp8_tensor_profile = session.runtime.mxfp8_tensor_available;
     let mut cases = Vec::with_capacity(oracles.len());
     for (index, oracle) in oracles.iter().enumerate() {
         cases.push(profile_stock_case(&mut session, &mut profiler, oracle, index % 2 == 1)?);
     }
+    let false_certificates = session
+        .packed_prefill
+        .as_ref()
+        .filter(|_| grouped_pilot::mxfp8_tensor_audit_requested())
+        .and_then(|packed| packed.mxfp8_false_certificates());
     Ok(json!({
+        "mxfp8_audit_false_certificates": false_certificates,
         "input_tokens": STOCK_INPUT,
         "context_tokens": STOCK_CONTEXT,
         "prefill_command_rows": STOCK_ROWS,
@@ -503,6 +518,7 @@ fn profile_stock(
         "drafting": false,
         "grouped_nvfp4_kernel": if nvfp4_probe { "ink_group_qmm_probe" } else { session.runtime.grouped_qmm },
         "singleton_router_kernel": session.runtime.singleton_router,
+        "mxfp8_tensor": session.runtime.mxfp8_tensor_active,
         "cases": cases,
     }))
 }
@@ -530,7 +546,8 @@ fn profile_stock_case(
     let probe = session.runtime.nvfp4_probe.is_some();
     let stock_qmm = "ink_group_qmm";
     let selected_qmm = session.runtime.grouped_qmm;
-    let compare = !probe && selected_qmm != stock_qmm;
+    let tensor = session.runtime.mxfp8_tensor_active;
+    let compare = !probe && (selected_qmm != stock_qmm || tensor);
     let orders = [instrument_first, !instrument_first];
     let instruments = if probe {
         &[true][..]
@@ -546,11 +563,12 @@ fn profile_stock_case(
             &[true][..]
         };
         for &candidate in arms {
-            session.runtime.grouped_qmm = if candidate {
+            session.runtime.grouped_qmm = if candidate || tensor {
                 selected_qmm
             } else {
                 stock_qmm
             };
+            session.runtime.mxfp8_tensor_active = candidate && tensor;
             session.reset();
             let mut commands = Vec::with_capacity(STOCK_ROWS.len());
             let start = std::time::Instant::now();
@@ -593,6 +611,7 @@ fn profile_stock_case(
         }
     }
     session.runtime.grouped_qmm = selected_qmm;
+    session.runtime.mxfp8_tensor_active = tensor;
     Ok(json!({
         "exact_pinned_seed_and_continuation": true,
         "instrumented_prefill_first": instrument_first,
@@ -714,6 +733,9 @@ fn stock_command(
         "gpu_ms": timing.gpu_ms,
         "stages": stages,
         "nvfp4": nvfp4,
+        "mxfp8_replay_counts": session.packed_prefill.as_ref()
+            .filter(|_| session.runtime.mxfp8_tensor_active && tokens.len() > 64)
+            .and_then(|packed| packed.mxfp8_replay_counts()),
     });
     session.finish_append(Ok(timing), tokens.len())?;
     Ok(stats)

@@ -2,6 +2,8 @@
 
 [Look up research and speed changes by model](../MODEL_RESEARCH.md), including benchmark comparisons and branch-only attempts. The [source index](source-index.md) groups individual reports by family and topic.
 
+- [20261121-INKPREFILL-11–13 · Inkling 2 Mini tensor MXFP8 prefill](2026-11-21-inkling-mini-mxfp8-tensor.md) reaches 1,058 greedy and 1,054 seeded sampled tok/s at cold 4K in eight exact worker pairs per mode. The compensated tensor path passed direct BF16 audit and remains opt-in. The wider NVFP4 tile with lane-scale sharing was rejected.
+
 - [20261121-INKPREFILL-10 · Inkling 2 Mini wider NVFP4 run tiles](2026-11-21-inkling-mini-nvfp4-run-tiles.md) compares exact grouped matrix tile sizes and MXFP8 fusion on the stock 4K schedule, and advances the 64 × 32 tile to worker timing.
 
 - [20261121-INKPROFILE-03 · Inkling 2 Mini NVFP4 guard and singleton router](2026-11-21-inkling-mini-nvfp4-router.md) measures occupancy and replay on stock expert routes, then screens shared scale metadata and an exact one-row router against the original worker.

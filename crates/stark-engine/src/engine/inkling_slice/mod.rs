@@ -75,6 +75,9 @@ struct Runtime {
     singleton_router: Kernel,
     grouped_qmm: Kernel,
     nvfp4_probe: Option<grouped_pilot::Nvfp4Probe>,
+    mxfp8_tensor_active: bool,
+    mxfp8_tensor_available: bool,
+    mxfp8_tensor_profile: bool,
 }
 
 impl Runtime {
@@ -160,6 +163,9 @@ impl Runtime {
             singleton_router: "ink_prefill_router_source",
             grouped_qmm: "ink_group_qmm",
             nvfp4_probe: None,
+            mxfp8_tensor_active: false,
+            mxfp8_tensor_available: false,
+            mxfp8_tensor_profile: false,
         })
     }
 }
@@ -169,6 +175,7 @@ struct Stream<'a> {
     runtime: &'a Runtime,
     dispatches: usize,
     nvfp4_dots: usize,
+    mxfp8_dots: usize,
     profile: Option<(&'a ProtocolObject<dyn MTLCommandBuffer>, &'a mut PrefillTiming)>,
 }
 
@@ -178,7 +185,7 @@ impl Stream<'_> {
         phase: PrefillPhase,
     ) {
         if let Some((command, profile)) = self.profile.as_mut() {
-            let phase = if self.runtime.nvfp4_probe.is_some()
+            let phase = if (self.runtime.nvfp4_probe.is_some() || self.runtime.mxfp8_tensor_available)
                 && matches!(phase, PrefillPhase::GlobalPacking | PrefillPhase::GlobalMask | PrefillPhase::GlobalGate)
             {
                 PrefillPhase::GlobalAttention
@@ -345,6 +352,7 @@ struct Gate {
 struct Mxfp8Bank {
     codes: Buffer,
     exponents: Buffer,
+    tensor_norms: Option<Buffer>,
 }
 
 impl Mxfp8Bank {
@@ -357,7 +365,29 @@ impl Mxfp8Bank {
         Ok(Self {
             codes: source.buffer(device, &format!("{prefix}_weight"), "F8_E4M3", &[EXPERTS, WIDTH, width])?,
             exponents: source.buffer(device, &format!("{prefix}_weight_scale"), "U8", &[EXPERTS, WIDTH, width / 32])?,
+            tensor_norms: None,
         })
+    }
+
+    fn prepare_tensor_norms(
+        &mut self,
+        runtime: &Runtime,
+        width: usize,
+    ) -> Result<()> {
+        if self.tensor_norms.is_none() {
+            let norms = zeroed(&runtime.device, EXPERTS * WIDTH * size_of::<f32>())?;
+            execute(runtime, |gpu| {
+                gpu.one(
+                    "ink_mx_weight_norm",
+                    &[&self.codes, &self.exponents, &norms],
+                    width as u32,
+                    (EXPERTS * WIDTH / 4, 1),
+                    128,
+                );
+            })?;
+            self.tensor_norms = Some(norms);
+        }
+        Ok(())
     }
 }
 
@@ -1221,6 +1251,7 @@ fn execute_with_profile(
         runtime,
         dispatches: 0,
         nvfp4_dots: 0,
+        mxfp8_dots: 0,
         profile: profile.map(|profile| (&*command, profile)),
     };
     encode(&mut gpu);

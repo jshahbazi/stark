@@ -228,6 +228,9 @@ impl PackedPrefill {
         }
         if mxsrc {
             experts.enable_source_mxfp8(runtime)?;
+            if source.is_some() && grouped_pilot::mxfp8_tensor_requested() {
+                experts.enable_mxfp8_tensor(runtime)?;
+            }
         }
         if epilogue {
             experts.enable_source_epilogue(runtime)?;
@@ -286,6 +289,18 @@ impl PackedPrefill {
             mlp: bf16(WIDTH)?,
             experts,
         })
+    }
+
+    pub(super) fn mxfp8_tensor_enabled(&self) -> bool {
+        self.experts.mxfp8_tensor_enabled()
+    }
+
+    pub(super) fn mxfp8_replay_counts(&self) -> Option<Vec<u32>> {
+        self.experts.mxfp8_replay_counts()
+    }
+
+    pub(super) fn mxfp8_false_certificates(&self) -> Option<Vec<u32>> {
+        self.experts.mxfp8_false_certificates()
     }
 
     pub(super) fn set_source_scope(

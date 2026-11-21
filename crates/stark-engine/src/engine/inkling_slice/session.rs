@@ -309,6 +309,21 @@ impl Session {
         } else {
             (None, None)
         };
+        let tensor = packed.as_ref().is_some_and(PackedPrefill::mxfp8_tensor_enabled);
+        if tensor {
+            for layer in &mut self.layers {
+                if let Experts::Mxfp8 {
+                    up,
+                    down,
+                } = &mut layer.experts
+                {
+                    up.prepare_tensor_norms(&self.runtime, WIDTH)?;
+                    down.prepare_tensor_norms(&self.runtime, MID)?;
+                }
+            }
+        }
+        self.runtime.mxfp8_tensor_active = tensor;
+        self.runtime.mxfp8_tensor_available = tensor;
         self.prefill_lanes = lanes;
         self.packed_prefill = packed;
         self.apply_prefill_scope();

@@ -15,6 +15,7 @@ const REPEATS: usize = 5;
 const PHYSICAL: usize = 10;
 const PROBE_FIELDS: usize = 5;
 const PROBE_DOTS: usize = 44 * 2;
+const MXFP8_DOTS: usize = 8;
 const PROBE_SAMPLE: [usize; 6] = [0, 1, 42, 43, 84, 85];
 
 pub(super) struct Nvfp4Probe {
@@ -110,6 +111,7 @@ pub(super) struct GroupedExperts {
     grouped_mxfp8: bool,
     wide_mxfp8: bool,
     source_mxfp8: bool,
+    mxfp8_tensor: Option<Mxfp8Tensor>,
     gate_up: Kernel,
     source_log_weights: Option<(Buffer, Buffer)>,
     input: Buffer,
@@ -127,6 +129,21 @@ pub(super) struct GroupedExperts {
     quantum: Buffer,
     maxima: Buffer,
     projected: Buffer,
+}
+
+struct Mxfp8Tensor {
+    input_norms: Buffer,
+    masks: Buffer,
+    counts: Buffer,
+    false_certificates: Buffer,
+}
+
+pub(super) fn mxfp8_tensor_audit_requested() -> bool {
+    std::env::var_os("STARK_INKLING_EXPERIMENT_MXFP8_TENSOR_AUDIT").as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
+pub(super) fn mxfp8_tensor_requested() -> bool {
+    std::env::var_os("STARK_INKLING_EXPERIMENT_MXFP8_TENSOR").as_deref() == Some(std::ffi::OsStr::new("1"))
 }
 
 struct ExpertOrder<'a> {
@@ -199,6 +216,69 @@ impl GroupedExperts {
         register_grouped_mxfp8(runtime, true, true)?;
         self.source_mxfp8 = true;
         Ok(())
+    }
+
+    pub(super) fn enable_mxfp8_tensor(
+        &mut self,
+        runtime: &mut Runtime,
+    ) -> Result<()> {
+        let options = MTLCompileOptions::new();
+        options.set_math_mode(MTLMathMode::Safe);
+        options.set_language_version(MTLLanguageVersion::Version4_0);
+        let source = concat!(
+            "#include <metal_stdlib>\nusing namespace metal;\n#define INK_GROUP_MXFP8_SOURCE\n#define INK_MX_SOURCE_VECTOR_LOAD\n",
+            include_str!("experts.metal"),
+            "\n",
+            include_str!("mxfp8.metal"),
+            "\n",
+            include_str!("mxfp8_grouped.metal"),
+            "\n",
+            include_str!("mxfp8_tensor.metal"),
+        );
+        let audit_source;
+        let source = if mxfp8_tensor_audit_requested() {
+            audit_source = format!("#define INK_MX_AUDIT\n{source}");
+            audit_source.as_str()
+        } else {
+            source
+        };
+        let library = runtime
+            .device
+            .new_library_with_source(source, Some(&options))
+            .map_err(|_| "Inkling MXFP8 tensor library compilation failed")?;
+        for name in [
+            "ink_mx_weight_norm",
+            "ink_mx_tensor_ingress",
+            "ink_mx_tensor_product",
+            "ink_mx_replay_reset",
+            "ink_mx_replay_source",
+            "ink_mx_tensor_finish_up",
+            "ink_mx_tensor_finish_down",
+        ] {
+            let function = library.new_function_with_name(name).ok_or(name)?;
+            let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
+            runtime.pipelines.insert(name, pipeline);
+        }
+        let device = &runtime.device;
+        self.mxfp8_tensor = Some(Mxfp8Tensor {
+            input_norms: zeroed(device, self.capacity * TOP * size_of::<f32>())?,
+            masks: zeroed(device, run_slots(self.capacity) * WIDTH * size_of::<u32>())?,
+            counts: zeroed(device, MXFP8_DOTS * size_of::<u32>())?,
+            false_certificates: zeroed(device, MXFP8_DOTS * size_of::<u32>())?,
+        });
+        Ok(())
+    }
+
+    pub(super) fn mxfp8_tensor_enabled(&self) -> bool {
+        self.mxfp8_tensor.is_some()
+    }
+
+    pub(super) fn mxfp8_replay_counts(&self) -> Option<Vec<u32>> {
+        self.mxfp8_tensor.as_ref().map(|tensor| read_shared(&tensor.counts, MXFP8_DOTS))
+    }
+
+    pub(super) fn mxfp8_false_certificates(&self) -> Option<Vec<u32>> {
+        self.mxfp8_tensor.as_ref().map(|tensor| read_shared(&tensor.false_certificates, MXFP8_DOTS))
     }
 
     pub(super) fn enable_source_epilogue(
@@ -276,6 +356,7 @@ impl GroupedExperts {
             grouped_mxfp8: false,
             wide_mxfp8: false,
             source_mxfp8: false,
+            mxfp8_tensor: None,
             gate_up: "ink_group_gate_up",
             source_log_weights: None,
             input: zeroed(device, capacity * WIDTH * 2)?,
@@ -575,27 +656,108 @@ impl GroupedExperts {
         let out = &self.output;
         let slots = run_slots(rows);
         let [up_kernel, down_kernel] = grouped_mxfp8_names(self.wide_mxfp8, self.source_mxfp8 && source_packed);
+        let tensor = self.mxfp8_tensor.as_ref().filter(|_| {
+            source_packed && gpu.runtime.source_text_active && gpu.runtime.mxfp8_tensor_active && rows > 64
+        });
+        let up_buffers =
+            [&self.up_inner, &self.order, &self.runs, &self.weights, &up.codes, &up.exponents, &out.middle];
+        let down_buffers = [&self.down_inner, &self.order, &self.runs, &down.codes, &down.exponents, &out.down];
+
         gpu.one("ink_mxfp8_activation", &[&self.input, &self.up_inner], WIDTH as u32, (WIDTH / 32, rows), 32);
         gpu.phase(PrefillPhase::Mxfp8Up);
-        gpu.one(
-            up_kernel,
-            &[&self.up_inner, &self.order, &self.runs, &self.weights, &up.codes, &up.exponents, &out.middle],
-            (),
-            (MID / 4, slots),
-            128,
-        );
+        if let Some(tensor) = tensor {
+            self.encode_mxfp8_tensor(gpu, tensor, up, &self.up_inner, rows, WIDTH);
+            gpu.phase(PrefillPhase::Mxfp8);
+            gpu.one(
+                "ink_mx_tensor_finish_up",
+                &[&self.projected, &self.order, &self.weights, &out.middle],
+                (),
+                (MID.div_ceil(128), rows * TOP),
+                128,
+            );
+        } else {
+            gpu.one(up_kernel, &up_buffers, (), (MID / 4, slots), 128);
+        }
+
         gpu.phase(PrefillPhase::Mxfp8);
         gpu.one("ink_mxfp8_activation", &[&out.middle, &self.down_inner], MID as u32, (MID / 32, rows * TOP), 32);
         gpu.phase(PrefillPhase::Mxfp8Down);
-        gpu.one(
-            down_kernel,
-            &[&self.down_inner, &self.order, &self.runs, &down.codes, &down.exponents, &out.down],
-            (),
-            (WIDTH / 4, slots),
-            128,
-        );
+        if let Some(tensor) = tensor {
+            self.encode_mxfp8_tensor(gpu, tensor, down, &self.down_inner, rows, MID);
+            gpu.phase(PrefillPhase::Mxfp8);
+            gpu.one(
+                "ink_mx_tensor_finish_down",
+                &[&self.projected, &self.order, &out.down],
+                (),
+                (WIDTH.div_ceil(128), rows * TOP),
+                128,
+            );
+        } else {
+            gpu.one(down_kernel, &down_buffers, (), (WIDTH / 4, slots), 128);
+        }
         gpu.phase(PrefillPhase::Mxfp8);
         gpu.one("ink_group_combine", &[&out.down, &out.merged], (), (WIDTH / 128, rows), 128);
+    }
+
+    fn encode_mxfp8_tensor(
+        &self,
+        gpu: &mut Stream<'_>,
+        tensor: &Mxfp8Tensor,
+        bank: &Mxfp8Bank,
+        inner: &Buffer,
+        rows: usize,
+        width: usize,
+    ) {
+        let norms = bank.tensor_norms.as_ref().expect("MXFP8 tensor norms prepared at startup");
+        let routes = rows * TOP;
+        let phase = gpu.mxfp8_dots;
+        assert!(phase < MXFP8_DOTS);
+        gpu.mxfp8_dots += 1;
+        let count = (gpu.runtime.mxfp8_tensor_profile).then_some(phase);
+        if let Some(index) = count {
+            gpu.dispatch("ink_mx_replay_reset", &[(&tensor.counts, index * size_of::<u32>())], (), (1, 1), 1);
+        }
+        gpu.one(
+            "ink_mx_tensor_ingress",
+            &[inner, &self.order, &self.activation, &tensor.input_norms],
+            [width as u32, routes as u32],
+            (routes.div_ceil(4), 1),
+            128,
+        );
+        gpu.one(
+            "ink_mx_tensor_product",
+            &[
+                &self.activation,
+                &self.runs,
+                &bank.codes,
+                &bank.exponents,
+                &tensor.input_norms,
+                norms,
+                &self.projected,
+                &tensor.masks,
+                &tensor.counts,
+            ],
+            [width as u32, count.map_or(0, |index| index as u32 + 1)],
+            (WIDTH / 64, run_slots(rows)),
+            128,
+        );
+        gpu.phase(PrefillPhase::Mxfp8Replay);
+        gpu.one(
+            "ink_mx_replay_source",
+            &[
+                inner,
+                &self.order,
+                &self.runs,
+                &bank.codes,
+                &bank.exponents,
+                &self.projected,
+                &tensor.masks,
+                &tensor.false_certificates,
+            ],
+            [width as u32, phase as u32],
+            (WIDTH / 4, run_slots(rows)),
+            128,
+        );
     }
 }
 

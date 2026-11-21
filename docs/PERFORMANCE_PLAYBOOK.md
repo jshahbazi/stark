@@ -451,6 +451,8 @@ The next Inkling control found 89% row fill on active 32-row runs at stock width
 
 Widening the Inkling NVFP4 run tile from 32 × 64 to 64 × 32 let four SIMD row fragments share decoded weight columns. Reusing the row and column metadata on broad guard misses preserved the replay rules. The exact stock 4K profiles removed 319–380 ms from the two NVFP4 matrix stages. The 64 × 64 and 128 × 32 shapes gave weaker whole-target screens. Combining the two source MXFP8 route loops retained exact output and slowed the down product. The 64 × 32 worker cut paired 4K prefill time by 5.52% greedy and 9.27% sampled, with output hashes preserved. The worker medians of 800.28 and 763.88 tok/s leave 1.03–1.28 s to remove at 4K. [Wider NVFP4 tile study](model-experiments/2026-11-21-inkling-mini-nvfp4-run-tiles.md)
 
+Precompute immutable MXFP8 row norms at load and measure certification density before allocating a replay list. On the original Inkling checkpoint the initial scalar queue overflowed every stock bulk projection. One mask per weight column let four ambiguous routes share the recurrence and avoided that limit. Compensated K32 partials and vector loads reduced the MXFP8 part of two instrumented 4K comparisons to 0.777–0.814 s, with 19–25% of outputs replayed. A physical audit matched 3.78 billion certified BF16 words against the pinned recurrence. Eight matched cold worker pairs per mode cleared 1,000 tok/s, with medians of 1,058 greedy and 1,054 seeded sampled. Combining NVFP4 lane-scale sharing with the 64 × 32 tile gave mixed whole-target timings and was dropped. [MXFP8 certification and replay](model-experiments/2026-11-21-inkling-mini-mxfp8-tensor.md)
+
 ## Correctness gates
 
 A speed change that is meant to leave output alone has to pass all of these, in this order of cost:
@@ -553,6 +555,7 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 | 2026-11-21 | [Inkling 2 Mini stock 4K and singleton profile](model-experiments/2026-11-21-inkling-mini-stock-profile.md) | Stock prefill stage attribution, same-cache source router projection cost and selected follow-up screens |
 | 2026-11-21 | [Inkling 2 Mini NVFP4 and singleton router](model-experiments/2026-11-21-inkling-mini-nvfp4-router.md) | Real-route tile occupancy, guard and FP32 replay attribution, plus exact shared scales and singleton projection trials |
 | 2026-11-21 | [Inkling 2 Mini wider NVFP4 run tiles](model-experiments/2026-11-21-inkling-mini-nvfp4-run-tiles.md) | Same-loaded shape and MXFP8 fusion screens, exact 64 × 32 tile and matched 4K worker timing |
+| 2026-11-21 | [Inkling 2 Mini tensor MXFP8 prefill](model-experiments/2026-11-21-inkling-mini-mxfp8-tensor.md) | Real-route certificate density, grouped source replay, compensated tensor partials, worker timing and wider-tile scale sharing |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 

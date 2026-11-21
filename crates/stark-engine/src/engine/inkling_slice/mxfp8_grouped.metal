@@ -4,10 +4,24 @@
 // Match the pinned MLX gather QMV lane layout. Up uses the aligned fast
 // kernel with eight contiguous values per lane. Down uses four. Scale
 // each partial dot before adding it to the lane accumulator.
+#ifdef INK_MX_SOURCE_VECTOR_LOAD
+inline float ink_mxfp8_accumulate_four(float accumulator, float4 input, float4 weight) {
+#pragma clang fp contract(off) reassociate(off)
+    accumulator += input.x * weight.x;
+    accumulator += input.y * weight.y;
+    accumulator += input.z * weight.z;
+    accumulator += input.w * weight.w;
+    return accumulator;
+}
+#endif
+
 template <uint Width, uint ValuesPerLane, bool Full>
 inline float4 ink_mxfp8_source_dot(
     device const float *input, uint4 rows, uint count,
     device const uchar *weights, device const uchar *exponents, uint lane) {
+#ifdef INK_MX_SOURCE_VECTOR_LOAD
+#pragma clang fp contract(off) reassociate(off)
+#endif
     float4 sum = 0.0f;
     const uint4 base = rows * Width;
     for (uint start = 0; start < Width; start += ValuesPerLane * 32) {
@@ -16,6 +30,23 @@ inline float4 ink_mxfp8_source_dot(
         const float scale = exponent == 0u ? 0x1p-127f :
                             exponent == 255u ? NAN : as_type<float>(exponent << 23);
         float4 partial = 0.0f;
+#ifdef INK_MX_SOURCE_VECTOR_LOAD
+        const device float4 *input4 = reinterpret_cast<const device float4 *>(input);
+        const device uchar4 *weight4 = reinterpret_cast<const device uchar4 *>(weights);
+        for (uint j = 0; j < ValuesPerLane; j += 4) {
+            const uint block = (begin + j) / 4;
+            const uchar4 code = weight4[block];
+            const float4 weight = float4(ink_mx_e4m3(code.x), ink_mx_e4m3(code.y),
+                                         ink_mx_e4m3(code.z), ink_mx_e4m3(code.w));
+            partial.x = ink_mxfp8_accumulate_four(partial.x, input4[base.x / 4 + block], weight);
+            if (Full || count > 1)
+                partial.y = ink_mxfp8_accumulate_four(partial.y, input4[base.y / 4 + block], weight);
+            if (Full || count > 2)
+                partial.z = ink_mxfp8_accumulate_four(partial.z, input4[base.z / 4 + block], weight);
+            if (Full || count > 3)
+                partial.w = ink_mxfp8_accumulate_four(partial.w, input4[base.w / 4 + block], weight);
+        }
+#else
         for (uint j = 0; j < ValuesPerLane; ++j) {
             const uint i = begin + j;
             const float weight = ink_mx_e4m3(weights[i]);
@@ -24,6 +55,7 @@ inline float4 ink_mxfp8_source_dot(
             if (Full || count > 2) partial.z += input[base.z + i] * weight;
             if (Full || count > 3) partial.w += input[base.w + i] * weight;
         }
+#endif
         sum += scale * partial;
     }
     return float4(simd_sum(sum.x), simd_sum(sum.y), simd_sum(sum.z), simd_sum(sum.w));
