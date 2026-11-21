@@ -64,6 +64,12 @@ inkling_slice --profile-prefill-source "$ORIGINAL_SHARD" "$PRIVATE_PREFILL_ORACL
 
 The four trace arms ingest eight 512-row native commands on the pinned M5 Max. They add source-shaped BF16 dense projections, local relative attention and the split-K FP32 router cumulatively. The native NVFP4 products remain internally tiled at 64 rows. Each trace reports stage-level unequal counts and continuation comparisons. The profile command uses the routed arm and reports phase time from a separate replay without trace copies. Use `--profile-prefill` for the normal 64-row native prefill graph. Raw tensors and token IDs stay private. [Matched prompt and stage comparison](../../../model-experiments/2026-11-21-inkling-mini-matched-prefill.md)
 
+## Stock-schedule 4K text capture
+
+Use the full-target extension and a 4,096-token text input. Set `Start` to 4095 and `Chunks` to `[2048, 2044, 3]`. The first teacher row is the generation seed at position 4,095. The cache export uses both tensor dimensions when rotating a nonzero ring offset. Historical 512-row receipts remain bound to the earlier capture binary.
+
+Run `inkling_slice --full-target-batched "$ORIGINAL_SHARD" "$PRIVATE_ORACLE" 4352`. On M5 Max it uses 2,048-row source-aligned bulk chunks and width-stable serial arithmetic for the three tail rows in one command. The comparison includes the seed, all 48 BF16 visit outputs and three following teacher rows. `STARK_INKLING_SOURCE_PREFILL=0` selects the earlier native precision policy for a control. [Stock-schedule and worker results](../../../model-experiments/2026-11-21-inkling-mini-packed-prefill.md#20261121-inkprefill-09--source-aligned-worker)
+
 ## Recorded runs
 
 | Capture | Prefix chunks | Captured positions | Merged fixture SHA-256 |

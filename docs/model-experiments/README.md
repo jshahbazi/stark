@@ -1,6 +1,6 @@
 # Model change and experiment ledger
 
-- [20261121-INKPREFILL-06 · Inkling 2 Mini packed prefill](2026-11-21-inkling-mini-packed-prefill.md) measures contiguous activations, eight-route MXFP8 and the remaining exact and matrix-kernel tradeoffs on the M5 Max.
+- [20261121-INKPREFILL-06–09 · Inkling 2 Mini packed prefill](2026-11-21-inkling-mini-packed-prefill.md) measures contiguous activations, eight-route MXFP8, and the source-shaped Metal graph and numerical gates on the M5 Max.
 
 - [20261121-INKPREFILL-05 · Inkling 2 Mini 4K prefill budget](2026-11-21-inkling-mini-prefill-budget.md) measures the 128-row bottlenecks, tests wider groups and several matrix and staging changes, and qualifies batched controller RMS with direct expert bindings.
 

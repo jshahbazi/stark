@@ -12,6 +12,8 @@ mod glm_exl3;
 #[cfg(feature = "glm-exl3")]
 mod glm_exl3_profile;
 
+#[cfg(all(feature = "inkling-slice", target_os = "macos"))]
+mod inkling_reference;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod metal;
 
@@ -60,6 +62,11 @@ fn main() -> anyhow::Result<ExitCode> {
             fs::create_dir_all(&out_dir).with_context(|| format!("cannot recreate {}", out_dir.display()))?;
         }
         debug_log!("cleaned caches");
+    }
+
+    #[cfg(all(feature = "inkling-slice", target_os = "macos"))]
+    if target_os == "macos" {
+        inkling_reference::build(&out_dir)?;
     }
 
     let gpu_types = GpuTypes::scan().context("Failed to scan gpu types")?;

@@ -34,8 +34,8 @@ static void ink_prefill_matrix(
                 const uint m = row_base + (i >> 2) * 8;
                 const uint d = k + k_base + (i & 3);
                 a[i] = row + m < rows ? input[(row + m) * width + d] : bfloat(0);
-                b[i] = weight[(column + m) * width + d];
-                b[i + 8] = weight[(column + m + 16) * width + d];
+                b[i] = column + m < columns ? weight[(column + m) * width + d] : bfloat(0);
+                b[i + 8] = column + m + 16 < columns ? weight[(column + m + 16) * width + d] : bfloat(0);
             }
             product.run(a, b, acc);
         }
@@ -44,7 +44,9 @@ static void ink_prefill_matrix(
 
     for (ushort i = 0; i < acc.get_capacity(); ++i) {
         const auto at = acc.get_multidimensional_index(i);
-        if (row + at[1] < rows) output[(row + at[1]) * columns + column + at[0]] = Output(total[i]);
+        if (row + at[1] < rows && column + at[0] < columns) {
+            output[(row + at[1]) * columns + column + at[0]] = Output(total[i]);
+        }
     }
 }
 
@@ -59,7 +61,7 @@ kernel void ink_prefill_router_source(
     device const bfloat *input [[buffer(0)]], device const bfloat *weight [[buffer(1)]],
     device float *output [[buffer(2)]], constant uint &rows [[buffer(3)]],
     uint2 tile [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
-    ink_prefill_matrix<float>(input, weight, output, uint4(2304, 128, rows, 2048), tile, lane);
+    ink_prefill_matrix<float>(input, weight, output, uint4(2304, 128, rows, rows <= 1024 ? 2048 : 2304), tile, lane);
 }
 
 kernel void ink_prefill_select_source(
@@ -83,16 +85,35 @@ kernel void ink_prefill_select_source(
         choices[selected] = -INFINITY;
         all_ids[row * 8 + route] = selected;
         const float x = -logits[selected];
+#ifdef INK_PREFILL_LOG_WEIGHTS
+        scores[route] = x;
+#else
         const float largest = max(x, 0.0f);
         const float e = exp(min(x, 0.0f) - largest);
         const float p = 1.0f + e;
         const float correction = p == 1.0f ? e : e * (log(p) / (p - 1.0f));
         scores[route] = -(largest + correction);
         peak = max(peak, scores[route]);
+#endif
     }
+#ifdef INK_PREFILL_LOG_WEIGHTS
+    for (uint route = 0; route < 8; ++route) all_weights[row * 8 + route] = scores[route];
+#else
     for (uint route = 0; route < 8; ++route) scores[route] = fast::exp(scores[route] - peak);
     const float first = ((scores[0] + scores[1]) + scores[2]) + scores[3];
     const float second = ((scores[4] + scores[5]) + scores[6]) + scores[7];
     const float inverse = 1.0f / (first + second);
     for (uint route = 0; route < 8; ++route) all_weights[row * 8 + route] = (scores[route] * inverse) * 8.0f;
+#endif
 }
+
+#ifdef INK_PREFILL_LOG_WEIGHTS
+kernel void ink_prefill_negate_route_weights(device float *weights [[buffer(0)]], uint pos [[thread_position_in_grid]]) {
+    weights[pos] = -weights[pos];
+}
+
+kernel void ink_prefill_scale_route_weights(
+    device float *weights [[buffer(0)]], constant uint &count [[buffer(1)]], uint pos [[thread_position_in_grid]]) {
+    if (pos < count) weights[pos] *= 8.0f;
+}
+#endif

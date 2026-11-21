@@ -439,6 +439,10 @@ Published rates are not comparable until the conditions match. The 2026-11-19 co
 - Hardware and speculation settings in a published figure have to be read from the source. One pack's advertised 157 tok/s was on different hardware with speculation on.
 - [`scripts/benchmark_lily_fixed_corpus.py`](../scripts/benchmark_lily_fixed_corpus.py) reproduces Sushi's corpus generator and request ladder, so the conditions can be matched ([fixed-corpus benchmark][bench]). Even then it is not a matched comparison: the packs differ.
 
+### Match the source call geometry before promoting a precision change
+
+Inkling’s packed source graph reached 772 tok/s in an uncached 4K worker session after matching the source’s BF16 boundaries, global matrix attention, route weight normalization, and the different MXFP8 gate/up and down lane layouts. A single fused FP32 convolution operation changed one BF16 cache word and propagated into hundreds of thousands of downstream words. Compare the first unequal intermediate before changing another kernel. Record the scheduler’s effective prefill widths alongside forced trace widths and capture the final prompt token’s seed logits. A continuation-only comparison can include errors from the singleton implementation after a matched prefill. Source-aligned wide batches and singleton repairs reproduced all 16 logit vectors from four stock-schedule captures. The final long paired session measured 683–685 tok/s prefill medians with 16 wins, about 23% lower request time and about 6% lower decode throughput within budget. [Inkling source precision experiments](model-experiments/2026-11-21-inkling-mini-packed-prefill.md#20261121-inkprefill-08--source-arithmetic-and-embedded-library)
+
 ## Correctness gates
 
 A speed change that is meant to leave output alone has to pass all of these, in this order of cost:

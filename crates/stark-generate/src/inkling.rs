@@ -34,6 +34,8 @@ const EOS: &[u32] = &[200_006];
 const IMAGE_CONTENT: u32 = 200_005;
 const END_MESSAGE: u32 = 200_010;
 const CHUNK: usize = prefix_cache::PREFILL_CHUNK_TOKENS;
+const SOURCE_PREFILL_MIN_INPUT: usize = 512;
+const SOURCE_PROMPT_SUFFIX: usize = 4;
 const INITIAL_CONTEXT: usize = 4352;
 const MTP_VERIFICATION: &str = "inkling-dspark-target-draw-v1";
 
@@ -135,14 +137,16 @@ impl InklingBackend {
     ) -> Result<Self, &'static str> {
         let runtime_identity = Engine::<Metal>::new().map_err(|_| "inkling_load_failed")?.metal_device_identity();
         let m5_max = runtime_identity.device_name == "Apple M5 Max" && runtime_identity.supports_mxu;
+        let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
+        let fixed = inkling_artifact::TARGET_BYTES + inkling_artifact::DRAFT_BYTES + 1024 * 1024 * 1024;
+        let source_allowed = m5_max
+            && admit_request_memory(Some(fixed + Session::batched_prefill_memory_bytes(true)), available).is_ok();
         let prefill_reserve = if m5_max {
-            Session::batched_prefill_memory_bytes()
+            Session::batched_prefill_memory_bytes(source_allowed)
         } else {
             128 * 1024 * 1024
         };
-        admit(Some(
-            inkling_artifact::TARGET_BYTES + inkling_artifact::DRAFT_BYTES + 1024 * 1024 * 1024 + prefill_reserve,
-        ))?;
+        admit_request_memory(Some(fixed + prefill_reserve), available)?;
         let artifact = Artifact::load(root)?;
         let mut target =
             Session::load_file(artifact.target.descriptor()?, INITIAL_CONTEXT).map_err(|_| "inkling_load_failed")?;
@@ -152,7 +156,7 @@ impl InklingBackend {
             artifact.draft.verify_unchanged()?;
         }
         if target.supports_batched_prefill() {
-            target.set_batched_prefill(true).map_err(|_| "inkling_prefill_load_failed")?;
+            target.set_batched_prefill(true, source_allowed).map_err(|_| "inkling_prefill_load_failed")?;
         }
         Ok(Self {
             tokenizer: artifact.tokenizer,
@@ -167,11 +171,27 @@ impl InklingBackend {
         })
     }
 
+    fn source_text_prefill(
+        &self,
+        input_len: usize,
+        options: &GenerationOptions,
+    ) -> bool {
+        input_len >= SOURCE_PREFILL_MIN_INPUT
+            && options.mtp_drafts == 0
+            && self.target.supports_source_text_prefill(options.context_tokens as usize)
+    }
+
     fn boundary(
         input_len: usize,
         options: &GenerationOptions,
+        source_prefill: bool,
     ) -> usize {
-        options.cache_scope.map_or(0, |_| input_len.saturating_sub(2) / CHUNK * CHUNK)
+        let (remaining, chunk) = if source_prefill {
+            (SOURCE_PROMPT_SUFFIX, Session::SOURCE_PREFILL_ROWS)
+        } else {
+            (2, CHUNK)
+        };
+        options.cache_scope.map_or(0, |_| input_len.saturating_sub(remaining) / chunk * chunk)
     }
 
     fn generate_inner(
@@ -192,8 +212,9 @@ impl InklingBackend {
         if use_draft && (options.mtp_drafts > 1 || image.is_some() || !self.target.has_dspark()) {
             return Err("mtp_not_supported");
         }
+        let source_prefill = image.is_none() && self.source_text_prefill(input.len(), options);
         let boundary = if image.is_none() {
-            Self::boundary(input.len(), options)
+            Self::boundary(input.len(), options, source_prefill)
         } else {
             0
         };
@@ -210,6 +231,7 @@ impl InklingBackend {
         require_active(&mut self.cancellation, options.request_id)?;
         self.target.set_context(options.context_tokens as usize).map_err(|_| "native_generation_failed")?;
         self.target.reset();
+        self.target.set_text_prefill_scope(source_prefill);
         self.target.set_dspark_enabled(use_draft).map_err(|_| "mtp_not_supported")?;
         let mut retained = retained.filter(|_| reused > 0);
         if let Some(entry) = retained.as_ref() {
@@ -247,7 +269,15 @@ impl InklingBackend {
             } else if boundary > 0 && boundary == reused {
                 snapshot = retained.take().map(|entry| entry.state.1);
             }
-            prefill.text(&mut self.target, &input[boundary.max(reused)..last])?;
+            let bulk_end = if source_prefill {
+                input.len().saturating_sub(SOURCE_PROMPT_SUFFIX)
+            } else {
+                last
+            };
+            prefill.text(&mut self.target, &input[boundary.max(reused)..bulk_end])?;
+            if source_prefill {
+                prefill.text(&mut self.target, &input[bulk_end..last])?;
+            }
             self.target.step(input[last])
         }
         .map_err(|_| "native_generation_failed")?;
@@ -453,10 +483,17 @@ impl GenerationBackend for InklingBackend {
         input: &[u32],
         options: &GenerationOptions,
     ) -> usize {
-        self.retained
+        let boundary = Self::boundary(input.len(), options, self.source_text_prefill(input.len(), options));
+        let reused = self
+            .retained
             .as_ref()
             .filter(|entry| entry.state.0 == (options.mtp_drafts > 0))
-            .map_or(0, |entry| entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()))
+            .map_or(0, |entry| entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()));
+        if reused <= boundary {
+            reused
+        } else {
+            0
+        }
     }
     fn publish_prefix_cache(&mut self) {
         self.retained = self.pending.take();

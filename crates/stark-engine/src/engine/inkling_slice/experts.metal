@@ -206,7 +206,15 @@ kernel void ink_nvfp4_up(
         const float outer = (amax[0] * expert_max[expert]) / (1536.0f * shape.denominator);
         const float gate = float(bfloat(gate_dot * outer));
         const float up = float(bfloat(up_dot * outer));
+#ifdef INK_SOURCE_SINGLETON_EPILOGUE
+        const float lo = 1.0f / (1.0f + metal::precise::exp(abs(gate)));
+        const float sigmoid = gate < 0.0f ? lo : 1.0f - lo;
+        const float cap_gate = 4.0f * metal::precise::tanh(gate * 0.25f);
+        const float cap_up = 25.0f * metal::precise::tanh(up / 25.0f);
+        const float act = (cap_gate * sigmoid) * cap_up;
+#else
         const float act = (4.0f * tanh(gate * 0.25f)) * ink_sigmoid(gate) * (25.0f * tanh(up / 25.0f));
+#endif
         middle[route * shape.intermediate + column] = bfloat(act * route_weights[route]);
     }
 }

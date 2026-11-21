@@ -141,6 +141,28 @@ impl PrefillTrace {
         }
     }
 
+    pub(super) fn packed_stages(
+        &self,
+        gpu: &mut Stream<'_>,
+        sources: &[(&str, Binding<'_>)],
+    ) {
+        for &(name, source) in sources {
+            if let Some(tap) = self.stages.iter().find(|tap| tap.name == name) {
+                Self::copy(gpu, source, binding(&tap.buffer), tap.buffer.length());
+            }
+        }
+    }
+
+    pub(super) fn packed_partial(
+        &self,
+        gpu: &mut Stream<'_>,
+        visit: usize,
+        partial: &Buffer,
+    ) {
+        let bytes = CHUNK * WIDTH * 4;
+        Self::copy(gpu, binding(partial), (&self.partials, visit * bytes), bytes);
+    }
+
     pub(super) fn input(
         &self,
         gpu: &mut Stream<'_>,
@@ -249,10 +271,13 @@ impl PrefillTrace {
         let visits = (0..PHYSICAL.len())
             .map(|i| residual(i, &format!("full.visit.{i:02}.partial")))
             .collect::<Result<Vec<_>>>()?;
-        let mut stages = vec![json!({
-            "stage": "visit_input",
-            "words": residual(PHYSICAL.len(), "stage.trace.embedding_rms")?,
-        })];
+        let mut stages = Vec::new();
+        if self.visit == 0 {
+            stages.push(json!({
+                "stage": "visit_input",
+                "words": residual(PHYSICAL.len(), "stage.trace.embedding_rms")?,
+            }));
+        }
         for tap in &self.stages {
             let diff = if tap.dtype == "BF16" {
                 tap.compare::<u16>(source)?
@@ -325,6 +350,23 @@ pub fn trace_prefill(
     oracle: &Path,
     mode: PrefillTraceMode,
 ) -> Result<Value> {
+    run_trace(checkpoint, oracle, mode, None)
+}
+
+pub fn trace_packed_prefill(
+    checkpoint: &Path,
+    oracle: &Path,
+    variant: &str,
+) -> Result<Value> {
+    run_trace(checkpoint, oracle, PrefillTraceMode::Baseline, Some(variant))
+}
+
+fn run_trace(
+    checkpoint: &Path,
+    oracle: &Path,
+    mode: PrefillTraceMode,
+    variant: Option<&str>,
+) -> Result<Value> {
     let source = Tensors::open(&oracle.join("prefill.safetensors"))?;
     let chunk = source.values::<u32>("chunk", "U32", &[3])?;
     let [offset, rows, visit] = [chunk[0] as usize, chunk[1] as usize, chunk[2] as usize];
@@ -336,16 +378,32 @@ pub fn trace_prefill(
         return Err("Inkling oracle token is outside the vocabulary");
     }
     let mut session = Session::load(checkpoint, 4352)?;
-    let lanes = mode.lanes(&mut session.runtime)?;
+    let packed = variant.map(|variant| PackedPrefill::diagnostic(&mut session.runtime, variant)).transpose()?;
+    if packed.as_ref().is_some_and(|packed| packed.rows() != CHUNK) {
+        return Err("packed Inkling trace requires 512 rows");
+    }
+    let lanes = if packed.is_none() {
+        Some(mode.lanes(&mut session.runtime)?)
+    } else {
+        None
+    };
     let trace = PrefillTrace::new(&session.runtime.device, &source, visit)?;
     let mut comparison = Value::Null;
     let mut wall_ms = 0.0;
     for (index, inputs) in tokens[..4096].chunks_exact(CHUNK).enumerate() {
-        let inputs = inputs.iter().copied().map(TokenInput::Text).collect::<Vec<_>>();
         let capture = index * CHUNK == offset;
-        let timing = execute(&session.runtime, |gpu| {
-            session.encode_prefill_trace(gpu, &lanes, &inputs, false, capture.then_some(&trace));
-        })?;
+        let timing = if let Some(packed) = &packed {
+            packed.upload(inputs);
+            execute(&session.runtime, |gpu| {
+                packed.encode_traced(&session, gpu, CHUNK, false, capture.then_some(&trace));
+            })?
+        } else {
+            let inputs = inputs.iter().copied().map(TokenInput::Text).collect::<Vec<_>>();
+            let lanes = lanes.as_ref().expect("serial-input trace workspace");
+            execute(&session.runtime, |gpu| {
+                session.encode_prefill_trace(gpu, lanes, &inputs, false, capture.then_some(&trace));
+            })?
+        };
         wall_ms += timing.wall_ms;
         session.position += CHUNK;
         if capture {
@@ -363,6 +421,8 @@ pub fn trace_prefill(
             "greedy_equal": top(&actual) == top(&expected),
         }));
     }
-    Ok(json!({"chunk_offset":offset,"chunk_rows":CHUNK,"mode":format!("{mode:?}"),"comparison":comparison,
-        "instrumented_prefill_ms":wall_ms,"teacher_logits":teacher_logits}))
+    Ok(
+        json!({"chunk_offset":offset,"chunk_rows":CHUNK,"mode":format!("{mode:?}"),"packed_variant":variant,"comparison":comparison,
+        "instrumented_prefill_ms":wall_ms,"teacher_logits":teacher_logits}),
+    )
 }

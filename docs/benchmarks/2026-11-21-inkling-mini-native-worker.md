@@ -81,3 +81,21 @@ The M5 Max worker processes up to 512 text rows in one command with packed activ
 Prefill speed improved 2.29× in the greedy pair and 2.12× at the median of the three paired sampled ratios. Every 256-token output hash matched. The sampled packed observations spanned 343.82–382.40 tok/s and the incumbent spanned 155.42–186.24 tok/s. During the two monitored repeat pairs the worker accounted for at least 99.89% of observed GPU activity, with fair thermal state and zero measured pageouts or swapouts. The earlier packed build reached 473.05 tok/s greedy and 406.67 tok/s sampled in its one pair per mode. Both builds used the same packed precision policy. The 500 tok/s target corresponds to 8.192 s on a cold 4K request and remains open. [Packed graph and numerical controls](../model-experiments/2026-11-21-inkling-mini-packed-prefill.md)
 
 The incumbent and packed worker executables have SHA-256 `aae3755e67daf4142eac0bed33acaed8fe6c393cf824e85d41b9374f53f7b00a` and `6bbafc99e1d880fb90ccbef9ea461e22f1204cdc689a3a4c205be176894a700d`. The primary and sampled repeat aggregates have SHA-256 `23dfc768e43b7765224fce6de08aa446a6ed597fde960e76238277928b979e83` and `13f3674757927dca5f60d59e60bf03c49268dc14c06b401c72efd5e521dd2839`. The private host receipt is `d5e479ac908cb01911d8a2e171d0ee4101de1a89078df98b8c0940febffdaa36`.
+
+
+## Source-aligned M5 Max prefill
+
+The default worker for eligible text requests uses source-aligned bulk widths of 2,048 and 2,044 on a 4,096-token prompt. It then runs three width-stable rows and the final prompt seed. The original checkpoint, vision tower and DSpark weights were resident. Drafting was off. Each request used context 4,352, ingested all 4,096 tokens with zero reuse and generated exactly 256 tokens.
+
+One sealed incumbent and one sealed candidate stayed loaded on the same 128 GiB M5 Max. The eight prompt windows per mode used matched inputs and seeds, alternating which worker ran first. Requests ran sequentially, with a two-second pause before each. The table shows medians. The rate ratio and request-time decrease use the median of the individual paired changes.
+
+| Mode | Pairs | Prefill incumbent → source | Prefill tok/s incumbent → source | Paired gain | Useful decode tok/s incumbent → source | Paired request-time decrease |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Greedy | 8 | 10.687 → 5.994 s | 383.37 → 683.34 | 1.776× | 33.26 → 31.38 | 23.19% |
+| Seeded temperature 1 | 8 | 10.681 → 5.980 s | 383.50 → 685.31 | 1.780× | 32.09 → 30.31 | 22.68% |
+
+All 16 pairs improved prefill. The candidate ranged from 645.42 to 808.32 tok/s greedy and from 645.12 to 770.51 tok/s sampled. Every run cleared 500 tok/s. The source singleton path traded 5.94% greedy and 5.71% sampled useful decode rate at the paired medians. Median decode cost stayed under the original 42.53 and 43.91 ms ceilings. System pageouts increased by 352 pages of 16 KiB, swapouts held steady, and the host recorded no thermal or performance warning in the before and after snapshots.
+
+Source parity uses the pinned Ollama shapes and includes the generation seed. All 16 teacher logit vectors and the 48 BF16 residuals per vector matched exactly. The precision change is qualified by the pinned reference. The original checkpoint’s source and incumbent worker output hashes differ. [Numerical controls and scoped default](../model-experiments/2026-11-21-inkling-mini-packed-prefill.md#20261121-inkprefill-09--source-aligned-worker)
+
+Incumbent worker SHA-256 `6bbafc99e1d880fb90ccbef9ea461e22f1204cdc689a3a4c205be176894a700d`. Source worker SHA-256 `9000a3c1568b8dc2004d3a6b0e01ed28d37d3192b0bca560284e050ec34e764f`. Paired aggregate SHA-256 `7d8456afd546260b7aad46a891d398d27f6fafbbd8c2c0f2cd53548db6e7f50a`. The replay harness SHA-256 is `02cb1472338afe8ff80ae4eb147195bc0174744085f6c49dfe8b600bc15b0f47`.

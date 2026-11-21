@@ -346,7 +346,15 @@ kernel void ink_group_gate_up(
     const float outer = (amax[route / 8] * expert_max[ids[route]]) / (1536.0f * denominator);
     const float gate = float(bfloat(inner[column] * outer));
     const float up = float(bfloat(inner[column + 1] * outer));
+#ifdef INK_GROUP_SOURCE_EPILOGUE
+    // Match the F32 unary operations in MLX's compiled GateUpEpilogue.
+    // unary_ops.h, fc344c986c4169d99f76b5d95ae6b4a58a359a63 (MIT).
+    const float low = 1.0f / (1.0f + precise::exp(abs(gate)));
+    const float sigmoid = gate < 0.0f ? low : 1.0f - low;
+    const float activation = (4.0f * precise::tanh(gate * 0.25f)) * sigmoid * (25.0f * precise::tanh(up / 25.0f));
+#else
     const float activation = (4.0f * tanh(gate * 0.25f)) * ink_sigmoid(gate) * (25.0f * tanh(up / 25.0f));
+#endif
     middle[sorted * MID + position.x] = bfloat(activation * weights[route]);
 }
 

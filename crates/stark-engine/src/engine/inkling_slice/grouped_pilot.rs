@@ -3,8 +3,9 @@
 
 use half::bf16;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
-use super::*;
+use super::{session::read_shared, *};
 
 const TOP: usize = 8;
 const TILE: usize = 32;
@@ -20,6 +21,9 @@ pub(super) struct GroupedExperts {
     pub(super) min_rows: usize,
     grouped_mxfp8: bool,
     wide_mxfp8: bool,
+    source_mxfp8: bool,
+    gate_up: Kernel,
+    source_log_weights: Option<(Buffer, Buffer)>,
     input: Buffer,
     output: Outputs,
     logits: Buffer,
@@ -49,8 +53,8 @@ impl GroupedExperts {
         runtime: &mut Runtime,
         capacity: usize,
     ) -> Result<Self> {
-        if !runtime.pinned_m5 || !(64..=512).contains(&capacity) {
-            return Err("grouped Inkling experts require M5 Max and capacity of 64–512 rows");
+        if !runtime.pinned_m5 || !(64..=2048).contains(&capacity) {
+            return Err("grouped Inkling experts require M5 Max and capacity of 64–2,048 rows");
         }
         register_grouped(runtime)?;
         Self::buffers(&runtime.device, capacity)
@@ -86,7 +90,7 @@ impl GroupedExperts {
         &mut self,
         runtime: &mut Runtime,
     ) -> Result<()> {
-        register_grouped_mxfp8(runtime, false)?;
+        register_grouped_mxfp8(runtime, false, false)?;
         self.grouped_mxfp8 = true;
         Ok(())
     }
@@ -95,8 +99,81 @@ impl GroupedExperts {
         &mut self,
         runtime: &mut Runtime,
     ) -> Result<()> {
-        register_grouped_mxfp8(runtime, true)?;
+        register_grouped_mxfp8(runtime, true, false)?;
         self.wide_mxfp8 = true;
+        Ok(())
+    }
+
+    pub(super) fn enable_source_mxfp8(
+        &mut self,
+        runtime: &mut Runtime,
+    ) -> Result<()> {
+        register_grouped_mxfp8(runtime, true, true)?;
+        self.source_mxfp8 = true;
+        Ok(())
+    }
+
+    pub(super) fn enable_source_epilogue(
+        &mut self,
+        runtime: &mut Runtime,
+    ) -> Result<()> {
+        let name = "ink_group_gate_up_source";
+        if !runtime.pipelines.contains_key(name) {
+            let options = MTLCompileOptions::new();
+            options.set_math_mode(MTLMathMode::Safe);
+            options.set_language_version(MTLLanguageVersion::Version4_0);
+            let source = concat!(
+                "#include <metal_stdlib>\nusing namespace metal;\n",
+                "#define INK_GROUP_SOURCE_EPILOGUE\n#define ink_group_gate_up ink_group_gate_up_source\n",
+                include_str!("experts.metal"),
+                "\n",
+                include_str!("grouped_pilot.metal"),
+            );
+            let library = runtime
+                .device
+                .new_library_with_source(source, Some(&options))
+                .map_err(|_| "source expert epilogue compilation failed")?;
+            let function = library.new_function_with_name(name).ok_or(name)?;
+            let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
+            runtime.pipelines.insert(name, pipeline);
+        }
+        self.gate_up = name;
+        Ok(())
+    }
+
+    pub(super) fn enable_source_softmax(
+        &mut self,
+        runtime: &mut Runtime,
+    ) -> Result<()> {
+        const SOFTMAX: Kernel = "block_softmax_float32";
+        if !runtime.pipelines.contains_key(SOFTMAX) {
+            let stock = packed_source_library(&runtime.device)?;
+            for kernel in [SOFTMAX, "vs_LogAddExpfloat32", "ink_singleton_route_weights"] {
+                let function = stock.new_function_with_name(kernel).ok_or(kernel)?;
+                let pipeline =
+                    runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| kernel)?;
+                runtime.pipelines.insert(kernel, pipeline);
+            }
+
+            let options = MTLCompileOptions::new();
+            options.set_math_mode(MTLMathMode::Safe);
+            options.set_language_version(MTLLanguageVersion::Version4_0);
+            let selector = runtime.device.new_library_with_source(concat!(
+                "#define INK_PREFILL_LOG_WEIGHTS\n#define ink_prefill_select_source ink_prefill_select_log_weights\n",
+                include_str!("prefill_dense_source.metal"),
+            ), Some(&options)).map_err(|_| "source log-weight selector compilation failed")?;
+            for name in [
+                "ink_prefill_select_log_weights",
+                "ink_prefill_scale_route_weights",
+                "ink_prefill_negate_route_weights",
+            ] {
+                let function = selector.new_function_with_name(name).ok_or(name)?;
+                let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
+                runtime.pipelines.insert(name, pipeline);
+            }
+        }
+        self.source_log_weights =
+            Some((zeroed(&runtime.device, self.capacity * TOP * 4)?, zeroed(&runtime.device, 4)?));
         Ok(())
     }
 
@@ -110,6 +187,9 @@ impl GroupedExperts {
             min_rows: 64,
             grouped_mxfp8: false,
             wide_mxfp8: false,
+            source_mxfp8: false,
+            gate_up: "ink_group_gate_up",
+            source_log_weights: None,
             input: zeroed(device, capacity * WIDTH * 2)?,
             output: Outputs::new(device, capacity)?,
             logits: zeroed(device, capacity * EXPERTS * 4)?,
@@ -176,23 +256,11 @@ impl GroupedExperts {
         layer: &Layer,
         rows: usize,
         source_router: bool,
+        source_packed: bool,
     ) {
         assert!(self.supports(layer, rows));
-        if source_router && matches!(layer.experts, Experts::Nvfp4 { .. }) {
-            gpu.one(
-                "ink_prefill_router_source",
-                &[&self.input, &layer.router, &self.logits],
-                rows as u32,
-                (EXPERTS / 32, rows.div_ceil(16)),
-                32,
-            );
-            gpu.one(
-                "ink_prefill_select_source",
-                &[&self.logits, &layer.bias, &self.ids, &self.weights],
-                (),
-                (rows, 1),
-                EXPERTS,
-            );
+        if source_router && (self.source_log_weights.is_some() || matches!(layer.experts, Experts::Nvfp4 { .. })) {
+            self.encode_source_router(gpu, &self.input, &layer.router, &layer.bias, rows);
         } else {
             self.encode_router(gpu, &self.input, &layer.router, &layer.bias, rows);
         }
@@ -202,12 +270,12 @@ impl GroupedExperts {
                 up,
                 down,
             } => {
-                self.encode_projected(gpu, &self.input, up, down, rows, self.active_order());
+                self.encode_projected(gpu, &self.input, up, down, rows, self.active_order(), source_packed, None);
             },
             Experts::Mxfp8 {
                 up,
                 down,
-            } => self.encode_mxfp8(gpu, up, down, rows),
+            } => self.encode_mxfp8(gpu, up, down, rows, source_packed),
         }
     }
 
@@ -217,6 +285,42 @@ impl GroupedExperts {
             weights: &self.weights,
             indices: &self.order,
             runs: &self.runs,
+        }
+    }
+
+    fn encode_source_router(
+        &self,
+        gpu: &mut Stream<'_>,
+        input: &Buffer,
+        router: &Buffer,
+        bias: &Buffer,
+        rows: usize,
+    ) {
+        gpu.one(
+            "ink_prefill_router_source",
+            &[input, router, &self.logits],
+            rows as u32,
+            (EXPERTS / 32, rows.div_ceil(16)),
+            32,
+        );
+        let select = if self.source_log_weights.is_some() {
+            "ink_prefill_select_log_weights"
+        } else {
+            "ink_prefill_select_source"
+        };
+        let route_weights = self.source_log_weights.as_ref().map_or(&self.weights, |(weights, _)| weights);
+        gpu.one(select, &[&self.logits, bias, &self.ids, route_weights], (), (rows, 1), EXPERTS);
+        if let Some((log_weights, zero)) = &self.source_log_weights {
+            gpu.one("vs_LogAddExpfloat32", &[log_weights, zero, log_weights], (rows * TOP) as u32, (rows, 1), TOP);
+            gpu.one("ink_prefill_negate_route_weights", &[log_weights], (), (rows, 1), TOP);
+            gpu.one("block_softmax_float32", &[log_weights, &self.weights], TOP as i32, (rows, 1), 32);
+            gpu.one(
+                "ink_prefill_scale_route_weights",
+                &[&self.weights],
+                (rows * TOP) as u32,
+                ((rows * TOP).div_ceil(128), 1),
+                128,
+            );
         }
     }
 
@@ -277,14 +381,24 @@ impl GroupedExperts {
         down: &Bank,
         rows: usize,
         routing: ExpertOrder<'_>,
+        source_packed: bool,
+        up_dot_tap: Option<&Buffer>,
     ) {
         let out = &self.output;
         gpu.phase(PrefillPhase::Nvfp4Quant);
         gpu.one("ink_nvfp4_activation", &[input, &self.up_inner, &self.up_max], WIDTH as u32, (rows, 1), 256);
         self.encode_dot(gpu, up, &self.up_inner, &routing, rows, WIDTH, true);
+        if let Some(tap) = up_dot_tap {
+            let words = rows * TOP * WIDTH;
+            gpu.one("ink_trace_copy", &[&self.projected, tap], words as u32, (words.div_ceil(128), 1), 128);
+        }
         gpu.phase(PrefillPhase::Nvfp4Epilogue);
         gpu.one(
-            "ink_group_gate_up",
+            if source_packed {
+                self.gate_up
+            } else {
+                "ink_group_gate_up"
+            },
             &[&self.projected, &self.up_max, routing.ids, routing.weights, routing.indices, &up.maxima, &out.middle],
             up.denominator,
             (MID / 128, rows * TOP),
@@ -316,10 +430,11 @@ impl GroupedExperts {
         up: &Mxfp8Bank,
         down: &Mxfp8Bank,
         rows: usize,
+        source_packed: bool,
     ) {
         let out = &self.output;
         let slots = run_slots(rows);
-        let [up_kernel, down_kernel] = grouped_mxfp8_names(self.wide_mxfp8);
+        let [up_kernel, down_kernel] = grouped_mxfp8_names(self.wide_mxfp8, self.source_mxfp8 && source_packed);
         gpu.one("ink_mxfp8_activation", &[&self.input, &self.up_inner], WIDTH as u32, (WIDTH / 32, rows), 32);
         gpu.one(
             up_kernel,
@@ -340,8 +455,13 @@ impl GroupedExperts {
     }
 }
 
-fn grouped_mxfp8_names(wide: bool) -> [&'static str; 2] {
-    if wide {
+fn grouped_mxfp8_names(
+    wide: bool,
+    source: bool,
+) -> [&'static str; 2] {
+    if source {
+        ["ink_group_mxfp8_source_up", "ink_group_mxfp8_source_down"]
+    } else if wide {
         ["ink_group_mxfp8_wide_up", "ink_group_mxfp8_wide_down"]
     } else {
         ["ink_group_mxfp8_up", "ink_group_mxfp8_down"]
@@ -351,8 +471,9 @@ fn grouped_mxfp8_names(wide: bool) -> [&'static str; 2] {
 fn register_grouped_mxfp8(
     runtime: &mut Runtime,
     wide: bool,
+    source_mode: bool,
 ) -> Result<()> {
-    let names = grouped_mxfp8_names(wide);
+    let names = grouped_mxfp8_names(wide, source_mode);
     if names.iter().all(|name| runtime.pipelines.contains_key(name)) {
         return Ok(());
     }
@@ -365,7 +486,12 @@ fn register_grouped_mxfp8(
         include_str!("mxfp8_grouped.metal")
     );
     let wide_source;
-    let source = if wide {
+    let source = if source_mode {
+        wide_source = format!(
+            "#define INK_GROUP_MXFP8_WIDE\n#define INK_GROUP_MXFP8_SOURCE\n#define ink_group_mxfp8_wide_up ink_group_mxfp8_source_up\n#define ink_group_mxfp8_wide_down ink_group_mxfp8_source_down\n{source}"
+        );
+        wide_source.as_str()
+    } else if wide {
         wide_source = format!("#define INK_GROUP_MXFP8_WIDE\n{source}");
         wide_source.as_str()
     } else {
@@ -452,10 +578,11 @@ fn row(
 fn ink_bank(
     source: &Tensors,
     device: &Device,
+    layer: usize,
     suffix: &str,
     width: usize,
 ) -> Result<Bank> {
-    Bank::load(source, device, &format!("model.llm.layers.{PHYSICAL}.mlp.experts.{suffix}"), width)
+    Bank::load(source, device, &format!("model.llm.layers.{layer}.mlp.experts.{suffix}"), width)
 }
 
 struct Routes {
@@ -686,7 +813,7 @@ impl Trial {
             grouped.active_order()
         };
         grouped.encode_buckets(gpu, routing.ids, rows);
-        grouped.encode_projected(gpu, &self.input, up, down, rows, routing);
+        grouped.encode_projected(gpu, &self.input, up, down, rows, routing, false, None);
     }
 
     fn measure(
@@ -815,8 +942,8 @@ pub fn measure_grouped_nvfp4(
     }
     register_grouped(&mut runtime)?;
     let source = Tensors::open(checkpoint)?;
-    let up = ink_bank(&source, &runtime.device, "w13", WIDTH)?;
-    let down = ink_bank(&source, &runtime.device, "w2", MID)?;
+    let up = ink_bank(&source, &runtime.device, PHYSICAL, "w13", WIDTH)?;
+    let down = ink_bank(&source, &runtime.device, PHYSICAL, "w2", MID)?;
     let key = format!("{PHYSICAL}.mlp_input");
     let anchors = [short, long]
         .into_iter()
@@ -827,4 +954,340 @@ pub fn measure_grouped_nvfp4(
         .map(|(rows, forced)| Trial::new(&runtime, &source, &anchors, rows, forced)?.measure(&runtime, &up, &down))
         .collect::<Result<Vec<_>>>()?;
     Ok(json!({"physical_layer":PHYSICAL,"grouping_in_timing":true,"source_anchors":8,"cases":shapes}))
+}
+
+/// Replay the first matched prefill visit with two sets of routing weights.
+pub fn probe_prefill_expert_weights(
+    checkpoint: &std::path::Path,
+    oracle: &std::path::Path,
+) -> Result<Value> {
+    const ROWS: usize = 512;
+    const BATCH: usize = 64;
+    let capture = Tensors::open(&oracle.join("prefill.safetensors"))?;
+    let (physical, focus) = match capture.values::<u32>("chunk", "U32", &[3])?.as_slice() {
+        [0, 512, 0] => (0, 52),
+        [0, 512, 4] => (4, 204),
+        _ => return Err("expected a chunk-zero 512-row Inkling expert trace at visit 0 or 4"),
+    };
+    let input = capture.values::<u16>("stage.mlp_input", "BF16", &[1, ROWS, WIDTH])?;
+    let expected_logits = capture.values::<f32>("stage.trace.router_logits", "F32", &[ROWS, EXPERTS])?;
+    let expected_ids = capture.values::<u32>("stage.routes", "U32", &[ROWS, TOP])?;
+    let expected_weights = capture.values::<f32>("stage.route_weights", "F32", &[ROWS, TOP])?;
+    let expected_log_weights = capture
+        .contains("stage.log_weights")
+        .then(|| capture.values::<f32>("stage.log_weights", "F32", &[ROWS, TOP]))
+        .transpose()?;
+    let expected = capture.values::<u16>("stage.experts", "BF16", &[1, ROWS, WIDTH])?;
+
+    let mut runtime = Runtime::new()?;
+    let mut grouped = GroupedExperts::new(&mut runtime, BATCH)?;
+    if std::env::var_os("INKLING_SOURCE_EPILOGUE").is_some() {
+        grouped.enable_source_epilogue(&mut runtime)?;
+    }
+    if std::env::var_os("INKLING_SOURCE_SOFTMAX").is_some() {
+        grouped.enable_source_softmax(&mut runtime)?;
+    }
+    let options = MTLCompileOptions::new();
+    options.set_math_mode(MTLMathMode::Safe);
+    options.set_language_version(MTLLanguageVersion::Version4_0);
+    let library = runtime
+        .device
+        .new_library_with_source(include_str!("prefill_dense_source.metal"), Some(&options))
+        .map_err(|_| "Inkling source router library compilation failed")?;
+    for name in ["ink_prefill_router_source", "ink_prefill_select_source"] {
+        let function = library.new_function_with_name(name).ok_or(name)?;
+        let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
+        runtime.pipelines.insert(name, pipeline);
+    }
+    let weights = Tensors::open(checkpoint)?;
+    let device = &runtime.device;
+    let mut stage_trace = capture
+        .contains("stage.expert_order")
+        .then(|| ExpertStageTrace::new(&capture, device, ROWS, BATCH))
+        .transpose()?;
+    let prefix = format!("model.llm.layers.{physical}.mlp.gate");
+    let router = weights.buffer(device, &format!("{prefix}.weight"), "BF16", &[EXPERTS, WIDTH])?;
+    let bias = weights.buffer(device, &format!("{prefix}.bias"), "F32", &[EXPERTS])?;
+    let up = ink_bank(&weights, device, physical, "w13", WIDTH)?;
+    let down = ink_bank(&weights, device, physical, "w2", MID)?;
+
+    let mut logits = Vec::with_capacity(ROWS * EXPERTS);
+    let mut aligned_weights = Vec::with_capacity(ROWS * TOP);
+    let mut aligned_log_weights = Vec::new();
+    let mut native_sums = Vec::with_capacity(ROWS * WIDTH);
+    let mut injected_sums = Vec::with_capacity(ROWS * WIDTH);
+    let mut reordered_rows = 0;
+    for start in (0..ROWS).step_by(BATCH) {
+        let rows = start..start + BATCH;
+        let route_range = rows.start * TOP..rows.end * TOP;
+        let source_ids = &expected_ids[route_range.clone()];
+        let input = upload(device, &input[rows.start * WIDTH..rows.end * WIDTH])?;
+        execute(&runtime, |gpu| grouped.encode_source_router(gpu, &input, &router, &bias, BATCH))?;
+        logits.extend(read_shared::<f32>(&grouped.logits, BATCH * EXPERTS));
+        let actual_ids = read_shared::<u32>(&grouped.ids, BATCH * TOP);
+        let actual_weights = read_shared::<f32>(&grouped.weights, BATCH * TOP);
+        let actual_log_weights =
+            grouped.source_log_weights.as_ref().map(|(weights, _)| read_shared::<f32>(weights, BATCH * TOP));
+        let first_weight = aligned_weights.len();
+        for (row, (source_row, actual_row)) in
+            source_ids.chunks_exact(TOP).zip(actual_ids.chunks_exact(TOP)).enumerate()
+        {
+            reordered_rows += usize::from(source_row != actual_row);
+            let mut seen = 0u32;
+            for id in source_row {
+                let slot = actual_row.iter().position(|actual| actual == id).ok_or("Inkling expert ID set differs")?;
+                if seen & (1 << slot) != 0 {
+                    return Err("duplicate source route in Inkling expert trace");
+                }
+                seen |= 1 << slot;
+                aligned_weights.push(actual_weights[row * TOP + slot]);
+                if let Some(values) = &actual_log_weights {
+                    aligned_log_weights.push(values[row * TOP + slot]);
+                }
+            }
+        }
+        let ids = upload(device, source_ids)?;
+        for (scores, sums, trace) in [
+            (&aligned_weights[first_weight..], &mut native_sums, None),
+            (&expected_weights[route_range], &mut injected_sums, stage_trace.as_mut()),
+        ] {
+            let scores = upload(device, scores)?;
+            execute(&runtime, |gpu| {
+                grouped.encode_buckets(gpu, &ids, BATCH);
+                let order = ExpertOrder {
+                    ids: &ids,
+                    weights: &scores,
+                    indices: &grouped.order,
+                    runs: &grouped.runs,
+                };
+                grouped.encode_projected(
+                    gpu,
+                    &input,
+                    &up,
+                    &down,
+                    BATCH,
+                    order,
+                    true,
+                    trace.as_ref().map(|t| &t.up_dot_tap),
+                );
+            })?;
+            sums.extend(read_shared::<u16>(grouped.output(), BATCH * WIDTH));
+            if let Some(trace) = trace {
+                trace.compare_batch(&grouped, start, BATCH, focus)?;
+            }
+        }
+    }
+
+    let row = focus;
+    let route_row = row * TOP..(row + 1) * TOP;
+    let output_row = row * WIDTH..(row + 1) * WIDTH;
+    let compare = |actual: &[u16], want: &[u16]| {
+        json!({
+            "all": expert_probe_summary(actual, want),
+            "focus_row": expert_probe_summary(&actual[output_row.clone()], &want[output_row.clone()]),
+        })
+    };
+    let mut report = json!({
+        "visit": physical, "physical_layer": physical, "chunk_rows": ROWS, "native_expert_batch_rows": BATCH,
+        "focus_row_index": focus,
+        "native_log_weights_in_source_order": expected_log_weights.as_ref().filter(|values| values.len() == aligned_log_weights.len())
+            .map(|values| expert_probe_summary(&aligned_log_weights, values)),
+        "router": "source-shaped native Metal logits and selection",
+        "expert_id_sets_equal": true, "route_order_different_rows": reordered_rows,
+        "native_router_logits": expert_probe_summary(&logits, &expected_logits),
+        "native_weights_in_source_order": {
+            "all": expert_probe_summary(&aligned_weights, &expected_weights),
+            "focus_row": expert_probe_summary(&aligned_weights[route_row.clone()], &expected_weights[route_row]),
+        },
+        "native_weights_vs_reference": compare(&native_sums, &expected),
+        "reference_weights_vs_reference": compare(&injected_sums, &expected),
+        "native_vs_reference_weights": compare(&native_sums, &injected_sums),
+    });
+    if let Some(trace) = stage_trace {
+        report["reference_weight_stage_comparison"] = trace.finish();
+    }
+    Ok(report)
+}
+
+struct ExpertStageTrace {
+    up_dot_tap: Buffer,
+    up_inner: ExpertStage<f32>,
+    up_max: ExpertStage<f32>,
+    up_dot: ExpertStage<f32>,
+    mid: ExpertStage<u16>,
+    down_inner: ExpertStage<f32>,
+    down_max: ExpertStage<f32>,
+    down_dot: ExpertStage<f32>,
+    down_raw: ExpertStage<u16>,
+}
+
+impl ExpertStageTrace {
+    fn new(
+        capture: &Tensors,
+        device: &Device,
+        rows: usize,
+        batch: usize,
+    ) -> Result<Self> {
+        let routes = rows * TOP;
+        let order = capture.values::<u32>("stage.expert_order", "U32", &[routes])?;
+        let inverse = invert_expert_order(&order)?;
+        let token_f32 = |name, width| ExpertStage::new(capture, name, "F32", rows, width, None);
+        let route_f32 = |name, width| ExpertStage::new(capture, name, "F32", routes, width, Some(&inverse));
+        let route_bf16 = |name, width| ExpertStage::new(capture, name, "BF16", routes, width, Some(&inverse));
+        Ok(Self {
+            up_dot_tap: zeroed(device, batch * TOP * WIDTH * 4)?,
+            up_inner: token_f32("stage.up_inner", WIDTH)?,
+            up_max: token_f32("stage.up_max", 1)?,
+            up_dot: route_f32("stage.up_dot", WIDTH)?,
+            mid: route_bf16("stage.mid", MID)?,
+            down_inner: route_f32("stage.down_inner", MID)?,
+            down_max: route_f32("stage.down_max", 1)?,
+            down_dot: route_f32("stage.down_dot", WIDTH)?,
+            down_raw: route_bf16("stage.down_raw", WIDTH)?,
+        })
+    }
+
+    fn compare_batch(
+        &mut self,
+        grouped: &GroupedExperts,
+        start: usize,
+        rows: usize,
+        focus: usize,
+    ) -> Result<()> {
+        let inverse = invert_expert_order(&read_shared::<u32>(&grouped.order, rows * TOP))?;
+        self.up_inner.compare(&grouped.up_inner, start, rows, focus, None);
+        self.up_max.compare(&grouped.up_max, start, rows, focus, None);
+        self.up_dot.compare(&self.up_dot_tap, start, rows, focus, Some(&inverse));
+        self.mid.compare(&grouped.output.middle, start, rows, focus, Some(&inverse));
+        self.down_inner.compare(&grouped.down_inner, start, rows, focus, Some(&inverse));
+        self.down_max.compare(&grouped.down_max, start, rows, focus, Some(&inverse));
+        self.down_dot.compare(&grouped.projected, start, rows, focus, Some(&inverse));
+        self.down_raw.compare(&grouped.output.down, start, rows, focus, None);
+        Ok(())
+    }
+
+    fn finish(self) -> Value {
+        json!({
+            "up_inner": self.up_inner.finish(), "up_max": self.up_max.finish(), "up_dot": self.up_dot.finish(),
+            "mid": self.mid.finish(), "down_inner": self.down_inner.finish(), "down_max": self.down_max.finish(),
+            "down_dot": self.down_dot.finish(), "down_raw": self.down_raw.finish(),
+        })
+    }
+}
+
+fn invert_expert_order(order: &[u32]) -> Result<Vec<usize>> {
+    let mut inverse = vec![usize::MAX; order.len()];
+    for (sorted, &route) in order.iter().enumerate() {
+        let index = inverse.get_mut(route as usize).ok_or("Inkling expert order route is out of range")?;
+        if *index != usize::MAX {
+            return Err("Inkling expert order contains a duplicate route");
+        }
+        *index = sorted;
+    }
+    Ok(inverse)
+}
+
+fn undo_expert_order<T: Copy>(
+    values: &[T],
+    width: usize,
+    inverse: &[usize],
+) -> Vec<T> {
+    inverse.iter().flat_map(|&row| values[row * width..(row + 1) * width].iter().copied()).collect()
+}
+
+struct ExpertStage<T> {
+    expected: Vec<T>,
+    row_width: usize,
+    actual_hash: Sha256,
+    unequal: usize,
+    first_row: Option<usize>,
+    focus: Value,
+}
+
+impl<T: bytemuck::Pod> ExpertStage<T> {
+    fn new(
+        capture: &Tensors,
+        name: &str,
+        dtype: &str,
+        rows: usize,
+        width: usize,
+        inverse: Option<&[usize]>,
+    ) -> Result<Self> {
+        let flat = if width == 1 {
+            capture.values(name, dtype, &[rows])
+        } else {
+            capture.values(name, dtype, &[rows, width])
+        }
+        .or_else(|_| capture.values(name, dtype, &[rows, 1, width]))
+        .or_else(|_| capture.values(name, dtype, &[rows, 1, 1, width]))?;
+        Ok(Self {
+            expected: match inverse {
+                Some(order) => undo_expert_order(&flat, width, order),
+                None => flat,
+            },
+            row_width: if inverse.is_some() {
+                TOP * width
+            } else {
+                width
+            },
+            actual_hash: Sha256::new(),
+            unequal: 0,
+            first_row: None,
+            focus: Value::Null,
+        })
+    }
+
+    fn compare(
+        &mut self,
+        buffer: &Buffer,
+        start: usize,
+        rows: usize,
+        focus: usize,
+        inverse: Option<&[usize]>,
+    ) {
+        let actual = read_shared::<T>(buffer, rows * self.row_width);
+        let actual = match inverse {
+            Some(order) => undo_expert_order(&actual, self.row_width / TOP, order),
+            None => actual,
+        };
+        let expected = &self.expected[start * self.row_width..(start + rows) * self.row_width];
+        let actual_bytes = bytemuck::cast_slice::<T, u8>(&actual);
+        let expected_bytes = bytemuck::cast_slice::<T, u8>(expected);
+        self.actual_hash.update(actual_bytes);
+        for (index, (a, b)) in
+            actual_bytes.chunks_exact(size_of::<T>()).zip(expected_bytes.chunks_exact(size_of::<T>())).enumerate()
+        {
+            if a != b {
+                self.unequal += 1;
+                self.first_row.get_or_insert(start + index / self.row_width);
+            }
+        }
+        if (start..start + rows).contains(&focus) {
+            let range = (focus - start) * self.row_width..(focus - start + 1) * self.row_width;
+            self.focus = expert_probe_summary(&actual[range.clone()], &expected[range]);
+        }
+    }
+
+    fn finish(self) -> Value {
+        json!({"all": {"values": self.expected.len(), "unequal": self.unequal, "first_row": self.first_row,
+            "actual_sha256": format!("{:x}", self.actual_hash.finalize()),
+            "expected_sha256": format!("{:x}", Sha256::digest(bytemuck::cast_slice::<T, u8>(&self.expected)))},
+            "focus_row": self.focus})
+    }
+}
+
+fn expert_probe_summary<T: bytemuck::Pod>(
+    actual: &[T],
+    expected: &[T],
+) -> Value {
+    let size = std::mem::size_of::<T>();
+    let actual_bytes = bytemuck::cast_slice::<T, u8>(actual);
+    let expected_bytes = bytemuck::cast_slice::<T, u8>(expected);
+    let unequal =
+        actual_bytes.chunks_exact(size).zip(expected_bytes.chunks_exact(size)).filter(|(a, b)| a != b).count();
+    json!({
+        "values": actual.len(), "unequal": unequal,
+        "actual_sha256": format!("{:x}", Sha256::digest(actual_bytes)),
+        "expected_sha256": format!("{:x}", Sha256::digest(expected_bytes)),
+    })
 }

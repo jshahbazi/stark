@@ -235,11 +235,17 @@ pub fn measure_full(
     let started = Instant::now();
     let mut session = Session::load(checkpoint, context)?;
     let serial_allocated = session.runtime.device.current_allocated_size();
-    session.set_batched_prefill(batched_prefill)?;
+    session.set_batched_prefill(batched_prefill, true)?;
     let prefill_allocated = session.runtime.device.current_allocated_size().saturating_sub(serial_allocated);
     let load_ms = 1000.0 * started.elapsed().as_secs_f64();
     let started = Instant::now();
-    session.ingest_many(&tokens[..prefix])?;
+    if session.prefill_batch_rows() == Session::SOURCE_PREFILL_ROWS && prefix == 4095 {
+        session.ingest_many(&tokens[..2048])?;
+        session.ingest_many(&tokens[2048..4092])?;
+        session.ingest_many(&tokens[4092..4095])?;
+    } else {
+        session.ingest_many(&tokens[..prefix])?;
+    }
     let prefill_ms = 1000.0 * started.elapsed().as_secs_f64();
     let prefill_state = state_digest(&session);
     session.capture_draft_features(true);
@@ -273,6 +279,8 @@ pub fn measure_full(
             "partial_state": probe_partials(&session, &source)?,
             "history_physical_5": history_5,
             "history_physical_11": history_11,
+            "first_pass_physical_2": probe_first_pass(&session, &source, 2)?,
+            "first_pass_physical_9": probe_first_pass(&session, &source, 9)?,
             "first_pass_physical_4": probe_first_pass(&session, &source, 4)?,
             "first_pass_physical_5": probe_first_pass(&session, &source, 5)?,
             "first_pass_physical_10": probe_first_pass(&session, &source, 10)?,
@@ -308,7 +316,9 @@ pub fn measure_full(
                 "partial_state": probe_partials(&session, &source)?,
                 "history_physical_5": history_5,
                 "history_physical_11": history_11,
-                "first_pass_physical_4": probe_first_pass(&session, &source, 4)?,
+                "first_pass_physical_2": probe_first_pass(&session, &source, 2)?,
+            "first_pass_physical_9": probe_first_pass(&session, &source, 9)?,
+            "first_pass_physical_4": probe_first_pass(&session, &source, 4)?,
                 "first_pass_physical_5": probe_first_pass(&session, &source, 5)?,
                 "first_pass_physical_10": probe_first_pass(&session, &source, 10)?,
                 "first_pass_physical_11": probe_first_pass(&session, &source, 11)?,

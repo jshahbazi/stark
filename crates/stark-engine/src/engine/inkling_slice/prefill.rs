@@ -349,13 +349,13 @@ impl Session {
                 let tile = scratches.clone().skip(start).take(count);
                 if lanes.grouped.supports(layer, count) {
                     if direct {
-                        lanes.grouped.encode(gpu, layer, count, lanes.source_router);
+                        lanes.grouped.encode(gpu, layer, count, lanes.source_router, false);
                         continue;
                     }
                     for (row, scratch) in tile.clone().enumerate() {
                         lanes.grouped.copy_input(gpu, binding(&scratch.mlp_input), row);
                     }
-                    lanes.grouped.encode(gpu, layer, count, lanes.source_router);
+                    lanes.grouped.encode(gpu, layer, count, lanes.source_router, false);
                     for (row, scratch) in tile.enumerate() {
                         lanes.grouped.copy_output(gpu, row, binding(&scratch.experts));
                         if let Some(tap) = tap {

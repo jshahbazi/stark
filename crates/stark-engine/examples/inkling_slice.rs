@@ -23,6 +23,32 @@ fn main() {
             println!("{report}");
             return Ok(0);
         }
+        if args.first().is_some_and(|arg| arg == "--trace-prefill-packed") {
+            if args.len() != 4 {
+                return Err("expected --trace-prefill-packed, original SafeTensors, private oracle and variant");
+            }
+            let variant = args[3].to_str().ok_or("invalid packed prefill variant")?;
+            let report = stark_engine::engine::inkling_slice::trace_packed_prefill(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                variant,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--probe-prefill-expert-weights") {
+            if args.len() != 3 {
+                return Err(
+                    "expected --probe-prefill-expert-weights, original SafeTensors and private oracle directory",
+                );
+            }
+            let report = stark_engine::engine::inkling_slice::probe_prefill_expert_weights(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
         let trace_mode = match args.first().and_then(|arg| arg.to_str()) {
             Some("--trace-prefill-512") => Some(PrefillTraceMode::Baseline),
             Some("--trace-prefill-512-dense") => Some(PrefillTraceMode::Dense),

@@ -12,17 +12,18 @@ mod vision;
 use std::{collections::HashMap, ptr::NonNull};
 
 use checkpoint::Tensors;
-pub use grouped_pilot::measure_grouped_nvfp4;
+pub use grouped_pilot::{measure_grouped_nvfp4, probe_prefill_expert_weights};
 use metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandBufferExt, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
     MTLCompileOptions, MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, MTLDeviceExt, MTLGPUFamily,
-    MTLLanguageVersion, MTLLibraryExt, MTLMathMode, MTLResourceOptions, MTLSize,
+    MTLLanguageVersion, MTLLibrary, MTLLibraryExt, MTLMathMode, MTLResourceOptions, MTLSize,
 };
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use session::prefill_profile::{PrefillPhase, PrefillTiming};
 pub use session::{
     PrefillTraceMode, Session, Snapshot, VOCABULARY, measure_dspark, measure_full, measure_full_budget,
-    measure_prefill, measure_prefill_speed, profile_packed_prefill, profile_prefill, trace_prefill,
+    measure_prefill, measure_prefill_speed, profile_packed_prefill, profile_prefill, trace_packed_prefill,
+    trace_prefill,
 };
 pub use validation::measure;
 pub use vision::{INKLING_IMAGE_TOKEN, ImageEmbeddings, measure_vision};
@@ -44,6 +45,12 @@ type Kernel = &'static str;
 type Result<T> = std::result::Result<T, &'static str>;
 type Binding<'a> = (&'a Buffer, usize);
 
+fn packed_source_library(device: &Device) -> Result<Retained<ProtocolObject<dyn MTLLibrary>>> {
+    device
+        .new_library_with_data(include_bytes!(concat!(env!("OUT_DIR"), "/inkling_source.metallib")))
+        .map_err(|_| "cannot load the bundled Inkling Metal library")
+}
+
 fn binding(buffer: &Buffer) -> Binding<'_> {
     (buffer, 0)
 }
@@ -64,6 +71,7 @@ struct Runtime {
     queue: Queue,
     pipelines: HashMap<Kernel, Pipeline>,
     pinned_m5: bool,
+    source_text_active: bool,
 }
 
 impl Runtime {
@@ -145,6 +153,7 @@ impl Runtime {
             queue,
             pipelines,
             pinned_m5,
+            source_text_active: false,
         })
     }
 }
@@ -569,6 +578,17 @@ impl Layer {
         gpu: &mut Stream<'_>,
         s: &Scratch,
     ) {
+        if gpu.runtime.source_text_active {
+            gpu.one("ink_prefill_router_source", &[&s.mlp_input, &self.router, &s.logits], 1u32, (4, 1), 32);
+            gpu.one(
+                "ink_singleton_route_weights",
+                &[&s.logits, &self.bias, &s.routes, &s.route_weights],
+                (),
+                (1, 1),
+                EXPERTS,
+            );
+            return;
+        }
         gpu.one("ink_router_logits", &[&s.mlp_input, &self.router, &s.logits], WIDTH as u32, (EXPERTS, 1), 32);
         gpu.one("ink_router_select", &[&s.logits, &self.bias, &s.routes, &s.route_weights], (), (1, 1), 128);
     }
@@ -581,7 +601,11 @@ impl Layer {
     ) {
         gpu.one("ink_nvfp4_activation", &[&s.mlp_input, &s.up_inner, &s.up_max], WIDTH as u32, (1, 1), 256);
         gpu.one(
-            "ink_nvfp4_up",
+            if gpu.runtime.source_text_active {
+                "ink_nvfp4_up_source"
+            } else {
+                "ink_nvfp4_up"
+            },
             &[&s.up_inner, &s.up_max, &s.routes, &s.route_weights, &up.codes, &up.blocks, &up.maxima, &s.mid],
             up.args(),
             (MID / 4, 8),
@@ -606,7 +630,11 @@ impl Layer {
         gpu.one("ink_mxfp8_activation", &[&s.mlp_input, &s.up_inner], WIDTH as u32, (WIDTH / 32, 1), 32);
         let shape = [WIDTH as u32, MID as u32];
         gpu.one(
-            "ink_mxfp8_up",
+            if gpu.runtime.source_text_active {
+                "ink_mxfp8_source_up"
+            } else {
+                "ink_mxfp8_up"
+            },
             &[&s.up_inner, &s.routes, &s.route_weights, &up.codes, &up.exponents, &s.mid],
             shape,
             (MID / 4, 8),
@@ -614,7 +642,11 @@ impl Layer {
         );
         gpu.one("ink_mxfp8_activation", &[&s.mid, &s.down_inner], MID as u32, (MID / 32, 8), 32);
         gpu.one(
-            "ink_mxfp8_down",
+            if gpu.runtime.source_text_active {
+                "ink_mxfp8_source_down"
+            } else {
+                "ink_mxfp8_down"
+            },
             &[&s.down_inner, &s.routes, &down.codes, &down.exponents, &s.down],
             shape,
             (WIDTH / 4, 8),
@@ -633,7 +665,11 @@ impl Layer {
         position: usize,
     ) {
         gpu.dispatch(
-            "ink_conv",
+            if gpu.runtime.source_text_active {
+                "ink_conv_source"
+            } else {
+                "ink_conv"
+            },
             &[input, binding(weight), binding(extra.unwrap_or(weight)), binding(history), binding(output)],
             [width as u32, position as u32, u32::from(extra.is_some()), 0],
             (width / 128, 1),
@@ -708,7 +744,17 @@ impl Layer {
         };
         let args = [position as u32, width, window, shards];
         self.attention_write_cache(gpu, s, cache, args);
-        gpu.one("ink_relative_table", &[&s.r, &self.relative, &s.table], (), (HEADS * LOCAL / 128, 1), 128);
+        if gpu.runtime.source_text_active {
+            gpu.one(
+                "ink_prefill_relative_table_source",
+                &[&s.r, &self.relative, &s.table],
+                HEADS as u32,
+                (LOCAL / 32, HEADS.div_ceil(16)),
+                32,
+            );
+        } else {
+            gpu.one("ink_relative_table", &[&s.r, &self.relative, &s.table], (), (HEADS * LOCAL / 128, 1), 128);
+        }
         let (parts_kernel, gate_kernel, parts_groups, gate_groups, shape) = if gpu.runtime.pinned_m5 {
             (
                 "ink_attention_source_parts",
@@ -766,6 +812,26 @@ impl Layer {
             KV,
             position,
         );
+        if gpu.runtime.source_text_active {
+            let offset = position % cache.capacity * KV * 2;
+            gpu.dispatch(
+                "ink_packed_heads_source",
+                &[
+                    binding(&s.q),
+                    binding(&s.conv_k),
+                    binding(&s.conv_v),
+                    binding(&s.r),
+                    binding(&self.q_scale),
+                    binding(&self.r_scale),
+                    (&cache.keys, offset),
+                    (&cache.values, offset),
+                ],
+                [args[0], args[2]],
+                (16, 1),
+                128,
+            );
+            return;
+        }
         gpu.one(
             "ink_heads_and_cache",
             &[&s.q, &s.conv_k, &s.conv_v, &s.r, &self.q_scale, &self.r_scale, &cache.keys, &cache.values],

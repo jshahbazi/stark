@@ -62,7 +62,14 @@ kernel void ink_packed_conv(
         const float coefficient = is_dynamic
             ? float(weight[tap * width + column]) + float(dynamic[(row * (width / 128) + column / 128) * 4 + tap])
             : float(weight[column * 4 + tap]);
+#ifdef INK_PACKED_SOURCE_CONV
+        {
+#pragma clang fp contract(off) reassociate(off)
+            result += coefficient * value;
+        }
+#else
         result = fma(coefficient, value, result);
+#endif
     }
     output[index] = bfloat((result + current) * (is_dynamic ? 1.0f / 3.0f : 0.447213595499958f));
 }
@@ -100,23 +107,62 @@ kernel void ink_packed_heads(
     float4 vals = 0;
     float norm = 0;
     for (uint j = 0; j < width / 32 + uint(is_rel); ++j) {
+#ifdef INK_PACKED_SOURCE_HEADS
+        const uint col = is_rel ? lane : 4 * lane + j;
+#else
         uint col = lane + j * 32;
+#endif
         if (col < width) {
             uint index = head * width + col;
             float value = float(input[token_offset + index]);
             if (is_q || is_rel) value *= float(gain[index]);
+#ifdef INK_PACKED_SOURCE_HEADS
+            if (is_v) norm = fma(value, value, norm);
+            else {
+#pragma clang fp contract(off) reassociate(off)
+                norm += value * value;
+            }
+#else
             norm = fma(value, value, norm);
+#endif
             vals[j] = value;
         }
     }
+#ifdef INK_PACKED_SOURCE_HEADS
+    // MLX takes a serial reduction for the 16-channel relative head. Its
+    // 128-channel contiguous reductions use four neighboring reads per lane.
+    if (is_rel) {
+        float total = 0;
+        if (lane == 0) {
+#pragma clang fp contract(off) reassociate(off)
+            const uint row_offset = token_offset + head * 16;
+            for (uint i = 0; i < 16; ++i) {
+                const float x = float(input[row_offset + i]) * float(gain[head * 16 + i]);
+                total += x * x;
+            }
+        }
+        norm = simd_broadcast(total, 0);
+    } else {
+        norm = simd_sum(norm);
+    }
+#else
     norm = simd_sum(norm);
+#endif
     float limit = is_rel ? 8.0f : 22.62741699797f;
+#ifdef INK_PACKED_SOURCE_HEADS
+    float scale = is_v ? precise::rsqrt(norm / 128.0f + 1e-6f) : min(1.0f, limit / (precise::sqrt(norm) + 1e-6f));
+#else
     float scale = is_v ? rsqrt(norm / 128.0f + 1e-6f) : min(1.0f, limit / (sqrt(norm) + 1e-6f));
+#endif
     if ((is_q || is_rel) && p.y == 0 && position >= 8192) {
         scale *= 1.0f + 0.1f * log(float(position + 1) / 8192.0f);
     }
     for (uint j = 0; j < width / 32 + uint(is_rel); ++j) {
+#ifdef INK_PACKED_SOURCE_HEADS
+        const uint col = is_rel ? lane : 4 * lane + j;
+#else
         uint col = lane + j * 32;
+#endif
         if (col < width) {
             uint index = head * width + col;
             bfloat result = bfloat(vals[j] * scale);
@@ -141,6 +187,29 @@ kernel void ink_packed_commit_kv(
     const uint target = ((p.x + row) % p.z) * kv + tid.x;
     keys[target] = current_keys[source];
     values[target] = current_values[source];
+}
+
+kernel void ink_packed_chronological_kv(
+    device const bfloat *ring_keys [[buffer(0)]], device const bfloat *ring_values [[buffer(1)]],
+    device const bfloat *keys [[buffer(2)]], device const bfloat *values [[buffer(3)]],
+    device bfloat *ordered_keys [[buffer(4)]], device bfloat *ordered_values [[buffer(5)]],
+    constant uint *p [[buffer(6)]], // start, rows, ring slots, aligned start, first visible
+    uint2 tid [[thread_position_in_grid]]) {
+    const uint token = p[3] + tid.y, column = tid.x;
+    bfloat key = 0, value = 0;
+    if (token >= p[4] && token < p[0] + p[1]) {
+        if (token < p[0]) {
+            const uint source = (token % p[2]) * kv + column;
+            key = ring_keys[source];
+            value = ring_values[source];
+        } else {
+            const uint source = (token - p[0]) * kv + column;
+            key = keys[source];
+            value = values[source];
+        }
+    }
+    ordered_keys[tid.y * kv + column] = key;
+    ordered_values[tid.y * kv + column] = value;
 }
 
 kernel void ink_packed_attention_table(

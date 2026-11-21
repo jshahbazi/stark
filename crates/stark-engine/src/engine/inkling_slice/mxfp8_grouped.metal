@@ -1,11 +1,45 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#ifdef INK_GROUP_MXFP8_SOURCE
+// Match the pinned MLX gather QMV lane layout. Up uses the aligned fast
+// kernel with eight contiguous values per lane. Down uses four. Scale
+// each partial dot before adding it to the lane accumulator.
+template <uint Width, uint ValuesPerLane, bool Full>
+inline float4 ink_mxfp8_source_dot(
+    device const float *input, uint4 rows, uint count,
+    device const uchar *weights, device const uchar *exponents, uint lane) {
+    float4 sum = 0.0f;
+    const uint4 base = rows * Width;
+    for (uint start = 0; start < Width; start += ValuesPerLane * 32) {
+        const uint begin = start + lane * ValuesPerLane;
+        const uint exponent = uint(exponents[begin / 32]);
+        const float scale = exponent == 0u ? 0x1p-127f :
+                            exponent == 255u ? NAN : as_type<float>(exponent << 23);
+        float4 partial = 0.0f;
+        for (uint j = 0; j < ValuesPerLane; ++j) {
+            const uint i = begin + j;
+            const float weight = ink_mx_e4m3(weights[i]);
+            partial.x += input[base.x + i] * weight;
+            if (Full || count > 1) partial.y += input[base.y + i] * weight;
+            if (Full || count > 2) partial.z += input[base.z + i] * weight;
+            if (Full || count > 3) partial.w += input[base.w + i] * weight;
+        }
+        sum += scale * partial;
+    }
+    return float4(simd_sum(sum.x), simd_sum(sum.y), simd_sum(sum.z), simd_sum(sum.w));
+}
+#endif
+
 // Share a decoded weight across up to four routes. Each row retains the
 // singleton lane's FP32 recurrence and SIMD reduction.
 template <uint Width>
 inline float4 ink_mxfp8_group_dot(
     device const float *input, uint4 rows, uint count,
     device const uchar *weights, device const uchar *exponents, uint lane) {
+#ifdef INK_GROUP_MXFP8_SOURCE
+    return ink_mxfp8_source_dot<Width, Width == 2304 ? 8 : 4, false>(
+        input, rows, count, weights, exponents, lane);
+#else
     float4 sum = 0.0f;
     for (uint start = 0; start < Width; start += 32) {
         const uint exponent = uint(exponents[start / 32]);
@@ -19,6 +53,7 @@ inline float4 ink_mxfp8_group_dot(
         if (count > 3) sum.w = fma(weight, input[rows.w * Width + i], sum.w);
     }
     return float4(simd_sum(sum.x), simd_sum(sum.y), simd_sum(sum.z), simd_sum(sum.w));
+#endif
 }
 
 kernel void ink_group_mxfp8_up(
@@ -88,6 +123,13 @@ __attribute__((always_inline)) inline void ink_mxfp8_group_dot8(
     device const float *input, uint4 first_rows, uint4 second_rows,
     device const uchar *weights, device const uchar *exponents, uint lane,
     thread float4 &first, thread float4 &second) {
+#ifdef INK_GROUP_MXFP8_SOURCE
+    constexpr uint VALUES = Width == 2304 ? 8 : 4;
+    first = ink_mxfp8_source_dot<Width, VALUES, true>(
+        input, first_rows, 4, weights, exponents, lane);
+    second = ink_mxfp8_source_dot<Width, VALUES, true>(
+        input, second_rows, 4, weights, exponents, lane);
+#else
     float4 a = 0.0f, b = 0.0f;
     for (uint start = 0; start < Width; start += 32) {
         const uint exponent = uint(exponents[start / 32]);
@@ -106,6 +148,7 @@ __attribute__((always_inline)) inline void ink_mxfp8_group_dot8(
     }
     first = float4(simd_sum(a.x), simd_sum(a.y), simd_sum(a.z), simd_sum(a.w));
     second = float4(simd_sum(b.x), simd_sum(b.y), simd_sum(b.z), simd_sum(b.w));
+#endif
 }
 
 inline uint4 ink_mxfp8_group_routes(device const uint *order, uint start, uint count) {
@@ -121,7 +164,12 @@ __attribute__((always_inline)) inline void ink_mxfp8_group_store_up(
     for (uint i = 0; i < count; ++i) {
         const float gate = float(bfloat(gates[i]));
         const float up = float(bfloat(ups[i]));
+#ifdef INK_GROUP_MXFP8_SOURCE
+        const float sigmoid_low = 1.0f / (1.0f + metal::precise::exp(abs(gate)));
+        const float sigmoid = gate < 0.0f ? sigmoid_low : 1.0f - sigmoid_low;
+#else
         const float sigmoid = 1.0f / (1.0f + metal::precise::exp(-gate));
+#endif
         const float gate_cap = 4.0f * metal::precise::tanh(gate * 0.25f);
         const float up_cap = 25.0f * metal::precise::tanh(up / 25.0f);
         output[(sorted + i) * MID + column] =

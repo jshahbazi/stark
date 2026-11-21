@@ -27,7 +27,7 @@ mod target_validation;
 use packed_prefill::PackedPrefill;
 use prefill::PrefillLanes;
 pub use prefill_profile::{profile_packed_prefill, profile_prefill};
-pub use prefill_trace::{PrefillTraceMode, trace_prefill};
+pub use prefill_trace::{PrefillTraceMode, trace_packed_prefill, trace_prefill};
 pub use target_validation::{measure_full, measure_full_budget, measure_prefill, measure_prefill_speed};
 
 use super::{dspark::Dspark, vision::Vision, *};
@@ -67,6 +67,7 @@ pub struct Session {
     flow: Flow,
     prefill_lanes: Option<PrefillLanes>,
     packed_prefill: Option<PackedPrefill>,
+    source_text_requested: bool,
     embedding: Buffer,
     embed_norm: Buffer,
     output_query: Buffer,
@@ -86,6 +87,9 @@ pub struct Session {
 }
 
 impl Session {
+    /// Maximum rows in the image-loaded M5 Max source prefill command.
+    pub const SOURCE_PREFILL_ROWS: usize = 2048;
+
     /// Load directly from the original publisher shard. The worker owns package
     /// admission, including tokenizer metadata and source identity checks.
     pub fn load(
@@ -134,6 +138,7 @@ impl Session {
             flow: Flow::new(device)?,
             prefill_lanes: None,
             packed_prefill: None,
+            source_text_requested: true,
             mixed: zeroed(device, WIDTH * 4)?,
             hidden: zeroed(device, logits_rows * WIDTH * 2)?,
             logits: zeroed(device, logits_rows * PADDED_VOCABULARY * 4)?,
@@ -237,6 +242,7 @@ impl Session {
             }
             self.visits = visits;
             self.context = context;
+            self.apply_prefill_scope();
             self.reset();
         }
         Ok(())
@@ -255,7 +261,11 @@ impl Session {
         if !self.dspark_enabled
             && let Some(packed) = &self.packed_prefill
         {
-            packed.rows()
+            if self.runtime.source_text_active {
+                packed.rows()
+            } else {
+                packed.rows().min(PackedPrefill::EXACT_WORKER_ROWS)
+            }
         } else {
             self.image_prefill_batch_rows()
         }
@@ -271,7 +281,10 @@ impl Session {
     }
 
     /// Reserve both the packed and per-row workspaces separately from persistent cache.
-    pub const fn batched_prefill_memory_bytes() -> usize {
+    pub fn batched_prefill_memory_bytes(source_allowed: bool) -> usize {
+        if source_allowed && PackedPrefill::source_enabled() {
+            return 1344 * 1024 * 1024;
+        }
         384 * 1024 * 1024
     }
 
@@ -280,6 +293,7 @@ impl Session {
     pub fn set_batched_prefill(
         &mut self,
         enabled: bool,
+        source_allowed: bool,
     ) -> Result<()> {
         if enabled == self.prefill_lanes.is_some() {
             return Ok(());
@@ -290,14 +304,42 @@ impl Session {
         let (lanes, packed) = if enabled {
             (
                 Some(PrefillLanes::for_m5_worker(&mut self.runtime)?),
-                Some(PackedPrefill::for_m5_worker(&mut self.runtime)?),
+                Some(PackedPrefill::for_m5_worker(&mut self.runtime, source_allowed)?),
             )
         } else {
             (None, None)
         };
         self.prefill_lanes = lanes;
         self.packed_prefill = packed;
+        self.apply_prefill_scope();
         Ok(())
+    }
+
+    /// Whether this loaded worker can run reference-shaped prefill at a request context.
+    pub fn supports_source_text_prefill(
+        &self,
+        context: usize,
+    ) -> bool {
+        self.packed_prefill.as_ref().is_some_and(|packed| packed.supports_source_context(context))
+    }
+
+    /// Select the packed text precision policy before ingesting a request.
+    pub fn set_text_prefill_scope(
+        &mut self,
+        source: bool,
+    ) {
+        debug_assert_eq!(self.position, 0);
+        self.source_text_requested = source;
+        self.apply_prefill_scope();
+    }
+
+    fn apply_prefill_scope(&mut self) {
+        let source =
+            self.source_text_requested && !self.dspark_enabled && self.supports_source_text_prefill(self.context);
+        self.runtime.source_text_active = source;
+        if let Some(packed) = &mut self.packed_prefill {
+            packed.set_source_scope(source);
+        }
     }
 
     /// Reset the live position. Kernels read only committed absolute positions,
@@ -365,6 +407,7 @@ impl Session {
             return Err("Inkling DSpark weights are unavailable");
         }
         self.dspark_enabled = enabled;
+        self.apply_prefill_scope();
         Ok(())
     }
 
@@ -418,9 +461,8 @@ impl Session {
         self.ingest_many(std::slice::from_ref(&token))
     }
 
-    /// Process serial-shape rows in bounded command batches. Every row remains
-    /// causal and uses exactly the same kernels as decode. The worker may take
-    /// a prefix snapshot at the end of this operation.
+    /// Ingest causal rows in bounded command batches. The worker may take a
+    /// prefix snapshot at the end of a complete batch.
     pub fn ingest_many(
         &mut self,
         tokens: &[u32],
@@ -544,6 +586,7 @@ impl Session {
         }
         if let Some(lanes) = &self.prefill_lanes
             && tokens.len() > 1
+            && (!self.runtime.source_text_active || tokens.len() > 3)
         {
             let inputs = tokens.iter().copied().map(TokenInput::Text).collect::<Vec<_>>();
             let result = execute(&self.runtime, |gpu| self.encode_prefill_rows(gpu, lanes, &inputs, readout));
@@ -834,7 +877,7 @@ enum TokenInput<'a> {
     Image(Binding<'a>),
 }
 
-fn read_shared<T: bytemuck::Pod>(
+pub(super) fn read_shared<T: bytemuck::Pod>(
     source: &Buffer,
     count: usize,
 ) -> Vec<T> {

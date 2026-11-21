@@ -216,7 +216,14 @@ kernel void ink_conv(
         float value = lag == 0 ? current : float(history[((pos - lag) % 3) * width + i]);
         float coef = is_dynamic ? float(weight[tap * width + i]) + float(dynamic[(i / 128) * 4 + tap])
                                 : float(weight[i * 4 + tap]);
+#ifdef INK_SOURCE_SINGLETON_CONV
+        {
+#pragma clang fp contract(off) reassociate(off)
+            result += coef * value;
+        }
+#else
         result = fma(coef, value, result);
+#endif
     }
     history[(pos % 3) * width + i] = x[i];
     output[i] = bfloat((result + current) * (is_dynamic ? 1.0f / 3.0f : 0.447213595499958f));

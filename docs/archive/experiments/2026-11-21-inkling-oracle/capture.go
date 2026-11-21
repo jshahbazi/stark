@@ -62,8 +62,8 @@ func oracleSetVisit(layer int, state residualStream, previous []*mlx.Array, mess
 			values = mlx.PadConstant(values, []int{0}, []int{0}, []int{capacity - n})
 		} else if split := n - offset%capacity; split != n {
 			values = mlx.Concatenate([]*mlx.Array{
-				values.Slice(mlx.Slice(split, n)),
-				values.Slice(mlx.Slice(0, split)),
+				values.Slice(mlx.Slice(split, n), mlx.Slice()),
+				values.Slice(mlx.Slice(0, split), mlx.Slice()),
 			}, 0)
 		}
 		oraclePut([]string{"keys", "values"}[i], values)

@@ -1,0 +1,5 @@
+# MLX Metal kernels for Inkling 2 Mini
+
+Source revision [`fc344c986c4169d99f76b5d95ae6b4a58a359a63`](https://github.com/ml-explore/mlx/tree/fc344c986c4169d99f76b5d95ae6b4a58a359a63), the MLX revision used by the pinned Ollama `6949a42ad24450cf567d7ce1ff7d278ebb3eb5d8` reference. The `mlx/` subtree contains the unmodified dependency closure of the three Stark Metal translation units. See `LICENSE` for the upstream license.
+
+The translation units instantiate the F32 global attention, two narrow BF16 projection tilings, F32 row softmax and F32 LogAddExp used by this checkpoint. The singleton routing kernel uses the pinned LogAddExp and softmax operations in one dispatch. Compile each with `-std=metal4.0 -fno-fast-math` and the reference directory on the include path, then link the AIR files with `metallib`. Attention and the narrow projection use overlapping function constant IDs and need separate translation units. Use the compiler depfiles to verify the header closure when updating the pin.
