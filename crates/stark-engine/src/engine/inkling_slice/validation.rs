@@ -59,7 +59,7 @@ fn load_flow(
     Ok(())
 }
 
-fn seed_visit(
+pub(super) fn seed_visit(
     fixture: &Tensors,
     visit: &Visit,
 ) -> Result<()> {

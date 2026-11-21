@@ -1119,7 +1119,7 @@ fn sample(
     sample_with_mapper(logits, sampling, rng, None)
 }
 
-fn sample_with_mapper(
+pub(crate) fn sample_with_mapper(
     logits: &[f32],
     sampling: &Sampling,
     rng: &mut u64,

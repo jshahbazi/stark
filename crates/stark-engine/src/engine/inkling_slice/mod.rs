@@ -1,22 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Decode slice for the pinned original Inkling 2 Mini checkpoint.
-//! This is an explicit engine diagnostic. The generation worker does not
-//! admit the family until the missing epilogue and normal entry points qualify.
+//! Native target decoder and measurement tools for the original Inkling 2 Mini.
 
 mod checkpoint;
+mod dspark;
+mod grouped_pilot;
+mod session;
 mod trace;
 mod validation;
+mod vision;
 
 use std::{collections::HashMap, ptr::NonNull};
 
 use checkpoint::Tensors;
+pub use grouped_pilot::measure_grouped_nvfp4;
 use metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandBufferExt, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
     MTLCompileOptions, MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, MTLDeviceExt, MTLGPUFamily,
     MTLLanguageVersion, MTLLibraryExt, MTLMathMode, MTLResourceOptions, MTLSize,
 };
 use objc2::{rc::Retained, runtime::ProtocolObject};
+pub use session::{Session, Snapshot, VOCABULARY, measure_dspark, measure_full, measure_full_budget, measure_prefill};
 pub use validation::measure;
+pub use vision::{INKLING_IMAGE_TOKEN, ImageEmbeddings, measure_vision};
 
 const WIDTH: usize = 2304;
 const EXPERTS: usize = 128;
@@ -69,7 +74,11 @@ impl Runtime {
             "\n",
             include_str!("experts.metal"),
             "\n",
-            include_str!("attention_source.metal")
+            include_str!("mxfp8.metal"),
+            "\n",
+            include_str!("attention_source.metal"),
+            "\n",
+            include_str!("session.metal")
         );
         let library = device
             .new_library_with_source(source, Some(&options))
@@ -94,7 +103,15 @@ impl Runtime {
             "ink_nvfp4_activation",
             "ink_nvfp4_up",
             "ink_nvfp4_down",
+            "ink_mxfp8_activation",
+            "ink_mxfp8_up",
+            "ink_mxfp8_down",
             "ink_expert_sum",
+            "ink_embedding",
+            "ink_embedding_override",
+            "ink_capture_feature",
+            "ink_unembed_f32",
+            "ink_logits_cap",
             "ink_copy",
             "ink_trace_copy",
         ];
@@ -108,13 +125,16 @@ impl Runtime {
             && device.supports_family(MTLGPUFamily::Apple10)
             && device.supports_family(MTLGPUFamily::Metal4);
         if pinned_m5 {
-            const NAME: &str = "ink_controller_source";
-            let library = device
-                .new_library_with_source(include_str!("controller_source.metal"), Some(&options))
-                .map_err(|_| NAME)?;
-            let function = library.new_function_with_name(NAME).ok_or(NAME)?;
-            let pipeline = device.new_compute_pipeline_state_with_function(&function).map_err(|_| NAME)?;
-            pipelines.insert(NAME, pipeline);
+            let sources = [
+                ("ink_controller_source", include_str!("controller_source.metal")),
+                ("ink_unembed_tensor", include_str!("unembed_source.metal")),
+            ];
+            for (name, source) in sources {
+                let library = device.new_library_with_source(source, Some(&options)).map_err(|_| name)?;
+                let function = library.new_function_with_name(name).ok_or(name)?;
+                let pipeline = device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
+                pipelines.insert(name, pipeline);
+            }
         }
         Ok(Self {
             device,
@@ -194,7 +214,14 @@ impl Stream<'_> {
         rows: usize,
     ) {
         let (kernel, threads) = if self.runtime.pinned_m5 {
-            ("ink_matvec_source", if rows <= 64 { 128 } else { 64 })
+            (
+                "ink_matvec_source",
+                if rows <= 64 {
+                    128
+                } else {
+                    64
+                },
+            )
         } else {
             ("ink_matvec", 128)
         };
@@ -275,6 +302,59 @@ struct Gate {
     forget: Buffer,
 }
 
+struct Mxfp8Bank {
+    codes: Buffer,
+    exponents: Buffer,
+}
+
+impl Mxfp8Bank {
+    fn load(
+        source: &Tensors,
+        device: &Device,
+        prefix: &str,
+        width: usize,
+    ) -> Result<Self> {
+        Ok(Self {
+            codes: source.buffer(device, &format!("{prefix}_weight"), "F8_E4M3", &[EXPERTS, WIDTH, width])?,
+            exponents: source.buffer(device, &format!("{prefix}_weight_scale"), "U8", &[EXPERTS, WIDTH, width / 32])?,
+        })
+    }
+}
+
+enum Experts {
+    Nvfp4 {
+        up: Bank,
+        down: Bank,
+    },
+    Mxfp8 {
+        up: Mxfp8Bank,
+        down: Mxfp8Bank,
+    },
+}
+
+impl Experts {
+    fn load(
+        source: &Tensors,
+        device: &Device,
+        stem: &str,
+        physical: usize,
+    ) -> Result<Self> {
+        let up = format!("{stem}mlp.experts.w13");
+        let down = format!("{stem}mlp.experts.w2");
+        if physical < 20 {
+            Ok(Self::Nvfp4 {
+                up: Bank::load(source, device, &up, WIDTH)?,
+                down: Bank::load(source, device, &down, MID)?,
+            })
+        } else {
+            Ok(Self::Mxfp8 {
+                up: Mxfp8Bank::load(source, device, &up, WIDTH)?,
+                down: Mxfp8Bank::load(source, device, &down, MID)?,
+            })
+        }
+    }
+}
+
 struct Layer {
     local: bool,
     attn_queries: Option<Buffer>,
@@ -300,8 +380,7 @@ struct Layer {
     mlp_conv: Buffer,
     router: Buffer,
     bias: Buffer,
-    up: Bank,
-    down: Bank,
+    experts: Experts,
 }
 
 impl Layer {
@@ -401,8 +480,7 @@ impl Layer {
             mlp_conv: weight("mlp_sconv.weight", &[WIDTH, 1, 4])?,
             router: weight("mlp.gate.weight", &[EXPERTS, WIDTH])?,
             bias: source.buffer(device, &format!("{stem}mlp.gate.bias"), "F32", &[EXPERTS])?,
-            up: Bank::load(source, device, &format!("{stem}mlp.experts.w13"), WIDTH)?,
-            down: Bank::load(source, device, &format!("{stem}mlp.experts.w2"), MID)?,
+            experts: Experts::load(source, device, &stem, layer)?,
         })
     }
 
@@ -455,34 +533,76 @@ impl Layer {
         gpu: &mut Stream<'_>,
         s: &Scratch,
     ) {
+        self.route_experts(gpu, s);
+        match &self.experts {
+            Experts::Nvfp4 {
+                up,
+                down,
+            } => Self::nvfp4(gpu, s, up, down),
+            Experts::Mxfp8 {
+                up,
+                down,
+            } => Self::mxfp8(gpu, s, up, down),
+        }
+        gpu.one("ink_expert_sum", &[&s.down, &s.experts], WIDTH as u32, (WIDTH / 128, 1), 128);
+    }
+
+    fn route_experts(
+        &self,
+        gpu: &mut Stream<'_>,
+        s: &Scratch,
+    ) {
         gpu.one("ink_router_logits", &[&s.mlp_input, &self.router, &s.logits], WIDTH as u32, (EXPERTS, 1), 32);
         gpu.one("ink_router_select", &[&s.logits, &self.bias, &s.routes, &s.route_weights], (), (1, 1), 128);
+    }
+
+    fn nvfp4(
+        gpu: &mut Stream<'_>,
+        s: &Scratch,
+        up: &Bank,
+        down: &Bank,
+    ) {
         gpu.one("ink_nvfp4_activation", &[&s.mlp_input, &s.up_inner, &s.up_max], WIDTH as u32, (1, 1), 256);
         gpu.one(
             "ink_nvfp4_up",
-            &[
-                &s.up_inner,
-                &s.up_max,
-                &s.routes,
-                &s.route_weights,
-                &self.up.codes,
-                &self.up.blocks,
-                &self.up.maxima,
-                &s.mid,
-            ],
-            self.up.args(),
+            &[&s.up_inner, &s.up_max, &s.routes, &s.route_weights, &up.codes, &up.blocks, &up.maxima, &s.mid],
+            up.args(),
             (MID / 4, 8),
             128,
         );
         gpu.one("ink_nvfp4_activation", &[&s.mid, &s.down_inner, &s.down_max], MID as u32, (8, 1), 256);
         gpu.one(
             "ink_nvfp4_down",
-            &[&s.down_inner, &s.down_max, &s.routes, &self.down.codes, &self.down.blocks, &self.down.maxima, &s.down],
-            self.down.args(),
+            &[&s.down_inner, &s.down_max, &s.routes, &down.codes, &down.blocks, &down.maxima, &s.down],
+            down.args(),
             (WIDTH / 4, 8),
             128,
         );
-        gpu.one("ink_expert_sum", &[&s.down, &s.experts], WIDTH as u32, (WIDTH / 128, 1), 128);
+    }
+
+    fn mxfp8(
+        gpu: &mut Stream<'_>,
+        s: &Scratch,
+        up: &Mxfp8Bank,
+        down: &Mxfp8Bank,
+    ) {
+        gpu.one("ink_mxfp8_activation", &[&s.mlp_input, &s.up_inner], WIDTH as u32, (WIDTH / 32, 1), 32);
+        let shape = [WIDTH as u32, MID as u32];
+        gpu.one(
+            "ink_mxfp8_up",
+            &[&s.up_inner, &s.routes, &s.route_weights, &up.codes, &up.exponents, &s.mid],
+            shape,
+            (MID / 4, 8),
+            128,
+        );
+        gpu.one("ink_mxfp8_activation", &[&s.mid, &s.down_inner], MID as u32, (MID / 32, 8), 32);
+        gpu.one(
+            "ink_mxfp8_down",
+            &[&s.down_inner, &s.routes, &down.codes, &down.exponents, &s.down],
+            shape,
+            (WIDTH / 4, 8),
+            128,
+        );
     }
 
     fn convolution(
@@ -504,14 +624,11 @@ impl Layer {
         );
     }
 
-    fn attention(
-        &self,
-        gpu: &mut Stream<'_>,
-        s: &Scratch,
-        cache: &Visit,
-        position: usize,
-    ) {
-        for ((input, weight, out, rows), name) in [
+    fn attention_projections<'a>(
+        &'a self,
+        s: &'a Scratch,
+    ) -> [(&'a Buffer, &'a Buffer, &'a Buffer, usize); 6] {
+        [
             (&s.qkv_input[0], &self.q, &s.q, 3072),
             (&s.qkv_input[1], &self.k, &s.k, KV),
             (&s.qkv_input[2], &self.v, &s.v, KV),
@@ -519,8 +636,16 @@ impl Layer {
             (&s.qkv_input[0], &self.attn_gate, &s.attn_gate, 3072),
             (&s.qkv_input[0], &self.sink, &s.sink, HEADS),
         ]
-        .into_iter()
-        .zip(trace::RAW_PROJECTIONS)
+    }
+
+    fn attention(
+        &self,
+        gpu: &mut Stream<'_>,
+        s: &Scratch,
+        cache: &Visit,
+        position: usize,
+    ) {
+        for ((input, weight, out, rows), name) in self.attention_projections(s).into_iter().zip(trace::RAW_PROJECTIONS)
         {
             gpu.project(binding(input), weight, out, WIDTH, rows);
             s.record(gpu, name, out);
@@ -530,6 +655,19 @@ impl Layer {
                 gpu.project(binding(&s.qkv_input[i + 1]), weight, &s.dynamic[i], WIDTH, 32);
             }
         }
+        self.attention_read_cache(gpu, s, cache, position);
+        gpu.project(binding(&s.attended), &self.output, &s.attn_raw, 3072, WIDTH);
+        s.record(gpu, "attn_raw", &s.attn_raw);
+        Self::convolution(gpu, &s.attn_raw, &self.attn_conv, None, &cache.conv[2], &s.attention, WIDTH, position);
+    }
+
+    fn attention_read_cache(
+        &self,
+        gpu: &mut Stream<'_>,
+        s: &Scratch,
+        cache: &Visit,
+        position: usize,
+    ) {
         let width = cache.capacity as u32;
         let window = if self.local {
             LOCAL as u32
@@ -591,16 +729,13 @@ impl Layer {
         };
         gpu.one(
             parts_kernel,
-            &[&s.q, &cache.keys, &cache.values, &s.table, &s.sink, &s.parts],
+            &[&s.q, &cache.keys, &cache.values, &s.table, &s.sink, &cache.scratch.parts],
             args,
             parts_groups,
             128,
         );
-        gpu.one(gate_kernel, &[&s.parts, &s.attn_gate, &s.attended], shape, gate_groups, 128);
+        gpu.one(gate_kernel, &[&cache.scratch.parts, &s.attn_gate, &s.attended], shape, gate_groups, 128);
         s.record(gpu, "attended", &s.attended);
-        gpu.project(binding(&s.attended), &self.output, &s.attn_raw, 3072, WIDTH);
-        s.record(gpu, "attn_raw", &s.attn_raw);
-        Self::convolution(gpu, &s.attn_raw, &self.attn_conv, None, &cache.conv[2], &s.attention, WIDTH, position);
     }
 
     fn encode(
@@ -613,6 +748,19 @@ impl Layer {
         position: usize,
     ) {
         let s = &cache.scratch;
+        self.attention_inputs(gpu, flow, partial, s, state);
+        self.attention(gpu, s, cache, position);
+        self.finish_visit(gpu, cache, flow, partial, s, state, position);
+    }
+
+    fn attention_inputs(
+        &self,
+        gpu: &mut Stream<'_>,
+        flow: &Flow,
+        partial: &Buffer,
+        s: &Scratch,
+        state: VisitInput,
+    ) {
         let queries = self.attn_queries.as_ref().unwrap_or(&self.mlp_query);
         if state.blocks != 0 {
             gpu.mix(
@@ -646,7 +794,32 @@ impl Layer {
             };
             self.norms(gpu, s, input, &s.qkv_input[slot], slot, state.later);
         }
-        self.attention(gpu, s, cache, position);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_visit(
+        &self,
+        gpu: &mut Stream<'_>,
+        cache: &Visit,
+        flow: &Flow,
+        partial: &Buffer,
+        s: &Scratch,
+        state: VisitInput,
+        position: usize,
+    ) {
+        self.expert_inputs(gpu, flow, partial, s, state);
+        self.experts(gpu, s);
+        self.finish_experts(gpu, cache, partial, s, state, position);
+    }
+
+    fn expert_inputs(
+        &self,
+        gpu: &mut Stream<'_>,
+        flow: &Flow,
+        partial: &Buffer,
+        s: &Scratch,
+        state: VisitInput,
+    ) {
         if state.boundary {
             gpu.copy(binding(partial), (&flow.blocks, state.blocks * WIDTH * 4));
         }
@@ -654,7 +827,17 @@ impl Layer {
         gpu.mix(&flow.blocks, partial, &self.mlp_query, &s.mixed, state.blocks + usize::from(state.boundary), true, 1);
         s.record(gpu, "mlp_mixed", &s.mixed);
         self.norms(gpu, s, binding(&s.mixed), &s.mlp_input, 3, state.later);
-        self.experts(gpu, s);
+    }
+
+    fn finish_experts(
+        &self,
+        gpu: &mut Stream<'_>,
+        cache: &Visit,
+        partial: &Buffer,
+        s: &Scratch,
+        state: VisitInput,
+        position: usize,
+    ) {
         s.record(gpu, "router_logits", &s.logits);
         Self::convolution(gpu, &s.experts, &self.mlp_conv, None, &cache.conv[3], &s.mlp, WIDTH, position);
         gpu.one("ink_after_experts", &[partial, &s.mlp], (), (WIDTH / 128, 1), 128);
@@ -728,6 +911,50 @@ struct Scratch {
 }
 
 impl Scratch {
+    fn new(
+        device: &Device,
+        parts: usize,
+    ) -> Result<Self> {
+        let bf = |n| zeroed(device, n * 2);
+        let wide = |n| zeroed(device, n * 4);
+        Ok(Self {
+            trace: None,
+            mixed: wide(3 * WIDTH)?,
+            messages: wide(4 * WIDTH)?,
+            controller_pair: bf(2 * WIDTH)?,
+            compressed: bf(64)?,
+            gated: wide(WIDTH)?,
+            qkv_input: [bf(WIDTH)?, bf(WIDTH)?, bf(WIDTH)?],
+            q: bf(3072)?,
+            k: bf(KV)?,
+            v: bf(KV)?,
+            r: bf(HEADS * 16)?,
+            attn_gate: bf(3072)?,
+            sink: bf(HEADS)?,
+            dynamic: [bf(32)?, bf(32)?],
+            conv_k: bf(KV)?,
+            conv_v: bf(KV)?,
+            table: bf(HEADS * LOCAL)?,
+            parts: wide((HEADS * parts * 130).max(1))?,
+            attended: bf(3072)?,
+            attn_raw: bf(WIDTH)?,
+            attention: bf(WIDTH)?,
+            mlp_input: bf(WIDTH)?,
+            logits: wide(EXPERTS)?,
+            routes: wide(8)?,
+            route_weights: wide(8)?,
+            up_inner: wide(WIDTH)?,
+            up_max: wide(1)?,
+            mid: bf(8 * MID)?,
+            down_inner: wide(8 * MID)?,
+            down_max: wide(8)?,
+            down: bf(8 * WIDTH)?,
+            experts: bf(WIDTH)?,
+            mlp: bf(WIDTH)?,
+            partial_debug: wide(WIDTH)?,
+        })
+    }
+
     fn record(
         &self,
         gpu: &mut Stream<'_>,
@@ -753,54 +980,32 @@ impl Visit {
         device: &Device,
         local: bool,
     ) -> Result<Self> {
+        Self::new_context(device, local, CAPACITY, false)
+    }
+
+    fn new_context(
+        device: &Device,
+        local: bool,
+        context: usize,
+        source_attention: bool,
+    ) -> Result<Self> {
         let capacity = if local {
-            LOCAL
+            LOCAL.min(context)
         } else {
-            CAPACITY
+            context
+        };
+        let parts = if source_attention {
+            64
+        } else {
+            capacity.div_ceil(32).max(64)
         };
         let bf = |n| zeroed(device, n * 2);
-        let wide = |n| zeroed(device, n * 4);
         Ok(Self {
             capacity,
             keys: bf(capacity * KV)?,
             values: bf(capacity * KV)?,
             conv: [bf(3 * KV)?, bf(3 * KV)?, bf(3 * WIDTH)?, bf(3 * WIDTH)?],
-            scratch: Scratch {
-                trace: None,
-                mixed: wide(3 * WIDTH)?,
-                messages: wide(4 * WIDTH)?,
-                controller_pair: bf(2 * WIDTH)?,
-                compressed: bf(64)?,
-                gated: wide(WIDTH)?,
-                qkv_input: [bf(WIDTH)?, bf(WIDTH)?, bf(WIDTH)?],
-                q: bf(3072)?,
-                k: bf(KV)?,
-                v: bf(KV)?,
-                r: bf(HEADS * 16)?,
-                attn_gate: bf(3072)?,
-                sink: bf(HEADS)?,
-                dynamic: [bf(32)?, bf(32)?],
-                conv_k: bf(KV)?,
-                conv_v: bf(KV)?,
-                table: bf(HEADS * LOCAL)?,
-                parts: wide(HEADS * capacity.div_ceil(32).max(64) * 130)?,
-                attended: bf(3072)?,
-                attn_raw: bf(WIDTH)?,
-                attention: bf(WIDTH)?,
-                mlp_input: bf(WIDTH)?,
-                logits: wide(EXPERTS)?,
-                routes: wide(8)?,
-                route_weights: wide(8)?,
-                up_inner: wide(WIDTH)?,
-                up_max: wide(1)?,
-                mid: bf(8 * MID)?,
-                down_inner: wide(8 * MID)?,
-                down_max: wide(8)?,
-                down: bf(8 * WIDTH)?,
-                experts: bf(WIDTH)?,
-                mlp: bf(WIDTH)?,
-                partial_debug: wide(WIDTH)?,
-            },
+            scratch: Scratch::new(device, parts)?,
         })
     }
 }

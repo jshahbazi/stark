@@ -6,6 +6,8 @@ from typing import Any
 
 _MAX_DRAFTS = 2**32 - 1
 _SAMPLING = "exact-rejection-v1"
+_INKLING_SAMPLING = "native-target-draw-match-v1"
+_INKLING_VERIFICATION = "inkling-dspark-target-draw-v1"
 
 
 def _unsupported() -> dict[str, Any]:
@@ -40,6 +42,7 @@ def mtp_capabilities(readiness: Any) -> dict[str, Any]:
     default = value.get("default_drafts", 0)
     operations = value.get("operations", ["generate"])
     verification = value.get("verification")
+    sampling = value.get("sampling")
     if (
         type(recommended) is not int
         or not 1 <= recommended <= maximum
@@ -47,7 +50,10 @@ def mtp_capabilities(readiness: Any) -> dict[str, Any]:
         or default != 0
         or operations != ["generate"]
         or not isinstance(operations, list)
-        or value.get("sampling") != _SAMPLING
+        or (
+            sampling != _SAMPLING
+            and (sampling, verification, maximum) != (_INKLING_SAMPLING, _INKLING_VERIFICATION, 1)
+        )
         or not isinstance(verification, str)
         or not 1 <= len(verification) <= 128
         or any(not (character.isascii() and (character.isalnum() or character in "._-")) for character in verification)
@@ -58,7 +64,7 @@ def mtp_capabilities(readiness: Any) -> dict[str, Any]:
         "max_drafts": maximum,
         "recommended_drafts": recommended,
         "default_drafts": 0,
-        "sampling": _SAMPLING,
+        "sampling": sampling,
         "verification": verification,
         "operations": ["generate"],
     }

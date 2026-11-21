@@ -36,6 +36,20 @@ for start in 4 4096; do
 done
 ```
 
+## Full-target extension
+
+In a fresh isolated source copy, run `full_target.py` after `instrument.py` and after copying `capture.go`. Build the runner as above. Set `"FullTarget": true` in the private request to record the four complete teacher rows, all per-visit partials, logits, and original MXFP8 expert inputs and outputs. The short full-target control used 4 singleton chunks and also recorded the four initial prompt rows to locate the first changing cache value. The 4K control used eight 512-token chunks. Native serial prefill receives the exact same token IDs but evaluates each row with decode geometry. The chunk difference limits interpretation of the full 4K output comparison.
+
+Feed the resulting private directory, original shard, and context to the native example.
+
+```sh
+cargo +1.98.1 run --release --locked -p stark-engine --no-default-features \
+    --features inkling-slice --example inkling_slice -- \
+    --full-target "$ORIGINAL_SHARD" "$ORACLE_DIR/4" 512
+```
+
+The example prints aggregate errors, greedy agreement, snapshot replay and SHA-256 fingerprints of native caches, taps and logits. Repeat with `--full-target-batched` to select 64-row native prefill and measure the late paired tile from a common native snapshot. The `--full-budget` command accepts the original shard and the private synthetic 4K cache seed. The `--prefill-order` command accepts the long private oracle directory and a token count. It compares serial and batched native prefill, checks cache bytes and taps, and replays a chunk-aligned snapshot. [Full-target experimental evidence](../../../model-experiments/2026-11-21-inkling-mini-full-target.md)
+
 ## Recorded runs
 
 | Capture | Prefix chunks | Captured positions | Merged fixture SHA-256 |
@@ -51,3 +65,13 @@ Discard initial merged fixtures with SHA-256 `7b787f61add91123d94856fd30d57c7b3a
 The short and optional visit 0 captures share token sequence SHA-256 `fc2381d9f7a8a4d2af3b732e106584b70bd03cc03db1a45bf9770396f3e96fd5`. The long token sequence SHA-256 is `44b25d4c71b4521ee9f9b06a897cf2ed93be87438f89dd57313d2a89e4f7164a`.
 
 The imported manifest SHA-256 is `bd9c92c3d4c4c1a6c6904dea6a51e8503cceb0f77f8073c2c9e5c63976e0aa4d`. The application reported MLX `0.32.4-82-gfc344c9`. The release's Metal v4 `libmlx.dylib`, `libmlxc.dylib`, and `mlx.metallib` have SHA-256 values `ca64874f5226232695e22f85c0d4b48a3df71a2a8f3f836df8442a7df2ab66ea`, `7a362d78cfa54e2adb003db825376bfaaaaad23fba6fe58c14391786f15d2512`, and `bb219cf229e00d2b7af3eb65c044fb0365f171d78a273164b92ac54a8ba9caf4`, respectively.
+
+## Original DSpark capture
+
+The target-only benchmark import has no draft descriptor. The draft capture uses the same pinned target loader and loads the publisher's separate `mtp.safetensors` and `mtp_config` through the pinned model's draft code. Copy [dspark.go](dspark.go) into `mlxrunner/model/inkling2/oracle_dspark.go` in an isolated source tree. On the MLX worker after target load, call `inkling2.CaptureDSpark(runner.Model, configPath, draftPath, inputPath, outputPath)` and exit. Use the original `config.json`, original draft shard, existing short request JSON and a private SafeTensors output path. Limit capture to 4–64 prefix rows.
+
+The reference runs the original full eight-row draft block for four anchors and retains the first-mask greedy decision and selected BF16 boundaries. The fixture includes the source target taps. Compare those taps in isolation before examining the connected target-plus-draft path. All fixture inputs and outputs stay private. The native diagnostic accepts the original target and draft shard, private fixture, prefix extent and decode extent.
+
+```sh
+inkling_slice --dspark "$TARGET_SHARD" "$DRAFT_SHARD" "$PRIVATE_DRAFT_FIXTURE" 4 16
+```

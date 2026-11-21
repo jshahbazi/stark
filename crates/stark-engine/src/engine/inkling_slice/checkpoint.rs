@@ -2,7 +2,7 @@
 //! A scoped SafeTensors reader for the exact original mixed-format slice.
 //! Keep E4M3 bytes packed. Validate requested dtype and geometry before upload.
 
-use std::{collections::HashMap, fs::File, io::Read, os::unix::fs::FileExt, path::Path};
+use std::{collections::HashMap, fs::File, os::unix::fs::FileExt, path::Path};
 
 use metal::{MTLBuffer, MTLDeviceExt, MTLResourceOptions};
 use serde::Deserialize;
@@ -32,16 +32,19 @@ impl Tensors {
     }
 
     pub(super) fn open(path: &Path) -> Result<Self> {
-        let mut file = File::open(path).map_err(|_| "cannot open SafeTensors")?;
+        Self::from_file(File::open(path).map_err(|_| "cannot open SafeTensors")?)
+    }
+
+    pub(super) fn from_file(file: File) -> Result<Self> {
         let size = file.metadata().map_err(|_| "cannot inspect SafeTensors")?.len();
         let mut prefix = [0; 8];
-        file.read_exact(&mut prefix).map_err(|_| "missing SafeTensors header")?;
+        file.read_exact_at(&mut prefix, 0).map_err(|_| "missing SafeTensors header")?;
         let header = u64::from_le_bytes(prefix);
         if header > 4 * 1024 * 1024 || header + 8 > size {
             return Err("invalid SafeTensors header size");
         }
         let mut data = vec![0; header as usize];
-        file.read_exact(&mut data).map_err(|_| "truncated SafeTensors header")?;
+        file.read_exact_at(&mut data, 8).map_err(|_| "truncated SafeTensors header")?;
         let mut values = serde_json::from_slice::<HashMap<String, serde_json::Value>>(&data)
             .map_err(|_| "invalid SafeTensors header")?;
         values.remove("__metadata__");

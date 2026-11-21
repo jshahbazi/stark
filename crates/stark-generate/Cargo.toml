@@ -8,7 +8,7 @@ license.workspace = true
 
 [features]
 default = ["metal"]
-metal = ["dep:stark-engine", "stark-engine/metal"]
+metal = ["dep:stark-engine", "stark-engine/metal", "stark-engine/inkling-slice", "dep:sha2", "dep:tokenizers"]
 glm-exl3 = ["metal", "stark-engine/glm-exl3"]
 gemma4-assistant-staging = ["metal"]
 
@@ -19,6 +19,8 @@ serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true
 rayon.workspace = true
+sha2 = { version = "=0.10.9", features = ["asm-aarch64"], optional = true }
+tokenizers = { workspace = true, optional = true }
 
 [dev-dependencies]
 sha2 = "=0.10.9"

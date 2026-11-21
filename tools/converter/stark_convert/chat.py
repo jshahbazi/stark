@@ -16,8 +16,12 @@ from pathlib import Path
 
 from jinja2.exceptions import TemplateError
 
+from . import inkling_prepare
 from ._build_metadata import ConversionError, file_hash, open_regular
+from .api_tools import tool_parser_for
 from .generation_eta import progress_frame
+from .inkling_chat import PARSER as INKLING_PARSER
+from .inkling_chat import parse_response as parse_inkling_response
 from .media import MAX_IMAGE_BYTES, ImageData, MediaError, PrivateMediaStore
 from .mtp import mtp_capabilities, resolve_mtp
 from .reasoning import assistant_message, prompt_opens_reasoning, reasoning_options
@@ -295,6 +299,8 @@ def load_template(model, *, expected_hashes=None):
                 from . import qwen38_retained
 
                 template_hashes = qwen38_retained.SUPPORTED_TEMPLATE_HASHES
+            elif image_family == {"profile": inkling_prepare.VISION_PROFILE, "version": 1}:
+                template_hashes = {inkling_prepare.TEMPLATE_SHA}
             contract = config.get("artifact_contract")
             family = contract.get("family") if isinstance(contract, dict) else None
             if (
@@ -1124,8 +1130,14 @@ def run_chat(args, worker):
                 print(str(error))
                 continue
             raise
-        print("Stark> " + terminal_text(reply["text"]) + "\n")
-        messages = [*candidate, assistant_message(reply["text"], initial_thinking=prompt_opens_reasoning(prompt))]
+        if tool_parser_for(codec) == INKLING_PARSER:
+            assistant, _, _ = parse_inkling_response(reply["text"])
+            displayed = assistant["content"]
+        else:
+            assistant = assistant_message(reply["text"], initial_thinking=prompt_opens_reasoning(prompt))
+            displayed = reply["text"]
+        print("Stark> " + terminal_text(displayed) + "\n")
+        messages = [*candidate, assistant]
         if image is not None:
             image_attached = True
 

@@ -4,6 +4,10 @@ mod cancel;
 mod generation;
 #[cfg(feature = "metal")]
 mod hybrid;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+mod inkling;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+mod inkling_artifact;
 mod media;
 #[cfg(any(feature = "metal", test))]
 mod model_stops;

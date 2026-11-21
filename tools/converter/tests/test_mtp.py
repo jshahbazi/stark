@@ -30,6 +30,18 @@ def test_loaded_model_capabilities_select_its_recommended_depth_and_return_owned
     assert mtp_capabilities({"mtp": raw})["operations"] == ["generate"]
 
 
+def test_inkling_retains_the_one_draft_exact_target_draw_contract():
+    raw = descriptor(
+        max_drafts=1,
+        recommended_drafts=1,
+        sampling="native-target-draw-match-v1",
+        verification="inkling-dspark-target-draw-v1",
+    )
+    assert resolve_mtp(True, raw) == 1
+    assert mtp_capabilities({"mtp": dict(raw, verification="unqualified-draw-match-v1")})["supported"] is False
+    assert mtp_capabilities({"mtp": dict(raw, max_drafts=2)})["supported"] is False
+
+
 @pytest.mark.parametrize("maximum, expected", [(1, 1), (2, 2), (3, 2), (8, 2)])
 def test_legacy_exact_mtp_readiness_uses_bounded_compatibility_depth(maximum, expected):
     raw = descriptor(max_drafts=maximum)

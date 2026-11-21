@@ -113,6 +113,27 @@ fn python_json_spacing_sorting_ascii_and_html_escaping_match() {
 }
 
 #[test]
+fn transformers_json_options_preserve_compact_spacing_and_control_key_order() {
+    let arguments = json!({"value": {"z": ["café<&>'", {"z": 1.0, "a": null}], "a": true}});
+    success(
+        "{{ value | tojson(separators=(',', ':')) }}",
+        arguments.clone(),
+        r#"{"z":["café<&>'",{"z":1.0,"a":null}],"a":true}"#.as_bytes(),
+    );
+    success(
+        "{{ value | tojson(sort_keys=true, separators=(',', ':')) }}",
+        arguments.clone(),
+        r#"{"a":true,"z":["café<&>'",{"a":null,"z":1.0}]}"#.as_bytes(),
+    );
+    rejected("{{ value | tojson(sort_keys=1) }}", arguments.clone());
+    rejected("{{ value | tojson(separators=':,') }}", arguments.clone());
+    rejected("{{ value | tojson(separators=(',', ':', ':')) }}", arguments.clone());
+    rejected("{{ dict(separators=(',', ':')) }}", arguments.clone());
+    rejected("{{ value | tojson(separators=(',', ':') ~ '') }}", arguments.clone());
+    rejected("{{ value | tojson(separators=('<|', ':')) }}", arguments);
+}
+
+#[test]
 fn python_display_preserves_bool_none_and_container_types() {
     success(
         "{{ true }};{{ none }};{{ values }}",

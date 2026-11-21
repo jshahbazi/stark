@@ -422,7 +422,9 @@ pub(crate) fn decode_image(
     data: &[u8],
     limits: &PreprocessLimits,
 ) -> Result<RgbImage, InvalidInput> {
-    decode_image_alpha(data, limits, true, true, |width, height| resized_dimensions(width, height, limits).map(|_| ()))
+    decode_image_alpha(data, limits, AlphaBackground::White, true, |width, height| {
+        resized_dimensions(width, height, limits).map(|_| ())
+    })
 }
 
 /// Match PIL's RGB conversion for processors that discard alpha channels.
@@ -432,7 +434,7 @@ pub(super) fn decode_image_discard_alpha<F: FnOnce(u32, u32) -> Result<(), Inval
     limits: &PreprocessLimits,
     validate_processed: F,
 ) -> Result<RgbImage, InvalidInput> {
-    decode_image_alpha(data, limits, false, true, validate_processed)
+    decode_image_alpha(data, limits, AlphaBackground::Discard, true, validate_processed)
 }
 
 /// Perplexity protocol-v4 calls PIL `convert("RGB")` without EXIF transpose.
@@ -441,15 +443,34 @@ pub(crate) fn decode_decider_image(
     data: &[u8],
     limits: &PreprocessLimits,
 ) -> Result<RgbImage, InvalidInput> {
-    decode_image_alpha(data, limits, false, false, |width, height| {
+    decode_image_alpha(data, limits, AlphaBackground::Discard, false, |width, height| {
         resized_dimensions(width, height, limits).map(|_| ())
     })
+}
+
+/// The Inkling processor keeps the encoded orientation and composites alpha
+/// against an 8-pixel checkerboard.
+#[cfg(all(target_os = "macos", feature = "inkling-slice"))]
+pub(crate) fn decode_inkling_image<F: FnOnce(u32, u32) -> Result<(), InvalidInput>>(
+    data: &[u8],
+    limits: &PreprocessLimits,
+    validate_processed: F,
+) -> Result<RgbImage, InvalidInput> {
+    decode_image_alpha(data, limits, AlphaBackground::Checkerboard, false, validate_processed)
+}
+
+#[derive(Clone, Copy)]
+enum AlphaBackground {
+    Discard,
+    White,
+    #[cfg(all(target_os = "macos", feature = "inkling-slice"))]
+    Checkerboard,
 }
 
 fn decode_image_alpha<F: FnOnce(u32, u32) -> Result<(), InvalidInput>>(
     data: &[u8],
     limits: &PreprocessLimits,
-    white_background: bool,
+    alpha_background: AlphaBackground,
     apply_orientation: bool,
     validate_processed: F,
 ) -> Result<RgbImage, InvalidInput> {
@@ -470,7 +491,7 @@ fn decode_image_alpha<F: FnOnce(u32, u32) -> Result<(), InvalidInput>>(
     let pixels = if jpeg {
         decode_jpeg_rgb(&data[..primary_end], width, height)?
     } else {
-        decode_png_rgb(data, width, height, limits, white_background)?
+        decode_png_rgb(data, width, height, limits, alpha_background)?
     };
     let (pixels, width, height) = if apply_orientation {
         orient_rgb(pixels, width, height, orientation)?
@@ -485,7 +506,7 @@ fn decode_png_rgb(
     width: u32,
     height: u32,
     limits: &PreprocessLimits,
-    white_background: bool,
+    alpha_background: AlphaBackground,
 ) -> Result<Vec<u8>, InvalidInput> {
     let max_bytes =
         usize::try_from(limits.max_source_pixels.checked_mul(8).ok_or(InvalidInput("PNG allocation bound overflow"))?)
@@ -525,17 +546,29 @@ fn decode_png_rgb(
         _ => return Err(InvalidInput("unsupported PNG color channels")),
     };
     let mut rgb = zeroed_bytes(rgb_bytes(width, height)?)?;
-    for (pixel, source) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(decoded.chunks_exact(channels)) {
+    for (_index, (pixel, source)) in
+        rgb.as_chunks_mut::<3>().0.iter_mut().zip(decoded.chunks_exact(channels)).enumerate()
+    {
         for channel in 0..3 {
             let value = source[if channels == 4 {
                 channel
             } else {
                 0
             }];
-            pixel[channel] = if white_background && channels > 1 {
-                composite_white(value, source[channels - 1])
-            } else {
-                value
+            pixel[channel] = match (alpha_background, channels > 1) {
+                (AlphaBackground::White, true) => composite_white(value, source[channels - 1]),
+                #[cfg(all(target_os = "macos", feature = "inkling-slice"))]
+                (AlphaBackground::Checkerboard, true) => {
+                    let width = width as usize;
+                    let background = if (_index % width / 8 + _index / width / 8).is_multiple_of(2) {
+                        204
+                    } else {
+                        153
+                    };
+                    let alpha = u32::from(source[channels - 1]);
+                    ((u32::from(value) * alpha + background * (255 - alpha) + 127) / 255) as u8
+                },
+                _ => value,
             };
         }
     }

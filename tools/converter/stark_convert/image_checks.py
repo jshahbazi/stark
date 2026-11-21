@@ -17,6 +17,7 @@ from pathlib import Path
 
 import psutil
 
+from . import inkling_prepare
 from ._build_metadata import file_hash
 from .media import ImageData
 from .vision_runtime import (
@@ -68,6 +69,15 @@ def preflight_family_memory(model: Path, config: dict) -> None:
     Available memory is an observation, not a reservation or peak-memory bound.
     The native loader and operation-specific allocation guards remain authoritative.
     """
+    if config.get("model_type") == inkling_prepare.FAMILY:
+        required = inkling_prepare.SOURCE["weight_bytes"] + 1152 * 1024**2
+        try:
+            available = psutil.virtual_memory().available
+        except (OSError, ValueError, psutil.Error):
+            raise _insufficient_memory(required, None) from None
+        if type(available) is not int or available < required:
+            raise _insufficient_memory(required, available)
+        return
     contract = config.get("artifact_contract", {})
     if not isinstance(contract, dict) or contract.get("schema_version") not in (3, 4, 5):
         from .hybrid_vision import prepared_image_identity
@@ -410,8 +420,8 @@ def _fixture() -> ImageData:
     return ImageData(data, "image/png")
 
 
-def _valid_reply(reply: dict, maximum: int) -> bool:
-    return (
+def _valid_reply(reply: dict, maximum: int, *, inkling: bool = False) -> bool:
+    valid = (
         isinstance(reply, dict)
         and "error" not in reply
         and isinstance(reply.get("text"), str)
@@ -422,6 +432,12 @@ def _valid_reply(reply: dict, maximum: int) -> bool:
         and 0 < reply["output_tokens"] <= maximum
         and reply.get("finish_reason") in {"eos", "stop_token", "stop_sequence", "length", "context"}
     )
+    if valid and inkling:
+        from .inkling_chat import parse_response
+
+        message, _, _ = parse_response(reply["text"])
+        return bool(message["content"].strip())
+    return valid
 
 
 def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool:
@@ -452,7 +468,8 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
                 worker._image_check_identity = identity
                 return True
         codec, template = load_template(worker.model_path, expected_hashes=worker.image_input)
-        context, maximum = min(context, 2048), min(maximum, 8)
+        inkling = identity["family_profile"] == inkling_prepare.VISION_PROFILE
+        context, maximum = min(context, 2048), min(maximum, 192 if inkling else 8)
         options = {"context_tokens": context, "max_new_tokens": maximum, "sampling": {"mode": "greedy"}}
         worker._verification_deadline = time.monotonic() + min(worker.timeout, 120)
 
@@ -460,18 +477,19 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
             content = (
                 [{"type": "image"}, {"type": "text", "text": "Describe the image briefly."}] if image else "Hello."
             )
+            thinking = {"reasoning_effort": "none"} if inkling else {"enable_thinking": False}
             return template.render(
                 messages=[{"role": "user", "content": content}],
                 tools=None,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                **thinking,
                 bos_token=codec.get("bos_token") or "",
                 eos_token=codec.get("eos_token") or "",
             )
 
         worker._image_deadline = worker._verification_deadline
         text = worker.request({"operation": "generate", "rendered_prompt": prompt(), **options})
-        if not _valid_reply(text, maximum) or text["input_tokens"] + maximum > context:
+        if not _valid_reply(text, maximum, inkling=inkling) or text["input_tokens"] + maximum > context:
             raise ImageCheckError("The model did not pass the text execution check.")
         image_prompt = prompt(True)
         tokens = worker.request({"operation": "tokenize", "text": image_prompt, "add_special_tokens": False})
@@ -494,7 +512,7 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
         counts = []
         for _ in range(2):
             reply = worker.request_image(image_prompt, _fixture(), options)
-            if not _valid_reply(reply, maximum) or reply["input_tokens"] + maximum > context:
+            if not _valid_reply(reply, maximum, inkling=inkling) or reply["input_tokens"] + maximum > context:
                 raise ImageCheckError("The model did not pass the image execution check.")
             image_tokens = getattr(worker, "_last_image_tokens", None)
             gemma = identity["family_profile"] in {
@@ -507,6 +525,10 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
             }
             expected_image_tokens = 256 if gemma else 64
             expected_delta = expected_image_tokens + 1 if gemma else expected_image_tokens - 1
+            if identity["family_profile"] == inkling_prepare.VISION_PROFILE:
+                # The 256px fixture pads to seven 40px cells on each axis.
+                expected_image_tokens = 49
+                expected_delta = 48
             if identity["family_profile"] == GEMMA3_FAMILY_PROFILE:
                 # Pinned HF Gemma3Processor adds separators around the block;
                 # re-tokenization merges its leading newline with the template.

@@ -7,6 +7,80 @@ fn main() {
 
     fn run() -> Result<i32, &'static str> {
         let args: Vec<_> = std::env::args_os().skip(1).collect();
+        if args.first().is_some_and(|arg| arg == "--prefill-order") {
+            if args.len() != 4 {
+                return Err(
+                    "expected --prefill-order, original SafeTensors, private oracle directory and input length",
+                );
+            }
+            let count = args[3].to_str().and_then(|value| value.parse().ok()).ok_or("invalid Inkling input length")?;
+            let report =
+                stark_engine::engine::inkling_slice::measure_prefill(Path::new(&args[1]), Path::new(&args[2]), count)?;
+            println!("{report}");
+            return Ok(i32::from(
+                [
+                    "exact_target_state",
+                    "exact_target_taps",
+                    "exact_continuation_logits",
+                    "exact_snapshot_replay",
+                    "exact_snapshot_tile_replay",
+                ]
+                .iter()
+                .any(|key| report[*key] != true),
+            ));
+        }
+        if args.first().is_some_and(|arg| arg == "--dspark") {
+            if args.len() != 6 {
+                return Err("expected --dspark, target, draft, private fixture, prefix rows and decode rows");
+            }
+            let positive = |index: usize| {
+                args[index].to_str().and_then(|value| value.parse::<usize>().ok()).ok_or("invalid row count")
+            };
+            let steps = positive(5)?;
+            let report = stark_engine::engine::inkling_slice::measure_dspark(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                positive(4)?,
+                steps,
+            )?;
+            println!("{report}");
+            return Ok(i32::from(
+                report["target_logit_matches"] != steps
+                    || report["target_token_matches"] != steps
+                    || report["source_ingress_proposal_matches"] != report["source_ingress_proposals"]
+                    || report["draft_restore_exact"] != true
+                    || report["rejects_other_mode_snapshot"] != true
+                    || report["serial_recovery"] != true,
+            ));
+        }
+        if args.first().is_some_and(|arg| arg == "--full-budget") {
+            if args.len() != 3 {
+                return Err("expected --full-budget, original SafeTensors and a private 4K cache seed");
+            }
+            let report =
+                stark_engine::engine::inkling_slice::measure_full_budget(Path::new(&args[1]), Path::new(&args[2]))?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--full-target" || arg == "--full-target-batched") {
+            if args.len() != 4 {
+                return Err("expected --full-target, original SafeTensors, private oracle directory and context");
+            }
+            let context = args[3].to_str().and_then(|value| value.parse().ok()).ok_or("invalid Inkling context")?;
+            let report = stark_engine::engine::inkling_slice::measure_full(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                context,
+                args[0] == "--full-target-batched",
+            )?;
+            println!("{report}");
+            return Ok(if report["exact_snapshot_replay"] == true {
+                0
+            } else {
+                1
+            });
+        }
         if !(2..=3).contains(&args.len()) || (args.len() == 3 && args[2] != "--parity-only") {
             return Err("expected original SafeTensors, private reference SafeTensors and optional --parity-only");
         }

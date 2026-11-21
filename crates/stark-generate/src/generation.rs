@@ -217,7 +217,7 @@ pub(crate) struct ImageArtifactIdentity<'a> {
 
 impl ImageArtifactIdentity<'_> {
     fn valid(&self) -> bool {
-        matches!(self.schema_version, 2..=6)
+        matches!(self.schema_version, 2..=7)
             && [
                 self.artifact_sha256,
                 self.config_sha256,
@@ -257,6 +257,7 @@ fn image_family_limits(
             4,
         ) => ((16, 3), 2520, 280),
         ("gemma3-siglip-bf16-v1", 1, 5) => ((14, 4), 4096, 256),
+        ("inkling2-mini-native-v1", 1, 7) => ((20, 2), 4096, 1024),
         _ => return None,
     };
     (geometry == expected_geometry).then_some((patches, tokens, patches * geometry.0 * geometry.0))
@@ -280,6 +281,7 @@ mod image_family_tests {
             ("gemma4-12b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
             ("gemma4-26b-a4b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
             ("gemma3-siglip-bf16-v1", 1, 5, (14, 4), (4096, 256, 802816)),
+            ("inkling2-mini-native-v1", 1, 7, (20, 2), (4096, 1024, 1638400)),
         ] {
             assert_eq!(image_family_limits(profile, version, schema, geometry), Some(expected));
             assert_eq!(image_family_limits(profile, version + 1, schema, geometry), None);
@@ -306,6 +308,7 @@ fn valid_image_metadata(
     let (max_patches, max_image_tokens) = match geometry {
         (16, 2) => (65_536, 16_384),
         (16, 3) => (2520, 280),
+        (20, 2) => (4096, 1024),
         (14, 4) if metadata.grid == [1, 64, 64] && metadata.processed_dimensions == [896, 896] => (4096, 256),
         _ => return false,
     };
@@ -1589,11 +1592,16 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             worker.backend.image_geometry(),
         )
         .ok_or("invalid_model_config")?;
+        let max_source_pixels = if identity.schema_version == 7 {
+            max_processed_pixels
+        } else {
+            32_000_000
+        };
         readiness["image_input"] = json!({
             "version":"mediaref-v1","transport":"owner-private-file-v1","qualified":false,"qualification":"unverified",
             "operations":["prepare_image","generate_image","discard_image"],
             "formats":["image/jpeg","image/png"],"max_images":1,
-            "max_compressed_bytes":crate::media::MAX_COMPRESSED_BYTES,"max_source_pixels":32_000_000,
+            "max_compressed_bytes":crate::media::MAX_COMPRESSED_BYTES,"max_source_pixels":max_source_pixels,
             "max_source_dimension":16_384,
             "max_processed_pixels":max_processed_pixels,"max_patches":max_patches,"max_image_tokens":max_image_tokens,
             "artifact_schema_version":identity.schema_version,"model_source":model_source,

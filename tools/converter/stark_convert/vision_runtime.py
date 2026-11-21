@@ -9,6 +9,7 @@ from copy import deepcopy
 from importlib.resources import files
 from pathlib import Path
 
+from . import inkling_prepare
 from ._build_metadata import ConversionError, file_hash
 from .vision_contract import REPO, REVISION
 
@@ -50,6 +51,7 @@ _FAMILY_VERSIONS = {
     "qwen35-moe-affine-merged-v4": 4,
     "qwen35-moe-bf16-merged-v5": 5,
     LILY_FAMILY_PROFILE: 1,
+    inkling_prepare.VISION_PROFILE: 1,
 }
 
 
@@ -118,7 +120,7 @@ def image_input_contract(value: object) -> dict | None:
         or type(value.get("max_images")) is not int
         or value["max_images"] != 1
         or type(value.get("artifact_schema_version")) is not int
-        or value["artifact_schema_version"] not in (2, 3, 4, 5, 6)
+        or value["artifact_schema_version"] not in (2, 3, 4, 5, 6, 7)
         or any(not isinstance(value.get(key), str) or _HASH.fullmatch(value[key]) is None for key in _ARTIFACT_HASHES)
         or not isinstance(operations, list)
         or any(not isinstance(item, str) for item in operations)
@@ -155,6 +157,8 @@ def image_input_contract(value: object) -> dict | None:
         return None
     if (value["artifact_schema_version"] == 6) != (value.get("family_profile") == LILY_FAMILY_PROFILE):
         return None
+    if (value["artifact_schema_version"] == 7) != (value.get("family_profile") == inkling_prepare.VISION_PROFILE):
+        return None
     return dict(value)
 
 
@@ -164,6 +168,20 @@ def family_image_input_contract(value: object) -> bool:
         return False
     source, revision = value.get("model_source"), value.get("model_revision")
     gemma = value.get("family_profile") in _GEMMA4_PROFILES
+    inkling = value.get("family_profile") == inkling_prepare.VISION_PROFILE
+    if inkling and (
+        value.get("artifact_schema_version") != 7
+        or (source, revision) != (inkling_prepare.REPO, inkling_prepare.REVISION)
+        or value.get("artifact_sha256") != inkling_prepare.WEIGHTS[inkling_prepare.TARGET][1]
+        or value.get("processor_sha256") != inkling_prepare.PROCESSOR_SHA
+        or value.get("tokenizer_sha256") != inkling_prepare.TOKENIZER_SHA
+        or value.get("template_sha256") != inkling_prepare.TEMPLATE_SHA
+        or value.get("max_patches") != 4096
+        or value.get("max_image_tokens") != 1024
+        or value.get("max_source_pixels") != 1_638_400
+        or value.get("max_processed_pixels") != 1_638_400
+    ):
+        return False
     if value.get("family_profile") == LILY_FAMILY_PROFILE and (
         value.get("artifact_schema_version") != 6
         or not isinstance(source, str)
@@ -202,7 +220,7 @@ def family_image_input_contract(value: object) -> bool:
             for key, maximum in (
                 ("max_compressed_bytes", 20 * 1024 * 1024),
                 ("max_source_pixels", 32_000_000),
-                ("max_processed_pixels", 16_777_216 if retained else 1_048_576),
+                ("max_processed_pixels", 16_777_216 if retained else 1_638_400 if inkling else 1_048_576),
                 ("max_patches", 65_536 if retained else 4096),
                 ("max_image_tokens", 16_384 if retained else 1024),
             )
@@ -247,6 +265,12 @@ def model_image_family(config: object, model: Path) -> dict | None:
     family = artifact_image_family(config)
     if family is not None:
         return family
+    if isinstance(config, dict) and config.get("model_type") == inkling_prepare.FAMILY:
+        from .hybrid_prepare import prepared_identity
+
+        if prepared_identity(model) is not None:
+            return {"profile": inkling_prepare.VISION_PROFILE, "version": 1}
+        return None
     from .hybrid_vision import prepared_image_identity
 
     return {"profile": LILY_FAMILY_PROFILE, "version": 1} if prepared_image_identity(model) is not None else None

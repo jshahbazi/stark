@@ -14,6 +14,9 @@ import math
 import re
 from typing import Any
 
+from .inkling_chat import PARSER as INKLING_PARSER
+from .inkling_chat import parse_response as parse_inkling_response
+from .inkling_prepare import TEMPLATE_SHA as INKLING_TEMPLATE_SHA
 from .json_budget import check_json_structure
 from .local_api import APIError
 from .resource_budget import INPUT_BYTES
@@ -43,7 +46,7 @@ _QWEN35_XML_PARSER = "qwen35-xml-v1"
 _GLM_PARSER = "glm53-xml-v1"
 _XML_PARSERS = frozenset({_XML_PARSER, _QWEN35_XML_PARSER, _GLM_PARSER})
 _HERMES_PARSERS = frozenset({_PARSER, "smollm3-hermes-v1"})
-TOOL_PARSERS = frozenset({*_HERMES_PARSERS, *_XML_PARSERS, *FORMATS})
+TOOL_PARSERS = frozenset({*_HERMES_PARSERS, *_XML_PARSERS, *FORMATS, INKLING_PARSER})
 # Official Qwen/Qwen3-0.6B tokenizer_config.json chat_template at revision
 # c1899de289a04d12100db370d81485cdf75e47ca, verified 2026-10-31. Admission
 # binds the reviewed template program, not a model name.
@@ -379,6 +382,8 @@ def tool_parser_for(codec: dict | None) -> str | None:
     if len(encoded) > MAX_TEMPLATE_BYTES:
         return None
     digest = hashlib.sha256(encoded).hexdigest()
+    if digest == INKLING_TEMPLATE_SHA:
+        return INKLING_PARSER
     if digest in TEMPLATE_HASHES:
         return TEMPLATE_HASHES[digest]
     if digest in _SUPPORTED_TEMPLATE_HASHES:
@@ -1131,6 +1136,55 @@ def parse_tool_output(
             + ".",
             "invalid_tool_call",
         )
+
+    if parser == INKLING_PARSER:
+        message, frames, malformed = parse_inkling_response(text)
+        if malformed:
+            raise invalid("limit" if reason == "length" else "format")
+        if not frames:
+            if tool_choice == "required" or isinstance(tool_choice, dict):
+                raise APIError(
+                    502, "The model did not satisfy the requested tool choice.", "tool_choice_not_satisfied"
+                )
+            return message, reason
+        if tool_choice == "none" or not tools:
+            raise invalid("disabled")
+        if finish_reason not in {"eos", "stop_token", "stop"}:
+            raise invalid("limit" if reason == "length" else "unfinished")
+        if not isinstance(call_id_prefix, str) or not _CALL_ID.fullmatch(call_id_prefix) or len(call_id_prefix) > 100:
+            raise ValueError("Invalid private tool-call ID prefix")
+        if len(frames) > (MAX_CALLS if parallel_tool_calls else 1):
+            raise invalid("count")
+        names = {tool["function"]["name"] for tool in tools}
+        if isinstance(tool_choice, dict):
+            names &= {tool_choice["function"]["name"]}
+        calls = []
+        for header, body in frames:
+            try:
+                check_json_structure(body.encode("utf-8"))
+                item = json.loads(body, object_pairs_hook=_pairs, parse_constant=_constant)
+            except (ValueError, RecursionError):
+                raise invalid("format") from None
+            if not isinstance(item, dict) or set(item) != {"name", "args"} or not isinstance(item["args"], dict):
+                raise invalid("format")
+            name, arguments = item["name"], item["args"]
+            if (
+                not isinstance(name, str)
+                or not _NAME.fullmatch(name)
+                or name not in names
+                or header != name
+            ):
+                raise invalid("tool")
+            try:
+                bounded_json(arguments, MAX_ARGUMENT_BYTES, label="Function arguments")
+            except APIError:
+                raise invalid("limits") from None
+            calls.append({
+                "id": f"call_{call_id_prefix}_{len(calls)}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False, allow_nan=False)},
+            })
+        return {**message, "content": message["content"] or None, "tool_calls": calls}, "tool_calls"
 
     if parser in FORMATS:
         return _parse_additional_output(

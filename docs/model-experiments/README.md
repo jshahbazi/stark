@@ -1,5 +1,17 @@
 # Model change and experiment ledger
 
+- [20261121-INKLING-14 and 20261121-INKLINGGROUP-02 · Inkling 2 Mini grouped original NVFP4](2026-11-21-inkling-mini-grouped-nvfp4.md) preserve BF16 expert boundaries, native routing and stable GPU buckets at 64 and 128 rows. The grouped component also passes the speed gate with all 128 experts active.
+
+- [20261121-INKLING-13 · Original Inkling 2 Mini in the native worker](2026-11-21-inkling-mini-worker.md) exercises prepared-artifact loading, streamed chat, images after DSpark-enabled text, and an API tool-result round trip.
+
+- [20261121-INKFULL-01 and INKPREFILL-01/02 · Inkling 2 Mini full target and prefill](2026-11-21-inkling-mini-full-target.md) measure complete serial target stages, pinned traces and exact 4K native parity with the 64-row grouped path.
+
+- [20261121-INKLING-12 · Inkling 2 Mini original DSpark](2026-11-21-inkling-mini-dspark.md) verifies the target's serial selection and draft-state restoration, and tests first-mask proposal fidelity against the original draft head.
+
+- [20261121-INKLINGVISION-01 · Inkling 2 Mini native vision tower](2026-11-21-inkling-mini-vision.md) passes both real-weight image projection controls against the pinned Ollama runtime on the M5 Max.
+
+- [20261121-INKLING-07 · Inkling 2 Mini short-prefix projection](2026-11-21-inkling-mini-short-projection.md) isolates one BF16 gate-projection word, passes connected short and 4K parity, and clears the paired M5 Max budget regression gate.
+
 - [20261121-INKLING-04–06 · Inkling 2 Mini live Ollama parity](2026-11-21-inkling-mini-pinned-oracle.md) fixes the first BF16 mismatch and passes the two-visit 4K connected gate against the pinned runtime. One short global expert row remains outside tolerance.
 
 - [20261121-INKLING-01–03 · Inkling 2 Mini native decode slice](2026-11-21-inkling-mini-native-slice.md) records a 27.35 ms 44-visit 4K budget, exact-ingress NVFP4 parity and a connected numerical failure after BF16 ingress differences.

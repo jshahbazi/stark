@@ -1,8 +1,8 @@
 """Prepare pinned original-format weights for Stark's native hybrid worker.
 
 This path preserves quantized bytes. It downloads metadata and weights only;
-repository Python, speculative sidecars and foreign inference engines are never
-requested or executed. Native load and execution remain separate checks.
+Repository Python and foreign inference engines are excluded. A supported
+checkpoint's original speculative weights can be retained alongside its target.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-from . import qwen38_external
+from . import inkling_prepare, qwen38_external
 from .cli import _publish
 from .progress import (
     FDProgressSink,
@@ -35,6 +35,7 @@ from .sources import SourceSnapshot, _verified_hashes, huggingface_repository
 from .streaming import ConversionError, UnsupportedConversion, load_checkpoint, read_safetensors_header
 
 SOURCES = {
+    inkling_prepare.CHOICE: inkling_prepare.SOURCE,
     "ripple-q4-k-m": {
         "architecture": "ricursive",
         "weights_repo": "AtomicChat/Ripple-65B-Preview-GGUF",
@@ -522,6 +523,8 @@ def prepared_identity(directory: Path) -> dict | None:
         config_path = directory / "config.json"
         config = _json(config_path)
         receipt = _json(directory / "native-source.json")
+        if config.get("model_type") == inkling_prepare.FAMILY:
+            return inkling_prepare.prepared_identity(directory, config, receipt)
         marker = config.get("stark_native_hybrid")
         if not isinstance(marker, dict) or marker.get("schema_version") != 1:
             return None
@@ -590,7 +593,7 @@ def prepared_identity(directory: Path) -> dict | None:
             "weight_bytes": size,
             "quantization": source["quantization"],
         }
-    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError, ConversionError):
         return None
 
 
@@ -709,7 +712,8 @@ def prepare(
     artifact_mode: str = "text",
 ) -> dict:
     if artifact_mode not in {"text", "vision-language"} or (
-        artifact_mode == "vision-language" and choice not in {"qwen38-mlx-serve-mixed", "qwen38-lily-q4-xl"}
+        artifact_mode == "vision-language"
+        and choice not in {"qwen38-mlx-serve-mixed", "qwen38-lily-q4-xl", inkling_prepare.CHOICE}
     ):
         raise ValueError("unsupported native artifact mode")
     progress = reporter(progress)
@@ -783,7 +787,7 @@ def prepare(
     snapshot_download(
         source["metadata_repo"],
         revision=source["metadata_revision"],
-        allow_patterns=_METADATA,
+        allow_patterns=inkling_prepare.METADATA if choice == inkling_prepare.CHOICE else _METADATA,
         local_dir=stage,
         local_files_only=offline,
         max_workers=2,
@@ -820,8 +824,8 @@ def prepare(
     if progress is not None:
         progress.emit("download", "complete", weight_bytes, weight_bytes, force=True)
         progress.emit("conversion", "running", force=True)
-    receipt = finish_metadata(stage, choice)
-    if artifact_mode == "vision-language":
+    receipt = inkling_prepare.stage(stage) if choice == inkling_prepare.CHOICE else finish_metadata(stage, choice)
+    if artifact_mode == "vision-language" and choice != inkling_prepare.CHOICE:
         from .hybrid_vision import prepare_image_artifact
 
         prepare_image_artifact(stage, choice)

@@ -17,6 +17,10 @@ follow. Update it when a study changes what a lever returned.
 
 ## Current result
 
+**Inkling 2 Mini native worker (2026-11-21).** The original checkpoint's grouped Metal worker reached 34.52 useful greedy tokens/s and 30.17 sampled at 4K, inside the two decode ceilings. Prefill improved from roughly 115 seconds to 33–34 seconds. The cache-cold prefill floor and full Ollama parity remain open. [Native worker screening](2026-11-21-inkling-mini-native-worker.md)
+
+**Inkling 2 Mini short-prefix projection (2026-11-21).** Matching the pinned MLX attention-gate projection fixed the last short control. Short and 4K connected slice parity passed, with a 0.965 median paired 4K wall ratio. [Short-prefix projection and budget](2026-11-21-inkling-mini-short-projection.md)
+
 **Inkling 2 Mini first milestone (2026-11-20).** The [M5 Max study](2026-11-20-inkling-mini-m5-max.md) measures the original checkpoint and Unsloth Q4_K_XL with vision loaded and drafting off. Original serial decode at 4,096 inputs reached 26.13 tokens/s greedy and 25.30 sampled. A real-weight Metal test passed 26 numerical cells after moving the activation outer scale beyond the indexed dot product. The study defines the native port's first throughput floors and next implementation gate. [Machine-readable aggregates](data/inkling-mini-m5-max-2026-11-20.json)
 
 **Inkling 2 Mini native slice (2026-11-21).** The 44 NVFP4 visits with local/global attention, cross-pass gates and persistent state writes ran in 27.35 ms median wall on one Metal command stream. Exact-ingress expert replay passed. Connected slice parity failed. [M5 Max diagnostic](2026-11-21-inkling-mini-native-slice.md)
