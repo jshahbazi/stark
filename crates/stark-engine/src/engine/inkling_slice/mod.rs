@@ -76,6 +76,7 @@ impl Runtime {
             .map_err(|_| "Inkling Metal library compilation failed")?;
         let names = [
             "ink_matvec",
+            "ink_matvec_source",
             "ink_mix",
             "ink_norm",
             "ink_controller_expand",
@@ -192,12 +193,17 @@ impl Stream<'_> {
         columns: usize,
         rows: usize,
     ) {
+        let (kernel, threads) = if self.runtime.pinned_m5 {
+            ("ink_matvec_source", if rows <= 64 { 128 } else { 64 })
+        } else {
+            ("ink_matvec", 128)
+        };
         self.dispatch(
-            "ink_matvec",
+            kernel,
             &[input, binding(weight), binding(output)],
             [columns as u32, rows as u32],
             (rows.div_ceil(4), 1),
-            128,
+            threads,
         );
     }
 

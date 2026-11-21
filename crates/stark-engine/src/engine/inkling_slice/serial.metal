@@ -28,6 +28,43 @@ kernel void ink_matvec(
     if (lane == 0) y[row] = bfloat(sum);
 }
 
+// Single live row of GemvWide, adapted from MLX gemv.h at
+// fc344c986c4169d99f76b5d95ae6b4a58a359a63 (Copyright © 2026 Apple Inc., LICENSE.mlx-reference).
+// Ollama's eight-row BF16 target pad selects 16 K lanes for wide output
+// and 32 for up to 64 outputs. Preserve the dot and block sums before the
+// BF16 round because an adjacent gate value can change expert quantization.
+kernel void ink_matvec_source(
+    device const bfloat4 *x [[buffer(0)]], device const bfloat4 *w [[buffer(1)]],
+    device bfloat *y [[buffer(2)]], constant uint2 &shape [[buffer(3)]],
+    uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    const uint lanes = shape.y <= 64 ? 32 : 16;
+    const uint row = group * 4 + simd * (32 / lanes) + lane / lanes;
+    const uint k_lane = lane % lanes;
+    const uint cols = shape.x / 4;
+    const uint stride = lanes * 8;
+    const uint end = cols - cols % stride;
+    const device bfloat4 *weights = w + min(row, shape.y - 1) * cols;
+    float sum = 0.0f;
+    for (uint base = 0; base < end; base += stride) {
+        float block = 0.0f;
+#pragma clang loop unroll(full)
+        for (uint i = 0; i < 8; ++i) {
+            const uint col = base + i * lanes + k_lane;
+            block += dot(float4(weights[col]), float4(x[col]));
+        }
+        sum += block;
+    }
+    for (uint col = end + k_lane; col < cols; col += lanes) {
+        sum += dot(float4(weights[col]), float4(x[col]));
+    }
+    for (uint delta = lanes / 2; delta > 0; delta >>= 1) {
+        sum += simd_shuffle_down(sum, ushort(delta));
+    }
+    if (k_lane == 0 && row < shape.y) y[row] = bfloat(sum);
+}
+
 // Materialize the FP32 rounding boundaries of the source's RMS, scaled
 // query dot, softmax, and weighted residual sum in one dispatch.
 kernel void ink_mix(

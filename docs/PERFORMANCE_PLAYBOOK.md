@@ -180,6 +180,8 @@ Source: [optimization history][hist], rows K01 to K24, U06 to U30 and F07; [llam
 
 #### Inkling 2 Mini packed experts
 
+Capture the actual dispatched kernel before emulating GPU accumulation order. The layer 11 short-prefix failure started at one BF16 gate-projection word. F64 accumulation and padded Thin NAX replay retained the mismatch. The released MLX runtime selected GemvWide, and matching its FP32 dot grouping and lane tree passed short and 4K connected parity. The paired 4K slice wall ratio of 0.965 cleared the no-regression gate while falling below the practical speedup threshold. [Short-prefix projection and paired budget](benchmarks/2026-11-21-inkling-mini-short-projection.md)
+
 On the original three-pass Mini, test the weight layout and the activation scale at the actual kernel boundary. At 32 rows the Unsloth Metal indexed kernel with an early activation outer scale missed the registered relative L2 limit on both original layer 6 projections (about `1.6e-4`). Keeping the four-over-six inner values through the dot and restoring the scale afterward reduced both errors to about `5e-8` on the same inputs. Preserve the BF16 projection round before SwiGLU and apply routing weights before down-input quantization. [Component and model benchmarks](benchmarks/2026-11-20-inkling-mini-m5-max.md)
 
 Time the connected routed sublayer before multiplying an isolated graph latency by 44 logical visits. In a full-bank layer 0 MLX control, eight ordered singleton calls over distinct source inputs completed in 1.242 ms with one host wait (0.155 ms each). An individually synchronized singleton took 0.607–0.685 ms across sessions. The test reused a physical layer. A complete native token needs different layer weights, attention and the remaining stages. [Measurement boundaries](benchmarks/2026-11-20-inkling-mini-m5-max.md#original-weight-component-budget)
@@ -509,6 +511,7 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 | 2026-11-20 | [Inkling 2 Mini first milestone](benchmarks/2026-11-20-inkling-mini-m5-max.md) | Original-weight NVFP4 scale ordering, routed sublayer timing with and without a host wait per call, MXFP8 and attention costs |
 | 2026-11-21 | [Inkling 2 Mini native decode slice](benchmarks/2026-11-21-inkling-mini-native-slice.md) | Single-stream 44-visit budget, exact-ingress expert replay and connected BF16 parity failure |
 | 2026-11-21 | [Inkling 2 Mini pinned-runtime follow-up](benchmarks/2026-11-21-inkling-mini-pinned-oracle.md) | Live BF16 boundary, connected 4K parity and paired serial timing |
+| 2026-11-21 | [Inkling 2 Mini short-prefix projection](benchmarks/2026-11-21-inkling-mini-short-projection.md) | Source-dispatched BF16 dot order, short and 4K connected parity, paired no-regression test |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 
