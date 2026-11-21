@@ -7,6 +7,39 @@ fn main() {
 
     fn run() -> Result<i32, &'static str> {
         let args: Vec<_> = std::env::args_os().skip(1).collect();
+        use stark_engine::engine::inkling_slice::PrefillTraceMode;
+        let trace_mode = match args.first().and_then(|arg| arg.to_str()) {
+            Some("--trace-prefill-512") => Some(PrefillTraceMode::Baseline),
+            Some("--trace-prefill-512-dense") => Some(PrefillTraceMode::Dense),
+            Some("--trace-prefill-512-local") => Some(PrefillTraceMode::Local),
+            Some("--trace-prefill-512-routed") => Some(PrefillTraceMode::Routed),
+            _ => None,
+        };
+        if let Some(mode) = trace_mode {
+            if args.len() != 3 {
+                return Err("expected --trace-prefill-512, original SafeTensors and private oracle directory");
+            }
+            let report =
+                stark_engine::engine::inkling_slice::trace_prefill(Path::new(&args[1]), Path::new(&args[2]), mode)?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--profile-prefill" || arg == "--profile-prefill-source") {
+            if args.len() != 4 {
+                return Err(
+                    "expected --profile-prefill, original SafeTensors, private oracle directory and input length",
+                );
+            }
+            let count = args[3].to_str().and_then(|value| value.parse().ok()).ok_or("invalid Inkling input length")?;
+            let report = stark_engine::engine::inkling_slice::profile_prefill(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                count,
+                args[0] == "--profile-prefill-source",
+            )?;
+            println!("{report}");
+            return Ok(i32::from(report["exact_continuation_logits"] != true));
+        }
         if args.first().is_some_and(|arg| arg == "--prefill-order") {
             if args.len() != 4 {
                 return Err(

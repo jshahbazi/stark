@@ -19,7 +19,11 @@ use metal::{
     MTLLanguageVersion, MTLLibraryExt, MTLMathMode, MTLResourceOptions, MTLSize,
 };
 use objc2::{rc::Retained, runtime::ProtocolObject};
-pub use session::{Session, Snapshot, VOCABULARY, measure_dspark, measure_full, measure_full_budget, measure_prefill};
+use session::prefill_profile::{PrefillPhase, PrefillTiming};
+pub use session::{
+    PrefillTraceMode, Session, Snapshot, VOCABULARY, measure_dspark, measure_full, measure_full_budget,
+    measure_prefill, profile_prefill, trace_prefill,
+};
 pub use validation::measure;
 pub use vision::{INKLING_IMAGE_TOKEN, ImageEmbeddings, measure_vision};
 
@@ -146,12 +150,22 @@ impl Runtime {
 }
 
 struct Stream<'a> {
-    encoder: &'a ProtocolObject<dyn MTLComputeCommandEncoder>,
+    encoder: Option<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>>,
     runtime: &'a Runtime,
     dispatches: usize,
+    profile: Option<(&'a ProtocolObject<dyn MTLCommandBuffer>, &'a mut PrefillTiming)>,
 }
 
 impl Stream<'_> {
+    fn phase(
+        &mut self,
+        phase: PrefillPhase,
+    ) {
+        if let Some((command, profile)) = self.profile.as_mut() {
+            profile.transition(command, &mut self.encoder, self.dispatches, phase);
+        }
+    }
+
     fn dispatch<T>(
         &mut self,
         kernel: Kernel,
@@ -160,14 +174,17 @@ impl Stream<'_> {
         groups: (usize, usize),
         threads: usize,
     ) {
-        self.encoder.set_compute_pipeline_state(&self.runtime.pipelines[kernel]);
+        let Some(encoder) = &self.encoder else {
+            return;
+        };
+        encoder.set_compute_pipeline_state(&self.runtime.pipelines[kernel]);
         for (index, &(buffer, offset)) in buffers.iter().enumerate() {
-            self.encoder.set_buffer(Some(buffer), offset, index);
+            encoder.set_buffer(Some(buffer), offset, index);
         }
         if size_of::<T>() != 0 {
-            self.encoder.set_bytes(NonNull::from(&params).cast(), size_of::<T>(), buffers.len());
+            encoder.set_bytes(NonNull::from(&params).cast(), size_of::<T>(), buffers.len());
         }
-        self.encoder.dispatch_threadgroups(
+        encoder.dispatch_threadgroups(
             MTLSize {
                 width: groups.0,
                 height: groups.1,
@@ -681,33 +698,7 @@ impl Layer {
             64
         };
         let args = [position as u32, width, window, shards];
-        Self::convolution(
-            gpu,
-            &s.k,
-            &self.key_conv,
-            self.dynamic.as_ref().map(|_| &s.dynamic[0]),
-            &cache.conv[0],
-            &s.conv_k,
-            KV,
-            position,
-        );
-        Self::convolution(
-            gpu,
-            &s.v,
-            &self.value_conv,
-            self.dynamic.as_ref().map(|_| &s.dynamic[1]),
-            &cache.conv[1],
-            &s.conv_v,
-            KV,
-            position,
-        );
-        gpu.one(
-            "ink_heads_and_cache",
-            &[&s.q, &s.conv_k, &s.conv_v, &s.r, &self.q_scale, &self.r_scale, &cache.keys, &cache.values],
-            args,
-            (16, 1),
-            128,
-        );
+        self.attention_write_cache(gpu, s, cache, args);
         gpu.one("ink_relative_table", &[&s.r, &self.relative, &s.table], (), (HEADS * LOCAL / 128, 1), 128);
         let (parts_kernel, gate_kernel, parts_groups, gate_groups, shape) = if gpu.runtime.pinned_m5 {
             (
@@ -736,6 +727,43 @@ impl Layer {
         );
         gpu.one(gate_kernel, &[&cache.scratch.parts, &s.attn_gate, &s.attended], shape, gate_groups, 128);
         s.record(gpu, "attended", &s.attended);
+    }
+
+    fn attention_write_cache(
+        &self,
+        gpu: &mut Stream<'_>,
+        s: &Scratch,
+        cache: &Visit,
+        args: [u32; 4],
+    ) {
+        let position = args[0] as usize;
+        Self::convolution(
+            gpu,
+            &s.k,
+            &self.key_conv,
+            self.dynamic.as_ref().map(|_| &s.dynamic[0]),
+            &cache.conv[0],
+            &s.conv_k,
+            KV,
+            position,
+        );
+        Self::convolution(
+            gpu,
+            &s.v,
+            &self.value_conv,
+            self.dynamic.as_ref().map(|_| &s.dynamic[1]),
+            &cache.conv[1],
+            &s.conv_v,
+            KV,
+            position,
+        );
+        gpu.one(
+            "ink_heads_and_cache",
+            &[&s.q, &s.conv_k, &s.conv_v, &s.r, &self.q_scale, &self.r_scale, &cache.keys, &cache.values],
+            args,
+            (16, 1),
+            128,
+        );
     }
 
     fn encode(
@@ -1020,24 +1048,43 @@ fn execute(
     runtime: &Runtime,
     encode: impl FnOnce(&mut Stream<'_>),
 ) -> Result<Timing> {
+    execute_with_profile(runtime, None, encode)
+}
+
+fn execute_with_profile(
+    runtime: &Runtime,
+    mut profile: Option<&mut PrefillTiming>,
+    encode: impl FnOnce(&mut Stream<'_>),
+) -> Result<Timing> {
     let start = std::time::Instant::now();
     let command = runtime.queue.command_buffer().ok_or("Metal command allocation failed")?;
-    let encoder = command.compute_command_encoder().ok_or("Metal encoder allocation failed")?;
+    let encoder = match profile.as_mut() {
+        Some(profile) => profile.begin(&command)?,
+        None => command.compute_command_encoder().ok_or("Metal encoder allocation failed")?,
+    };
     let mut gpu = Stream {
-        encoder: &encoder,
+        encoder: Some(encoder),
         runtime,
         dispatches: 0,
+        profile: profile.map(|profile| (&*command, profile)),
     };
     encode(&mut gpu);
-    encoder.end_encoding();
+    gpu.encoder.take().ok_or("Inkling timestamped encoder allocation failed")?.end_encoding();
+    if let Some((_, profile)) = gpu.profile.as_mut() {
+        profile.before_submit(gpu.dispatches);
+    }
     command.commit();
     command.wait_until_completed();
     if command.status() != MTLCommandBufferStatus::Completed {
         return Err("Inkling command failed");
     }
-    Ok(Timing {
+    let timing = Timing {
         dispatches: gpu.dispatches,
         wall_ms: start.elapsed().as_secs_f64() * 1000.0,
         gpu_ms: (command.gpu_end_time() - command.gpu_start_time()) * 1000.0,
-    })
+    };
+    if let Some((_, profile)) = gpu.profile {
+        profile.complete(&timing)?;
+    }
+    Ok(timing)
 }

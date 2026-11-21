@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use super::*;
 
-fn report(
+pub(super) fn report(
     got: &[f32],
     want: &[f32],
 ) -> Value {

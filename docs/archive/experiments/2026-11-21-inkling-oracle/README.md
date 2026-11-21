@@ -50,6 +50,20 @@ cargo +1.98.1 run --release --locked -p stark-engine --no-default-features \
 
 The example prints aggregate errors, greedy agreement, snapshot replay and SHA-256 fingerprints of native caches, taps and logits. Repeat with `--full-target-batched` to select 64-row native prefill and measure the late paired tile from a common native snapshot. The `--full-budget` command accepts the original shard and the private synthetic 4K cache seed. The `--prefill-order` command accepts the long private oracle directory and a token count. It compares serial and batched native prefill, checks cache bytes and taps, and replays a chunk-aligned snapshot. [Full-target experimental evidence](../../../model-experiments/2026-11-21-inkling-mini-full-target.md)
 
+## Matched 512-row prompt trace
+
+After applying `full_target.py`, format the isolated source with `go fmt ./mlxrunner/model/inkling2`. Apply [prefill_trace.py](prefill_trace.py) to that formatted source and rebuild. Use the long private request with `FullTarget` enabled and add `"PrefillTrace": {"Chunk": 0, "Visit": 0}`. The chunk and visit indices are zero-based. The runner saves the selected complete prompt forward to `prefill.safetensors`, including the partials for all 48 visits and the detailed stages for the selected visit. It also exports the same four singleton continuation rows. Use a fresh output directory for each selection.
+
+```sh
+inkling_slice --trace-prefill-512 "$ORIGINAL_SHARD" "$PRIVATE_PREFILL_ORACLE"
+inkling_slice --trace-prefill-512-dense "$ORIGINAL_SHARD" "$PRIVATE_PREFILL_ORACLE"
+inkling_slice --trace-prefill-512-local "$ORIGINAL_SHARD" "$PRIVATE_PREFILL_ORACLE"
+inkling_slice --trace-prefill-512-routed "$ORIGINAL_SHARD" "$PRIVATE_PREFILL_ORACLE"
+inkling_slice --profile-prefill-source "$ORIGINAL_SHARD" "$PRIVATE_PREFILL_ORACLE" 4096
+```
+
+The four trace arms ingest eight 512-row native commands on the pinned M5 Max. They add source-shaped BF16 dense projections, local relative attention and the split-K FP32 router cumulatively. The native NVFP4 products remain internally tiled at 64 rows. Each trace reports stage-level unequal counts and continuation comparisons. The profile command uses the routed arm and reports phase time from a separate replay without trace copies. Use `--profile-prefill` for the normal 64-row native prefill graph. Raw tensors and token IDs stay private. [Matched prompt and stage comparison](../../../model-experiments/2026-11-21-inkling-mini-matched-prefill.md)
+
 ## Recorded runs
 
 | Capture | Prefix chunks | Captured positions | Merged fixture SHA-256 |

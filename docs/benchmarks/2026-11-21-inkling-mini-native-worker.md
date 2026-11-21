@@ -25,3 +25,18 @@ The same binary completed 32 timed full-target 4K steps on a seeded cache. Media
 | Short slice aggregate | `3ec9bea159f2df8ab1c508329cd2b102cb53e672c740ae3fbddc9ba677cbfa63` |
 | 4K slice aggregate | `c4a5cefe72c1633b5a56a7092e2e47479698d79936933e66910289b867c40652` |
 | Full-target budget aggregate | `199ff0349ae71058d05c9348b22ab4d2a050f63e681e7183cbc7ea29389792ac` |
+
+## 4K worker rerun after the matched trace
+
+The original-checkpoint worker retained its production 64-row scheduler during the 512-row diagnostic work. This rerun alternated the previously measured grouped binary and the new worker in fresh sessions in AB/BA order. Greedy ran baseline first. The temperature-1 case ran the new worker first. Each session completed local image checks with vision and draft weights resident, then waited ten seconds before one timed request. Both builds ingested the same 4,096-token input and used the same seed within each mode, with draft execution off, zero reused input and 256 output tokens. The output token hash matched within each pair.
+
+| Mode | Baseline prefill | Rerun prefill | Rerun input tokens/s | Rerun useful decode tokens/s |
+| --- | ---: | ---: | ---: | ---: |
+| Greedy | 33.47 s | 33.05 s | 123.93 | 34.89 |
+| Temperature 1 | 36.06 s | 33.52 s | 122.20 | 31.20 |
+
+Prefill wall ratios were 0.988 and 0.930. One pair per mode screens for regression and leaves the speedup unqualified. Useful decode averaged 28.66 ms and 32.05 ms per interval, within the existing 42.53 and 43.91 ms budgets. The cold prefill floors remain 626.15 and 589.58 input tokens/s. The host reported no thermal or performance warnings before or after the run.
+
+The initial setup lacked the native template helper on the executable search path. Image readiness rejected that launch before a benchmark request. The rerun used the checkout's built helper on `PATH` and completed the local image checks for both arms. Its aggregate is SHA-256 `e3cf008530d300ce88005aa34863a2762675bb684475a2cfc21688fed641cb72`. Baseline worker SHA-256 is `2579436a9389bd97c5e19287a92bf745aa14105932f0f416770e18f7b4367f37`. Rerun worker SHA-256 is `64928c90e87754db290f198bed0e7a414c82290d27623fb5e6890b3784363035`. The benchmark used the production grouped path. [Matched prefill attempt](../model-experiments/2026-11-21-inkling-mini-matched-prefill.md) · [Stage profile](../model-experiments/2026-11-21-inkling-mini-prefill-profile.md)
+
+The final diagnostic reproduced the short and 4K slice aggregate hashes above exactly. Its 32-step synthetic-cache full-target control measured 28.071 ms median wall, with 28.030 ms p10 and 28.282 ms p90. It used the same 1,883 dispatches and one completion per step. The new diagnostic SHA-256 is `2794f11765305a6607534e4ce3d4f136cb1dbba16823239af770681a7930968a` and the step-budget aggregate is `c637557451ca5241bfc6a169c0b8016f2eef11d593dd372e2d29e3e878662df0`.

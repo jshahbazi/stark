@@ -17,7 +17,7 @@ follow. Update it when a study changes what a lever returned.
 
 ## Current result
 
-**Inkling 2 Mini native worker (2026-11-21).** The original checkpoint's grouped Metal worker reached 34.52 useful greedy tokens/s and 30.17 sampled at 4K, inside the two decode ceilings. Prefill improved from roughly 115 seconds to 33–34 seconds. The cache-cold prefill floor and full Ollama parity remain open. [Native worker screening](2026-11-21-inkling-mini-native-worker.md)
+**Inkling 2 Mini native worker (2026-11-21).** The original checkpoint's grouped Metal worker reran 4K cache-cold prefill in 33.05 s greedy and 33.52 s sampled with matching output hashes. Useful decode reached 34.89 and 31.20 tokens/s, inside both decode ceilings. The cache-cold prefill floor and full Ollama parity remain open. [4K worker rerun](2026-11-21-inkling-mini-native-worker.md#4k-worker-rerun-after-the-matched-trace)
 
 **Inkling 2 Mini short-prefix projection (2026-11-21).** Matching the pinned MLX attention-gate projection fixed the last short control. Short and 4K connected slice parity passed, with a 0.965 median paired 4K wall ratio. [Short-prefix projection and budget](2026-11-21-inkling-mini-short-projection.md)
 

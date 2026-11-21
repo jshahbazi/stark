@@ -11,10 +11,20 @@ pub use dspark_validation::measure_dspark;
 
 #[path = "prefill.rs"]
 mod prefill;
+#[path = "prefill_dense.rs"]
+mod prefill_dense;
+#[path = "prefill_profile.rs"]
+pub(super) mod prefill_profile;
+#[path = "prefill_relative.rs"]
+mod prefill_relative;
+#[path = "prefill_trace.rs"]
+mod prefill_trace;
 #[path = "target_validation.rs"]
 mod target_validation;
 
 use prefill::PrefillLanes;
+pub use prefill_profile::profile_prefill;
+pub use prefill_trace::{PrefillTraceMode, trace_prefill};
 pub use target_validation::{measure_full, measure_full_budget, measure_prefill};
 
 use super::{dspark::Dspark, vision::Vision, *};

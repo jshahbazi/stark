@@ -112,11 +112,19 @@ impl GroupedExperts {
         );
     }
 
+    pub(super) fn routing(
+        &self,
+        index: usize,
+    ) -> [Binding<'_>; 3] {
+        [row(&self.logits, index, EXPERTS * 4), row(&self.ids, index, TOP * 4), row(&self.weights, index, TOP * 4)]
+    }
+
     pub(super) fn encode(
         &self,
         gpu: &mut Stream<'_>,
         layer: &Layer,
         rows: usize,
+        source_router: bool,
     ) {
         assert!(self.supports(layer, rows));
         let Experts::Nvfp4 {
@@ -126,7 +134,24 @@ impl GroupedExperts {
         else {
             unreachable!()
         };
-        self.encode_router(gpu, &self.input, &layer.router, &layer.bias, rows);
+        if source_router {
+            gpu.one(
+                "ink_prefill_router_source",
+                &[&self.input, &layer.router, &self.logits],
+                rows as u32,
+                (EXPERTS / 32, rows.div_ceil(16)),
+                32,
+            );
+            gpu.one(
+                "ink_prefill_select_source",
+                &[&self.logits, &layer.bias, &self.ids, &self.weights],
+                (),
+                (rows, 1),
+                EXPERTS,
+            );
+        } else {
+            self.encode_router(gpu, &self.input, &layer.router, &layer.bias, rows);
+        }
         self.encode_buckets(gpu, &self.ids, rows);
         self.encode_projected(gpu, &self.input, up, down, rows, self.active_order());
     }

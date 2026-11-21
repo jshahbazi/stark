@@ -1,5 +1,9 @@
 # Model change and experiment ledger
 
+- [20261121-INKMATCH-01 · Inkling 2 Mini matched 512-row prefill](2026-11-21-inkling-mini-matched-prefill.md) locates the first full-model mismatch and verifies source-shaped dense projections, local attention and router logits at the first visit.
+
+- [20261121-INKPROFILE-01 · Inkling 2 Mini 4K prefill stage profile](2026-11-21-inkling-mini-prefill-profile.md) attributes M5 Max GPU time on the grouped prefill graph. The instrumented and uninstrumented paths produce bit-exact continuation logits.
+
 - [20261121-INKLING-14 and 20261121-INKLINGGROUP-02 · Inkling 2 Mini grouped original NVFP4](2026-11-21-inkling-mini-grouped-nvfp4.md) preserve BF16 expert boundaries, native routing and stable GPU buckets at 64 and 128 rows. The grouped component also passes the speed gate with all 128 experts active.
 
 - [20261121-INKLING-13 · Original Inkling 2 Mini in the native worker](2026-11-21-inkling-mini-worker.md) exercises prepared-artifact loading, streamed chat, images after DSpark-enabled text, and an API tool-result round trip.

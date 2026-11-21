@@ -202,6 +202,12 @@ Using the layer-major schedule to share four-row BF16 weights and group a 64-row
 
 The grouped worker ran 4K prefill in 32.98 s greedy and 34.28 s sampled, compared with 114.52 s and 114.63 s in earlier serial-worker screens. Decode cleared both stage budgets. The gap to the reference prefill floor remains much larger than the full worker's decode overhead. Measure dense products and relative attention on the connected prompt graph before choosing the next kernel. [Worker benchmark](benchmarks/2026-11-21-inkling-mini-native-worker.md)
 
+Match prompt geometry and capture the first prompt forward before debugging post-prefill decode. On eight 512-row commands, matching the command width alone reproduced the B64 cross-runtime logit errors. Matching the source NAX fragments fixed the first full-model attention-gate difference. The source local attention also required a BF16 relative table and rounding the unnormalized probabilities before the value product. The combined repair matched every captured BF16 attention boundary through MLP ingress at visit 0. The first remaining visit 0 output mismatch moved from row 1 to row 52 in the expert path. [Matched 512-row prefill](model-experiments/2026-11-21-inkling-mini-matched-prefill.md)
+
+On the 4K B64 graph, attention dense projections accounted for 11.81% of command GPU time and relative/cache attention for 13.40%. The relative/cache band doubled from 40 to 80 ms per tile as context grew, with dense steady at 60 ms. Halving both bands gives a 1.14× ceiling on this profile. Routed experts took 41.03% and other encoded work 33.25%. Subdivide those phases before committing another prefill kernel. [Connected M5 Max prefill profile](model-experiments/2026-11-21-inkling-mini-prefill-profile.md)
+
+The separate reference-shaped 512-row profile measured 3.17 s in dense projections and 3.12 s in relative/cache attention over 4K. Its uninstrumented target prefill was 30.87 s and used 303.5 MiB of added Metal workspace, above the worker's 128 MiB reserve. Retain the profile as a numerical and performance diagnostic. The 64-row worker rerun took 33.05 s greedy and 33.52 s sampled and matched both output hashes. [Matched-width profile](model-experiments/2026-11-21-inkling-mini-prefill-profile.md#profile-after-the-matched-width-repair) · [Worker screening](benchmarks/2026-11-21-inkling-mini-native-worker.md#4k-worker-rerun-after-the-matched-trace)
+
 ### 5. Speculative decoding
 
 #### The design that held

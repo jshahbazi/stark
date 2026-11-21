@@ -389,7 +389,7 @@ impl Vision {
         let values = bf(geometry.tokens(), WIDTH)?;
         execute(runtime, |gpu| {
             let stream = VisionStream {
-                encoder: gpu.encoder,
+                encoder: gpu.encoder.as_deref().expect("untimed vision encoder"),
                 pipeline: &self.pipelines,
                 mpp: self.mpp,
             };
