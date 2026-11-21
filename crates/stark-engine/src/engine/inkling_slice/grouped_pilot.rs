@@ -19,6 +19,7 @@ pub(super) struct GroupedExperts {
     capacity: usize,
     pub(super) min_rows: usize,
     grouped_mxfp8: bool,
+    wide_mxfp8: bool,
     input: Buffer,
     output: Outputs,
     logits: Buffer,
@@ -48,8 +49,8 @@ impl GroupedExperts {
         runtime: &mut Runtime,
         capacity: usize,
     ) -> Result<Self> {
-        if !runtime.pinned_m5 || !(64..=128).contains(&capacity) {
-            return Err("grouped Inkling experts require M5 Max and capacity of 64–128 rows");
+        if !runtime.pinned_m5 || !(64..=512).contains(&capacity) {
+            return Err("grouped Inkling experts require M5 Max and capacity of 64–512 rows");
         }
         register_grouped(runtime)?;
         Self::buffers(&runtime.device, capacity)
@@ -57,6 +58,14 @@ impl GroupedExperts {
 
     pub(super) fn rows(&self) -> usize {
         self.capacity
+    }
+
+    pub(super) fn input(&self) -> &Buffer {
+        &self.input
+    }
+
+    pub(super) fn output(&self) -> &Buffer {
+        &self.output.merged
     }
 
     pub(super) fn input_at(
@@ -77,8 +86,17 @@ impl GroupedExperts {
         &mut self,
         runtime: &mut Runtime,
     ) -> Result<()> {
-        register_grouped_mxfp8(runtime)?;
+        register_grouped_mxfp8(runtime, false)?;
         self.grouped_mxfp8 = true;
+        Ok(())
+    }
+
+    pub(super) fn enable_wide_mxfp8(
+        &mut self,
+        runtime: &mut Runtime,
+    ) -> Result<()> {
+        register_grouped_mxfp8(runtime, true)?;
+        self.wide_mxfp8 = true;
         Ok(())
     }
 
@@ -91,6 +109,7 @@ impl GroupedExperts {
             capacity,
             min_rows: 64,
             grouped_mxfp8: false,
+            wide_mxfp8: false,
             input: zeroed(device, capacity * WIDTH * 2)?,
             output: Outputs::new(device, capacity)?,
             logits: zeroed(device, capacity * EXPERTS * 4)?,
@@ -115,7 +134,7 @@ impl GroupedExperts {
         rows: usize,
     ) -> bool {
         (self.min_rows..=self.capacity).contains(&rows)
-            && (matches!(layer.experts, Experts::Nvfp4 { .. }) || self.grouped_mxfp8)
+            && (matches!(layer.experts, Experts::Nvfp4 { .. }) || self.grouped_mxfp8 || self.wide_mxfp8)
     }
 
     pub(super) fn copy_input(
@@ -232,6 +251,7 @@ impl GroupedExperts {
         width: usize,
         gather: bool,
     ) {
+        gpu.phase(PrefillPhase::Nvfp4Quant);
         gpu.one(
             "ink_group_ingress",
             &[inner, routing.indices, &self.activation, &self.quantum, &self.maxima],
@@ -239,6 +259,7 @@ impl GroupedExperts {
             ((width / 32).div_ceil(128), rows * TOP),
             128,
         );
+        gpu.phase(PrefillPhase::Nvfp4Dot);
         gpu.one(
             "ink_group_qmm",
             &[&self.activation, &bank.codes, &bank.blocks, routing.runs, &self.quantum, &self.maxima, &self.projected],
@@ -258,8 +279,10 @@ impl GroupedExperts {
         routing: ExpertOrder<'_>,
     ) {
         let out = &self.output;
+        gpu.phase(PrefillPhase::Nvfp4Quant);
         gpu.one("ink_nvfp4_activation", &[input, &self.up_inner, &self.up_max], WIDTH as u32, (rows, 1), 256);
         self.encode_dot(gpu, up, &self.up_inner, &routing, rows, WIDTH, true);
+        gpu.phase(PrefillPhase::Nvfp4Epilogue);
         gpu.one(
             "ink_group_gate_up",
             &[&self.projected, &self.up_max, routing.ids, routing.weights, routing.indices, &up.maxima, &out.middle],
@@ -267,6 +290,7 @@ impl GroupedExperts {
             (MID / 128, rows * TOP),
             128,
         );
+        gpu.phase(PrefillPhase::Nvfp4Quant);
         gpu.one(
             "ink_nvfp4_activation",
             &[&out.middle, &self.down_inner, &self.down_max],
@@ -275,6 +299,7 @@ impl GroupedExperts {
             256,
         );
         self.encode_dot(gpu, down, &self.down_inner, &routing, rows, MID, false);
+        gpu.phase(PrefillPhase::Nvfp4Epilogue);
         gpu.one(
             "ink_group_down_epilogue",
             &[&self.projected, &self.down_max, routing.ids, routing.indices, &down.maxima, &out.down],
@@ -294,9 +319,10 @@ impl GroupedExperts {
     ) {
         let out = &self.output;
         let slots = run_slots(rows);
+        let [up_kernel, down_kernel] = grouped_mxfp8_names(self.wide_mxfp8);
         gpu.one("ink_mxfp8_activation", &[&self.input, &self.up_inner], WIDTH as u32, (WIDTH / 32, rows), 32);
         gpu.one(
-            "ink_group_mxfp8_up",
+            up_kernel,
             &[&self.up_inner, &self.order, &self.runs, &self.weights, &up.codes, &up.exponents, &out.middle],
             (),
             (MID / 4, slots),
@@ -304,7 +330,7 @@ impl GroupedExperts {
         );
         gpu.one("ink_mxfp8_activation", &[&out.middle, &self.down_inner], MID as u32, (MID / 32, rows * TOP), 32);
         gpu.one(
-            "ink_group_mxfp8_down",
+            down_kernel,
             &[&self.down_inner, &self.order, &self.runs, &down.codes, &down.exponents, &out.down],
             (),
             (WIDTH / 4, slots),
@@ -314,28 +340,45 @@ impl GroupedExperts {
     }
 }
 
-fn register_grouped_mxfp8(runtime: &mut Runtime) -> Result<()> {
-    if runtime.pipelines.contains_key("ink_group_mxfp8_up") {
+fn grouped_mxfp8_names(wide: bool) -> [&'static str; 2] {
+    if wide {
+        ["ink_group_mxfp8_wide_up", "ink_group_mxfp8_wide_down"]
+    } else {
+        ["ink_group_mxfp8_up", "ink_group_mxfp8_down"]
+    }
+}
+
+fn register_grouped_mxfp8(
+    runtime: &mut Runtime,
+    wide: bool,
+) -> Result<()> {
+    let names = grouped_mxfp8_names(wide);
+    if names.iter().all(|name| runtime.pipelines.contains_key(name)) {
         return Ok(());
     }
+    let source = concat!(
+        "#include <metal_stdlib>\nusing namespace metal;\n",
+        include_str!("experts.metal"),
+        "\n",
+        include_str!("mxfp8.metal"),
+        "\n",
+        include_str!("mxfp8_grouped.metal")
+    );
+    let wide_source;
+    let source = if wide {
+        wide_source = format!("#define INK_GROUP_MXFP8_WIDE\n{source}");
+        wide_source.as_str()
+    } else {
+        source
+    };
     let options = MTLCompileOptions::new();
     options.set_math_mode(MTLMathMode::Safe);
     options.set_language_version(MTLLanguageVersion::Version4_0);
     let library = runtime
         .device
-        .new_library_with_source(
-            concat!(
-                "#include <metal_stdlib>\nusing namespace metal;\n",
-                include_str!("experts.metal"),
-                "\n",
-                include_str!("mxfp8.metal"),
-                "\n",
-                include_str!("mxfp8_grouped.metal")
-            ),
-            Some(&options),
-        )
+        .new_library_with_source(source, Some(&options))
         .map_err(|_| "Inkling grouped MXFP8 shader compilation failed")?;
-    for name in ["ink_group_mxfp8_up", "ink_group_mxfp8_down"] {
+    for name in names {
         let function = library.new_function_with_name(name).ok_or(name)?;
         let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
         runtime.pipelines.insert(name, pipeline);

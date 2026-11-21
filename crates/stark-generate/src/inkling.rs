@@ -133,18 +133,21 @@ impl InklingBackend {
         root: &Path,
         cancellation: Option<CancelSignal>,
     ) -> Result<Self, &'static str> {
+        let runtime_identity = Engine::<Metal>::new().map_err(|_| "inkling_load_failed")?.metal_device_identity();
+        let m5_max = runtime_identity.device_name == "Apple M5 Max" && runtime_identity.supports_mxu;
+        let prefill_reserve = if m5_max {
+            Session::batched_prefill_memory_bytes()
+        } else {
+            128 * 1024 * 1024
+        };
         admit(Some(
-            inkling_artifact::TARGET_BYTES
-                + inkling_artifact::DRAFT_BYTES
-                + 1024 * 1024 * 1024
-                + Session::batched_prefill_memory_bytes(),
+            inkling_artifact::TARGET_BYTES + inkling_artifact::DRAFT_BYTES + 1024 * 1024 * 1024 + prefill_reserve,
         ))?;
         let artifact = Artifact::load(root)?;
         let mut target =
             Session::load_file(artifact.target.descriptor()?, INITIAL_CONTEXT).map_err(|_| "inkling_load_failed")?;
         artifact.target.verify_unchanged()?;
-        let runtime_identity = Engine::<Metal>::new().map_err(|_| "inkling_load_failed")?.metal_device_identity();
-        if runtime_identity.device_name == "Apple M5 Max" && runtime_identity.supports_mxu {
+        if m5_max {
             target.load_dspark_file(artifact.draft.descriptor()?).map_err(|_| "inkling_draft_load_failed")?;
             artifact.draft.verify_unchanged()?;
         }
@@ -217,7 +220,11 @@ impl InklingBackend {
             request: options.request_id,
             started,
             last_progress: Duration::ZERO,
-            batch_rows: self.target.prefill_batch_rows(),
+            batch_rows: if image.is_some() {
+                self.target.image_prefill_batch_rows()
+            } else {
+                self.target.prefill_batch_rows()
+            },
             callback: &mut on_progress,
         };
         let last = input.len() - 1;

@@ -212,6 +212,8 @@ Subdividing the B64 prefill graph found 4.35 s in the four MXFP8 visits and 10.1
 
 The B128 follow-up split 22.50 s of 4K command GPU time into 7.65 s of experts, 7.47 s of preparation and finish, 7.20 s of dense/relative attention and 0.18 s of embedding and gaps. The prefill floors allow about 6.5–6.9 s in total. Batched controller RMS and direct expert bindings took 21.15 s against 23.39 s in one exact same-session 4K pair. The 256- and 512-row geometry probes gained 5.6% and 8.4% in short screens and required about two and four times the workspace. A source-shaped dense variant changed logits, and compact NVFP4 removed its certified reduction replay. The next floor-scale comparison needs packed activations, batched projections and query-by-key attention across the connected graph. [4K prefill budget and attempts](model-experiments/2026-11-21-inkling-mini-prefill-budget.md)
 
+Packing the activations across the original Inkling graph eliminated most of the per-token dispatches and brought the exact 4K target diagnostic from 20.67 to 11.09 s. The packed profile put 11.57 of 11.86 GPU seconds in projections, attention and experts. The first worker with packed activations and eight-route MXFP8 reached 473 tok/s greedy and 407 tok/s sampled on two cold 4K requests with matching output hashes. The combined matrix variant reached 771 tok/s in the target diagnostic and changed the continuation logits. Short and full-prompt controls retired the guarded matrix variants, wider 1,024-row geometry and the NVFP4 register-fragment kernel for lack of speedup. The finer profile put 2.99 s of 9.15 s in NVFP4 matrix products and 0.07 s in their quantization and ingress. Use the original runtime to qualify any change in accumulation order. [Packed prefill experiments](model-experiments/2026-11-21-inkling-mini-packed-prefill.md)
+
 ### 5. Speculative decoding
 
 #### The design that held
@@ -535,6 +537,7 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 | 2026-11-21 | [Inkling 2 Mini pinned-runtime follow-up](benchmarks/2026-11-21-inkling-mini-pinned-oracle.md) | Live BF16 boundary, connected 4K parity and paired serial timing |
 | 2026-11-21 | [Inkling 2 Mini short-prefix projection](benchmarks/2026-11-21-inkling-mini-short-projection.md) | Source-dispatched BF16 dot order, short and 4K connected parity, paired no-regression test |
 | 2026-11-21 | [Inkling 2 Mini native worker](benchmarks/2026-11-21-inkling-mini-native-worker.md) | Grouped 4K worker prefill, greedy and sampled decode budgets, final slice reruns |
+| 2026-11-21 | [Inkling 2 Mini packed prefill](model-experiments/2026-11-21-inkling-mini-packed-prefill.md) | Contiguous prefill buffers, exact kernel screens, matrix precision limits and cold worker comparison |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 

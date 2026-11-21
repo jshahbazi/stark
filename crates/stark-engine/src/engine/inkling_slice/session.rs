@@ -9,6 +9,8 @@ use metal::MTLBlitCommandEncoder;
 mod dspark_validation;
 pub use dspark_validation::measure_dspark;
 
+#[path = "packed_prefill.rs"]
+mod packed_prefill;
 #[path = "prefill.rs"]
 mod prefill;
 #[path = "prefill_dense.rs"]
@@ -22,8 +24,9 @@ mod prefill_trace;
 #[path = "target_validation.rs"]
 mod target_validation;
 
+use packed_prefill::PackedPrefill;
 use prefill::PrefillLanes;
-pub use prefill_profile::profile_prefill;
+pub use prefill_profile::{profile_packed_prefill, profile_prefill};
 pub use prefill_trace::{PrefillTraceMode, trace_prefill};
 pub use target_validation::{measure_full, measure_full_budget, measure_prefill, measure_prefill_speed};
 
@@ -63,6 +66,7 @@ pub struct Session {
     visits: Vec<Visit>,
     flow: Flow,
     prefill_lanes: Option<PrefillLanes>,
+    packed_prefill: Option<PackedPrefill>,
     embedding: Buffer,
     embed_norm: Buffer,
     output_query: Buffer,
@@ -129,6 +133,7 @@ impl Session {
             owner: Arc::new(()),
             flow: Flow::new(device)?,
             prefill_lanes: None,
+            packed_prefill: None,
             mixed: zeroed(device, WIDTH * 4)?,
             hidden: zeroed(device, logits_rows * WIDTH * 2)?,
             logits: zeroed(device, logits_rows * PADDED_VOCABULARY * 4)?,
@@ -247,6 +252,17 @@ impl Session {
 
     /// Command row bound for worker cancellation and chunk-aligned snapshots.
     pub fn prefill_batch_rows(&self) -> usize {
+        if !self.dspark_enabled
+            && let Some(packed) = &self.packed_prefill
+        {
+            packed.rows()
+        } else {
+            self.image_prefill_batch_rows()
+        }
+    }
+
+    /// Image embedding rows still use the per-row-input batch.
+    pub fn image_prefill_batch_rows(&self) -> usize {
         self.prefill_lanes.as_ref().map_or(PREFILL_COMMAND_ROWS, PrefillLanes::rows)
     }
 
@@ -254,9 +270,9 @@ impl Session {
         self.runtime.pinned_m5
     }
 
-    /// Reserve the optional tile workspace separately from persistent cache.
+    /// Reserve both the packed and per-row workspaces separately from persistent cache.
     pub const fn batched_prefill_memory_bytes() -> usize {
-        128 * 1024 * 1024
+        384 * 1024 * 1024
     }
 
     /// Select M5 Max batched prefill before ingesting
@@ -271,11 +287,16 @@ impl Session {
         if self.position != 0 {
             return Err("Inkling prefill mode must be selected before ingest");
         }
-        self.prefill_lanes = if enabled {
-            Some(PrefillLanes::for_m5_worker(&mut self.runtime)?)
+        let (lanes, packed) = if enabled {
+            (
+                Some(PrefillLanes::for_m5_worker(&mut self.runtime)?),
+                Some(PackedPrefill::for_m5_worker(&mut self.runtime)?),
+            )
         } else {
-            None
+            (None, None)
         };
+        self.prefill_lanes = lanes;
+        self.packed_prefill = packed;
         Ok(())
     }
 
@@ -469,7 +490,7 @@ impl Session {
             return Err("Inkling image range falls outside its embeddings");
         }
         self.check_append(rows.len())?;
-        let batch_rows = self.prefill_batch_rows();
+        let batch_rows = self.image_prefill_batch_rows();
         for start in rows.clone().step_by(batch_rows) {
             self.append_image(image, start..rows.end.min(start + batch_rows), false)?;
         }
@@ -513,6 +534,14 @@ impl Session {
         tokens: &[u32],
         readout: bool,
     ) -> Result<()> {
+        if let Some(packed) = &self.packed_prefill
+            && tokens.len() >= PackedPrefill::MIN_ROWS
+            && self.active_dspark().is_none()
+        {
+            packed.upload(tokens);
+            let result = execute(&self.runtime, |gpu| packed.encode(self, gpu, tokens.len(), readout));
+            return self.finish_append(result, tokens.len());
+        }
         if let Some(lanes) = &self.prefill_lanes
             && tokens.len() > 1
         {

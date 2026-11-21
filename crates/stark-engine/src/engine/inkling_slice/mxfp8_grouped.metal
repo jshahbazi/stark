@@ -81,3 +81,134 @@ kernel void ink_group_mxfp8_down(
         }
     }
 }
+
+#ifdef INK_GROUP_MXFP8_WIDE
+template <uint Width>
+__attribute__((always_inline)) inline void ink_mxfp8_group_dot8(
+    device const float *input, uint4 first_rows, uint4 second_rows,
+    device const uchar *weights, device const uchar *exponents, uint lane,
+    thread float4 &first, thread float4 &second) {
+    float4 a = 0.0f, b = 0.0f;
+    for (uint start = 0; start < Width; start += 32) {
+        const uint exponent = uint(exponents[start / 32]);
+        float scale = exponent == 0u ? 0x1p-127f : as_type<float>(exponent << 23);
+        if (exponent == 255u) scale = NAN;
+        const uint i = start + lane;
+        const float weight = ink_mx_e4m3(weights[i]) * scale;
+        a.x = fma(weight, input[first_rows.x * Width + i], a.x);
+        a.y = fma(weight, input[first_rows.y * Width + i], a.y);
+        a.z = fma(weight, input[first_rows.z * Width + i], a.z);
+        a.w = fma(weight, input[first_rows.w * Width + i], a.w);
+        b.x = fma(weight, input[second_rows.x * Width + i], b.x);
+        b.y = fma(weight, input[second_rows.y * Width + i], b.y);
+        b.z = fma(weight, input[second_rows.z * Width + i], b.z);
+        b.w = fma(weight, input[second_rows.w * Width + i], b.w);
+    }
+    first = float4(simd_sum(a.x), simd_sum(a.y), simd_sum(a.z), simd_sum(a.w));
+    second = float4(simd_sum(b.x), simd_sum(b.y), simd_sum(b.z), simd_sum(b.w));
+}
+
+inline uint4 ink_mxfp8_group_routes(device const uint *order, uint start, uint count) {
+    uint4 routes = 0;
+    for (uint i = 0; i < count; ++i) routes[i] = order[start + i];
+    return routes;
+}
+
+__attribute__((always_inline)) inline void ink_mxfp8_group_store_up(
+    device bfloat *output, device const float *route_weights,
+    uint sorted, uint column, uint count, uint4 routes, float4 gates, float4 ups) {
+    constexpr uint MID = 1152;
+    for (uint i = 0; i < count; ++i) {
+        const float gate = float(bfloat(gates[i]));
+        const float up = float(bfloat(ups[i]));
+        const float sigmoid = 1.0f / (1.0f + metal::precise::exp(-gate));
+        const float gate_cap = 4.0f * metal::precise::tanh(gate * 0.25f);
+        const float up_cap = 25.0f * metal::precise::tanh(up / 25.0f);
+        output[(sorted + i) * MID + column] =
+            bfloat(((gate_cap * sigmoid) * up_cap) * route_weights[routes[i]]);
+    }
+}
+
+kernel void ink_group_mxfp8_wide_up(
+    device const float *input [[buffer(0)]], device const uint *order [[buffer(1)]],
+    device const uint *runs [[buffer(2)]], device const float *route_weights [[buffer(3)]],
+    device const uchar *weights [[buffer(4)]], device const uchar *exponents [[buffer(5)]],
+    device bfloat *output [[buffer(6)]], uint2 group [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint WIDTH = 2304;
+    constexpr uint MID = 1152;
+    const uint start = runs[group.y * 3], rows = runs[group.y * 3 + 1];
+    if (rows == 0) return;
+    const uint column = group.x * 4 + sg;
+    const uint weight_row = (runs[group.y * 3 + 2] * MID + column) * 2;
+    const uint scale_stride = WIDTH / 32;
+    uint offset = 0;
+    for (; offset + 8 <= rows; offset += 8) {
+        const uint sorted = start + offset;
+        const uint4 first = ink_mxfp8_group_routes(order, sorted, 4);
+        const uint4 second = ink_mxfp8_group_routes(order, sorted + 4, 4);
+        float4 gates_first, gates_second, ups_first, ups_second;
+        ink_mxfp8_group_dot8<WIDTH>(
+            input, first / 8u, second / 8u, weights + weight_row * WIDTH,
+            exponents + weight_row * scale_stride, lane, gates_first, gates_second);
+        ink_mxfp8_group_dot8<WIDTH>(
+            input, first / 8u, second / 8u, weights + (weight_row + 1) * WIDTH,
+            exponents + (weight_row + 1) * scale_stride, lane, ups_first, ups_second);
+        if (lane == 0) {
+            ink_mxfp8_group_store_up(output, route_weights, sorted, column, 4, first, gates_first, ups_first);
+            ink_mxfp8_group_store_up(output, route_weights, sorted + 4, column, 4, second, gates_second, ups_second);
+        }
+    }
+    for (; offset < rows; offset += 4) {
+        const uint count = min(4u, rows - offset);
+        const uint4 routes = ink_mxfp8_group_routes(order, start + offset, count);
+        const uint4 inputs = routes / 8u;
+        const float4 gates = ink_mxfp8_group_dot<WIDTH>(
+            input, inputs, count, weights + weight_row * WIDTH, exponents + weight_row * scale_stride, lane);
+        const float4 ups = ink_mxfp8_group_dot<WIDTH>(
+            input, inputs, count, weights + (weight_row + 1) * WIDTH, exponents + (weight_row + 1) * scale_stride, lane);
+        if (lane == 0) {
+            ink_mxfp8_group_store_up(output, route_weights, start + offset, column, count, routes, gates, ups);
+        }
+    }
+}
+
+kernel void ink_group_mxfp8_wide_down(
+    device const float *input [[buffer(0)]], device const uint *order [[buffer(1)]],
+    device const uint *runs [[buffer(2)]], device const uchar *weights [[buffer(3)]],
+    device const uchar *exponents [[buffer(4)]], device bfloat *output [[buffer(5)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint WIDTH = 2304;
+    constexpr uint MID = 1152;
+    const uint start = runs[group.y * 3], rows = runs[group.y * 3 + 1];
+    if (rows == 0) return;
+    const uint column = group.x * 4 + sg;
+    const uint weight_row = runs[group.y * 3 + 2] * WIDTH + column;
+    uint offset = 0;
+    for (; offset + 8 <= rows; offset += 8) {
+        const uint sorted = start + offset;
+        float4 first, second;
+        ink_mxfp8_group_dot8<MID>(
+            input, sorted + uint4(0, 1, 2, 3), sorted + uint4(4, 5, 6, 7),
+            weights + weight_row * MID, exponents + weight_row * (MID / 32), lane, first, second);
+        if (lane == 0) {
+            for (uint i = 0; i < 4; ++i) {
+                output[order[sorted + i] * WIDTH + column] = bfloat(first[i]);
+                output[order[sorted + i + 4] * WIDTH + column] = bfloat(second[i]);
+            }
+        }
+    }
+    for (; offset < rows; offset += 4) {
+        const uint sorted = start + offset;
+        const uint count = min(4u, rows - offset);
+        const float4 dot = ink_mxfp8_group_dot<MID>(
+            input, sorted + uint4(0, 1, 2, 3), count,
+            weights + weight_row * MID, exponents + weight_row * (MID / 32), lane);
+        if (lane == 0) {
+            for (uint i = 0; i < count; ++i)
+                output[order[sorted + i] * WIDTH + column] = bfloat(dot[i]);
+        }
+    }
+}
+#endif

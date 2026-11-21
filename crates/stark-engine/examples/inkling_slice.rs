@@ -39,19 +39,35 @@ fn main() {
             println!("{report}");
             return Ok(0);
         }
-        if args.first().is_some_and(|arg| arg == "--profile-prefill" || arg == "--profile-prefill-source") {
-            if args.len() != 4 {
+        if args.first().is_some_and(|arg| {
+            arg == "--profile-prefill" || arg == "--profile-prefill-source" || arg == "--profile-prefill-packed"
+        }) {
+            let packed = args[0] == "--profile-prefill-packed";
+            if args.len()
+                != if packed {
+                    5
+                } else {
+                    4
+                }
+            {
                 return Err(
                     "expected --profile-prefill, original SafeTensors, private oracle directory and input length",
                 );
             }
             let count = args[3].to_str().and_then(|value| value.parse().ok()).ok_or("invalid Inkling input length")?;
-            let report = stark_engine::engine::inkling_slice::profile_prefill(
-                Path::new(&args[1]),
-                Path::new(&args[2]),
-                count,
-                args[0] == "--profile-prefill-source",
-            )?;
+            let checkpoint = Path::new(&args[1]);
+            let oracle = Path::new(&args[2]);
+            let report = if packed {
+                let variant = args[4].to_str().ok_or("invalid Inkling prefill candidate")?;
+                stark_engine::engine::inkling_slice::profile_packed_prefill(checkpoint, oracle, count, variant)
+            } else {
+                stark_engine::engine::inkling_slice::profile_prefill(
+                    checkpoint,
+                    oracle,
+                    count,
+                    args[0] == "--profile-prefill-source",
+                )
+            }?;
             println!("{report}");
             return Ok(i32::from(report["exact_continuation_logits"] != true));
         }

@@ -445,6 +445,11 @@ pub fn measure_prefill_speed(
     let mut session = Session::load(checkpoint, prefix + 4)?;
     session.capture_draft_features(true);
     let create = |runtime: &mut Runtime, variant: &str| {
+        if variant.starts_with("packed") {
+            let packed = PackedPrefill::diagnostic(runtime, variant)?;
+            let rows = packed.rows();
+            return Ok((None, Some(packed), rows));
+        }
         let rows = if variant.split('+').any(|v| v == "wide") {
             128
         } else {
@@ -463,18 +468,20 @@ pub fn measure_prefill_speed(
                 _ => return Err("unknown Inkling prefill candidate"),
             }
         }
-        Ok(lanes)
+        Ok((Some(lanes), None, rows))
     };
     let (variant, baseline) = variant.split_once(':').unwrap_or((variant, "baseline"));
-    let mut base = Some(create(&mut session.runtime, baseline)?);
+    let mut base = create(&mut session.runtime, baseline)?;
     let bytes = session.runtime.device.current_allocated_size();
-    let candidate = create(&mut session.runtime, variant)?;
-    let rows = candidate.rows();
+    let mut candidate = create(&mut session.runtime, variant)?;
+    let rows = candidate.2;
     let allocated = session.runtime.device.current_allocated_size().saturating_sub(bytes);
-    let mut candidate = Some(candidate);
-    let mut run = |lanes: &mut Option<PrefillLanes>, offset: usize, count: usize| {
+    let mut run = |lane: &mut (Option<PrefillLanes>, Option<PackedPrefill>, usize), offset: usize, count: usize| {
         session.reset();
-        std::mem::swap(&mut session.prefill_lanes, lanes);
+        std::mem::swap(&mut session.prefill_lanes, &mut lane.0);
+        std::mem::swap(&mut session.packed_prefill, &mut lane.1);
+        let _activity = crate::engine::hybrid::activity::InferenceActivity::begin()
+            .map_err(|_| "Inkling inference activity unavailable")?;
         let started = Instant::now();
         session.ingest_many(&tokens[offset..offset + count])?;
         let ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -484,11 +491,12 @@ pub fn measure_prefill_speed(
         let range = &tokens[offset + count..offset + count + 4];
         let mut logits = Vec::with_capacity(4);
         for &token in range {
-            logits.push(native_digest(&session.step(token)?));
+            logits.push(session.step(token)?);
         }
         session.restore(&snapshot)?;
-        let replay = logits[0] == native_digest(&session.step(range[0])?);
-        std::mem::swap(&mut session.prefill_lanes, lanes);
+        let replay = native_digest(&logits[0]) == native_digest(&session.step(range[0])?);
+        std::mem::swap(&mut session.prefill_lanes, &mut lane.0);
+        std::mem::swap(&mut session.packed_prefill, &mut lane.1);
         Ok::<_, &'static str>((ms, state, features, logits, replay))
     };
     let warmup = count.min(128);
@@ -507,10 +515,32 @@ pub fn measure_prefill_speed(
             let cand = run(&mut candidate, offset, count)?;
             (run(&mut base, offset, count)?, cand)
         };
+        let equal = base.3.iter().zip(&candidate.3).all(|(a, b)| native_digest(a) == native_digest(b));
+        let source = if !equal && count == prefix {
+            let mut errors = Vec::with_capacity(4);
+            let top =
+                |values: &[f32]| values.iter().enumerate().max_by(|(_, a), (_, b)| a.total_cmp(b)).map(|(i, _)| i);
+            for (row, (incumbent, changed)) in base.3.iter().zip(&candidate.3).enumerate() {
+                let want = Tensors::open(&oracle.join(format!("row-{row}.safetensors")))?.values::<f32>(
+                    "full.logits",
+                    "F32",
+                    &[1, 1, VOCABULARY],
+                )?;
+                errors.push(json!({
+                    "incumbent": report(incumbent, &want), "candidate": report(changed, &want),
+                    "incumbent_top1_matches": top(incumbent) == top(&want),
+                    "candidate_top1_matches": top(changed) == top(&want),
+                }));
+            }
+            Some(errors)
+        } else {
+            None
+        };
         pairs.push(json!({
             "base_ms":base.0,"candidate_ms":candidate.0,"ratio":candidate.0/base.0,
             "state_equal":base.1==candidate.1,"taps_equal":base.2==candidate.2,
-            "continuation_equal":base.3==candidate.3,"snapshot_replay":base.4&&candidate.4,
+            "continuation_equal":equal,"snapshot_replay":base.4&&candidate.4,
+            "pinned_ollama_continuation":source,
         }));
     }
     Ok(json!({"variant":variant,"baseline":baseline,"input_tokens":count,"candidate_rows":rows,

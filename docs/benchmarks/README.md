@@ -17,7 +17,7 @@ follow. Update it when a study changes what a lever returned.
 
 ## Current result
 
-**Inkling 2 Mini native worker (2026-11-21).** Batched RMS and direct expert bindings brought original-checkpoint 4K prefill to 199.98 tok/s greedy and 197.49 tok/s sampled at the median. Output hashes matched and median decode stayed within budget. The cache-cold prefill floor and full Ollama parity remain open. [Latest 4K worker results](2026-11-21-inkling-mini-native-worker.md#batched-rms-and-direct-expert-bindings)
+**Inkling 2 Mini native worker (2026-11-21).** The M5 Max packed graph reached 452.30 tok/s greedy and 363.22 tok/s at the sampled median for cold 4K prefill on the original checkpoint. All worker output hashes matched the preceding build. The 500 tok/s target and full Ollama parity remain open. [Latest 4K worker results](2026-11-21-inkling-mini-native-worker.md#packed-512-row-prefill)
 
 **Inkling 2 Mini short-prefix projection (2026-11-21).** Matching the pinned MLX attention-gate projection fixed the last short control. Short and 4K connected slice parity passed, with a 0.965 median paired 4K wall ratio. [Short-prefix projection and budget](2026-11-21-inkling-mini-short-projection.md)
 

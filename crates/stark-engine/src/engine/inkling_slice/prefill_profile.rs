@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 
 use super::*;
 
-// Each visit contributes up to eight phase encoders plus setup and readout.
-const SAMPLE_COUNT: usize = (2 + PHYSICAL.len() * 8) * 2;
+// Include the individual NVFP4 phases as well as setup and readout.
+const SAMPLE_COUNT: usize = (2 + PHYSICAL.len() * 16) * 2;
 type Encoder = Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,9 @@ pub(in crate::engine::inkling_slice) enum PrefillPhase {
     AttentionDense,
     RelativeCacheAttention,
     Experts,
+    Nvfp4Quant,
+    Nvfp4Dot,
+    Nvfp4Epilogue,
     Mxfp8,
 }
 
@@ -37,6 +40,9 @@ struct Totals {
     attention_dense: f64,
     relative_cache_attention: f64,
     experts: f64,
+    nvfp4_quant: f64,
+    nvfp4_dot: f64,
+    nvfp4_epilogue: f64,
     mxfp8: f64,
     other: f64,
     attention_inputs: f64,
@@ -55,6 +61,9 @@ impl Totals {
             PrefillPhase::AttentionDense => &mut self.attention_dense,
             PrefillPhase::RelativeCacheAttention => &mut self.relative_cache_attention,
             PrefillPhase::Experts => &mut self.experts,
+            PrefillPhase::Nvfp4Quant => &mut self.nvfp4_quant,
+            PrefillPhase::Nvfp4Dot => &mut self.nvfp4_dot,
+            PrefillPhase::Nvfp4Epilogue => &mut self.nvfp4_epilogue,
             PrefillPhase::Mxfp8 => &mut self.mxfp8,
             PrefillPhase::AttentionInputs => &mut self.attention_inputs,
             PrefillPhase::ExpertInputs => &mut self.expert_inputs,
@@ -65,12 +74,16 @@ impl Totals {
     fn sum(&self) -> f64 {
         self.attention_dense
             + self.relative_cache_attention
-            + self.experts
+            + self.nvfp4()
             + self.mxfp8
             + self.attention_inputs
             + self.expert_inputs
             + self.expert_finish
             + self.other
+    }
+
+    fn nvfp4(&self) -> f64 {
+        self.experts + self.nvfp4_quant + self.nvfp4_dot + self.nvfp4_epilogue
     }
 
     fn report(
@@ -80,8 +93,12 @@ impl Totals {
         json!({
             "attention_dense_ms": self.attention_dense,
             "relative_cache_attention_ms": self.relative_cache_attention,
-            "experts_ms": self.experts + self.mxfp8,
-            "nvfp4_experts_ms": self.experts,
+            "experts_ms": self.nvfp4() + self.mxfp8,
+            "nvfp4_experts_ms": self.nvfp4(),
+            "nvfp4_routing_ms": self.experts,
+            "nvfp4_quant_ms": self.nvfp4_quant,
+            "nvfp4_dot_ms": self.nvfp4_dot,
+            "nvfp4_epilogue_ms": self.nvfp4_epilogue,
             "mxfp8_experts_ms": self.mxfp8,
             "other_ms": self.other + self.attention_inputs + self.expert_inputs + self.expert_finish,
             "attention_inputs_ms": self.attention_inputs,
@@ -239,14 +256,29 @@ pub fn profile_prefill(
     count: usize,
     source_geometry: bool,
 ) -> Result<Value> {
+    profile(checkpoint, oracle, count, source_geometry, None)
+}
+
+/// Attribute the packed prefill candidate to the same GPU stages.
+pub fn profile_packed_prefill(
+    checkpoint: &Path,
+    oracle: &Path,
+    count: usize,
+    variant: &str,
+) -> Result<Value> {
+    profile(checkpoint, oracle, count, false, Some(variant))
+}
+
+fn profile(
+    checkpoint: &Path,
+    oracle: &Path,
+    count: usize,
+    source_geometry: bool,
+    packed_variant: Option<&str>,
+) -> Result<Value> {
     let first = Tensors::open(&oracle.join("row-0.safetensors"))?;
     let prefix = first.values::<u32>("start", "U32", &[1])?[0] as usize;
-    let tile_rows = if source_geometry {
-        prefill_trace::CHUNK
-    } else {
-        M5_PREFILL_ROWS
-    };
-    if !(2..=prefix).contains(&count) || count % tile_rows == 1 || (source_geometry && count % tile_rows != 0) {
+    if !(2..=prefix).contains(&count) {
         return Err("Inkling profile requires grouped prefill tiles with at least two rows each");
     }
     let tokens = Tensors::open(&oracle.join("tokens.safetensors"))?.values::<u32>("tokens", "U32", &[prefix + 4])?;
@@ -256,10 +288,20 @@ pub fn profile_prefill(
     let mut session = Session::load(checkpoint, prefix + 4)?;
     let mut profiler = PrefillTiming::new(&session.runtime)?;
     let allocated_before = session.runtime.device.current_allocated_size();
-    if source_geometry {
+    if let Some(variant) = packed_variant {
+        session.packed_prefill = Some(PackedPrefill::diagnostic(&mut session.runtime, variant)?);
+    } else if source_geometry {
         session.prefill_lanes = Some(PrefillTraceMode::Routed.lanes(&mut session.runtime)?);
     } else {
-        session.set_batched_prefill(true)?;
+        session.prefill_lanes = Some(PrefillLanes::for_m5_worker(&mut session.runtime)?);
+    }
+    let tile_rows = session.prefill_batch_rows();
+    let tail = count % tile_rows;
+    if tail == 1
+        || (source_geometry && tail != 0)
+        || (packed_variant.is_some() && (1..PackedPrefill::MIN_ROWS).contains(&tail))
+    {
+        return Err("Inkling profile requires fully batched prefill");
     }
     let allocated = session.runtime.device.current_allocated_size().saturating_sub(allocated_before);
     let baseline_start = std::time::Instant::now();
@@ -271,14 +313,21 @@ pub fn profile_prefill(
     let (mut gpu_ms, mut wall_ms, mut dispatches) = (0.0, 0.0, 0);
     let mut tiles = Vec::new();
     for chunk in tokens[..count].chunks(tile_rows) {
-        let lanes = session.prefill_lanes.as_ref().ok_or("missing grouped prefill lanes")?;
-        let inputs = chunk.iter().copied().map(TokenInput::Text).collect::<Vec<_>>();
-        let timing = execute_with_profile(&session.runtime, Some(&mut profiler), |gpu| {
-            session.encode_prefill_rows(gpu, lanes, &inputs, false);
-        })?;
+        let timing = if let Some(packed) = &session.packed_prefill {
+            packed.upload(chunk);
+            execute_with_profile(&session.runtime, Some(&mut profiler), |gpu| {
+                packed.encode(&session, gpu, chunk.len(), false)
+            })
+        } else {
+            let lanes = session.prefill_lanes.as_ref().ok_or("missing grouped prefill lanes")?;
+            let inputs = chunk.iter().copied().map(TokenInput::Text).collect::<Vec<_>>();
+            execute_with_profile(&session.runtime, Some(&mut profiler), |gpu| {
+                session.encode_prefill_rows(gpu, lanes, &inputs, false)
+            })
+        }?;
         tiles.push(json!({
             "start_position": session.position,
-            "rows": inputs.len(),
+            "rows": chunk.len(),
             "stages": profiler.tile.report(timing.gpu_ms),
         }));
         gpu_ms += timing.gpu_ms;
@@ -292,6 +341,7 @@ pub fn profile_prefill(
         "context_tokens": session.context(),
         "tile_rows": tile_rows,
         "source_geometry": source_geometry,
+        "packed_variant": packed_variant,
         "prefill_additional_metal_allocated_bytes": allocated,
         "uninstrumented_ingest_wall_ms": baseline_ms,
         "instrumented_command_wall_ms": wall_ms,
