@@ -40,3 +40,18 @@ Prefill wall ratios were 0.988 and 0.930. One pair per mode screens for regressi
 The initial setup lacked the native template helper on the executable search path. Image readiness rejected that launch before a benchmark request. The rerun used the checkout's built helper on `PATH` and completed the local image checks for both arms. Its aggregate is SHA-256 `e3cf008530d300ce88005aa34863a2762675bb684475a2cfc21688fed641cb72`. Baseline worker SHA-256 is `2579436a9389bd97c5e19287a92bf745aa14105932f0f416770e18f7b4367f37`. Rerun worker SHA-256 is `64928c90e87754db290f198bed0e7a414c82290d27623fb5e6890b3784363035`. The benchmark used the production grouped path. [Matched prefill attempt](../model-experiments/2026-11-21-inkling-mini-matched-prefill.md) · [Stage profile](../model-experiments/2026-11-21-inkling-mini-prefill-profile.md)
 
 The final diagnostic reproduced the short and 4K slice aggregate hashes above exactly. Its 32-step synthetic-cache full-target control measured 28.071 ms median wall, with 28.030 ms p10 and 28.282 ms p90. It used the same 1,883 dispatches and one completion per step. The new diagnostic SHA-256 is `2794f11765305a6607534e4ce3d4f136cb1dbba16823239af770681a7930968a` and the step-budget aggregate is `c637557451ca5241bfc6a169c0b8016f2eef11d593dd372e2d29e3e878662df0`.
+
+## 128-row worker prefill
+
+The M5 Max worker now uses 128-row commands, batched cross-pass controllers, grouped MXFP8 and NVFP4, and eight-row shared BF16 projections. It also groups expert tiles from 16 rows. In the same-session model control, 4K ingestion took 23.28 s versus 32.03 s and produced identical live state, target taps and four continuation logits. The new workspace uses 89.8 MiB of the existing 128 MiB reserve. [Model control and screening](../model-experiments/2026-11-21-inkling-mini-faster-prefill.md)
+
+The original image-loaded and draft-resident worker benchmarks used one matched 4,096-input, 256-output request per mode and build. The worker ran the builds in AB/BA order with a ten-second wait after local image checks. Sampling controls, seeds and input tokens matched within each pair, and all requests reported zero reused inputs and draft execution off. Output hashes matched in both modes.
+
+| Mode | B64 prefill | B128 prefill | B128 input tokens/s | B64 useful decode tokens/s | B128 useful decode tokens/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Greedy | 32.87 s | 23.41 s | 174.95 | 35.46 | 33.93 |
+| Temperature 1 | 32.86 s | 23.28 s | 175.96 | 33.58 | 33.69 |
+
+Prefill wall time fell by 28.8% greedy and 29.2% sampled. Decode met the 42.53 and 43.91 ms ceilings, and the prefill floors remain open. The repeated model-window controls and the same-session 4K pair support the performance change. The worker comparison is one independent pair per mode. The host reported no thermal or performance warnings before or after the run.
+
+Baseline worker SHA-256 is `64928c90e87754db290f198bed0e7a414c82290d27623fb5e6890b3784363035`. B128 worker SHA-256 is `b239258f6d1bb4280313517389030b07ef0eed32e08560680af54ae67bed4da5`. The aggregate SHA-256 is `1f46160e14bd2ef0ffd2ae76c963b3361f7fd4f8f8cefbedbcff36bd7fff3dc8`.

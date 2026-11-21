@@ -4,7 +4,7 @@ Target the official fixed-three-pass release for native generation on Apple Sili
 
 The native slice passes short and 4K connected parity. One BF16 word in the attention gate of physical layer 11 caused the last short mismatch. Matching the released runtime's wide GEMV gave bit-exact expert outputs and kept the measured 44-visit budget within the paired no-regression bound. [Short-prefix projection and paired timing](benchmarks/2026-11-21-inkling-mini-short-projection.md)
 
-The native worker uses the 48-visit target with per-visit state, original packed expert banks and a 200,058-token readout. The M5 Max path uses 64-row prefill tiles with GPU-routed NVFP4 experts. The vision tower passed two original-weight projector controls against the pinned Ollama runtime. The full-target and request-level checks below define the remaining release gates. [Inkling worker](../crates/stark-generate/src/inkling.rs) · [Vision attempt](model-experiments/2026-11-21-inkling-mini-vision.md) · [Grouped projection](model-experiments/2026-11-21-inkling-mini-grouped-nvfp4.md)
+The native worker uses the 48-visit target with per-visit state, original packed expert banks and a 200,058-token readout. The M5 Max path uses 128-row prefill tiles with batched controllers, grouped NVFP4 and MXFP8, and grouped expert tails from 16 rows. The vision tower passed two original-weight projector controls against the pinned Ollama runtime. The full-target and request-level checks below define the remaining release gates. [Inkling worker](../crates/stark-generate/src/inkling.rs) · [Vision attempt](model-experiments/2026-11-21-inkling-mini-vision.md) · [Faster prefill](model-experiments/2026-11-21-inkling-mini-faster-prefill.md)
 
 ## What to build against
 

@@ -429,8 +429,93 @@ pub fn measure_full_budget(
     }))
 }
 
-/// Compare the one-row exact kernels under token-major and layer-major
-/// scheduling. Keep state fingerprints and logits private to the comparison.
+/// Compare prompt schedules while retaining state fingerprints privately.
+pub fn measure_prefill_speed(
+    checkpoint: &Path,
+    oracle: &Path,
+    count: usize,
+    variant: &str,
+) -> Result<Value> {
+    let first = Tensors::open(&oracle.join("row-0.safetensors"))?;
+    let prefix = first.values::<u32>("start", "U32", &[1])?[0] as usize;
+    if !(16..=prefix).contains(&count) || prefix > 4096 {
+        return Err("Inkling speed comparison requires 16 to 4096 input rows");
+    }
+    let tokens = Tensors::open(&oracle.join("tokens.safetensors"))?.values::<u32>("tokens", "U32", &[prefix + 4])?;
+    let mut session = Session::load(checkpoint, prefix + 4)?;
+    session.capture_draft_features(true);
+    let create = |runtime: &mut Runtime, variant: &str| {
+        let rows = if variant.split('+').any(|v| v == "wide") {
+            128
+        } else {
+            64
+        };
+        let mut lanes = PrefillLanes::new(runtime, rows)?;
+        for factor in variant.split('+') {
+            match factor {
+                "controllers" => lanes.enable_controllers(runtime)?,
+                "mx" => lanes.enable_mxfp8(runtime)?,
+                "small" => lanes.enable_short_expert_tiles(),
+                "widegemv" => lanes.enable_wide_gemv(runtime)?,
+                "baseline" | "wide" => {},
+                _ => return Err("unknown Inkling prefill candidate"),
+            }
+        }
+        Ok(lanes)
+    };
+    let (variant, baseline) = variant.split_once(':').unwrap_or((variant, "baseline"));
+    let mut base = Some(create(&mut session.runtime, baseline)?);
+    let bytes = session.runtime.device.current_allocated_size();
+    let candidate = create(&mut session.runtime, variant)?;
+    let rows = candidate.rows();
+    let allocated = session.runtime.device.current_allocated_size().saturating_sub(bytes);
+    let mut candidate = Some(candidate);
+    let mut run = |lanes: &mut Option<PrefillLanes>, offset: usize, count: usize| {
+        session.reset();
+        std::mem::swap(&mut session.prefill_lanes, lanes);
+        let started = Instant::now();
+        session.ingest_many(&tokens[offset..offset + count])?;
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        let state = state_digest(&session);
+        let features = session.draft_features().ok_or("missing captured prefill features")?;
+        let snapshot = session.snapshot()?;
+        let range = &tokens[offset + count..offset + count + 4];
+        let mut logits = Vec::with_capacity(4);
+        for &token in range {
+            logits.push(native_digest(&session.step(token)?));
+        }
+        session.restore(&snapshot)?;
+        let replay = logits[0] == native_digest(&session.step(range[0])?);
+        std::mem::swap(&mut session.prefill_lanes, lanes);
+        Ok::<_, &'static str>((ms, state, features, logits, replay))
+    };
+    let warmup = count.min(128);
+    let _ = run(&mut base, 0, warmup)?;
+    let _ = run(&mut candidate, 0, warmup)?;
+    let mut pairs = Vec::new();
+    for index in 0..if count == prefix {
+        1
+    } else {
+        8
+    } {
+        let offset = index * (prefix - count) / 8;
+        let (base, candidate) = if index % 2 == 0 {
+            (run(&mut base, offset, count)?, run(&mut candidate, offset, count)?)
+        } else {
+            let cand = run(&mut candidate, offset, count)?;
+            (run(&mut base, offset, count)?, cand)
+        };
+        pairs.push(json!({
+            "base_ms":base.0,"candidate_ms":candidate.0,"ratio":candidate.0/base.0,
+            "state_equal":base.1==candidate.1,"taps_equal":base.2==candidate.2,
+            "continuation_equal":base.3==candidate.3,"snapshot_replay":base.4&&candidate.4,
+        }));
+    }
+    Ok(json!({"variant":variant,"baseline":baseline,"input_tokens":count,"candidate_rows":rows,
+        "candidate_additional_metal_bytes":allocated,"pairs":pairs}))
+}
+
+/// Compare the one-row exact kernels under token-major and layer-major scheduling.
 pub fn measure_prefill(
     checkpoint: &Path,
     oracle: &Path,

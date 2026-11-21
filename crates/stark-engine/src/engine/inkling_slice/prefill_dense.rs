@@ -37,7 +37,7 @@ impl PrefillDense {
         &self,
         gpu: &mut Stream<'_>,
         weight: &Buffer,
-        rows: &[(&Buffer, &Buffer)],
+        rows: &[(Binding<'_>, &Buffer)],
         width: usize,
         columns: usize,
     ) {
@@ -45,7 +45,7 @@ impl PrefillDense {
             gpu.dispatch("ink_trace_copy", &[source, output], (count / 2) as u32, (count.div_ceil(256), 1), 128);
         };
         for (row, (input, _)) in rows.iter().enumerate() {
-            copy(gpu, binding(input), (&self.input, row * width * 2), width);
+            copy(gpu, *input, (&self.input, row * width * 2), width);
         }
         let max = columns.max(rows.len());
         let split = if width >= 3 * max || (max <= 1024 && width > 2 * max) {

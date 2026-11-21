@@ -208,6 +208,8 @@ On the 4K B64 graph, attention dense projections accounted for 11.81% of command
 
 The separate reference-shaped 512-row profile measured 3.17 s in dense projections and 3.12 s in relative/cache attention over 4K. Its uninstrumented target prefill was 30.87 s and used 303.5 MiB of added Metal workspace, above the worker's 128 MiB reserve. Retain the profile as a numerical and performance diagnostic. The 64-row worker rerun took 33.05 s greedy and 33.52 s sampled and matched both output hashes. [Matched-width profile](model-experiments/2026-11-21-inkling-mini-prefill-profile.md#profile-after-the-matched-width-repair) · [Worker screening](benchmarks/2026-11-21-inkling-mini-native-worker.md#4k-worker-rerun-after-the-matched-trace)
 
+Subdividing the B64 prefill graph found 4.35 s in the four MXFP8 visits and 10.15 s preparing attention and expert inputs. Grouping those expert visits, sharing controller expansion and dense projection loads, and using 128-row commands lowered exact native target prefill from 32.03 to 23.28 s at 4K. Grouped expert tails cut a 31-row tile from 567 to 224 ms. The combined graph used 89.8 MiB of additional workspace. Exact batching of relative/cache attention had a separate 2% marginal gain for 13.4 MiB of workspace and was dropped from the production candidate. [Faster prefill attempt](model-experiments/2026-11-21-inkling-mini-faster-prefill.md)
+
 ### 5. Speculative decoding
 
 #### The design that held

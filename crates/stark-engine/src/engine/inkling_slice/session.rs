@@ -25,7 +25,7 @@ mod target_validation;
 use prefill::PrefillLanes;
 pub use prefill_profile::profile_prefill;
 pub use prefill_trace::{PrefillTraceMode, trace_prefill};
-pub use target_validation::{measure_full, measure_full_budget, measure_prefill};
+pub use target_validation::{measure_full, measure_full_budget, measure_prefill, measure_prefill_speed};
 
 use super::{dspark::Dspark, vision::Vision, *};
 
@@ -35,6 +35,7 @@ pub(super) const PADDED_VOCABULARY: usize = VOCABULARY.div_ceil(32) * 32;
 const MAX_CONTEXT: usize = 32_768;
 const PREFILL_COMMAND_ROWS: usize = 8;
 const BATCHED_PREFILL_ROWS: usize = 64;
+const M5_PREFILL_ROWS: usize = 128;
 const DRAFT_TAPS: [usize; 3] = [5, 23, 41];
 
 const PHYSICAL: [usize; 48] = [
@@ -258,7 +259,7 @@ impl Session {
         128 * 1024 * 1024
     }
 
-    /// Select the experimental M5 Max batched prefill path before ingesting
+    /// Select M5 Max batched prefill before ingesting
     /// a prompt. Prefix snapshots stay bound to the selected row geometry.
     pub fn set_batched_prefill(
         &mut self,
@@ -271,7 +272,7 @@ impl Session {
             return Err("Inkling prefill mode must be selected before ingest");
         }
         self.prefill_lanes = if enabled {
-            Some(PrefillLanes::new(&mut self.runtime, BATCHED_PREFILL_ROWS)?)
+            Some(PrefillLanes::for_m5_worker(&mut self.runtime)?)
         } else {
             None
         };

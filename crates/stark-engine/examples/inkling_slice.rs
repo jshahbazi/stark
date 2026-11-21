@@ -8,6 +8,21 @@ fn main() {
     fn run() -> Result<i32, &'static str> {
         let args: Vec<_> = std::env::args_os().skip(1).collect();
         use stark_engine::engine::inkling_slice::PrefillTraceMode;
+        if args.first().is_some_and(|arg| arg == "--prefill-speed") {
+            if args.len() != 5 {
+                return Err("expected --prefill-speed, original SafeTensors, private oracle, input length and variant");
+            }
+            let count = args[3].to_str().and_then(|value| value.parse().ok()).ok_or("invalid Inkling input length")?;
+            let variant = args[4].to_str().ok_or("invalid Inkling prefill candidate")?;
+            let report = stark_engine::engine::inkling_slice::measure_prefill_speed(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                count,
+                variant,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
         let trace_mode = match args.first().and_then(|arg| arg.to_str()) {
             Some("--trace-prefill-512") => Some(PrefillTraceMode::Baseline),
             Some("--trace-prefill-512-dense") => Some(PrefillTraceMode::Dense),

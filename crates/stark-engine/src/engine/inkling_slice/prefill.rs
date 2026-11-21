@@ -4,14 +4,20 @@
 use super::{prefill_dense::PrefillDense, prefill_relative::PrefillRelative, prefill_trace::PrefillTrace, *};
 use crate::engine::inkling_slice::grouped_pilot::GroupedExperts;
 
+#[path = "prefill_controller.rs"]
+mod prefill_controller;
+use prefill_controller::PrefillControllers;
+
 pub(super) struct PrefillLanes {
     flows: Vec<Flow>,
     features: Vec<Buffer>,
     scratch: Vec<Scratch>,
     grouped: GroupedExperts,
+    controllers: Option<PrefillControllers>,
     pub(super) dense: Option<PrefillDense>,
     pub(super) relative: Option<PrefillRelative>,
     pub(super) source_router: bool,
+    wide_gemv: bool,
 }
 
 impl PrefillLanes {
@@ -22,7 +28,14 @@ impl PrefillLanes {
         if !runtime.pinned_m5 {
             return Err("Inkling shared projection pilot requires the pinned M5 Max");
         }
-        let grouped = GroupedExperts::new(runtime, rows.min(BATCHED_PREFILL_ROWS))?;
+        let grouped = GroupedExperts::new(
+            runtime,
+            if rows <= 128 {
+                rows
+            } else {
+                BATCHED_PREFILL_ROWS
+            },
+        )?;
         let device = &runtime.device;
         let options = MTLCompileOptions::new();
         options.set_math_mode(MTLMathMode::Safe);
@@ -43,45 +56,104 @@ impl PrefillLanes {
             // before the next row uses it. Other activations are per row.
             scratch: (1..rows).map(|_| Scratch::new(device, 0)).collect::<Result<_>>()?,
             grouped,
+            controllers: None,
             dense: None,
             relative: None,
             source_router: false,
+            wide_gemv: false,
         })
     }
 
     pub(super) fn rows(&self) -> usize {
         self.flows.len() + 1
     }
+
+    pub(super) fn for_m5_worker(runtime: &mut Runtime) -> Result<Self> {
+        let mut lanes = Self::new(runtime, M5_PREFILL_ROWS)?;
+        lanes.enable_controllers(runtime)?;
+        lanes.enable_mxfp8(runtime)?;
+        lanes.enable_wide_gemv(runtime)?;
+        lanes.enable_short_expert_tiles();
+        Ok(lanes)
+    }
+
+    pub(super) fn enable_controllers(
+        &mut self,
+        runtime: &mut Runtime,
+    ) -> Result<()> {
+        self.controllers = Some(PrefillControllers::new(runtime, self.rows().min(BATCHED_PREFILL_ROWS))?);
+        Ok(())
+    }
+
+    pub(super) fn enable_mxfp8(
+        &mut self,
+        runtime: &mut Runtime,
+    ) -> Result<()> {
+        self.grouped.enable_mxfp8(runtime)
+    }
+
+    pub(super) fn enable_short_expert_tiles(&mut self) {
+        self.grouped.min_rows = 16;
+    }
+
+    pub(super) fn enable_wide_gemv(
+        &mut self,
+        runtime: &mut Runtime,
+    ) -> Result<()> {
+        let options = MTLCompileOptions::new();
+        options.set_math_mode(MTLMathMode::Safe);
+        options.set_language_version(MTLLanguageVersion::Version4_0);
+        let library = runtime
+            .device
+            .new_library_with_source(include_str!("prefill.metal"), Some(&options))
+            .map_err(|_| "Inkling wide projection shader compilation failed")?;
+        let name = "ink_matvec_prefill_wide";
+        let function = library.new_function_with_name(name).ok_or(name)?;
+        let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
+        runtime.pipelines.insert(name, pipeline);
+        self.wide_gemv = true;
+        Ok(())
+    }
 }
 
-fn project_rows<'a>(
+pub(super) fn project_rows<'a>(
     gpu: &mut Stream<'_>,
     dense: Option<&PrefillDense>,
     weight: &Buffer,
-    inputs_and_outputs: impl IntoIterator<Item = (&'a Buffer, &'a Buffer)>,
+    inputs_and_outputs: impl IntoIterator<Item = (Binding<'a>, &'a Buffer)>,
     columns: usize,
     rows: usize,
+    wide_gemv: bool,
 ) {
     let lanes = inputs_and_outputs.into_iter().collect::<Vec<_>>();
     if let Some(dense) = dense.filter(|_| lanes.len() > 64 && rows > 64) {
         dense.project(gpu, weight, &lanes, columns, rows);
         return;
     }
-    for tile in lanes.chunks(4) {
+    for tile in lanes.chunks(if wide_gemv {
+        8
+    } else {
+        4
+    }) {
         if let [(input, output)] = tile {
-            gpu.project(binding(input), weight, output, columns, rows);
+            gpu.project(*input, weight, output, columns, rows);
             continue;
         }
         let first = tile[0];
-        let mut buffers = [binding(weight); 9];
-        for row in 0..4 {
+        let (kernel, width) = if tile.len() > 4 {
+            ("ink_matvec_prefill_wide", 8)
+        } else {
+            ("ink_matvec_prefill", 4)
+        };
+        let mut buffers = [binding(weight); 17];
+        for row in 0..width {
             let (input, output) = tile.get(row).copied().unwrap_or(first);
-            buffers[1 + row] = binding(input);
-            buffers[5 + row] = binding(output);
+            buffers[1 + row] = input;
+            buffers[1 + width + row] = binding(output);
         }
         gpu.dispatch(
-            "ink_matvec_prefill",
-            &buffers,
+            kernel,
+            &buffers[..1 + 2 * width],
             [columns as u32, rows as u32, tile.len() as u32],
             (rows.div_ceil(4), 1),
             if rows <= 64 {
@@ -134,13 +206,31 @@ impl Session {
             let state = self.visit_input(index, physical, &mut blocks);
             let layer = &self.layers[physical];
             let scratches = lanes.scratch.iter().chain(std::iter::once(&visit.scratch)).skip(skip);
+            let controllers = lanes.controllers.as_ref().filter(|_| state.later && row_count > 1);
+            gpu.phase(PrefillPhase::AttentionInputs);
             for (row, ((flow, taps), scratch)) in flows.clone().zip(tap_rows.clone()).zip(scratches.clone()).enumerate()
             {
                 Self::prepare_visit(gpu, flow, index, taps);
                 if let Some(tap) = tap {
                     tap.input(gpu, row, flow);
                 }
-                layer.attention_inputs(gpu, flow, &flow.partial, scratch, state);
+                if controllers.is_some() {
+                    layer.prepare_attention_inputs(gpu, flow, &flow.partial, scratch, state);
+                } else {
+                    layer.attention_inputs(gpu, flow, &flow.partial, scratch, state);
+                }
+            }
+            if let Some(controllers) = controllers {
+                for slot in 0..3 {
+                    let rows = flows.clone().zip(scratches.clone()).map(|(flow, scratch)| {
+                        (
+                            scratch,
+                            layer.attention_norm_input(&flow.partial, scratch, state, slot),
+                            &scratch.qkv_input[slot],
+                        )
+                    });
+                    controllers.encode(gpu, layer, slot, rows, row_count, lanes.wide_gemv);
+                }
             }
 
             gpu.phase(PrefillPhase::AttentionDense);
@@ -148,14 +238,14 @@ impl Session {
             {
                 let bindings = scratches.clone().map(|s| {
                     let (input, _, output, _) = layer.attention_projections(s)[index];
-                    (input, output)
+                    (binding(input), output)
                 });
-                project_rows(gpu, lanes.dense.as_ref(), weight, bindings, WIDTH, columns);
+                project_rows(gpu, lanes.dense.as_ref(), weight, bindings, WIDTH, columns, lanes.wide_gemv);
             }
             if let Some(weights) = &layer.dynamic {
                 for (index, weight) in weights.iter().enumerate() {
-                    let bindings = scratches.clone().map(|s| (&s.qkv_input[index + 1], &s.dynamic[index]));
-                    project_rows(gpu, None, weight, bindings, WIDTH, 32);
+                    let bindings = scratches.clone().map(|s| (binding(&s.qkv_input[index + 1]), &s.dynamic[index]));
+                    project_rows(gpu, None, weight, bindings, WIDTH, 32, lanes.wide_gemv);
                 }
             }
             gpu.phase(PrefillPhase::RelativeCacheAttention);
@@ -189,10 +279,10 @@ impl Session {
                 }
             }
             gpu.phase(PrefillPhase::AttentionDense);
-            let output = scratches.clone().map(|s| (&s.attended, &s.attn_raw));
-            project_rows(gpu, lanes.dense.as_ref(), &layer.output, output, 3072, WIDTH);
+            let output = scratches.clone().map(|s| (binding(&s.attended), &s.attn_raw));
+            project_rows(gpu, lanes.dense.as_ref(), &layer.output, output, 3072, WIDTH, lanes.wide_gemv);
 
-            gpu.phase(PrefillPhase::Other);
+            gpu.phase(PrefillPhase::ExpertInputs);
             for (row, (flow, scratch)) in flows.clone().zip(scratches.clone()).enumerate() {
                 let position = self.position + row;
                 Layer::convolution(
@@ -205,12 +295,32 @@ impl Session {
                     WIDTH,
                     position,
                 );
-                layer.expert_inputs(gpu, flow, &flow.partial, scratch, state);
+                if controllers.is_some() {
+                    layer.prepare_expert_inputs(gpu, flow, &flow.partial, scratch, state);
+                } else {
+                    layer.expert_inputs(gpu, flow, &flow.partial, scratch, state);
+                }
+            }
+            if let Some(controllers) = controllers {
+                let rows = scratches.clone().map(|scratch| (scratch, binding(&scratch.mixed), &scratch.mlp_input));
+                controllers.encode(gpu, layer, 3, rows, row_count, lanes.wide_gemv);
             }
 
-            gpu.phase(PrefillPhase::Experts);
-            for start in (0..row_count).step_by(BATCHED_PREFILL_ROWS) {
-                let count = (row_count - start).min(BATCHED_PREFILL_ROWS);
+            gpu.phase(match layer.experts {
+                Experts::Nvfp4 {
+                    ..
+                } => PrefillPhase::Experts,
+                Experts::Mxfp8 {
+                    ..
+                } => PrefillPhase::Mxfp8,
+            });
+            let expert_rows = if lanes.rows() <= 128 {
+                lanes.rows()
+            } else {
+                BATCHED_PREFILL_ROWS
+            };
+            for start in (0..row_count).step_by(expert_rows) {
+                let count = (row_count - start).min(expert_rows);
                 let tile = scratches.clone().skip(start).take(count);
                 if lanes.grouped.supports(layer, count) {
                     for (row, scratch) in tile.clone().enumerate() {
@@ -236,7 +346,7 @@ impl Session {
                     }
                 }
             }
-            gpu.phase(PrefillPhase::Other);
+            gpu.phase(PrefillPhase::ExpertFinish);
             for (row, (flow, scratch)) in flows.clone().zip(scratches).enumerate() {
                 layer.finish_experts(gpu, visit, &flow.partial, scratch, state, self.position + row);
                 if let Some(tap) = tap {
@@ -248,6 +358,7 @@ impl Session {
             }
         }
 
+        gpu.phase(PrefillPhase::Other);
         for (row, (flow, taps)) in flows.zip(tap_rows).enumerate() {
             self.finish_forward(gpu, flow, blocks, readout && row + 1 == row_count, taps);
             if let (Some(draft), Some(taps)) = (draft, taps) {

@@ -1,5 +1,7 @@
 # Model change and experiment ledger
 
+- [20261121-INKPREFILL-04 · Faster native Inkling 2 Mini prefill](2026-11-21-inkling-mini-faster-prefill.md) records the M5 Max move to 128-row commands, batched controllers, grouped MXFP8, eight-row BF16 weight reuse and partial-tile expert routing.
+
 - [20261121-INKMATCH-01 · Inkling 2 Mini matched 512-row prefill](2026-11-21-inkling-mini-matched-prefill.md) locates the first full-model mismatch and verifies source-shaped dense projections, local attention and router logits at the first visit.
 
 - [20261121-INKPROFILE-01 · Inkling 2 Mini 4K prefill stage profile](2026-11-21-inkling-mini-prefill-profile.md) attributes M5 Max GPU time on the grouped prefill graph. The instrumented and uninstrumented paths produce bit-exact continuation logits.

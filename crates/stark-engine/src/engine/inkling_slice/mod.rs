@@ -22,7 +22,7 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use session::prefill_profile::{PrefillPhase, PrefillTiming};
 pub use session::{
     PrefillTraceMode, Session, Snapshot, VOCABULARY, measure_dspark, measure_full, measure_full_budget,
-    measure_prefill, profile_prefill, trace_prefill,
+    measure_prefill, measure_prefill_speed, profile_prefill, trace_prefill,
 };
 pub use validation::measure;
 pub use vision::{INKLING_IMAGE_TOKEN, ImageEmbeddings, measure_vision};
@@ -789,6 +789,21 @@ impl Layer {
         s: &Scratch,
         state: VisitInput,
     ) {
+        self.prepare_attention_inputs(gpu, flow, partial, s, state);
+        for slot in 0..3 {
+            let input = self.attention_norm_input(partial, s, state, slot);
+            self.norms(gpu, s, input, &s.qkv_input[slot], slot, state.later);
+        }
+    }
+
+    fn prepare_attention_inputs(
+        &self,
+        gpu: &mut Stream<'_>,
+        flow: &Flow,
+        partial: &Buffer,
+        s: &Scratch,
+        state: VisitInput,
+    ) {
         let queries = self.attn_queries.as_ref().unwrap_or(&self.mlp_query);
         if state.blocks != 0 {
             gpu.mix(
@@ -809,18 +824,24 @@ impl Layer {
         if state.later {
             gpu.mix(&flow.previous, partial, self.gate_queries.as_ref().unwrap(), &s.messages, 2, false, 4);
         }
-        for slot in 0..3 {
+    }
+
+    fn attention_norm_input<'a>(
+        &self,
+        partial: &'a Buffer,
+        s: &'a Scratch,
+        state: VisitInput,
+        slot: usize,
+    ) -> Binding<'a> {
+        if state.blocks == 0 {
+            binding(partial)
+        } else {
             let offset = if self.local {
                 0
             } else {
                 slot * WIDTH * 4
             };
-            let input = if state.blocks == 0 {
-                binding(partial)
-            } else {
-                (&s.mixed, offset)
-            };
-            self.norms(gpu, s, input, &s.qkv_input[slot], slot, state.later);
+            (&s.mixed, offset)
         }
     }
 
@@ -848,13 +869,24 @@ impl Layer {
         s: &Scratch,
         state: VisitInput,
     ) {
+        self.prepare_expert_inputs(gpu, flow, partial, s, state);
+        self.norms(gpu, s, binding(&s.mixed), &s.mlp_input, 3, state.later);
+    }
+
+    fn prepare_expert_inputs(
+        &self,
+        gpu: &mut Stream<'_>,
+        flow: &Flow,
+        partial: &Buffer,
+        s: &Scratch,
+        state: VisitInput,
+    ) {
         if state.boundary {
             gpu.copy(binding(partial), (&flow.blocks, state.blocks * WIDTH * 4));
         }
         gpu.one("ink_after_attention", &[partial, &s.attention], u32::from(state.boundary), (WIDTH / 128, 1), 128);
         gpu.mix(&flow.blocks, partial, &self.mlp_query, &s.mixed, state.blocks + usize::from(state.boundary), true, 1);
         s.record(gpu, "mlp_mixed", &s.mixed);
-        self.norms(gpu, s, binding(&s.mixed), &s.mlp_input, 3, state.later);
     }
 
     fn finish_experts(

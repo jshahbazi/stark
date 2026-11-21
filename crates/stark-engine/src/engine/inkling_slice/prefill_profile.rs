@@ -10,17 +10,20 @@ use serde_json::{Value, json};
 
 use super::*;
 
-// Six encoder transitions per visit and one initial encoder. The M5 Max
-// supports at most 4096 samples in a buffer.
-const SAMPLE_COUNT: usize = (1 + PHYSICAL.len() * 6) * 2;
+// Each visit contributes up to eight phase encoders plus setup and readout.
+const SAMPLE_COUNT: usize = (2 + PHYSICAL.len() * 8) * 2;
 type Encoder = Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::engine::inkling_slice) enum PrefillPhase {
     Other,
+    AttentionInputs,
+    ExpertInputs,
+    ExpertFinish,
     AttentionDense,
     RelativeCacheAttention,
     Experts,
+    Mxfp8,
 }
 
 struct Span {
@@ -34,7 +37,11 @@ struct Totals {
     attention_dense: f64,
     relative_cache_attention: f64,
     experts: f64,
+    mxfp8: f64,
     other: f64,
+    attention_inputs: f64,
+    expert_inputs: f64,
+    expert_finish: f64,
 }
 
 impl Totals {
@@ -48,11 +55,22 @@ impl Totals {
             PrefillPhase::AttentionDense => &mut self.attention_dense,
             PrefillPhase::RelativeCacheAttention => &mut self.relative_cache_attention,
             PrefillPhase::Experts => &mut self.experts,
+            PrefillPhase::Mxfp8 => &mut self.mxfp8,
+            PrefillPhase::AttentionInputs => &mut self.attention_inputs,
+            PrefillPhase::ExpertInputs => &mut self.expert_inputs,
+            PrefillPhase::ExpertFinish => &mut self.expert_finish,
         } += ms;
     }
 
     fn sum(&self) -> f64 {
-        self.attention_dense + self.relative_cache_attention + self.experts + self.other
+        self.attention_dense
+            + self.relative_cache_attention
+            + self.experts
+            + self.mxfp8
+            + self.attention_inputs
+            + self.expert_inputs
+            + self.expert_finish
+            + self.other
     }
 
     fn report(
@@ -62,8 +80,14 @@ impl Totals {
         json!({
             "attention_dense_ms": self.attention_dense,
             "relative_cache_attention_ms": self.relative_cache_attention,
-            "experts_ms": self.experts,
-            "other_ms": self.other,
+            "experts_ms": self.experts + self.mxfp8,
+            "nvfp4_experts_ms": self.experts,
+            "mxfp8_experts_ms": self.mxfp8,
+            "other_ms": self.other + self.attention_inputs + self.expert_inputs + self.expert_finish,
+            "attention_inputs_ms": self.attention_inputs,
+            "expert_inputs_ms": self.expert_inputs,
+            "expert_finish_ms": self.expert_finish,
+            "embedding_readout_ms": self.other,
             "command_gap_ms": (gpu_ms - self.sum()).max(0.0),
             "whole_command_gpu_ms": gpu_ms,
         })
@@ -220,7 +244,7 @@ pub fn profile_prefill(
     let tile_rows = if source_geometry {
         prefill_trace::CHUNK
     } else {
-        BATCHED_PREFILL_ROWS
+        M5_PREFILL_ROWS
     };
     if !(2..=prefix).contains(&count) || count % tile_rows == 1 || (source_geometry && count % tile_rows != 0) {
         return Err("Inkling profile requires grouped prefill tiles with at least two rows each");
