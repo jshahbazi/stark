@@ -55,3 +55,16 @@ The original image-loaded and draft-resident worker benchmarks used one matched 
 Prefill wall time fell by 28.8% greedy and 29.2% sampled. Decode met the 42.53 and 43.91 ms ceilings, and the prefill floors remain open. The repeated model-window controls and the same-session 4K pair support the performance change. The worker comparison is one independent pair per mode. The host reported no thermal or performance warnings before or after the run.
 
 Baseline worker SHA-256 is `64928c90e87754db290f198bed0e7a414c82290d27623fb5e6890b3784363035`. B128 worker SHA-256 is `b239258f6d1bb4280313517389030b07ef0eed32e08560680af54ae67bed4da5`. The aggregate SHA-256 is `1f46160e14bd2ef0ffd2ae76c963b3361f7fd4f8f8cefbedbcff36bd7fff3dc8`.
+
+## Batched RMS and direct expert bindings
+
+The M5 Max worker batches controller RMS and stages activations directly into and out of the grouped expert buffers. The incumbent and candidate used the same original checkpoint, vision and draft weights resident, draft execution off, zero reused input tokens, 4,096 input and 256 output tokens. The request followed a ten-second wait after readiness. All output hashes matched.
+
+| Mode | Pairs | Incumbent prefill | New prefill | Incumbent input tok/s | New input tok/s | Incumbent / new useful decode tok/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Greedy | 1 | 23.27 s | 20.48 s | 176.03 | 199.98 | 35.56 / 35.54 |
+| Temperature 1 | 3 | 23.30 s | 20.74 s | 175.80 | 197.49 | 33.38 / 33.14 |
+
+The sampled medians include the initial slower observation. That candidate request measured 182.53 input tok/s and 28.41 useful decode tok/s. The two repeats reversed order on the same seeded workload and measured 197.49–200.25 input tok/s and 33.14–33.54 useful decode tok/s. The requests accounted for at least 99.95% of observed GPU activity during sampled intervals in the repeat, with no pageouts or swapouts. One incumbent repetition reached fair thermal state. The synthetic singleton decode check measured 28.025 to 28.055 ms median. The cold prefill floors remain 589.58–626.15 tok/s. [Numerical and timing controls](../model-experiments/2026-11-21-inkling-mini-prefill-budget.md)
+
+Candidate worker SHA-256 is `aae3755e67daf4142eac0bed33acaed8fe6c393cf824e85d41b9374f53f7b00a`. The incumbent is the B128 worker above. The first aggregate, sampled repeat and repeat host summary have SHA-256 `6a7944a8567489ef1a6bad7b332e404cd92b3bd267ba0121996208fc4f3df5ed`, `bbc5cd926b5a6dad47abe0b04d2b2ed0ea6d88972f5bed8dfaf7354dce615bd5` and `4cc48e800bacec932891247a4c21be494b6f0268efe313922f407cde460b8c16`.

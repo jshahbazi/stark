@@ -55,6 +55,24 @@ impl GroupedExperts {
         Self::buffers(&runtime.device, capacity)
     }
 
+    pub(super) fn rows(&self) -> usize {
+        self.capacity
+    }
+
+    pub(super) fn input_at(
+        &self,
+        index: usize,
+    ) -> Binding<'_> {
+        row(&self.input, index, WIDTH * 2)
+    }
+
+    pub(super) fn output_at(
+        &self,
+        index: usize,
+    ) -> Binding<'_> {
+        row(&self.output.merged, index, WIDTH * 2)
+    }
+
     pub(super) fn enable_mxfp8(
         &mut self,
         runtime: &mut Runtime,

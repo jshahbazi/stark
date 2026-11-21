@@ -624,7 +624,7 @@ impl Layer {
 
     fn convolution(
         gpu: &mut Stream<'_>,
-        input: &Buffer,
+        input: Binding<'_>,
         weight: &Buffer,
         extra: Option<&Buffer>,
         history: &Buffer,
@@ -632,9 +632,9 @@ impl Layer {
         width: usize,
         position: usize,
     ) {
-        gpu.one(
+        gpu.dispatch(
             "ink_conv",
-            &[input, weight, extra.unwrap_or(weight), history, output],
+            &[input, binding(weight), binding(extra.unwrap_or(weight)), binding(history), binding(output)],
             [width as u32, position as u32, u32::from(extra.is_some()), 0],
             (width / 128, 1),
             128,
@@ -675,7 +675,16 @@ impl Layer {
         self.attention_read_cache(gpu, s, cache, position);
         gpu.project(binding(&s.attended), &self.output, &s.attn_raw, 3072, WIDTH);
         s.record(gpu, "attn_raw", &s.attn_raw);
-        Self::convolution(gpu, &s.attn_raw, &self.attn_conv, None, &cache.conv[2], &s.attention, WIDTH, position);
+        Self::convolution(
+            gpu,
+            binding(&s.attn_raw),
+            &self.attn_conv,
+            None,
+            &cache.conv[2],
+            &s.attention,
+            WIDTH,
+            position,
+        );
     }
 
     fn attention_read_cache(
@@ -739,7 +748,7 @@ impl Layer {
         let position = args[0] as usize;
         Self::convolution(
             gpu,
-            &s.k,
+            binding(&s.k),
             &self.key_conv,
             self.dynamic.as_ref().map(|_| &s.dynamic[0]),
             &cache.conv[0],
@@ -749,7 +758,7 @@ impl Layer {
         );
         Self::convolution(
             gpu,
-            &s.v,
+            binding(&s.v),
             &self.value_conv,
             self.dynamic.as_ref().map(|_| &s.dynamic[1]),
             &cache.conv[1],
@@ -858,7 +867,7 @@ impl Layer {
     ) {
         self.expert_inputs(gpu, flow, partial, s, state);
         self.experts(gpu, s);
-        self.finish_experts(gpu, cache, partial, s, state, position);
+        self.finish_experts(gpu, cache, partial, s, binding(&s.experts), state, position);
     }
 
     fn expert_inputs(
@@ -889,17 +898,19 @@ impl Layer {
         s.record(gpu, "mlp_mixed", &s.mixed);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn finish_experts(
         &self,
         gpu: &mut Stream<'_>,
         cache: &Visit,
         partial: &Buffer,
         s: &Scratch,
+        experts: Binding<'_>,
         state: VisitInput,
         position: usize,
     ) {
         s.record(gpu, "router_logits", &s.logits);
-        Self::convolution(gpu, &s.experts, &self.mlp_conv, None, &cache.conv[3], &s.mlp, WIDTH, position);
+        Self::convolution(gpu, experts, &self.mlp_conv, None, &cache.conv[3], &s.mlp, WIDTH, position);
         gpu.one("ink_after_experts", &[partial, &s.mlp], (), (WIDTH / 128, 1), 128);
         if state.capture {
             gpu.copy(binding(partial), binding(&s.partial_debug));

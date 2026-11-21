@@ -210,6 +210,8 @@ The separate reference-shaped 512-row profile measured 3.17 s in dense projectio
 
 Subdividing the B64 prefill graph found 4.35 s in the four MXFP8 visits and 10.15 s preparing attention and expert inputs. Grouping those expert visits, sharing controller expansion and dense projection loads, and using 128-row commands lowered exact native target prefill from 32.03 to 23.28 s at 4K. Grouped expert tails cut a 31-row tile from 567 to 224 ms. The combined graph used 89.8 MiB of additional workspace. Exact batching of relative/cache attention had a separate 2% marginal gain for 13.4 MiB of workspace and was dropped from the production candidate. [Faster prefill attempt](model-experiments/2026-11-21-inkling-mini-faster-prefill.md)
 
+The B128 follow-up split 22.50 s of 4K command GPU time into 7.65 s of experts, 7.47 s of preparation and finish, 7.20 s of dense/relative attention and 0.18 s of embedding and gaps. The prefill floors allow about 6.5–6.9 s in total. Batched controller RMS and direct expert bindings took 21.15 s against 23.39 s in one exact same-session 4K pair. The 256- and 512-row geometry probes gained 5.6% and 8.4% in short screens and required about two and four times the workspace. A source-shaped dense variant changed logits, and compact NVFP4 removed its certified reduction replay. The next floor-scale comparison needs packed activations, batched projections and query-by-key attention across the connected graph. [4K prefill budget and attempts](model-experiments/2026-11-21-inkling-mini-prefill-budget.md)
+
 ### 5. Speculative decoding
 
 #### The design that held

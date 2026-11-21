@@ -65,6 +65,22 @@ kernel void ink_matvec_source(
     if (k_lane == 0 && row < shape.y) y[row] = bfloat(sum);
 }
 
+static inline float4 ink_mix_normalize(
+    float4 batch, threadgroup float *sums, threadgroup float &inverse, uint simd, uint lane
+) {
+    float norm = 0;
+    for (uint i = 0; i < 4; ++i) norm += batch[i] * batch[i];
+    norm = simd_sum(norm);
+    if (lane == 0) sums[simd] = norm;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd == 0) {
+        float total = simd_sum(lane < 18 ? sums[lane] : 0.f);
+        if (lane == 0) inverse = metal::precise::rsqrt(total / ink_width + 1e-6f);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return batch * inverse;
+}
+
 // Materialize the FP32 rounding boundaries of the source's RMS, scaled
 // query dot, softmax, and weighted residual sum in one dispatch.
 kernel void ink_mix(
@@ -136,15 +152,10 @@ kernel void ink_mix(
 
 // The source RMS reduction reads four adjacent values per thread and reduces
 // the 18 SIMD partial sums in one SIMD operation for a 2304-wide input.
-kernel void ink_norm(
-    device const float *x [[buffer(0)]], device const bfloat *weight [[buffer(1)]],
-    device bfloat *out [[buffer(2)]], constant uint &weighted [[buffer(3)]],
-    uint tid [[thread_index_in_threadgroup]],
-    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]
+static inline void ink_norm_row(
+    float4 value, device const bfloat *weight, device bfloat *out, bool weighted,
+    threadgroup float *sums, threadgroup float &scale, uint tid, uint simd, uint lane
 ) {
-    threadgroup float sums[18];
-    threadgroup float scale;
-    float4 value = *reinterpret_cast<device const float4 *>(x + tid * 4);
     float sum = 0;
     for (uint i = 0; i < 4; ++i) sum += value[i] * value[i];
     sum = simd_sum(sum);
@@ -160,6 +171,18 @@ kernel void ink_norm(
         float unit = value[i] * scale;
         out[j] = bfloat(weighted ? float(weight[j]) * unit : unit);
     }
+}
+
+kernel void ink_norm(
+    device const float *x [[buffer(0)]], device const bfloat *weight [[buffer(1)]],
+    device bfloat *out [[buffer(2)]], constant uint &weighted [[buffer(3)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]
+) {
+    threadgroup float sums[18];
+    threadgroup float scale;
+    float4 value = reinterpret_cast<device const float4 *>(x)[tid];
+    ink_norm_row(value, weight, out, weighted != 0, sums, scale, tid, simd, lane);
 }
 
 kernel void ink_controller_expand(

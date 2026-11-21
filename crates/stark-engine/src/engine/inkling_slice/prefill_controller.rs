@@ -3,6 +3,10 @@
 
 use super::*;
 
+const NORM_BATCH: usize = 4;
+const NORM_KERNELS: [&str; 3] =
+    ["ink_prefill_controller_norm_pair", "ink_prefill_controller_pack_rank", "ink_prefill_controller_norm_output"];
+
 pub(super) struct PrefillControllers {
     input_message: Buffer,
     compressed: Buffer,
@@ -35,14 +39,34 @@ impl PrefillControllers {
         })
     }
 
+    pub(super) fn compile_batched_norm(runtime: &mut Runtime) -> Result<()> {
+        let options = MTLCompileOptions::new();
+        options.set_math_mode(MTLMathMode::Safe);
+        options.set_language_version(MTLLanguageVersion::Version4_0);
+        let library = runtime
+            .device
+            .new_library_with_source(
+                concat!(include_str!("serial.metal"), "\n", include_str!("prefill_controller_norm.metal")),
+                Some(&options),
+            )
+            .map_err(|_| "Inkling prefill batch RMS shader compilation failed")?;
+        for name in NORM_KERNELS {
+            let function = library.new_function_with_name(name).ok_or(name)?;
+            let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
+            runtime.pipelines.insert(name, pipeline);
+        }
+        Ok(())
+    }
+
     pub(super) fn encode<'a>(
         &self,
         gpu: &mut Stream<'_>,
         layer: &Layer,
         slot: usize,
-        rows: impl Iterator<Item = (&'a Scratch, Binding<'a>, &'a Buffer)> + Clone,
+        rows: impl Iterator<Item = (&'a Scratch, Binding<'a>, Binding<'a>)> + Clone,
         count: usize,
         wide_gemv: bool,
+        batched_norm: bool,
     ) {
         let scale = if slot == 3 {
             &layer.mlp_norm
@@ -53,10 +77,25 @@ impl PrefillControllers {
         for start in (0..count).step_by(self.rows) {
             let size = (count - start).min(self.rows);
             let tile = rows.clone().skip(start).take(size);
-            for (scratch, input, _) in tile.clone() {
-                let message = (&scratch.messages, slot * WIDTH * 4);
-                gpu.norm(input, scale, binding(&scratch.controller_pair), false);
-                gpu.norm(message, scale, (&scratch.controller_pair, WIDTH * 2), false);
+            let staged = batched_norm.then(|| tile.clone().collect::<Vec<_>>());
+            if let Some(staged) = &staged {
+                for (batch, rows) in staged.chunks(NORM_BATCH).enumerate() {
+                    let packed = (&self.input_message, batch * NORM_BATCH * 2 * WIDTH * 4);
+                    let mut buffers = [packed; 3 * NORM_BATCH + 1];
+                    for row in 0..NORM_BATCH {
+                        let (scratch, input, _) = rows.get(row).copied().unwrap_or(rows[0]);
+                        buffers[row] = input;
+                        buffers[NORM_BATCH + row] = (&scratch.messages, slot * WIDTH * 4);
+                        buffers[2 * NORM_BATCH + row] = binding(&scratch.controller_pair);
+                    }
+                    gpu.dispatch(NORM_KERNELS[0], &buffers, (), (2, rows.len()), WIDTH / 4);
+                }
+            } else {
+                for (scratch, input, _) in tile.clone() {
+                    let message = (&scratch.messages, slot * WIDTH * 4);
+                    gpu.norm(input, scale, binding(&scratch.controller_pair), false);
+                    gpu.norm(message, scale, (&scratch.controller_pair, WIDTH * 2), false);
+                }
             }
             project_rows(
                 gpu,
@@ -67,20 +106,31 @@ impl PrefillControllers {
                 64,
                 wide_gemv,
             );
-            for (row, (scratch, input, _)) in tile.clone().enumerate() {
-                gpu.dispatch(
-                    "ink_prefill_controller_pack",
-                    &[
-                        input,
-                        (&scratch.messages, slot * WIDTH * 4),
-                        binding(&scratch.compressed),
-                        (&self.input_message, row * 2 * WIDTH * 4),
-                        (&self.compressed, row * 64 * 2),
-                    ],
-                    (),
-                    (WIDTH / 128, 1),
-                    128,
-                );
+            if let Some(staged) = &staged {
+                for (batch, rows) in staged.chunks(NORM_BATCH).enumerate() {
+                    let packed = (&self.compressed, batch * NORM_BATCH * 64 * 2);
+                    let mut buffers = [packed; NORM_BATCH + 1];
+                    for (row, buffer) in buffers[..NORM_BATCH].iter_mut().enumerate() {
+                        *buffer = binding(&rows.get(row).unwrap_or(&rows[0]).0.compressed);
+                    }
+                    gpu.dispatch(NORM_KERNELS[1], &buffers, (), (rows.len(), 1), 64);
+                }
+            } else {
+                for (row, (scratch, input, _)) in tile.clone().enumerate() {
+                    gpu.dispatch(
+                        "ink_prefill_controller_pack",
+                        &[
+                            input,
+                            (&scratch.messages, slot * WIDTH * 4),
+                            binding(&scratch.compressed),
+                            (&self.input_message, row * 2 * WIDTH * 4),
+                            (&self.compressed, row * 64 * 2),
+                        ],
+                        (),
+                        (WIDTH / 128, 1),
+                        128,
+                    );
+                }
             }
             gpu.one(
                 "ink_prefill_controller_expand",
@@ -89,8 +139,20 @@ impl PrefillControllers {
                 (WIDTH / 32, size.div_ceil(16)),
                 32,
             );
-            for (row, (_, _, output)) in tile.enumerate() {
-                gpu.norm((&self.gated, row * WIDTH * 4), scale, binding(output), true);
+            if let Some(staged) = &staged {
+                for (batch, rows) in staged.chunks(NORM_BATCH).enumerate() {
+                    let gated = (&self.gated, batch * NORM_BATCH * WIDTH * 4);
+                    let mut buffers = [gated; NORM_BATCH + 2];
+                    buffers[1] = binding(scale);
+                    for (row, buffer) in buffers[2..].iter_mut().enumerate() {
+                        *buffer = rows.get(row).unwrap_or(&rows[0]).2;
+                    }
+                    gpu.dispatch(NORM_KERNELS[2], &buffers, (), (rows.len(), 1), WIDTH / 4);
+                }
+            } else {
+                for (row, (_, _, output)) in tile.enumerate() {
+                    gpu.norm((&self.gated, row * WIDTH * 4), scale, output, true);
+                }
             }
         }
     }

@@ -456,6 +456,8 @@ pub fn measure_prefill_speed(
                 "controllers" => lanes.enable_controllers(runtime)?,
                 "mx" => lanes.enable_mxfp8(runtime)?,
                 "small" => lanes.enable_short_expert_tiles(),
+                "normbatch" => lanes.enable_batched_norm(runtime)?,
+                "direct" => lanes.direct_experts = true,
                 "widegemv" => lanes.enable_wide_gemv(runtime)?,
                 "baseline" | "wide" => {},
                 _ => return Err("unknown Inkling prefill candidate"),
