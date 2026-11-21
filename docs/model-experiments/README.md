@@ -1,5 +1,7 @@
 # Model change and experiment ledger
 
+[Look up research and speed changes by model](../MODEL_RESEARCH.md), including benchmark comparisons and branch-only attempts. The [source index](source-index.md) groups individual reports by family and topic.
+
 - [20261121-INKPREFILL-06–09 · Inkling 2 Mini packed prefill](2026-11-21-inkling-mini-packed-prefill.md) measures contiguous activations, eight-route MXFP8, and the source-shaped Metal graph and numerical gates on the M5 Max.
 
 - [20261121-INKPREFILL-05 · Inkling 2 Mini 4K prefill budget](2026-11-21-inkling-mini-prefill-budget.md) measures the 128-row bottlenecks, tests wider groups and several matrix and staging changes, and qualifies batched controller RMS with direct expert bindings.
@@ -197,7 +199,7 @@ from this retrospective.
    the next test. A component pass, synthetic kernel speedup or unscreened timing
    observation does not establish a production full-model gain. Name each exact
    artifact whose qualification remains missing.
-6. Add the entry to this index and link its ID from the implementation PR. Update
+6. Add the entry to this ledger and the [source index by model](source-index.md), and link its ID from the implementation PR. For a performance attempt, record its scoped change or timing limitation in the [family speed history](../MODEL_RESEARCH.md#record-the-next-result). Update
    the current model-support/reference page only when the evidence supports a
    capability change. When a new comparison supersedes a benchmark, update its
    current/superseded index without changing the historical measurements.

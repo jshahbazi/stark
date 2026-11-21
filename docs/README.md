@@ -64,6 +64,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 
 | Location | What it holds |
 | --- | --- |
+| [Model research and benchmarks](MODEL_RESEARCH.md) | Look up measured speed changes by family, search past attempts, find branch-only studies and record the next result |
 | [Model experiment ledger](model-experiments/README.md) | Cross-model attempt index and recording template, including failed/inconclusive work, artifact-specific results and adoption status |
 | [benchmarks/](benchmarks/README.md) | Engine comparisons with a current-versus-superseded index, optimization records, and [conversion benchmarks](benchmarks/CONVERSION_BENCHMARKS.md) |
 | [validation/](validation/) | [Scoring parity](validation/SCORING_PARITY.md) against frozen Uzu references and [ColGrep generation acceptance](validation/GENERATION_COLGREP.md), each bound to a named build |

@@ -66,6 +66,8 @@ untested scopes explicit. The worklist does not schedule model runs by itself.
 
 ## Record changes and experiments
 
+Look up the artifact and proposed change in [model research and benchmarks](MODEL_RESEARCH.md) first. Use its source index and speed histories to record the outcome alongside earlier attempts.
+
 Create or extend a [model experiment record](model-experiments/README.md) for
 each compatibility, correctness, memory, precision, state or performance attempt.
 Use the [template](model-experiments/TEMPLATE.md) to bind the hypothesis,

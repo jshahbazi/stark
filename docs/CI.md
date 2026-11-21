@@ -91,6 +91,7 @@ Run the same checks CI runs before opening a pull request. Repository policy and
 ```sh
 uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py
 uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py --test
+uv run --python 3.13.13 python scripts/model_research.py --check
 cargo +1.98.1 build --release --locked -p stark-template
 cargo +1.98.1 test --locked -p stark-template -p stark-resource-budget
 cargo +1.98.1 clippy --locked -p stark-template -p stark-resource-budget --all-targets -- -D warnings

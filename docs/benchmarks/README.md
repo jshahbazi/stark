@@ -1,5 +1,7 @@
 # Benchmarks
 
+For prior work on a particular family, use [model research and benchmarks](../MODEL_RESEARCH.md). The family speed histories link each before/after comparison to its source.
+
 Measured results, each bound to the source revision, build and host named inside it. This index says which result is current and which has been superseded. Earlier archived comparison artifacts are under [archive/experiments](../archive/experiments/). Each report states where its source-bound aggregates are retained.
 
 Track each proposed optimization, failed approach and promotion decision in the
@@ -17,7 +19,7 @@ follow. Update it when a study changes what a lever returned.
 
 ## Current result
 
-**Inkling 2 Mini native worker (2026-11-21).** The M5 Max packed graph reached 452.30 tok/s greedy and 363.22 tok/s at the sampled median for cold 4K prefill on the original checkpoint. All worker output hashes matched the preceding build. The 500 tok/s target and full Ollama parity remain open. [Latest 4K worker results](2026-11-21-inkling-mini-native-worker.md#packed-512-row-prefill)
+**Inkling 2 Mini native worker (2026-11-21).** The source-aligned M5 Max worker reached **683.34 tok/s greedy and 685.31 tok/s seeded sampled** for cold 4K prefill on the original checkpoint, with vision and DSpark resident and drafting off. It won all 16 matched pairs. Useful decode fell from 33.26 to 31.38 tok/s greedy and from 32.09 to 30.31 tok/s sampled, within the original decode ceilings. All 16 pinned stock-schedule F32 logit vectors matched. The final study supersedes the [512-row worker screen](2026-11-21-inkling-mini-native-worker.md#packed-512-row-prefill) for the eligible source-aligned text path. [Final 4K worker results](2026-11-21-inkling-mini-native-worker.md#source-aligned-m5-max-prefill) · [Speed history](../model-experiments/speed-inkling.md)
 
 **Inkling 2 Mini short-prefix projection (2026-11-21).** Matching the pinned MLX attention-gate projection fixed the last short control. Short and 4K connected slice parity passed, with a 0.965 median paired 4K wall ratio. [Short-prefix projection and budget](2026-11-21-inkling-mini-short-projection.md)
 
@@ -25,7 +27,7 @@ follow. Update it when a study changes what a lever returned.
 
 **Inkling 2 Mini native slice (2026-11-21).** The 44 NVFP4 visits with local/global attention, cross-pass gates and persistent state writes ran in 27.35 ms median wall on one Metal command stream. Exact-ingress expert replay passed. Connected slice parity failed. [M5 Max diagnostic](2026-11-21-inkling-mini-native-slice.md)
 
-**Inkling 2 Mini pinned-runtime follow-up (2026-11-21).** The connected two-visit 4K control now passes with bit-identical expert outputs. One short-prefix global expert row remains outside tolerance. The 44-visit diagnostic still fits the 4K budget. [Live parity and paired timing](2026-11-21-inkling-mini-pinned-oracle.md)
+**Inkling 2 Mini pinned-runtime follow-up (2026-11-21).** The connected two-visit 4K control passed with bit-identical expert outputs, and the 44-visit diagnostic fit the budget. This build still had one short-prefix global expert mismatch. The short-prefix projection follow-up above resolved it. [Live parity and paired timing](2026-11-21-inkling-mini-pinned-oracle.md)
 
 **Regular Decider v1.3 201-token smoke (2026-11-18).** The exact pinned 27B
 checkpoint loaded on an M5 Max with 128 GB memory and processed one cold text
