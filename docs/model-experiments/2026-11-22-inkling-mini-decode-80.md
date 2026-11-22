@@ -346,6 +346,58 @@ The sampled 4K arm certified 922 useful outputs in sparse readout and fell back 
 
 Advance the probe to an arithmetic and worker gate. The experiment compares native decode from private snapshots. An exact runtime path still needs outward-safe bounds for the source tensor and cap, selected-score and forced-fallback checks at all live widths, and a same-loaded worker comparison with pinned greedy and seeded output hashes. No claim of live worker throughput follows from these measurements.
 
+## 20261122-INKDECODE-97 · Decode NVFP4 coefficients with scaled half bits
+
+At `9b2491c7`, adapt the scaled E2M1 bit construction from MLX-Serve to the original Inkling checkpoint's adjacent nibble layout. Test pair masks, vector lane shifts, and pair masks with the power-of-two scale restored after the F32 block reduction. The last arm folds the recovery factor into the E4M3 weight scale. The source half ingress uses dyadic coefficients. The F32 block products and their sums stay within range under either scaling, so the existing dot grouping and scaled FMA remain in place. All three arms keep the same activation quantization, expert order and grouped epilogues. Compare against the retained 1 KiB FP16 pair table. [MLX-Serve source at `2fe9be83`](https://github.com/ddalcu/mlx-serve/blob/2fe9be834a601c70ef1a597563026340f0e722fe/src/kernels/moe/moe_fp4_e2m1x2_header.metal)
+
+On the M5 Max, compare all 65,536 four-nibble words per candidate against the source coefficient values, including signed zero and the half subnormal that represents magnitude 0.5 before recovery. Restore the short and four stock 4K snapshots, with all four 4K initial logit rows matching pinned F32. Per fixture and candidate, rotate four profiled serial-logit checks per width at two through four rows, and 16 uninstrumented queued rounds per width at three and four rows using actual DSpark proposals. The queued comparisons include rejected suffixes. The candidates match every checked coefficient, verifier logit row, proposal and committed target and draft state.
+
+| Candidate | Three-row NVFP4 dot change across 4K captures | Three-row paired queued saving | Four-row paired queued saving |
+| --- | ---: | ---: | ---: |
+| Pair masks, restore coefficients | +0.16 to +0.33 ms | −0.51 to +0.16 ms | −0.47 to +1.06 ms |
+| Vector lane shifts, restore coefficients | +0.17 to +0.34 ms | −0.47 to +0.01 ms | −0.79 to −0.29 ms |
+| Pair masks, restore at block scale | +0.03 to +0.21 ms | −0.36 to +0.18 ms | −0.32 to +0.36 ms |
+
+Positive paired queued saving indicates lower wall time. In the separately instrumented runs the three-row NVFP4 dot stage increases on every 4K capture. The block-scale variant mixes small gains and losses in the real queued rounds. The short control changes by −0.05 ms at three rows and +0.03 ms at four rows for that arm. Archive the three shifts at the native gate and retain the table. The timing scope is the native queued round.
+
+## 20261122-INKDECODE-98 · Check arithmetic guarantees for sparse vocabulary readout
+
+Review the MPP products in the original BF16 vocabulary projection and the INT8 screening projection from attempt 96. A real-arithmetic bound follows from Cauchy–Schwarz. For a hidden row `h`, source row `w`, packed row `q` and scale `s`, the difference between the ideal dots is at most `||h||₂ · ||w − s·q||₂`. A runtime bound also needs the errors from both implemented products and the INT8 row scale, followed by an outward bound for the source cap. With ordinary round-to-nearest FP32 accumulation, the conservative accumulation factor at width 2,304 would be `2304·2⁻²⁴ / (1 − 2304·2⁻²⁴)`, approximately 0.0001374 per product against its absolute term sum. The reviewed Apple specification lists the supported input and output types and explains relaxed precision for float inputs. It supplies no accumulation error bound for the two MPP operations used here. Disabling the relaxed flag or replacing the coarse INT8 product alone leaves the original BF16 product's error assumption open. [Apple Metal Shading Language Specification, section 7.2.1](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf#page=354)
+
+Keep the sparse path diagnostic. If testing it further, use the original compiled BF16 tile for selected scores with the production padded stride. Bound omitted mass from integer counts of omitted upper-logit bins. Use the FP32 difference between each bin's upper endpoint and the exact peak before bounding the production exponential, and carry the bounds outward through the FP64 sums and seeded comparison. Reuse the production dense sampler for ambiguous draws and resolve greedy signed-zero ties by token ID. This review establishes neither an exact sparse arithmetic contract nor worker throughput. A full original BF16 projection remains an available control for timing a sampler that avoids full-vocabulary ranking.
+
+## 20261122-INKDECODE-99 · Separate draft ordering from sampled rank
+
+At `9b2491c7`, rerun eight seeded original-checkpoint teacher trajectories on four stock 4K inputs using the INT8 DSpark shortlist. There are 192 anchors per trajectory and two conditional masks. The second mask's context uses the actual first target token. It earns acceptance only when the replayed first proposal would select that token. All eight initial F32 rows, 1,536 first-mask controls and 1,093 reachable second-mask controls match the pinned seed or the original native ranker as applicable.
+
+For the first privileged arm, order the draft's four highest candidates by their actual target logits and assign them the draft's original mass at each rank. Apply a copy of the next uniform to this distribution, using the reordered first candidate if the draw falls outside the four masses. For the second privileged arm, read the full target distribution's sampled rank and choose that rank from the draft's original top four, falling back to its first candidate when the target rank is larger. Both arms use information available only after target verification. The top-four hindsight selector is a ceiling for the existing shortlist.
+
+Fit a separate causal policy that predicts a draft rank from the mask index, the draft's top-two gap, the mass outside the top four and a bin for the copied uniform. Train on the other three prompts. Both seeds of the fourth prompt stay held out. Select four or eight draw bins and one of three smoothing weights by training round count. The fitted policy has no access to target values during held-out selection.
+
+| Arm | Rounds across eight trajectories |
+| --- | ---: |
+| Stock top proposal | 769 |
+| Correct target ordering within draft top four, original mass | 713 |
+| Correct global target sampled rank, original draft order | 766 |
+| Hindsight chooses the target if it appears in the draft top four | 665 |
+| Held-out causal context bins | 771 |
+
+The privileged ordering arm lowers round count on all eight trajectories, by 7.28% in aggregate. Supplying the global sampled rank alone changes it by 0.39%. The causal policy adds two rounds and improves neither seed on any held-out prompt. Archive the context bins. This screen supports investigating better candidate ordering if additional causal draft features are available. It records no live worker gain, and exports no token IDs, logits, draws or fitted parameters.
+
+## 20261122-INKDECODE-100 · Fuse the original vocabulary readout and logit cap
+
+At `9b2491c7`, keep the original BF16 weights, 16 × 32 Metal tensor descriptor and F32 output stride. Accumulate into a cooperative destination, apply the source FP32 soft cap to live rows, then store the tile. Compare four independent SIMD groups per threadgroup with the incumbent one, both with and without this epilogue. Keep the target's one-row path and DSpark's raw projection outside the change. The initial Metal load failed on an unavailable cooperative mask accessor and a missing standard-library include. The corrected variant uses the destination coordinates to restrict the cap to live, valid elements.
+
+Run rotating pairs on the four-token short control and four stock 4K captures. All four 4K starting rows match pinned F32. With zero live capped rows, the three candidates compare 48,015,360 uncapped F32 words in total with the source projection, including padding, and match exactly. The profiled two- through four-row commands match serial capped logits. The uninstrumented queued pairs use 16 real proposal rounds at each of three and four rows per capture. All checked proposals, capped logits and committed target and draft states match.
+
+| Candidate | Three-row readout GPU change across 4K captures | Three-row paired queued saving | Four-row paired queued saving |
+| --- | ---: | ---: | ---: |
+| Four SIMD groups, separate cap | −0.008 to +0.003 ms | −0.64 to +0.42 ms | −0.54 to +0.15 ms |
+| One SIMD group, inline cap | −0.008 to +0.001 ms | −0.14 to +0.15 ms | −0.40 to +0.75 ms |
+| Four SIMD groups, inline cap | −0.014 to +0.010 ms | −0.47 to +0.62 ms | −0.03 to +0.35 ms |
+
+Positive paired queued saving indicates lower wall time. The original head uses 2.06–2.13 ms in the profiled three-row 4K commands. The inline cap and group layout change it by at most 0.014 ms, with mixed queued wall changes. Archive this layout at the native gate. The benchmark includes the original full vocabulary projection in every arm.
+
 ## Evidence
 
 The original target and DSpark artifact digests are recorded with the [integrated QKV run](2026-11-21-inkling-mini-decode-60.md#evidence-identities). The worker and native screen retain aggregate-only private receipts. No prompts, token IDs, logits, targets or fitted tensors are published.
@@ -353,6 +405,21 @@ The original target and DSpark artifact digests are recorded with the [integrate
 | Evidence | SHA-256 |
 | --- | --- |
 | Sealed integrated worker | `638741dc417d72591a96b3fe5f4bccac64b345950319c09bfcded6d11100b485` |
+| NVFP4 shifts source patch | `cf5664ddfac2ff8c2fd0965faadee27eae5a72efdd960e8d6211eb6f33b200d5` |
+| NVFP4 shifts executable | `75fe9a910100f540ebd0912106d59fc07e6c6b6883d1be615ac7c692a18a712d` |
+| NVFP4 shifts harness | `ebef89e8e0a9aca3c880793e514537a60cfa46476e71e681f3c207df2b79ece6` |
+| Pinned MLX-Serve MIT license | `dfe22e0f100fe7f2c2808f1af6f488e7339cf8deb7504153602b4169ed7d90b4` |
+| NVFP4 shifts short receipt | `7e575cd8d39d30474c7f4c1ffb06b6315639293783b3d4dfb418df78264dc3d8` |
+| NVFP4 shifts stock receipts | `9a1ec887d30e5b7839ad04ee653701b6dee8473e55761fc93960876229460f15`, `508e8835a829e62c06e0715020e3dec3cc0995d33abbd0ac364c73e8c6679890`, `390f0f3b55d770a2d538f8181347f3b97330dc0122b3a9524d40e33f46ea3a09`, `b83355f281acc4895ec984be2c2964a3d42fde241b2610092269caa48b168c4c` |
+| Draft ordering replay source patch | `2f1e3334c77fa1a4fda7f2cb4c6d567e72775ec0f9d9a8dc9c1959541f392124` |
+| Draft ordering replay executable | `d267cad9ce87268ae9da35cc9a7fac1827660ba4e49cf3cd654eaddd57350a60` |
+| Draft ordering replay harness | `b62b17f266eb352813d69405a1cfbb27796ea17fe8dac079b8ac6b03c2d1ec5c` |
+| Draft ordering replay receipt | `1fe0ff9a27792df4b83f3377c840141e4a4bcf81d84e45e5678f9005dea6ff3a` |
+| Fused vocabulary readout source patch | `355517c19b6e538bb19bf3259e9d91eef94e5fe8f2526531fecfb55be193732f` |
+| Fused vocabulary readout executable | `ee2187be5d7c85777c789e86b5f80fd55ba142eda15870a814ec81b40eeede23` |
+| Fused vocabulary readout harness | `5d5a34f0fb66c61f15742ed52e686c7538bab8488bce2d200280ae91434a9253` |
+| Fused vocabulary readout short receipt | `7f64491b92fd0263e7354c5f9bdc09bf5463d65b852d6ee607a648a3f85f190a` |
+| Fused vocabulary readout stock receipts | `ee2024e62070d603c8631ae2c5106e2b6739597fa57de9509edc50edddf79e48`, `b2d191e1c897f806f8ffaa52cd390fde022853a8a0a80422e3f9aeca373f980f`, `32ad833396bcc41048033e9f91bb74d94dba365798446dda9380d1b82adec9e1`, `08004219e41dc22e8a1aabad3988a256b5f23686fbb1b3aeddfdffddeb5d51f5` |
 | One-worker harness | `d950570aad9ffa2ae0f0a5e46f4e608096836ea99535ded1ddcf59a47220d7d9` |
 | One-worker receipt | `8bb65ca242a3db7388f64bbbf2d7a2425918847e5380979b98ea1f47475bd261` |
 | One-worker host observations | `da15251353b67f433c9956d4c9a67c7b01fe62afd6233792ce8b04a6961dbf85` |
