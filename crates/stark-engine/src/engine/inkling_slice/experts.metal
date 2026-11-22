@@ -174,9 +174,16 @@ inline float ink_fp4_code(uint nibble) {
 inline float4 ink_nvfp4_nibbles(uint word) {
     const uint4 nibble = (uint4(word) >> uint4(0, 4, 8, 12)) & 15u;
     const uint4 magnitude = nibble & 7u;
+#ifdef INK_VERIFY_AFFINE_FP4
+    // For magnitudes 2..7 the float bits advance by one bit at position 22.
+    // Code one needs an offset correction. Apply the sign after masking zero.
+    const uint4 bits = ((magnitude + 252u - uint4(magnitude == 1u)) << 22) & (0u - uint4(magnitude != 0u));
+    return as_type<float4>(bits | ((nibble & 8u) << 28));
+#else
     const uint4 normal = (((magnitude >> 1) + 126u) << 23) | ((magnitude & 1u) << 22);
     const uint4 small = select(uint4(0), uint4(0x3f000000u), magnitude == 1u);
     return as_type<float4>(select(small, normal, magnitude >= 2u) | ((nibble & 8u) << 28));
+#endif
 }
 #endif
 

@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–34 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–37 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -527,6 +527,60 @@ Rates are in modeled tok/s. Fixed depth two was the best fixed setting at the me
 
 The ratio policy estimates a median of 55.72 tok/s, about 0.09 more than fixed depth two, and falls behind on the hardest input. The 16-position policy estimates 55.05. Anchor confidence alone failed to improve on fixed depth two. The hindsight range of 60.85–77.13 shows that perfect round choice could matter, with only 0.85 tok/s of modeled headroom on the hardest prompt before finishing and host work. Defer implementing these predictors. The screen supports lowering per-round compute or improving the proposals themselves before revisiting depth choice. No worker throughput changed.
 
+## 20261121-INKDECODE-35 · Isolate packed expert reads and simplify exact coefficient decoding
+
+Run three shadow projections from the live short verifier's routed operands using the same packed banks, indirect grid and scratch write layout. Time the original dot, the original dot with one weight column reused across each expert's outputs, and an integer checksum that consumes every packed weight, scale and binary16 activation load. Each shadow writes private scratch before the unchanged live product. Track the live product separately and compare its F32 logits against serial. This measures the response to address reuse and removing float work under these launch conditions. The probe does not identify DRAM traffic or decompose wall time into additive costs.
+
+In six rotated shadow comparisons per width on each stock input, the four-row shadow control took 11.93–12.21 ms for the 88 gate/up and down products. Reusing weight addresses saved 0.06–0.45 ms at the paired medians. The checksum saved 4.83–5.57 ms with the reads still present. The live projection medians moved by at most 0.26 ms relative to their same-input shadow baseline. The result favors addressing arithmetic and coefficient decode before redesigning packed-weight storage.
+
+Form the FP4 magnitude as an affine FP32 bit pattern for codes two through seven, with explicit code-one correction and a zero mask. Restore the sign bit after the mask. For E4M3, separately test shifting the complete byte into adjacent normal exponent and mantissa fields, with an explicit subnormal select. The host bit comparison covered all 16 FP4 nibbles, including negative zero, and all 256 inputs to the unsigned E4M3 helper. The signed MXFP8 reserved-code handling remains independent.
+
+| Exact decoder arm | Two-row paired saving, stock 4K | Three-row paired saving | Four-row paired saving |
+| --- | ---: | ---: | ---: |
+| FP4 affine bits | 1.14–1.31 ms | 1.56–1.69 ms | 2.06–2.30 ms |
+| E4M3 linear bits and subnormal select | 0.00–0.24 ms | −0.17–0.18 ms | 0.33–0.40 ms |
+| Both | 1.21–1.31 ms | 1.57–2.07 ms | 2.07–2.25 ms |
+
+Use eight rotated uninstrumented pairs per width and input. Separate timestamped comparisons put the four-row NVFP4 products at 11.78–12.43 ms with the ordinary decoder and 9.66–10.65 ms with affine FP4. All checked F32 vectors matched the serial target on the short prefix and both 4K inputs. The combined candidate passed the 45 rejected-suffix and capacity-wrap checks. An initial Rust build failed to resolve the private scratch allocation helper. The sealed run uses a directly allocated Metal private buffer.
+
+## 20261121-INKDECODE-36 · Compare exact FP16 element products
+
+The ingress coefficient already contains one FP4 value multiplied by its E4M3 activation scale. A second FP4 value leaves an odd significand no larger than `3 × 3 × 15 = 135`. Each nonzero element product is within the normal FP16 exponent range for the source activation codes. Multiply the two binary16 values, widen each product before the four-element sums, and preserve the F32 weight-scale FMA recurrence and final SIMD reduction. A host bit check covered 32,768 combinations of activation nibble, unsigned E4M3 scale and weight nibble, including signed zeros.
+
+| Two-stock-input verifier arm | Two-row paired saving | Three-row paired saving | Four-row paired saving |
+| --- | ---: | ---: | ---: |
+| Exact FP16 element products | 0.78–0.89 ms | 0.96–1.12 ms | 1.25–1.46 ms |
+| Affine FP4 readout in F32 | 1.01–1.18 ms | 1.36–1.44 ms | 1.68–1.94 ms |
+| Affine FP4 plus linear E4M3 in F32 | 1.09–1.19 ms | 1.36–1.52 ms | 1.63–1.95 ms |
+
+Eight rotated plain comparisons at each width reproduced every checked F32 row on the short and both stock 4K fixtures. Exact FP16 element products also passed all 45 rejection and capacity-wrap controls. The affine change alone beat FP16 multiplication on both 4K inputs. Its repeated four-row command savings were 1.68–1.94 ms. The linear E4M3 change gave mixed standalone results and little further saving in the repeated comparison. Retire the half-product, E4M3 and shadow variants. Retain the affine FP4 decoder within binary16-ingress verification under `STARK_INKLING_EXPERIMENT_VERIFY_LEAN_DECODE=1`.
+
+### Retained-build parity
+
+The build with affine FP4 decoding reproduced the serial continuation and committed cache state with the candidate enabled on the short and both stock 4K captures. All 45 rejection and capacity-wrap controls passed, including abandoned-transaction reset. The flags-unset source matched both connected slice aggregate records and the pinned full-model short logits. Four stock-scheduled 4K captures reproduced 16 F32 logit vectors, 768 BF16 visit residuals and four snapshot replays.
+
+### Paired cold 4K worker results
+
+Both arms used the same sealed worker and kept the prior exact verifier, global K/V sharing and short router options on. The candidate additionally enabled the affine FP4 decoder. Four alternating pairs per mode used 4,096 input tokens at context 4,352, zero reuse and 256 sampled and emitted tokens. Vision and DSpark stayed resident. Greedy requested three drafts and seeded sampled requested two. All 16 output hashes and paired proposal and acceptance counts matched.
+
+| Mode | Control median | Affine FP4 median | Median paired gain | Candidate range | Faster pairs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Greedy | 57.63 tok/s | **60.82 tok/s** | +5.57% | 52.71–64.23 | 4/4 |
+| Seeded sampled | 46.03 tok/s | **49.22 tok/s** | +5.62% | 47.91–49.28 | 4/4 |
+
+The two workers accounted for 99.87% of observed GPU counter increments across 84 intervals. Thermal readings were nominal or fair. Pageouts increased by 286 pages and swapouts by zero. The greedy median clears 60 tok/s on this set. At the observed sampled acceptance and other costs, reaching 60 would still require 6.78–8.00 ms less per verifier round across the sampled prompts.
+
+## 20261121-INKDECODE-37 · Profile the stock 4K DSpark proposal command
+
+Measure the live multi-mask proposal command at depths two and three on two stock 4K prefixes. Alternate the plain and timestamped arms at each of 16 consecutive anchors, and advance the same source target teacher once per anchor. Match all proposed IDs between arms. The full-vocabulary shortlist is enabled. The timing excludes target verification, acceptance and commit.
+
+| Proposals | Plain command wall median | Eight-row draft block GPU | Shared vocabulary projection GPU | Markov preparation and state GPU | Rank and winner GPU |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Two | 4.62–4.64 ms | 2.12–2.13 ms | 2.06–2.07 ms | 0.14–0.15 ms | 0.06 ms |
+| Three | 4.71–4.74 ms | 2.12–2.13 ms | 2.06–2.07 ms | 0.20–0.22 ms | 0.08–0.09 ms |
+
+Plain command GPU medians were 4.37–4.40 ms at depth two and 4.45–4.48 ms at depth three. The extra timestamps added 0.01–0.02 ms at the paired wall medians. The eight-row block includes the final normalization before the vocabulary projection. The fixed draft-block and vocabulary costs explain most of the proposal command. The shortlist rank stage has less than 0.09 ms left to recover on these inputs. Keep the timestamps in the archived diagnostic patch. This measurement does not change worker throughput.
+
 ## Evidence identities
 
 Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1`. Original DSpark SHA-256 `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2`. The current run uses the pinned Ollama capture and host documented in the [default-router record](2026-11-21-inkling-mini-decode-default.md).
@@ -806,3 +860,37 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Sampled depth bound pre-draw/inkling_slice | `63b9f03a7d846ba4a391bf3f0dcd4f5f26bae778cb9db4bf4e11c78cacd067bf` |
 | Sampled depth bound pre-draw/scored-source.patch | `73b8668b56ed618c4a50e76f3fffdbea796c30fb59f6f03de68df6118d0af6eb` |
 | Sampled depth bound pre-draw/result.json | `aec3adb0e955e0c045fa97df5f7773fdd8e3b58b92171f5c44cd63691858c063` |
+| NVFP4 read and decoder screen inkling_slice | `82999a6511194c32cf0cea39c6b7445e66e422d71853c5756419a76d477ebf13` |
+| NVFP4 read and decoder screen scored-source.patch | `7154ff6c3319203512f6486aaa250e59e65abf28431e4bbd6d43041a7edb400e` |
+| NVFP4 read and decoder screen short.json | `669f7e7421a3b536fa8071deaa3a4cc5ae076f76c1251fc59064b0c43c897142` |
+| NVFP4 read and decoder screen stock-s4096-00.json | `9523542b0cd2b5d00d61473a799d58daba73cf1b6bbe3b6f98007d891155c443` |
+| NVFP4 read and decoder screen stock-g4096-01.json | `9a7239e50f69fb59a9840757c21ac1be24ca167b1cb66c6ef4ec463b8118c830` |
+| NVFP4 read and decoder screen check_coefficients.py | `ed78be1b1323bb1623bdded6a146d7a736b8a75488160f01c9cedb96efae79d2` |
+| NVFP4 read and decoder screen check_coefficients.json | `0bac80e70e445409764e98a7ad477592f07cc221445f950dfd7bf6c8cd83ac9b` |
+| NVFP4 FP16 element product screen inkling_slice | `f8d9d57856bc16ce2f975ef21f809aae2a886f4e42318afd8f525cc24d59b8fc` |
+| NVFP4 FP16 element product screen scored-source.patch | `55e067aaed16489c9dba24f40196edce7a436067d958e33e94c7e4e619a7bb7f` |
+| NVFP4 FP16 element product screen short.json | `77556d893227adc28eb0f302be74683d34d694afd574d3628f1224a828ed41c5` |
+| NVFP4 FP16 element product screen stock-s4096-00.json | `41b181eb33dde18b20c47dbcf2553c39a516705f6e86dedb77866317ddf1be83` |
+| NVFP4 FP16 element product screen stock-g4096-01.json | `4c056566fd6701d9cce42e8dccb5ae09e36971dd4222738e93d031275ef399c2` |
+| NVFP4 FP16 element product screen check_products.py | `3a7b873ad84c89af15e5079bde739282cb26d922b902f6c0ae5f1623a69a9ab3` |
+| NVFP4 FP16 element product screen check_products.json | `1b6c103afed575b732a696aa330a320e7651ab4cc86fcef63908beb05069057b` |
+| Affine FP4 retained build inkling_slice | `86882f7bf35703102be8c88789f2424bdfd71cb7b1d211231b1e77bf2d0ba66e` |
+| Affine FP4 retained build scored-source.patch | `cc9534b022d31844717803f277a756946e151d479ac68feb098747f3ec12cd2f` |
+| Affine FP4 retained build short.json | `41ced58ae70b776cd0b01535daaf841d08a2aa3686029d3945c313d04c390d72` |
+| Affine FP4 retained build stock-s4096-00.json | `47d5c913533593d0774beeb4673170c6f83b3297e0242e53901a78a51c885d4e` |
+| Affine FP4 retained build stock-g4096-01.json | `254bc6adf3d063714e5cca4ff43b9ccb61d2a4e6298e5a524eee833caa82c8eb` |
+| Affine FP4 retained build flags-unset/slice-4.json | `3ec9bea159f2df8ab1c508329cd2b102cb53e672c740ae3fbddc9ba677cbfa63` |
+| Affine FP4 retained build flags-unset/slice-4096.json | `c4a5cefe72c1633b5a56a7092e2e47479698d79936933e66910289b867c40652` |
+| Affine FP4 retained build flags-unset/short-both.json | `9357b0c5d286f9272f47c80bcfd0eea083022ef8542e127c698ac9085b7861e5` |
+| Affine FP4 retained build flags-unset/full-0.json | `8e5390236d3da3f73c50e2da3c94b8711f5263a4013a128759693112281c112f` |
+| Affine FP4 retained build flags-unset/full-1.json | `a75bbafce59c724c433c8354c19d979e87f29f2d1c7b1a9d885775208ab1f206` |
+| Affine FP4 retained build flags-unset/full-2.json | `f67cfa2b8dd4a29d1898ef2bcb23fe9d0be71933ca0d60fcaadc1e73fb867b96` |
+| Affine FP4 retained build flags-unset/full-3.json | `2ae7883d68df5fa710431bb486a2d7fafa6c44a401a1f69caf540767d0bb8711` |
+| Affine FP4 worker stark-generate | `99cabd382cc554288145bfcb70150f6e080da78d1e72d4edc4ee5d3d1c59560b` |
+| Affine FP4 worker worker_probe.py | `e0ef33f19b12e4b73a92306565692610f1ca0cfa3d15ef189681f9295a684cb8` |
+| Affine FP4 worker worker-pairs.jsonl | `7183447837802ee8f2edda725572cd05ce34e8e0141fcac52eb20afeb0f75eb8` |
+| Affine FP4 worker worker-host.jsonl | `8b7a5fd5ddf439c2f93b03e96d252e0dd5a58cf4c5538638250ddae7bb426ee2` |
+| DSpark proposal stage profile inkling_slice | `b1de505c1ae6a6911aab2111c0d7ed64ed3aba26b5b01cb6a4804fe8d68fcb0d` |
+| DSpark proposal stage profile scored-source.patch | `e5c605c710ed2ccd157b9982dcb956765d5f9dbef7a4925caffbe11a5631ad44` |
+| DSpark proposal stage profile stock-s4096-00.json | `753bd5066802dd2620cd5ee851b47250aa81b0ebb8e3edbf6a67d80b3703ead7` |
+| DSpark proposal stage profile stock-g4096-01.json | `6594f05ae38d5d30f79b2b306645600a78d435e8fb923a104499683233e85314` |
