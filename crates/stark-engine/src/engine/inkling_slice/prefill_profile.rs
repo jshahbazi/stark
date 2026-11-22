@@ -214,6 +214,7 @@ pub(in crate::engine::inkling_slice) struct PrefillTiming {
     samples: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
     spans: Vec<Span>,
     pub(super) fold_verify_phases: bool,
+    pub(super) split_verify_experts: bool,
     start: (u64, u64),
     tile: Totals,
     totals: Totals,
@@ -244,6 +245,7 @@ impl PrefillTiming {
             samples,
             spans: Vec::with_capacity(SAMPLE_COUNT / 2),
             fold_verify_phases: false,
+            split_verify_experts: false,
             start: (0, 0),
             tile: Totals::default(),
             totals: Totals::default(),
@@ -296,7 +298,23 @@ impl PrefillTiming {
         dispatches: usize,
         phase: PrefillPhase,
     ) {
-        let phase = if self.fold_verify_phases {
+        let phase = if self.split_verify_experts {
+            match phase {
+                PrefillPhase::Experts
+                | PrefillPhase::RouterProjection
+                | PrefillPhase::RouteSelect
+                | PrefillPhase::Nvfp4Quant
+                | PrefillPhase::Nvfp4UpDot
+                | PrefillPhase::Nvfp4DownDot
+                | PrefillPhase::Nvfp4Epilogue
+                | PrefillPhase::ExpertCombine
+                | PrefillPhase::ExpertFinish
+                | PrefillPhase::Mxfp8
+                | PrefillPhase::Mxfp8Up
+                | PrefillPhase::Mxfp8Down => phase,
+                _ => PrefillPhase::Other,
+            }
+        } else if self.fold_verify_phases {
             match phase {
                 PrefillPhase::KeyValue
                 | PrefillPhase::RelativeTable

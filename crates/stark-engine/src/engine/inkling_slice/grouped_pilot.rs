@@ -493,6 +493,9 @@ impl GroupedExperts {
         } else {
             self.encode_router(gpu, &self.input, &layer.router, &layer.bias, rows);
         }
+        if gpu.runtime.verify_nvfp4_matvec {
+            gpu.phase(PrefillPhase::RouteSelect);
+        }
         let bucket = if matches!(layer.experts, Experts::Nvfp4 { .. }) && active_rows64(gpu) {
             EXPERIMENT_BUCKET
         } else {
@@ -545,13 +548,18 @@ impl GroupedExperts {
         bias: &Buffer,
         rows: usize,
     ) {
-        gpu.one(
-            "ink_prefill_router_source",
-            &[input, router, &self.logits],
-            rows as u32,
-            (EXPERTS / 32, rows.div_ceil(16)),
-            32,
-        );
+        if gpu.runtime.verify_nvfp4_matvec {
+            gpu.phase(PrefillPhase::RouterProjection);
+        }
+        let projection = if gpu.runtime.verify_nvfp4_matvec && gpu.runtime.verify_short_router && rows <= 4 {
+            "ink_verify_router_source"
+        } else {
+            "ink_prefill_router_source"
+        };
+        gpu.one(projection, &[input, router, &self.logits], rows as u32, (EXPERTS / 32, rows.div_ceil(16)), 32);
+        if gpu.runtime.verify_nvfp4_matvec {
+            gpu.phase(PrefillPhase::RouteSelect);
+        }
         if gpu.runtime.verify_nvfp4_matvec && gpu.runtime.parallel_route && self.source_log_weights.is_some() {
             gpu.one(PARALLEL_ROUTE_KERNEL, &[&self.logits, bias, &self.ids, &self.weights], (), (rows, 1), 32);
             return;

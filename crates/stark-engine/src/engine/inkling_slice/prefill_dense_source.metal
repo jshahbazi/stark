@@ -65,14 +65,12 @@ kernel void ink_prefill_router_source(
 }
 
 
-#ifdef INK_SOURCE_SINGLETON_ROUTER
-// Keep the source tensor operation and K order. Only the live row's input
-// registers are loaded inside the loop. Each weight fragment is aligned to
-// four BF16 words on this fixed 2,304-wide router.
-kernel void ink_singleton_router_source(
-    device const bfloat *input [[buffer(0)]], device const bfloat *weight [[buffer(1)]],
-    device float *output [[buffer(2)]], uint tile [[threadgroup_position_in_grid]],
-    uint lane [[thread_index_in_simdgroup]]) {
+#if defined(INK_SOURCE_SINGLETON_ROUTER) || defined(INK_SOURCE_VERIFY_ROUTER)
+// Keep the source tensor operation and K order. Only live input rows
+// load registers. Each weight fragment is aligned to four BF16 words.
+static void ink_short_router_source(
+    device const bfloat *input, device const bfloat *weight, device float *output,
+    uint rows, uint tile, uint lane) {
     constexpr uint M = 16, N = 32, K = 16, Width = 2304;
     constexpr auto descriptor = mpp::tensor_ops::matmul2d_descriptor(
         M, N, K, false, true, true, mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
@@ -90,14 +88,14 @@ kernel void ink_singleton_router_source(
     const device bfloat4 *w1 = w0 + 8 * Width / 4;
     const device bfloat4 *w2 = w0 + 16 * Width / 4;
     const device bfloat4 *w3 = w0 + 24 * Width / 4;
-    const device bfloat4 *source = (const device bfloat4 *)(input + k_base);
+    const device bfloat4 *source = (const device bfloat4 *)(input + row_base * Width + k_base);
     for (uint part = 0; part < Width; part += 2048) {
         for (ushort i = 0; i < acc.get_capacity(); ++i) acc[i] = 0.0f;
         for (uint k = part / 4; k < min(part + 2048, Width) / 4; k += K / 4) {
             const bfloat4 x0 = w0[k], x1 = w1[k], x2 = w2[k], x3 = w3[k];
-            const bfloat4 row = row_base == 0 ? source[k] : bfloat4(0);
+            const bfloat4 row = row_base < rows ? source[k] : bfloat4(0);
             for (ushort i = 0; i < 4; ++i) {
-                if (row_base == 0) a[i] = row[i];
+                if (row_base < rows) a[i] = row[i];
                 b[i] = x0[i];
                 b[i + 4] = x1[i];
                 b[i + 8] = x2[i];
@@ -109,8 +107,26 @@ kernel void ink_singleton_router_source(
     }
     for (ushort i = 0; i < acc.get_capacity(); ++i) {
         const auto at = acc.get_multidimensional_index(i);
-        if (at[1] == 0) output[tile * N + at[0]] = total[i];
+        if (at[1] < rows) output[at[1] * 128 + tile * N + at[0]] = total[i];
     }
+}
+#endif
+
+#ifdef INK_SOURCE_SINGLETON_ROUTER
+kernel void ink_singleton_router_source(
+    device const bfloat *input [[buffer(0)]], device const bfloat *weight [[buffer(1)]],
+    device float *output [[buffer(2)]], uint tile [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    ink_short_router_source(input, weight, output, 1, tile, lane);
+}
+#endif
+
+#ifdef INK_SOURCE_VERIFY_ROUTER
+kernel void ink_verify_router_source(
+    device const bfloat *input [[buffer(0)]], device const bfloat *weight [[buffer(1)]],
+    device float *output [[buffer(2)]], constant uint &rows [[buffer(3)]],
+    uint tile [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    ink_short_router_source(input, weight, output, rows, tile, lane);
 }
 #endif
 

@@ -130,6 +130,16 @@ impl PrefillLanes {
             runtime.verify_fused_finish = fused_experts;
             runtime.verify_fused_attention = fused_attention;
         }
+        if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_SHORT_ROUTER").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+        {
+            packed_prefill::register(
+                runtime,
+                concat!("#define INK_SOURCE_VERIFY_ROUTER\n", include_str!("prefill_dense_source.metal")),
+                &["ink_verify_router_source"],
+            )?;
+            runtime.verify_short_router = true;
+        }
         self.grouped.min_rows = 2;
         Ok(())
     }
@@ -362,6 +372,15 @@ impl Session {
             {
                 let rows = scratches.clone().collect::<Vec<_>>();
                 shared.encode_shared_local(gpu, index, layer, visit, self.position, &rows);
+            } else if let Some(shared) = undo.filter(|workspace| workspace.shares_global_attention())
+                && !layer.local
+                && self.position >= LOCAL
+                && self.position + row_count <= visit.capacity
+                && tap.is_none()
+                && trace.is_none()
+            {
+                let rows = scratches.clone().collect::<Vec<_>>();
+                shared.encode_shared_global(gpu, layer, visit, self.position, &rows);
             } else if let Some(relative) = lanes.relative.as_ref().filter(|_| layer.local && visit.capacity == LOCAL) {
                 relative.gather(gpu, visit, self.position, row_count, true);
                 for (row, scratch) in scratches.clone().enumerate() {

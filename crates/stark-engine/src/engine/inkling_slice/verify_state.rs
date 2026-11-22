@@ -14,8 +14,9 @@ const SAVED_VISIT_BYTES: usize = 2 * MAX_VERIFY_ROWS * KV_ROW_BYTES + 3 * CONV_B
 pub(super) struct VerifyWorkspace {
     saved: Buffer,
     anchors: Buffer,
-    local_parts: Option<Buffer>,
+    attention_parts: Option<Buffer>,
     pub(super) local_rows_per_group: usize,
+    pub(super) global_share: (usize, usize),
     lanes: PrefillLanes,
     draft: DraftBlock,
 }
@@ -32,8 +33,14 @@ impl VerifyWorkspace {
         packed_prefill::register(runtime, include_str!("verify_state.metal"), &["ink_save_anchor_convolution"])?;
         let shared_attention =
             std::env::var_os("STARK_INKLING_EXPERIMENT_SHARED_LOCAL").as_deref() == Some(std::ffi::OsStr::new("1"));
-        if shared_attention {
-            packed_prefill::register(runtime, include_str!("verify_attention.metal"), &["ink_verify_local_parts"])?;
+        let shared_global =
+            std::env::var_os("STARK_INKLING_EXPERIMENT_SHARED_GLOBAL").as_deref() == Some(std::ffi::OsStr::new("1"));
+        if shared_attention || shared_global {
+            packed_prefill::register(
+                runtime,
+                include_str!("verify_attention.metal"),
+                &["ink_verify_local_parts", "ink_verify_global_parts"],
+            )?;
         }
         let draft = DraftBlock::new(runtime)?;
         let alloc = |bytes| {
@@ -45,8 +52,15 @@ impl VerifyWorkspace {
         Ok(Self {
             saved: alloc(visits * SAVED_VISIT_BYTES)?,
             anchors: alloc(visits * CONV_BYTES)?,
-            local_parts: shared_attention.then(|| alloc(MAX_VERIFY_ROWS * HEADS * 64 * 130 * 4)).transpose()?,
+            attention_parts: (shared_attention || shared_global)
+                .then(|| alloc(MAX_VERIFY_ROWS * HEADS * 64 * 130 * 4))
+                .transpose()?,
 
+            global_share: if shared_global {
+                (3, 1)
+            } else {
+                (0, 0)
+            },
             local_rows_per_group: if shared_attention {
                 2
             } else {
@@ -127,7 +141,7 @@ impl VerifyWorkspace {
     }
 
     pub(super) fn shares_local_attention(&self) -> bool {
-        self.local_rows_per_group > 0 && self.local_parts.is_some()
+        self.local_rows_per_group > 0 && self.attention_parts.is_some()
     }
 
     pub(super) fn encode_shared_local(
@@ -139,7 +153,7 @@ impl VerifyWorkspace {
         position: usize,
         rows: &[&Scratch],
     ) {
-        let parts = self.local_parts.as_ref().expect("shared local verifier workspace");
+        let parts = self.attention_parts.as_ref().expect("shared local verifier workspace");
         for (row, scratch) in rows.iter().enumerate() {
             layer.attention_write_cache(gpu, scratch, visit, [(position + row) as u32, LOCAL as u32, LOCAL as u32, 64]);
             gpu.one(
@@ -173,6 +187,70 @@ impl VerifyWorkspace {
             ],
             [position as u32, rows.len() as u32, self.local_rows_per_group as u32, 0],
             (16, HEADS * rows.len().div_ceil(self.local_rows_per_group)),
+            128,
+        );
+        for (row, scratch) in rows.iter().enumerate() {
+            gpu.dispatch(
+                "ink_attention_source_gate",
+                &[(parts, row * HEADS * 64 * 130 * 4), binding(&scratch.attn_gate), binding(&scratch.attended)],
+                [64u32, 64],
+                (8, HEADS),
+                128,
+            );
+        }
+    }
+
+    pub(super) fn shares_global_attention(&self) -> bool {
+        self.global_share.0 != 0 && self.attention_parts.is_some()
+    }
+
+    pub(super) fn encode_shared_global(
+        &self,
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        visit: &Visit,
+        position: usize,
+        rows: &[&Scratch],
+    ) {
+        let parts = self.attention_parts.as_ref().expect("shared global verifier workspace");
+        let (heads_per_group, rows_per_group) = self.global_share;
+        gpu.phase(PrefillPhase::KeyValue);
+        for (row, scratch) in rows.iter().enumerate() {
+            layer.attention_write_cache(gpu, scratch, visit, [(position + row) as u32, visit.capacity as u32, 0, 64]);
+        }
+        gpu.phase(PrefillPhase::RelativeTable);
+        for scratch in rows {
+            gpu.one(
+                "ink_prefill_relative_table_source",
+                &[&scratch.r, &layer.relative, &scratch.table],
+                HEADS as u32,
+                (LOCAL / 32, HEADS.div_ceil(16)),
+                32,
+            );
+        }
+        gpu.phase(PrefillPhase::GlobalAttention);
+        let [a, b, c, d] = std::array::from_fn(|index| rows[index.min(rows.len() - 1)]);
+        gpu.dispatch(
+            "ink_verify_global_parts",
+            &[
+                binding(&a.q),
+                binding(&b.q),
+                binding(&c.q),
+                binding(&d.q),
+                binding(&a.table),
+                binding(&b.table),
+                binding(&c.table),
+                binding(&d.table),
+                binding(&a.sink),
+                binding(&b.sink),
+                binding(&c.sink),
+                binding(&d.sink),
+                binding(&visit.keys),
+                binding(&visit.values),
+                binding(parts),
+            ],
+            [position as u32, rows.len() as u32, rows_per_group as u32, heads_per_group as u32],
+            (16, HEADS / heads_per_group * rows.len().div_ceil(rows_per_group)),
             128,
         );
         for (row, scratch) in rows.iter().enumerate() {
@@ -340,6 +418,14 @@ impl Session {
         &mut self,
         tokens: &[u32],
     ) -> Result<Verification<'_>> {
+        self.begin_verify_profiled(tokens, None).map(|(verification, _)| verification)
+    }
+
+    pub(super) fn begin_verify_profiled(
+        &mut self,
+        tokens: &[u32],
+        profile: Option<&mut PrefillTiming>,
+    ) -> Result<(Verification<'_>, Timing)> {
         self.check_append(tokens.len())?;
         if !self.source_verifier
             || !self.runtime.source_text_active
@@ -356,19 +442,24 @@ impl Session {
         self.runtime.verify_nvfp4_matvec = true;
         let command = execute_prepared(
             &self.runtime,
-            None,
+            profile,
             |command| workspace.save(command, self, tokens.len()),
             |gpu| self.encode_verify_transaction(gpu, &workspace.lanes, tokens, VerifyExperts::Grouped, workspace),
         );
         self.runtime.verify_nvfp4_matvec = matvec;
         self.runtime.parallel_route = parallel;
-        if let Err(error) = command {
-            self.reset();
-            return Err(error);
+        match command {
+            Ok(timing) => Ok((
+                Verification {
+                    session: Some(self),
+                    rows: tokens.len(),
+                },
+                timing,
+            )),
+            Err(error) => {
+                self.reset();
+                Err(error)
+            },
         }
-        Ok(Verification {
-            session: Some(self),
-            rows: tokens.len(),
-        })
     }
 }

@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–29 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–32 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -430,6 +430,70 @@ The final retained executable passed the flags-unset short and 4K slice comparis
 
 Keep the vector singleton, transactional verifier, shared KV, binary16 ingress and shortlist opt-in. The measured acceptance and round costs leave the harder sampled input short of the 60 tok/s budget. Prioritize reducing ordinary target and verifier execution time across inputs before changing the production sampler. Distribution-preserving rejection would need separate qualification because it can change the sequence for the same seed. Keep the existing seeded path available for exact replay.
 
+## 20261121-INKDECODE-30 · Profile the live exact verifier transaction
+
+Profile the production transaction command after restoring the same stock-scheduled 4K state. It includes undo copies, all target layers and exact F32 readout. It excludes the draft, CPU sampling and state restoration used to repeat a trial. Rotate four repetitions of the plain command, folded stage timestamps and expert-only timestamps at widths two through four, on two stock inputs. Every measured row matched serial F32 logit bits.
+
+| Verifier rows | Plain wall median range across 4K inputs | Dispatches |
+| --- | ---: | ---: |
+| 2 | 28.38–28.43 ms | 2,349 |
+| 3 | 32.54–32.99 ms | 2,827 |
+| 4 | 35.75–38.13 ms | 3,353 |
+
+The plain four-row GPU interval was 34.52–37.02 ms. Folded instrumentation measured 36.23–39.19 ms GPU, including 5.88–5.89 ms dense attention, 4.92 ms relative and cache attention, and 16.10–18.66 ms for experts. The separate expert-only instrumented arm attributed 9.22–10.95 ms to NVFP4 block products, about 3.20 ms to router projection, 0.45 ms to selection and bucketing, 1.00–1.02 ms to NVFP4 quantization and 0.37–0.38 ms to its epilogue. The markers perturb wall time, so use the plain result for transaction capacity and compare stage times within their own instrumentation arm.
+
+Retain the diagnostic behind `STARK_INKLING_EXPERIMENT_PROFILE_VERIFY=1` with `--measure-verify-transaction`. Expert products remain the largest measured stage. Router projection has a measurable budget of its own, after previous work reduced exact route selection. No worker throughput or deployment claim follows from the profiler.
+
+## 20261121-INKDECODE-31 · Share global K/V reads in the exact short verifier
+
+Three query heads share each global K/V head. Vary how many of those heads and how many adjacent verifier rows consume each cache load. Keep the source score, relative table, sink, chronological updates and per-head shard reduction. Admit the shared path at positions of at least 1,024 with room for all rows in the global cache. The short prefix uses the ordinary path.
+
+| Global sharing geometry | Two-row paired saving across 4K inputs | Three-row saving | Four-row saving |
+| --- | ---: | ---: | ---: |
+| Three heads, one row | 0.41–0.48 ms | 0.59–0.64 ms | 0.15–0.77 ms |
+| One head, two rows | 0.28–0.35 ms | 0.34–0.50 ms | 0.64–0.86 ms |
+| Three heads, two rows | 0.38–0.41 ms | 0.40–0.46 ms | 0.74–0.84 ms |
+
+Each result is the median of eight rotated comparisons from the same stock-scheduled snapshot. Every checked F32 logit row matched the serial target. The three-head, one-row policy had the best three-row savings and passed all 45 rejection, capacity-wrap and rollback controls across one short and two 4K prefixes. It was selected for the first worker comparison because sampled depth two verifies three rows.
+
+The sealed worker held all other verifier flags fixed and alternated four cold 4K pairs per mode, with greedy depth three and sampled depth two. Each request generated and emitted 256 tokens at context 4,352 with vision and DSpark resident. All 16 requests reused zero input tokens and matched the established exact output hashes.
+
+| Mode | Control median | Shared global K/V median | Median paired gain | Candidate range | Faster pairs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Greedy | 53.54 tok/s | **54.19 tok/s** | +2.41% | 50.18–58.55 | 3/4 |
+| Seeded sampled | 45.21 tok/s | **45.86 tok/s** | +2.20% | 44.62–47.47 | 4/4 |
+
+Prefill varied across the paired session, with the slowest window affecting both arms. Use the same-session deltas for the kernel effect. Keep the shared global path opt-in with `STARK_INKLING_EXPERIMENT_SHARED_GLOBAL=1`. The measured rates remain below the 60 tok/s worker goal.
+
+## 20261121-INKDECODE-32 · Vector-load the exact short verifier router
+
+Reuse the vector-loaded singleton router for two through four live verifier rows. Keep the source 16 × 32 × 16 tensor operation, separate 2,048- and 256-channel accumulation, F32 output and existing route selection. Each aligned weight fragment loads four BF16 values together and only live input rows load a fragment. Limit the new entry to the short transactional verifier.
+
+| Rows | Short paired saving | Two stock 4K paired savings | Faster 4K pairs |
+| --- | ---: | ---: | ---: |
+| 2 | 0.87 ms | 0.91–0.93 ms | 16/16 |
+| 3 | 0.79 ms | 0.83–0.89 ms | 16/16 |
+| 4 | 0.80 ms | 0.86–1.14 ms | 15/16 |
+
+The eight alternating comparisons per width matched serial F32 readouts. The enabled candidate passed 45 rejection and capacity-wrap controls across one short and two stock 4K prefixes. The flags-unset build reproduced the connected four-token and 4K aggregate records. The full-model short control matched native state and pinned logits. Four stock-scheduled 4K cases matched 16 F32 logit vectors, 768 BF16 visit comparisons and four snapshot replays.
+
+The latest global K/V worker pairs also bound the remaining seeded sampled work. Holding the observed round counts and all other time fixed, 60 tok/s would give the verifier 25.00–27.96 ms per round across the four prompts. That requires removing another 8.82–10.93 ms per round from the measured 33.82–36.93 ms. Calculate the budgets from the reported 255 decode intervals and each request's actual verifier time. The short-router saving covers only part of this gap.
+
+The paired worker reused the global K/V configuration in both arms. It enabled only `STARK_INKLING_EXPERIMENT_VERIFY_SHORT_ROUTER=1` in the candidate. All 16 requests across four pairs per mode matched the pinned output hashes at 4,096 inputs, 256 outputs and zero reuse. The greedy and seeded sampled depths remained three and two.
+
+| Mode | Control median | Vector router median | Median paired gain | Candidate range | Faster pairs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Greedy | 58.81 tok/s | **59.32 tok/s** | +0.78% | 51.89–61.66 | 3/4 |
+| Seeded sampled | 46.62 tok/s | **47.70 tok/s** | +1.91% | 46.98–50.71 | 4/4 |
+
+The workers accounted for 99.86% of observed GPU counter increments over 84 intervals. Thermal readings were nominal or fair. Pageouts increased by 1,225 pages and swapouts by zero. Keep the short verifier router opt-in. With the observed sampled round counts and other costs held fixed, the candidate still needs 6.23–8.73 ms less per round to reach 60 tok/s. One greedy candidate window exceeded 60 tok/s. Its paired control also exceeded 60.
+
+### Flags-unset confirmation
+
+The stock 4K profile observed `ink_singleton_router_source`, the promoted 64-row NVFP4 prefill tile and the MXFP8 tensor path. The singleton router's F32 logits, route IDs and weights exactly matched the original source router on the restored 4K state.
+
+The rebuilt default worker, with drafting off and every Inkling flag unset, measured **34.12 tok/s greedy** and **32.47 tok/s seeded sampled** at the medians of two cold requests per mode. The ranges were 34.04–34.21 and 32.25–32.68 tok/s. All four output receipts matched their reference hashes at 256 outputs and zero input reuse. The first smoke harness applied the experimental verifier's three-draft readiness assertion to the stock worker and stopped before scoring. The corrected harness requires the stock worker's one-draft capability and checks the same output contract.
+
 ## Evidence identities
 
 Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1`. Original DSpark SHA-256 `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2`. The current run uses the pinned Ollama capture and host documented in the [default-router record](2026-11-21-inkling-mini-decode-default.md).
@@ -665,3 +729,35 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Final compact runs and finishing proof flags-unset/full-1.json | `d7a1abb9be1b88cc9f25734ac0115f23649fb3a2a2fc7a7e383143c01c07bd33` |
 | Final compact runs and finishing proof flags-unset/full-2.json | `27cee79bbc18082d1b9d5a35b4c284c316af9969cda4278e50060ede9a11410c` |
 | Final compact runs and finishing proof flags-unset/full-3.json | `2913aba71ce9b84ad35b5c0405484760cec07762b199789388ae872153a22711` |
+| Live transaction profiler inkling_slice | `bf60613355fd29091d0f26d35db45ce0ac5ee2c38d627318c61060faf352cdf3` |
+| Live transaction profiler scored-source.patch | `188162abbf9370b5bc337018196b8195bae3087853885ad0349df7bb5e606849` |
+| Live transaction profiler stock-s4096-00.json | `3e872c124a8e9292bb3a46c36f2c2c7526308dc1c1379396bf60d320eb5a5` |
+| Live transaction profiler stock-g4096-01.json | `167c0b994dd46f2726bbbb900caaa6810f685a2916c4449e3ac4469b541a0158` |
+| Global K/V screen inkling_slice | `1b91ffe054035ce5fbb606ad6a968fb3c18f6acf86a5a3f41b4e7cec78d14b07` |
+| Global K/V screen scored-source.patch | `5713d34e9f9c7a9ec1070bd07efebbc329983bf153ed99c95a4161af02637677` |
+| Global K/V screen short.json | `d7543b6c7fa3a12e696bbfd2e4148c0a1778b6ae87a74b5f5041e804cad9baca` |
+| Global K/V screen stock-s4096-00.json | `10985491a8decd617e932fd5052c82602b76c5c67835782e80afc3d70a0c039b` |
+| Global K/V screen stock-g4096-01.json | `b2327e2e60850076400eb4676f4ebe3fed88d976c2efe52394aa96ffd5c12e70` |
+| Global K/V worker stark-generate | `b0f7a9b3396fa26011b85f30811cd340b68603f0872037fa87d6b731fe3e465c` |
+| Global K/V worker worker_probe.py | `3640dccb66b03e35de3bc9a7dff1d19c8eaa73cd17c603e556a6c660da0c747d` |
+| Global K/V worker worker-pairs.jsonl | `7b03d3c87b75f2834aa53964c9ce246141d27d0a1be3ab2df8c205bf2f829385` |
+| Short verifier router inkling_slice | `567bd213c5c4f4b4483251eb5d046eddeed8218913786ee7648c40ce66bca8cf` |
+| Short verifier router scored-source.patch | `21c8b894166b99b626096394ba3a9177d0360fd189b8050167db80241cbff112` |
+| Short verifier router short.json | `d4b099174d86c24b82293edf7dd10bc5c8e1501733dfde27fa79be7034cafeb4` |
+| Short verifier router stock-s4096-00.json | `c5b7241c414b2e108875261115f0c5a98aa9be66af025aeb7a14931b0c55bf71` |
+| Short verifier router stock-g4096-01.json | `ff6588f52f372aa454a9f44ec205157bc497608013acf082d64b0e3ce0462752` |
+| Short router flags-unset parity final/flags-unset/slice-4.json | `3ec9bea159f2df8ab1c508329cd2b102cb53e672c740ae3fbddc9ba677cbfa63` |
+| Short router flags-unset parity final/flags-unset/slice-4096.json | `c4a5cefe72c1633b5a56a7092e2e47479698d79936933e66910289b867c40652` |
+| Short router flags-unset parity final/flags-unset/short-both.json | `9857fe852764ad2785a875b523921b4dc81779138460ff38b6e9e68c7aa17823` |
+| Short router flags-unset parity final/flags-unset/full-0.json | `97d8823b984369ec3a5bccb2e0f55f9e0c5dd30c85dd991b6aacad56a5595f87` |
+| Short router flags-unset parity final/flags-unset/full-1.json | `c37b8fe4ea4e9f9614ea8552c9702480e7425e08d2867fad98b3ef77f53d946e` |
+| Short router flags-unset parity final/flags-unset/full-2.json | `78465962571720c6cadfafbe1de2c4f8f7461244686d95485cc397baa885f6d5` |
+| Short router flags-unset parity final/flags-unset/full-3.json | `98a31d0a1c9eff82f6278b8d158e642b5fba19b90614aa280bd68296faa25748` |
+| Short verifier router worker stark-generate | `d883d29a92cf06d639860eba23bd640abc1cc0fae95d87f5055f5d16e6f7e2ec` |
+| Short verifier router worker paired_worker_probe.py | `89abb70b0dbaff5dacd67d5e109d42ef399e620bad9c9024d7443b89b96355f0` |
+| Short verifier router worker worker-pairs.jsonl | `0cf205b37ff7280384e5c8e90967aed87e7a974710b225296e5b0191ab79a539` |
+| Short verifier router worker worker-host.jsonl | `2706ab072f958de170c8ab9d1ae991b1c3e34e8eaea14aa593a5e7f0fb87058c` |
+| Short verifier router worker flags-unset-readiness-first.log | `b754b166fe5a3e574979bf67197e3de4cc8be5b86313eed1bde26bf4b2a2a727` |
+| Short router flags-unset worker_probe.py | `c4bfb8b9d96381457015832762774cc93d3cf2872a3b5b685308baed90e1c54c` |
+| Short router flags-unset flags-unset-worker.jsonl | `bfdde50e87683c2b6bb3ac997cca255790af6cebc89484a98be07b6333c0aace` |
+| Short router flags-unset flags-unset-stock-profile.json | `8d79302c6c127216a3bafc62ec48c941b12391af93dffa617a1961eafa09c2a3` |

@@ -256,7 +256,7 @@ fn screen_compact_runs(
     Ok(report)
 }
 
-fn screen_fused_finish(
+fn screen_verifier_flag(
     session: &mut Session,
     base: &Snapshot,
     teacher: &[u32],
@@ -279,7 +279,7 @@ fn screen_fused_finish(
                 timings[arm].push(start.elapsed().as_secs_f64() * 1000.0);
                 for (row, want) in expected.iter().take(width).enumerate() {
                     if !same_logits(txn.logits(row)?, want) {
-                        return Err("Inkling fused verifier finish changed F32 logits");
+                        return Err("Inkling verifier flag changed F32 logits");
                     }
                 }
                 txn.commit(1)?;
@@ -288,6 +288,85 @@ fn screen_fused_finish(
         report.push(json!({"width":width,"ordinary_ms":timings[0],"fused_ms":timings[1]}));
     }
     *setting(&mut session.runtime) = true;
+    Ok(report)
+}
+
+fn profile_exact_verifier(
+    session: &mut Session,
+    base: &Snapshot,
+    teacher: &[u32],
+) -> Result<Vec<Value>> {
+    let mut profile = PrefillTiming::new(&session.runtime)?;
+    profile.fold_verify_phases = true;
+    session.restore(base)?;
+    let expected = teacher[..MAX_VERIFY_ROWS].iter().map(|&id| session.step(id)).collect::<Result<Vec<_>>>()?;
+    let mut reports = Vec::new();
+    for width in 2..=MAX_VERIFY_ROWS {
+        for trial in 0..4 {
+            for offset in 0..3 {
+                let arm = (trial + offset) % 3;
+                profile.split_verify_experts = arm == 2;
+                session.restore(base)?;
+                let (txn, timing) =
+                    session.begin_verify_profiled(&teacher[..width], (arm != 0).then_some(&mut profile))?;
+                for (row, want) in expected.iter().take(width).enumerate() {
+                    if !same_logits(txn.logits(row)?, want) {
+                        return Err("Inkling verifier profiling changed F32 logits");
+                    }
+                }
+                txn.commit(1)?;
+                let stages = (arm != 0).then(|| profile.command_report(timing.gpu_ms));
+                reports.push(json!({
+                    "width":width,"trial":trial,"arm":arm,"gpu_ms":timing.gpu_ms,
+                    "wall_ms":timing.wall_ms,"encode_ms":timing.encode_ms,
+                    "dispatches":timing.dispatches,"stages":stages,
+                }));
+            }
+        }
+    }
+    Ok(reports)
+}
+
+fn screen_shared_global(
+    session: &mut Session,
+    base: &Snapshot,
+    teacher: &[u32],
+) -> Result<Vec<Value>> {
+    let Some(initial) = session.verifier.as_ref().filter(|w| w.shares_global_attention()).map(|w| w.global_share)
+    else {
+        return Ok(Vec::new());
+    };
+    if session.position < LOCAL {
+        return Ok(Vec::new());
+    }
+    const OPTIONS: [(usize, usize); 4] = [(0, 0), (3, 1), (1, 2), (3, 2)];
+    session.restore(base)?;
+    let expected = teacher[..MAX_VERIFY_ROWS].iter().map(|&id| session.step(id)).collect::<Result<Vec<_>>>()?;
+    let mut report = Vec::new();
+    for width in 2..=MAX_VERIFY_ROWS {
+        let mut timings = [const { Vec::new() }; OPTIONS.len()];
+        for trial in 0..8 {
+            for offset in 0..OPTIONS.len() {
+                let arm = (trial + offset) % OPTIONS.len();
+                session.restore(base)?;
+                session.verifier.as_mut().ok_or("Inkling global share workspace unavailable")?.global_share =
+                    OPTIONS[arm];
+                let start = Instant::now();
+                let txn = session.begin_verify(&teacher[..width])?;
+                timings[arm].push(start.elapsed().as_secs_f64() * 1000.0);
+                for (row, want) in expected.iter().take(width).enumerate() {
+                    if !same_logits(txn.logits(row)?, want) {
+                        return Err("Inkling shared global attention changed F32 logits");
+                    }
+                }
+                txn.commit(1)?;
+            }
+        }
+        for ((heads, rows), wall_ms) in OPTIONS.into_iter().zip(timings) {
+            report.push(json!({"width":width,"heads":heads,"rows":rows,"wall_ms":wall_ms}));
+        }
+    }
+    session.verifier.as_mut().ok_or("Inkling global share workspace unavailable")?.global_share = initial;
     Ok(report)
 }
 
@@ -336,6 +415,9 @@ pub fn measure_verify_transaction(
         logits = session.step(*teacher.last().unwrap())?;
         teacher.push(greedy(&logits));
     }
+    if std::env::var_os("STARK_INKLING_EXPERIMENT_PROFILE_VERIFY").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return Ok(json!({"prefix":prefix,"profile":profile_exact_verifier(&mut session, &base, &teacher)?}));
+    }
     let serial_ms = started.elapsed().as_secs_f64() * 1000.0;
     let serial_state = state_digest(&session)?;
     let controls = check_rejections(&mut session, &base, &teacher)?;
@@ -350,9 +432,11 @@ pub fn measure_verify_transaction(
     let fixed_run_commands = screen_run_width(&mut session, &base, &teacher)?;
     let shortlist_drafts = screen_draft_shortlist(&mut session, &base, &teacher)?;
     let compact_runs = screen_compact_runs(&mut session, &base, &teacher)?;
-    let fused_finish = screen_fused_finish(&mut session, &base, &teacher, |runtime| &mut runtime.verify_fused_finish)?;
+    let fused_finish = screen_verifier_flag(&mut session, &base, &teacher, |runtime| &mut runtime.verify_fused_finish)?;
     let fused_attention =
-        screen_fused_finish(&mut session, &base, &teacher, |runtime| &mut runtime.verify_fused_attention)?;
+        screen_verifier_flag(&mut session, &base, &teacher, |runtime| &mut runtime.verify_fused_attention)?;
+    let short_router = screen_verifier_flag(&mut session, &base, &teacher, |runtime| &mut runtime.verify_short_router)?;
+    let shared_global = screen_shared_global(&mut session, &base, &teacher)?;
     let mut rounds = Vec::new();
     for depth in 1..MAX_VERIFY_ROWS {
         session.restore(&base)?;
@@ -422,6 +506,6 @@ pub fn measure_verify_transaction(
         "prefix": prefix, "output_tokens": OUTPUTS, "additional_metal_bytes": verifier_bytes, "rejection_controls": controls,
         "crossing_controls": crossing_controls, "abandoned_transaction_reset": true, "cross_mode_snapshot_rejected": true,
         "serial_ms": serial_ms, "serial_decode_tok_s": 1000.0 * (OUTPUTS - 1) as f64 / serial_ms,
-        "rounds": rounds, "candidate_commands": candidate_commands, "fixed_run_commands": fixed_run_commands, "shortlist_drafts": shortlist_drafts, "compact_runs": compact_runs, "fused_finish": fused_finish, "fused_attention": fused_attention,
+        "rounds": rounds, "candidate_commands": candidate_commands, "fixed_run_commands": fixed_run_commands, "shortlist_drafts": shortlist_drafts, "compact_runs": compact_runs, "fused_finish": fused_finish, "fused_attention": fused_attention,"short_router":short_router, "shared_global": shared_global,
     }))
 }
