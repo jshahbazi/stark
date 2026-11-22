@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–19 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–20 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -276,6 +276,19 @@ A follow-up native comparison enabled shared KV in both arms. The run-width spec
 
 With all Inkling flags unset, the final native executable reproduced the connected short and 4K slice aggregates. The full target matched the pinned short and 16 stock 4K F32 logit vectors, 768 stock visit residual blocks and four exact 4K snapshots. One 4K flags-unset worker pair per mode reproduced the promoted router build's output. The candidate measured 33.39 tok/s greedy and 32.05 tok/s seeded sampled, against 33.45 and 32.33 tok/s on the promoted reference. The eight-pair [default router qualification](2026-11-21-inkling-mini-decode-default.md#worker-results) remains the stronger throughput measurement.
 
+## 20261121-INKDECODE-20 · Replay Lily’s depth planner with Inkling round costs
+
+Use the existing request-scoped depth planner with stock Inkling M5 Max command costs and rounded draft, finish and host allowances. Keep the exact ordinary target draw and feed the planner only completed round depth and accepted count. A zero-depth round still commits its target token and updates the source draft cache. The trial opened with a three-proposal cap and used the existing rollback and output paths.
+
+Four alternating cold 4K pairs per mode used the same sealed binary, with shared local KV and exact run width on in both arms. The fixed arm used three greedy or two sampled proposals. Vision and DSpark were resident. Every request sampled and emitted 256 tokens with zero reuse. All 16 output hashes matched the ordinary target.
+
+| Mode | Fixed useful decode | Adaptive useful decode | Median paired decode change | Faster adaptive pairs | Median paired prefill change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Greedy | 54.42 tok/s | 53.30 tok/s | -1.99% | 0/4 | -0.44% |
+| Sampled | 44.12 tok/s | 43.47 tok/s | -1.73% | 1/4 | -0.41% |
+
+The planner issued [1, 3, 73, 326] greedy and [165, 7, 288, 132] sampled rounds at depths zero through three. GPU client counters attributed 99.83% of observed increments to the two workers over 104 intervals. Thermal samples were nominal and fair. Pageouts changed by +155 and swapouts by +0 pages. Retire this planner integration after the screen. The fixed paths remain available within the experimental verifier.
+
 ## Decision and next target
 
 Keep the vector singleton, transactional verifier and shared KV path opt-in. The measured acceptance and round costs leave the harder sampled input short of the 60 tok/s budget. Prioritize reducing ordinary target and verifier execution time across inputs before changing the production sampler. Distribution-preserving rejection would need separate qualification because it can change the sequence for the same seed. Keep the existing seeded path available for exact replay.
@@ -430,3 +443,8 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Flags-unset full target stock 4 | `b8258668677b64424f334f19d6341fc2f31f77281752f7019ed9f13175a8b04c` |
 | Combined shared KV and exact run width stock s4096-00 | `78943fdcc69fd9eb3a7f453cd6a1acb0656b29cd0ac30b9b87d9c1f21c83460e` |
 | Combined shared KV and exact run width stock g4096-01 | `36fb6feb61a8d7cb255400492a52cb34d07c838dc940f6ad3e611ad59474f32f` |
+| Adaptive verifier worker | `1e262ee43ddb978e43f0229dfbeed7470bb59d134cd14095c8f4b65fa47f036f` |
+| Adaptive verifier source patch | `70d058d1b86787b84a9a61fa8be2680769a42981bc5d89b89fe76da3863c1eef` |
+| Adaptive verifier worker harness | `c118058a3ea084fc41ea5f2ef46769e418bccd93d27b9751489ef6cc319af300` |
+| Adaptive verifier worker pairs | `fae03fab02edde52bfbea8ec1bd4b4cfb51b4b330cea0add5e02f25d0965d071` |
+| Adaptive verifier host samples | `0d800841a554e080ce7e00ac928bfe7cbbd7380332546ecddb692c940dcbd9d0` |

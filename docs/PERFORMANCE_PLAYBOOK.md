@@ -483,6 +483,8 @@ Tabulating the F32 NVFP4 activation terms by exact BF16 input saved about 0.04 m
 
 Match the NVFP4 short-verifier kernel width to the live expert run. Specializing the two- and three-route cases eliminated idle accumulators and per-route guards, saving 0.69–0.91 ms per four-row command on two original Inkling 4K inputs with exact logits and rollback. The specialization is opt-in. [Exact run width screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-19--specialize-the-short-nvfp4-product-by-expert-run-width)
 
+Reusing Lily’s depth planner with measured Inkling round costs kept exact output. Four 4K pairs per sampling mode gave no sustained improvement over fixed depth three greedy and depth two sampled. Keep tuning inputs and costs tied to the artifact and target sampler. [Adaptive depth screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-20--replay-lilys-depth-planner-with-inkling-round-costs)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates
