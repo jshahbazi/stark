@@ -8,6 +8,8 @@ The native worker uses the 48-visit target with per-visit state, original packed
 
 Eligible source prefill selects the 64 × 32 NVFP4 tile and compensated K32 MXFP8 replay by default. The worker can use ordinary grouped kernels if the faster kernels fail to initialize. `STARK_INKLING_SOURCE_PREFILL=0` selects the incumbent worker geometry. [Default-path verification](model-experiments/2026-11-21-inkling-mini-prefill-default.md)
 
+Source-mode singleton steps select the exact one-row router by default. The original source router is available if its specialized pipeline fails to load. [Default-router verification](model-experiments/2026-11-21-inkling-mini-decode-default.md)
+
 [Implementation retrospective](archive/runs/2026-11-21-inkling-mini-native-retrospective.md) · [Prefill and decode follow-up](INKLING_2_MINI_PERFORMANCE_FOLLOWUP.md)
 
 ## What to build against

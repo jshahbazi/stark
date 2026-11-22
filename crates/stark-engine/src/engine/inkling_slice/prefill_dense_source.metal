@@ -65,7 +65,7 @@ kernel void ink_prefill_router_source(
 }
 
 
-
+#ifdef INK_SOURCE_SINGLETON_ROUTER
 // Keep the source tensor operation and K order. Only the live row's input
 // registers are loaded inside the loop. Each weight fragment is aligned to
 // four BF16 words on this fixed 2,304-wide router.
@@ -112,6 +112,7 @@ kernel void ink_singleton_router_source(
         if (at[1] == 0) output[tile * N + at[0]] = total[i];
     }
 }
+#endif
 
 kernel void ink_prefill_select_source(
     device const float *all_logits [[buffer(0)]], device const float *bias [[buffer(1)]],

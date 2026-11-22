@@ -2,6 +2,8 @@
 
 [Look up research and speed changes by model](../MODEL_RESEARCH.md), including benchmark comparisons and branch-only attempts. The [source index](source-index.md) groups individual reports by family and topic.
 
+- [20261121-INKPROFILE-04 · Default exact one-row router for Inkling 2 Mini](2026-11-21-inkling-mini-decode-default.md) records the flags-unset selection, pinned parity and paired decode comparison against the original source router.
+
 - [20261121-INKPREFILL-14 · Default fast prefill for Inkling 2 Mini](2026-11-21-inkling-mini-prefill-default.md) records default kernel selection, flags-unset parity and the cold 4K worker comparison against the prior opt-in configuration.
 
 - [20261121-INKPREFILL-11–13 · Inkling 2 Mini tensor MXFP8 prefill](2026-11-21-inkling-mini-mxfp8-tensor.md) reaches 1,058 greedy and 1,054 seeded sampled tok/s at cold 4K in eight exact worker pairs per mode. The compensated tensor path passed direct BF16 audit in the opt-in study. The wider NVFP4 tile with lane-scale sharing was rejected.
