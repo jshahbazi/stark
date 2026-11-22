@@ -248,6 +248,53 @@ Replay each depth as nonoverlapping rounds with the usual tail cap. The optimist
 
 The deeper draft path yields real acceptance headroom. At four proposals it allows only about 0.21 ms above the incumbent round cost, and the draft command alone adds 0.19–0.20 ms at the paired median across the four sampled fixtures. At seven proposals the extra round allowance is 1.21 ms. The native target timings leave no credible budget for the current wide design. Defer expanding the rollback verifier. This is a sizing and acceptance experiment with original target outputs and no live worker rate for the new geometry.
 
+## 20261122-INKDECODE-92 · Reconstruct packed BF16 bytes across verifier rows
+
+Start from `c4e5bf00` and the retained verifier configuration. The dense attention projections use about 5.7 ms at three rows. The earlier [lossless singleton screen](2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-15--lossless-bf16-attention-weights-on-metal) spent extra time reconstructing sign and mantissa. Preserve each BF16 word's low byte verbatim. In a 64-word chunk, encode the high byte as a sign bit and three high-exponent delta bits. The subgroup reuses each reconstructed four-word vector for all live rows. Keep the source BF16 casts, ordered FP32 dot products and lane reduction.
+
+Across 176 original attention banks, 10,042,333 of 10,093,824 chunks (99.49%) fit an arbitrary base. An eight-aligned base admits 9,305,048 chunks (92.19%) and permits bitwise reconstruction. Ineligible chunks read the original BF16 data. At payload level, the two formats remove approximately 24.1% and 22.3% of bytes, including base bytes and raw fallback. The diagnostic retains the original banks alongside both packed planes. Check every packed word on CPU, then compare arbitrary-base shifts, arbitrary-base byte-pair lookup and eight-aligned shifts on the physical GPU.
+
+Use the short prefix and both stock 4K prefixes, with eight rotated plain and four timestamped comparisons per width. All 1,296 full F32 readouts matched serial at widths two through four. All 36 checked single-row commits matched the serial target and draft state. The first Rust build could not access the Metal registrar from the packer's module. The timed build registers from the verifier diagnostic.
+
+| Candidate | Three-row 4K paired wall increase | Four-row 4K paired wall increase | Three-row dense stage increase |
+| --- | ---: | ---: | ---: |
+| Arbitrary base and shifts | +2.016 to +2.199 ms | +2.013 to +2.142 ms | +2.006 to +2.107 ms |
+| Arbitrary base and byte-pair lookup | +1.877 to +2.030 ms | +1.883 to +2.015 ms | +1.821 to +1.906 ms |
+| Eight-aligned base and shifts | +1.970 to +2.133 ms | +2.020 to +2.070 ms | +1.883 to +2.010 ms |
+
+Archive the packed layout. Sharing reconstruction across all three rows and using a byte-pair lookup still raises the dense stage time. The low-byte layout preserves exactly the checkpoint weights and the numerical reference in this component screen.
+
+## 20261122-INKDECODE-93 · Run independent attention projections concurrently
+
+Keep the original BF16 matrices, per-row arithmetic and dispatches. The Q, K, V, relative, gate, sink and dynamic projections read completed inputs and write disjoint destinations within one visit. Place these projections in a concurrent Metal compute encoder on the same target command buffer. The preceding and subsequent encoders keep their normal ordering. Compare the incumbent command, a separate serial encoder for each projection group, and a separate concurrent encoder. The separate serial arm isolates the effect of changing encoder boundaries. Timestamped arms select the corresponding dispatch mode inside the existing attention stage encoder.
+
+Rotate eight plain and four timestamped repeats per width on the short and two stock 4K prefixes. All 972 checked F32 readouts matched serial at widths two through four. All 27 checked accepted states matched serial target and draft state. The concurrent arm won seven of eight plain comparisons at both active widths on each stock fixture.
+
+| Verifier rows | Stock 4K paired wall saving | Stock 4K attention dense stage saving |
+| --- | ---: | ---: |
+| 2 | 0.770–0.791 ms | 0.738–0.813 ms |
+| 3 | 0.730–0.828 ms | 0.803–0.815 ms |
+| 4 | 0.728–0.892 ms | 0.876–0.930 ms |
+
+The three-row serial encoder control saved 0.023–0.066 ms of wall time. The concurrent arm added 0.05–0.08 ms of CPU encoding at three rows. Advance the concurrent arm to the exact worker comparison.
+
+Run four alternating pairs per mode on one loaded worker with the original target, vision and INT8 DSpark resident. Use cold 4,096-token prompts, context 4,352, 256 emitted and sampled tokens, two proposals for seeded sampling and three for greedy. Keep the pinned outputs, paired proposal and acceptance counters, and round histograms equal. Advance on a sampled median paired gain of at least 2%, at least three sampled wins, a nonnegative greedy median and no individual regression exceeding 5%.
+
+The worker build passed connected short and 4K parity with flags unset, including 16 stock F32 vectors, 768 BF16 residual blocks and four exact snapshot replays. With concurrent projections active, all 45 rejection and ring-wrap controls passed. The first scoring wrapper stopped after proof because it could not open the timing logs. A second invocation lacked the converter environment. Both stopped before timing generation. The scored run uses the existing locked converter environment and the sealed binary.
+
+| Mode | Control median | Concurrent median | Median paired change | Faster pairs |
+| --- | ---: | ---: | ---: | ---: |
+| Seeded sampled | 65.48 tok/s | 63.78 tok/s | +0.77% | 2/4 |
+| Greedy | 79.76 tok/s | 80.77 tok/s | +2.20% | 4/4 |
+
+All 16 output hashes and paired work counters matched. The median paired useful saving was 0.23 ms per sampled round and 0.70 ms per greedy round. One sampled request regressed 7.69%. The worker accounted for 99.86% of observed GPU counter increments over 49 intervals with nominal thermal readings and unchanged pageouts and swapouts. Disk pressure required reclaiming the experiment's generated build cache during the session. Measure the repeat without a build-cache cleanup.
+
+The first sampled session missed this gate. Repeat all four sampled cells on the same sealed binary, with the order of workloads and paired arms reversed in a fresh loaded worker. The repeat requires the original sampled gate, at least six of eight combined sampled wins and a pooled median paired gain of at least 2%. Keep the first session and repeat separately visible.
+
+The repeat matched all eight pinned hashes and relative work counters. The control median was **68.53 tok/s** and the concurrent median was **67.94 tok/s**. The candidate won one of four pairs and the median paired change was **−2.97%**. Across both sessions, sampled won three of eight with a median paired change of −1.44%. On the repeat, the queued verifier interval grew by 0.78 ms per round at the paired median. The worker accounted for 99.81% of observed GPU counter increments over 36 intervals, with nominal and fair thermal readings and unchanged pageouts and swapouts.
+
+Archive the separate concurrent encoder at the worker gate. The native snapshot commands benefit from concurrency, and the live sampled schedule regresses in the repeat with the draft and target queued together. The queued measurement includes CPU encoding, competing work and the GPU completion wait. The experiment does not isolate which of these caused the difference.
+
 ## Evidence
 
 The original target and DSpark artifact digests are recorded with the [integrated QKV run](2026-11-21-inkling-mini-decode-60.md#evidence-identities). The worker and native screen retain aggregate-only private receipts. No prompts, token IDs, logits, targets or fitted tensors are published.
@@ -343,3 +390,15 @@ The original target and DSpark artifact digests are recorded with the [integrate
 | Wider target cost follow-up executable | `530f84bc5f4fdd77a939c71091ff49d96911415551b66c65af3d27c50d7f3394` |
 | Wider target cost follow-up harness | `ce01f28c83fcbe6dacfdefcaed8be958aad1b61fbc57c4f4018b27c05e752164` |
 | Wider verifier and draft aggregate receipt | `7ef289b5237063a0a06044ca0e6795ac21c135ebca3abd36482e59b3fe43fd8f` |
+| Shared BF16 high-byte packing patch | `0ca295bd6d593165753ffcaeacad5c2558ab73c78116977f5370d923e54e500c` |
+| Shared BF16 high-byte packing executable | `a6a985f79036220efb22dbf1039e0f6b44b63548c7cb2b0c637416b993f488a0` |
+| Shared BF16 high-byte packing harness | `5bf67d2f3fe9bc64dbc0284fd64ee4096e00d41f4eb61805003b062ecacf5a5b` |
+| Shared BF16 high-byte packing aggregate receipt | `b11eb1f19136c4da000319ec26ca6b683738aee33bea8409d987e827e28b344f` |
+| Concurrent dense native probe patch | `03b5b3eca6220f02007f10267b0630db7d072111566405eff02272eee863b638` |
+| Concurrent dense native probe executable | `2a780229a2ff9661e8be675e87beb09a80c0058efceff078df0fa25eb950e2cd` |
+| Concurrent dense native probe harness | `31bc52deeee5421a1d060fad95a5a8b66ac79b49bff70fd722193175fda129c4` |
+| Concurrent dense native probe aggregate receipt | `2b19929916df1e17ba8fc17bd1835760c72082aefbdcb123d42a48113e27956a` |
+| Concurrent dense worker source patch | `2974fce19ea969062d9efcd6482f73b44771c72ee8478f0ea485a8b5e321915b` |
+| Concurrent dense paired worker executable | `456fd309c3ddbeb0478b9f3eb483f865c348a50f5581b4cc3e710c8305b36d2c` |
+| Concurrent dense worker proof executable | `9a786ea1cffd604fb7a4b7c95f0dbfac27cbe4c8eecf8b59f907b2feaaf10c25` |
+| Concurrent dense worker and repeat evidence manifest | `6e7b1bb1e4015d8374f2cbaf5bdccae583ea71289357f4de5a3fb1862b678d5e` |

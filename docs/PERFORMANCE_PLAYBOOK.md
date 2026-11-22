@@ -617,6 +617,10 @@ When a faster runtime reports a short greedy peak on its own quantization, first
 
 Replay native drafts at the proposed width and price the extra target rows separately. On Inkling, four drafts reduced sampled replay rounds from 386 to 347, with only 0.21 ms of additional round cost available at 80 tok/s. Three-head local KV sharing saved 0.154–0.218 ms at the incumbent sampled width with exact logits and rollback. The direct wider graph adds several milliseconds before handling rollback, so defer the wider transaction. [Wider verifier budget](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-91--price-wider-verification-and-local-kv-sharing)
 
+Time lossless weight reconstruction in the projection that will consume it. Inkling can reuse a packed BF16 high-byte decode across three rows and reduce estimated weight bytes by 24.1%. Even the fastest exact unpack adds 1.88–2.03 ms at the three-row native boundary. [BF16 high-byte packing](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-92--reconstruct-packed-bf16-bytes-across-verifier-rows)
+
+Test concurrent projection encoders in the live queued round as well as standalone. Inkling saves 0.73–0.83 ms per standalone three-row target command and gains 2.20% in the first greedy worker comparison, with exact outputs and state. The sampled repeat loses 2.97%, and its queued verifier interval grows 0.78 ms per round. Archive this encoder layout at the worker gate. [Concurrent projections](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-93--run-independent-attention-projections-concurrently)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates
