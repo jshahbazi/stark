@@ -19,6 +19,7 @@ pub(super) struct VerifyWorkspace {
     pub(super) local_rows_per_group: usize,
     pub(super) global_share: (usize, usize),
     lanes: PrefillLanes,
+    mix_rows: bool,
     draft: DraftBlock,
 }
 
@@ -92,6 +93,16 @@ impl VerifyWorkspace {
         if combined_short && qkv_batch {
             lanes.enable_verify_qkv_batch(runtime)?;
         }
+        let mix_rows = combined_short
+            && runtime.verify_fused_attention
+            && std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_MIX_ROWS").is_some_and(|value| value == "1");
+        if mix_rows {
+            packed_prefill::register(
+                runtime,
+                concat!(include_str!("serial.metal"), "\n", include_str!("verify_mix_rows.metal")),
+                &["ink_verify_mix_rows", "ink_verify_mix_attention"],
+            )?;
+        }
         let draft = DraftBlock::new(runtime)?;
         let alloc = |bytes| {
             runtime
@@ -118,8 +129,63 @@ impl VerifyWorkspace {
                 0
             },
             lanes,
+            mix_rows,
             draft,
         })
+    }
+
+    pub(super) fn mixes_rows(&self) -> bool {
+        self.mix_rows
+    }
+
+    pub(super) fn mix_rows(
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        flows: [&Flow; MAX_VERIFY_ROWS],
+        scratch: [&Scratch; MAX_VERIFY_ROWS],
+        state: VisitInput,
+        rows: usize,
+        expert: bool,
+    ) {
+        let mut buffers = [binding(&flows[0].blocks); 22];
+        for i in 0..MAX_VERIFY_ROWS {
+            buffers[i] = binding(&flows[i].blocks);
+            buffers[4 + i] = binding(&flows[i].partial);
+            buffers[8 + i] = binding(&scratch[i].mixed);
+        }
+        if expert {
+            buffers[12] = binding(&layer.mlp_query);
+            gpu.dispatch(
+                "ink_verify_mix_rows",
+                &buffers[..13],
+                (state.blocks + usize::from(state.boundary)) as u32,
+                (1, rows),
+                WIDTH / 4,
+            );
+        } else if state.blocks != 0 {
+            buffers[12] = binding(layer.attn_queries.as_ref().unwrap_or(&layer.mlp_query));
+            let queries = if layer.local {
+                1
+            } else {
+                3
+            };
+            if state.later {
+                for i in 0..MAX_VERIFY_ROWS {
+                    buffers[13 + i] = binding(&flows[i].previous);
+                    buffers[17 + i] = binding(&scratch[i].messages);
+                }
+                buffers[21] = binding(layer.gate_queries.as_ref().expect("cross-pass query"));
+                gpu.dispatch(
+                    "ink_verify_mix_attention",
+                    &buffers,
+                    [state.blocks as u32, queries as u32],
+                    (queries + 4, rows),
+                    WIDTH / 4,
+                );
+            } else {
+                gpu.dispatch("ink_verify_mix_rows", &buffers[..13], state.blocks as u32, (queries, rows), WIDTH / 4);
+            }
+        }
     }
 
     fn copy_undo(

@@ -83,17 +83,12 @@ static inline float4 ink_mix_normalize(
 
 // Materialize the FP32 rounding boundaries of the source's RMS, scaled
 // query dot, softmax, and weighted residual sum in one dispatch.
-kernel void ink_mix(
-    device const float *sources [[buffer(0)]], device const float *partial [[buffer(1)]],
-    device const float *queries [[buffer(2)]], device float *result [[buffer(3)]],
-    constant uint2 &args [[buffer(4)]], uint q [[threadgroup_position_in_grid]],
-    uint tid [[thread_index_in_threadgroup]], uint simd [[simdgroup_index_in_threadgroup]],
-    uint lane [[thread_index_in_simdgroup]]
+static inline void ink_mix_row(
+    device const float *sources, device const float *partial, device const float *queries,
+    device float *result, uint2 args, uint q, uint tid, uint simd, uint lane,
+    threadgroup float *sums, threadgroup float *dots, threadgroup float &inverse,
+    threadgroup float *scores
 ) {
-    threadgroup float sums[18];
-    threadgroup float dots[18];
-    threadgroup float inverse;
-    threadgroup float scores[5];
     float4 units[5];
     uint count = args.x + args.y;
     for (uint s = 0; s < count; ++s) {
@@ -148,6 +143,19 @@ kernel void ink_mix(
         for (uint s = 0; s < count; ++s) out += units[s] * scores[s];
         *reinterpret_cast<device float4 *>(result + q * ink_width + tid * 4) = out;
     }
+}
+kernel void ink_mix(
+    device const float *sources [[buffer(0)]], device const float *partial [[buffer(1)]],
+    device const float *queries [[buffer(2)]], device float *result [[buffer(3)]],
+    constant uint2 &args [[buffer(4)]], uint q [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]], uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    threadgroup float sums[18];
+    threadgroup float dots[18];
+    threadgroup float inverse;
+    threadgroup float scores[5];
+    ink_mix_row(sources, partial, queries, result, args, q, tid, simd, lane, sums, dots, inverse, scores);
 }
 
 // The source RMS reduction reads four adjacent values per thread and reduces

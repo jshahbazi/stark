@@ -364,6 +364,16 @@ impl Session {
             let layer = &self.layers[physical];
             let scratches = lanes.scratch.iter().chain(std::iter::once(&visit.scratch)).skip(skip);
             let controllers = lanes.controllers.as_ref().filter(|_| state.later && row_count > 1);
+            let batched_mix = undo.is_some_and(verify_state::VerifyWorkspace::mixes_rows)
+                && gpu.runtime.verify_fused_attention
+                && trace.is_none()
+                && !state.capture;
+            let mix_bindings = || {
+                (
+                    std::array::from_fn(|i| flows.clone().nth(i.min(row_count - 1)).expect("verified flow")),
+                    std::array::from_fn(|i| scratches.clone().nth(i.min(row_count - 1)).expect("verified scratch")),
+                )
+            };
             gpu.phase(PrefillPhase::AttentionInputs);
             for (row, ((flow, taps), scratch)) in flows.clone().zip(tap_rows.clone()).zip(scratches.clone()).enumerate()
             {
@@ -371,10 +381,25 @@ impl Session {
                 if let Some(tap) = tap {
                     tap.input(gpu, row, flow);
                 }
+                if batched_mix {
+                    continue;
+                }
                 if controllers.is_some() {
                     layer.prepare_attention_inputs(gpu, flow, &flow.partial, scratch, state);
                 } else {
                     layer.attention_inputs(gpu, flow, &flow.partial, scratch, state);
+                }
+            }
+            if batched_mix {
+                let (flow, scratch) = mix_bindings();
+                verify_state::VerifyWorkspace::mix_rows(gpu, layer, flow, scratch, state, row_count, false);
+                if controllers.is_none() {
+                    for (flow, scratch) in flows.clone().zip(scratches.clone()) {
+                        for slot in 0..3 {
+                            let input = layer.attention_norm_input(&flow.partial, scratch, state, slot);
+                            layer.norms(gpu, scratch, input, &scratch.qkv_input[slot], slot, state.later);
+                        }
+                    }
                 }
             }
             if let Some(controllers) = controllers
@@ -499,21 +524,27 @@ impl Session {
                     128,
                 );
             }
+            if batched_mix {
+                let (flow, scratch) = mix_bindings();
+                verify_state::VerifyWorkspace::mix_rows(gpu, layer, flow, scratch, state, row_count, true);
+            }
             for (row, (flow, scratch)) in flows.clone().zip(scratches.clone()).enumerate() {
-                if fused_attention {
-                    layer.mix_expert_inputs(gpu, flow, &flow.partial, scratch, state);
-                } else {
-                    Layer::convolution(
-                        gpu,
-                        binding(&scratch.attn_raw),
-                        &layer.attn_conv,
-                        None,
-                        &visit.conv[2],
-                        &scratch.attention,
-                        WIDTH,
-                        self.position + row,
-                    );
-                    layer.prepare_expert_inputs(gpu, flow, &flow.partial, scratch, state);
+                if !batched_mix {
+                    if fused_attention {
+                        layer.mix_expert_inputs(gpu, flow, &flow.partial, scratch, state);
+                    } else {
+                        Layer::convolution(
+                            gpu,
+                            binding(&scratch.attn_raw),
+                            &layer.attn_conv,
+                            None,
+                            &visit.conv[2],
+                            &scratch.attention,
+                            WIDTH,
+                            self.position + row,
+                        );
+                        layer.prepare_expert_inputs(gpu, flow, &flow.partial, scratch, state);
+                    }
                 }
                 if controllers.is_none() {
                     if direct {

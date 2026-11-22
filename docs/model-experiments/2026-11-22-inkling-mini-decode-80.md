@@ -1,6 +1,6 @@
 # Inkling 2 Mini decode toward 80 tok/s
 
-These experiments use the original Inkling 2 Mini target and DSpark checkpoint on the 128 GiB Apple M5 Max, with the combined short verifier and batched Q, K and V controllers enabled. The build starts at `90fce867` and uses locked Rust 1.98.1. The [integrated controller record](2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-78--integrate-batched-q-k-and-v-controllers) binds the checkpoint hashes, selectors, parity and earlier paired baseline. The target budget is 12.5 ms per useful output.
+These experiments use the original Inkling 2 Mini target and DSpark checkpoint on the 128 GiB Apple M5 Max, with the combined short verifier and batched Q, K and V controllers enabled. The initial build starts at `90fce867` and uses locked Rust 1.98.1. The [integrated controller record](2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-78--integrate-batched-q-k-and-v-controllers) binds the checkpoint hashes, selectors, parity and earlier paired baseline. The target budget is 12.5 ms per useful output.
 
 ## 20261122-INKDECODE-79 · Repeat decode on one loaded worker
 
@@ -54,6 +54,33 @@ All four initial F32 target rows matched the pinned captures. The four fits used
 
 Archive this small bias fit at the held-out replay gate. The fit operates after the base-score shortlist and can only reorder candidates that survive it. The target-mode reference leaves a reason to investigate a broader draft fit or a cheaper verifier. This run qualifies the observed round counts for the tested fit.
 
+## 20261122-INKDECODE-83 · Batch residual mixing across verifier rows
+
+Use Stark `3d5a3fe5`, locked Rust 1.98.1 and the original target and DSpark. The QKV-enabled stock four-row profile attributes 2.65 ms to attention inputs and 1.99 ms to expert inputs. The verifier separately dispatches attention and expert residual mixes for every row. Across 24 cross-pass visits it also launches four gate-message workgroups per row. Batch the attention queries and gate messages together, and run one grid for the expert mix after the fused attention finish. Each workgroup keeps the source 576-thread geometry, F32 normalization, dot reductions and weighted sum. The batching uses the existing per-row buffers and adds no verifier scratch.
+
+Alternate from a restored snapshot with eight plain and four instrumented pairs at each verifier width on two stock 4K fixtures. Require exact serial F32 logits and at least 0.7 ms per-command saving at the steady sampled and greedy widths on both stock inputs before advancing. The plain pairs save the following time.
+
+| Verifier rows | Dispatches removed | Stock 4K A wall saving | Stock 4K B wall saving |
+| --- | ---: | ---: | ---: |
+| 2 | 143 | 0.730 ms | 0.738 ms |
+| 3 | 262 | 1.358 ms | 1.332 ms |
+| 4 | 381 | 1.951 ms | 2.068 ms |
+
+All 432 profiled F32 rows matched serial. Separately verify 96 exact continuation outputs and committed state at proposal depths one through three on the short and both stock 4K fixtures. All 45 rejection and ring-wrap controls passed, including reset after an abandoned transaction and rejection of cross-mode snapshots. With flags unset, the connected short and 4K slices passed. The short full target matched pinned F32, and four stock 4K cases matched 16 F32 vectors, 768 BF16 visit residuals and four snapshot replays.
+
+Benchmark on one loaded worker with both pipelines resident. Alternate the selected mix within four paired workloads per mode, using 4,096 input tokens, context 4,352, zero prefix reuse and 256 emitted and sampled tokens. Vision and DSpark stay resident. Both arms use two proposals for seeded temperature-one, top-p-one sampling and three for greedy. All 16 pinned output hashes, accepted and proposed counts and round histograms matched.
+
+| Mode | Existing mix median | Batched mix median | Median paired gain | Faster pairs | Batched range |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Seeded sampled | 57.77 tok/s | 59.01 tok/s | +3.00% | 4/4 | 58.15–61.48 tok/s |
+| Greedy | 68.81 tok/s | 71.15 tok/s | +4.66% | 4/4 | 65.50–78.38 tok/s |
+
+Useful decode excludes the first emitted token. The median paired useful time saving is 0.972 ms per sampled round and 1.664 ms per greedy round. The worker accounted for 99.83% of GPU counter increments across 79 intervals, with nominal thermals and unchanged pageouts and swapouts. Retain `STARK_INKLING_EXPERIMENT_VERIFY_MIX_ROWS=1` under the combined short verifier with fused attention finish. At the observed proposal acceptance, this session needs about 8.42 ms less per sampled round and 4.04 ms less per greedy round for an 80 tok/s median.
+
+The retained source removes the worker arm switch and the extra timing diagnostic. Its sealed native build repeated flags-unset connected short and four-fixture 4K parity, and repeated all 45 enabled rejection and wrap checks. The retained worker restored a 2,048-token prefix across proposal depths, cleared reuse on mode changes and cancellation, preserved the existing request admission limits and matched accepted-proposal stop accounting.
+
+The retained binary's separate one-worker measurement reproduced all eight pinned output hashes and reached **77.39 tok/s median greedy** (75.38–78.95) and **65.18 tok/s median sampled** (62.84–66.81). The worker accounted for 99.85% of GPU counter increments over 36 intervals with nominal thermals. Keep the paired gains and the separate retained throughput estimates scoped to their sessions.
+
 ## Evidence
 
 The original target and DSpark artifact digests are recorded with the [integrated QKV run](2026-11-21-inkling-mini-decode-60.md#evidence-identities). The worker and native screen retain aggregate-only private receipts. No prompts, token IDs, logits, targets or fitted tensors are published.
@@ -77,3 +104,22 @@ The original target and DSpark artifact digests are recorded with the [integrate
 | Draft-head fit native binary | `4406b126ba92da66c9e96b9fa51345e101eb2cececf7adf4e97a5a94bec6ad4f` |
 | Draft-head fit harness | `62e1018dcb883135dc93973771761f5eef06906da2e1564560011f55dfe1c99a` |
 | Draft-head fit receipt | `3ef73c1e25e0cb5b355ea014794a41048284cc63587ae8191a582476dd29c8ba` |
+| Residual mix paired worker source patch | `a14338d5f16c17c11987cd433ed788ca149583b51f345eba3ffb9499a604f5d8` |
+| Residual mix native profile source patch | `fe217c13ffe7152c14f1e27caaec4bddfc6968397711ba658e7584e9cf545556` |
+| Residual mix paired worker | `ca0cc73012081bcf9c8f3f271c81eaa115de9f019bfbd467aac188fad2025ee1` |
+| Residual mix native profile executable | `53fb03931ecf90f9ba9c85f475d12564d10c7a47ec15777d9e51a28677c130d8` |
+| Residual mix paired benchmark harness | `ccf080ab744e6e56ae0943a4524f6a207c61e305cbbca12de5c26bc68abe592b` |
+| Residual mix paired benchmark receipt | `819e1c07300756c73f975e35303cbd0235b4a0b2cfeb111149ff2075afc12279` |
+| Residual mix paired host observations | `223327eeab5abe7db54d57b4cf6c99a48f7045b76131cd3d6bb19c6eb175ea38` |
+| Residual mix native profile, stock A | `6c8d621c931a6141317398ea61c06843daf1f3cbf6ed1048913b21db42f5292d` |
+| Residual mix native profile, stock B | `a4400e402a66dafa726625de9d330d74035f690aeeb3f8e7d752d5f7bfc8b895` |
+| Residual mix retained source patch | `1b3b55514d03caeb690d7eb7955fa234c4d46be6a82181f2c26e8bf7cbb43c53` |
+| Residual mix retained worker | `220271d9a2c84f5941aba1bf5f95ebfb55dc21ef426daa34f60f4d83a335e050` |
+| Residual mix retained native executable | `e7f6c3fab30d24b8f62ad4e98fad35630748984449997031d326c6b6a04c7865` |
+| Residual mix retained worker lifecycle | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |
+| Residual mix retained worker benchmark harness | `a292a5840c7a204e9a6b84bc08e9b68c4e62450a7379f0b0d9c76d28217817d2` |
+| Residual mix retained worker benchmark receipt | `b72b9cd4d3983714999f403b87153d683b08744e79d0b4b6da59547b8772abf4` |
+| Residual mix retained host observations | `b47e3f8d19ce2fece22b7a19e6ff6c7eb933bb595ed772e4d8208cd7b6071ff2` |
+| Residual mix retained proof, short | `2713ca77ee793c470bd0ad47e005b517cf8a9be306fd18921cbd18c8b407070c` |
+| Residual mix retained proof, stock A | `e16b1fd568a50ac8753eb27a132f5bd3bd172d4e8ec76777c9ca8f315558a4db` |
+| Residual mix retained proof, stock B | `7a5a70b041a0238a104bb08921ffef55d0465812d11beb856b9bd850d64c508a` |
