@@ -577,6 +577,10 @@ Measure table footprint and realistic indexing before replacing arithmetic with 
 
 Measure an improved one-proposal command at a fixed depth before making a depth policy choice. Inkling's queued INT8 path raised the one-proposal sampled median from 48.51 to 54.22 tok/s, with an 11.04% paired median gain and exact outputs. At the resulting costs, depth two still won three of four separate depth comparisons. [Queued one-proposal screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-69--queue-a-single-int8-proposal-and-retest-fixed-sampled-depth)
 
+Charge the draft-completion fence when a confidence policy chooses the verifier width after scoring proposals. On Inkling that boundary cost 1.10–1.26 ms per round. The policy lost to the faster fixed depth on all four held-out seeded 4K trajectories. [Draft-confidence depth replay](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-70--price-draft-confidence-depth-selection-after-queued-int8-proposals)
+
+Measure complete proposal time and accepted prefixes when shrinking a bidirectional draft block. Inkling's eight-row BF16 projection epilogue preserves proposals and saves at most 0.025 ms. Keeping four attention rows saves about 0.21 ms and improves only two of four seeded replays. [Draft block projection screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-71--reduce-the-padded-draft-block-and-fuse-projection-rounding)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates

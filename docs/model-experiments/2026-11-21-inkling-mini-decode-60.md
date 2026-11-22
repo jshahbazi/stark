@@ -1129,6 +1129,42 @@ The enabled worker reused 2,048 prompt tokens exactly across depths three, two a
 
 Retain queued one-proposal decode as an opt-in under `STARK_INKLING_EXPERIMENT_VERIFY_SINGLE_DRAFT=1` on the source verifier with queued submission and the INT8 draft head enabled. The existing INT8 bank accounts for the resident weight memory. The measured speed gain applies to requests using one proposal.
 
+## 20261122-INKDECODE-70 · Price draft-confidence depth selection after queued INT8 proposals
+
+Measure the two highest corrected scores from the production INT8 shortlist at each mask. Use the draft's own first proposal to compute the second mask. Fit each policy on three pinned 4K trajectories and replay it on the held-out trajectory using the original exact seeded target draws. The runtime-facing confidence candidate can see both draft score gaps. The pre-draft control can see the anchor's target gap and whether the anchor was the target argmax.
+
+At restored states measure both queued widths, then measure the same widths with a completed two-proposal confidence command and a separately encoded target. Include commit time. Price the policy once using queued costs as a favorable bound and once using the measured late-decision costs. Compare with fixed depth one and two and hindsight. Advance only if the held-out gain survives the relevant round boundary.
+
+The diagnostic top-two reductions reproduced both native INT8 proposals at all 768 anchors. The initial F32 target vocabulary rows matched the pinned capture on all four fixtures. The replay used the original target's exact temperature-one, top-p-one sampler and recorded no score vectors. Each fixture contributed 32 native timing samples per arm across eight restored states, with alternating accepted suffix lengths. The native executable and patch are based on `caa7e830`.
+
+| Policy | s4096-00 | s4096-01 | g4096-01 | g4096-02 | Median modeled tok/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Fixed one | 60.23 | 61.06 | 63.10 | 60.08 | 60.64 |
+| Fixed two | 61.40 | 68.93 | 73.17 | 53.70 | 65.17 |
+| Anchor gap and argmax agreement, queued cost | 61.40 | 68.93 | 73.17 | 53.70 | 65.17 |
+| First draft margin, queued cost | 61.40 | 68.71 | 74.34 | 53.70 | 65.06 |
+| Second draft margin, queued cost | 62.27 | 68.91 | 71.90 | 57.52 | 65.59 |
+| Both margins, queued cost | 62.27 | 68.52 | 72.55 | 54.67 | 65.40 |
+| Both margins with measured completion fence | 59.82 | 65.76 | 69.64 | 52.25 | 62.79 |
+
+The second margin alone raises the optimistic median by 0.42 tok/s versus fixed two. It chooses poorly on the workload where fixed one is fastest. Both margins at the measured boundary lose to the faster fixed arm on every holdout. Completing the confidence command and encoding the chosen width adds 1.10–1.26 ms to a round. Hindsight ranges from 60.55 to 78.43 modeled tok/s. These projections use native round costs with replayed acceptance, without charging the full worker's per-request, streaming and sampling work. Two originally greedy fixture prompts were sampled in this replay. The worker's sustained 60 tok/s gate remains open. Archive the confidence policy and leave runtime depth selection unchanged.
+
+## 20261122-INKDECODE-71 · Reduce the padded draft block and fuse projection rounding
+
+The three DSpark transformer layers use eight logical rows and project them with a 16-row F32 output tile, followed by a BF16 rounding dispatch. Compare the original projection, an eight-row F32 tile, and fused BF16 stores with F32 accumulators at both tile heights. Compare a separate four-logical-row proposal block using the eight-row fused projection. The shorter block changes draft attention visibility. Every target draw remains fully verified.
+
+Use the same four pinned trajectories, source state and INT8 vocabulary bank. Rotate five arms at each of 192 anchors per fixture and time the full two-proposal command from host submission through observed completion. Compare proposal pairs and accepted one- and two-mask prefixes. Compare the two live normalized BF16 rows at eight anchors per fixture. The eight-row variants retain all eight attention inputs. The four-row variant retains the anchor and three mask inputs. Subtract each fixture's paired whole-proposal saving from its fixed-two native round cost in attempt 70 and replay the observed path at depth two.
+
+| Draft projection and attention extent | Paired command saving across fixtures | Identical proposal pairs | Unequal BF16 words | First / two accepted prefixes | Median modeled tok/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Original M16 F32 then round, eight rows | — | 768 / 768 | 0 / 147,456 | 532 / 308 | 65.17 |
+| M8 F32 then round, eight rows | −0.0003 to +0.0098 ms | 768 / 768 | 0 / 147,456 | 532 / 308 | 65.17 |
+| M16 fused BF16 store, eight rows | 0.0080–0.0188 ms | 768 / 768 | 0 / 147,456 | 532 / 308 | 65.19 |
+| M8 fused BF16 store, eight rows | 0.0105–0.0247 ms | 768 / 768 | 0 / 147,456 | 532 / 308 | 65.19 |
+| M8 fused BF16 store, four rows | 0.2083–0.2175 ms | 598 / 768 | 145,235 / 147,456 | 543 / 317 | 65.43 |
+
+The M4 projection tile fails Metal 4's compile-time shape requirement. Both fused stores retain F32 accumulation and reproduce the checked eight-row draft values and IDs. The largest saving at eight logical rows is 0.025 ms, against the original 3.59–3.97 ms median proposal command. Four logical rows change draft attention and recover about 0.21 ms. Their replay improves from 61.40 to 63.70 modeled tok/s on s4096-00 and from 53.70 to 56.63 on g4096-02. It drops from 68.93 to 67.16 on s4096-01 and from 73.17 to 71.14 on g4096-01. The initial target F32 rows matched the pinned capture for each fixture. This screen measures proposal time and replayed acceptance. It leaves the worker's output and throughput gates open. Archive all variants and keep the original draft block.
+
 ## Evidence identities
 
 Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1`. Original DSpark SHA-256 `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2`. The current run uses the pinned Ollama capture and host documented in the [default-router record](2026-11-21-inkling-mini-decode-default.md).
@@ -1756,3 +1792,11 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Queued single proposal sealed stock-s4096-00 proof | `7240e6128a1fe532dde716f777627ad31d21497543788ea85ab6f8b89d6f3e0d` |
 | Queued single proposal sealed stock-g4096-01 proof | `913c42659700cb9fc172ce408f0fd57a12455f1d1c0c9e3b6af6178b29997c9c` |
 | Queued single proposal lifecycle receipt | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |
+| Draft-confidence replay native source patch | `76262ee83fabb2a3b5ef8ad1fdf797685c70e0d05961d65b7d17fb71b21cab8d` |
+| Draft-confidence replay native binary | `d5376a9bcb0333f500962b357f764b44cf0cc99b14cf8297c444f88ad69f5510` |
+| Draft-confidence replay harness | `eff9da0a2da4d704c25cb2fa6c76123bbad4382d0e50d4e4cfa30c5d914f1a35` |
+| Draft-confidence replay aggregate receipt | `7ed6766702e3367bebd2aa143c8ea1aaa16c71b39bcb20d7855dacefd3239020` |
+| Reduced draft block native source patch | `a660429e5f6b939fe9a8583aa39f8bfc9abe2daaf7a11b12112c44daefbc2319` |
+| Reduced draft block native binary | `264408b06cc6ba2d1758102e160503bacf4df6914c7405b1c0d77db8a454649c` |
+| Reduced draft block replay harness | `90bc3b4738bf39dbbc46ee4a87b65c5a41d7f524625392be22a34dc64ef1792b` |
+| Reduced draft block aggregate receipt | `17f336eae3238601480836912898ee442a91719e14adbb19c8532183bea4a327` |
