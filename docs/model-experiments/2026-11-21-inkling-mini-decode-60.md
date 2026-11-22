@@ -1231,6 +1231,19 @@ The retained build independently repeated the four sampled pairs. Output hashes 
 
 Build the formatted implementation from the recorded patch against `80affd98` with locked Rust 1.98.1. Use one loaded worker on the same M5 Max and original checkpoint with the combined verifier and its measured settings enabled. Alternate the four seeded sampled requests at two proposals with the four greedy requests at three proposals, changing workload order from the paired session. Each window ingests 4,096 tokens at context 4,352, reuses zero inputs and emits and samples 256 tokens with vision and DSpark resident. All eight output hashes match the pinned references.
 
+The harness clears inherited `STARK_INKLING_*` variables and then exports these selectors before loading the worker. Sampled requests use temperature and top-p both set to 1.
+
+```sh
+for selector in NVFP4_VECTOR_BLOCK PARALLEL_ROUTE CERTIFIED_SAMPLE SOURCE_VERIFY \
+    SHARED_LOCAL SHARED_GLOBAL EXACT_RUN_WIDTH VERIFY_HALF_INGRESS DRAFT_SHORTLIST \
+    DRAFT_INT8 VERIFY_FP4_LOOKUP VERIFY_NATIVE_ROUTER VERIFY_COMPACT_RUNS \
+    VERIFY_FUSED_FINISH VERIFY_FUSED_ATTENTION VERIFY_SHORT_ROUTER VERIFY_LEAN_DECODE \
+    VERIFY_OVERLAP VERIFY_FUSED_CACHE VERIFY_SINGLE_DRAFT VERIFY_COMBINED_SHORT
+do
+    export "STARK_INKLING_EXPERIMENT_${selector}=1"
+done
+```
+
 | Sampling | Useful decode median | Range | Requests over 60 tok/s | Median prefill |
 | --- | ---: | ---: | ---: | ---: |
 | Seeded sampled | **62.61 tok/s** | 61.86–66.04 | 4/4 | 975.12 tok/s |
