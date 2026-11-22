@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–44 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–51 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -752,6 +752,95 @@ The local Metal 4 compiler accepts a BF16 × INT8 → F32 vocabulary projection 
 
 Leave the integer expert path open. A useful GPU screen must include packing or repacking, the scale recurrence and real route occupancy before considering a new represented weight bank. This attempt establishes compiler and scalar arithmetic feasibility only.
 
+## 20261121-INKDECODE-48 · Time exact packed integer expert products
+
+Run the integer arithmetic in the live short verifier, including activation packing, on its original packed weight banks and sorted routes. All candidates keep the four-over-six activation error comparison. They store unscaled signed activation coefficients and one block scale. The normalized FP16 arm uses four exact half-vector subdots. The INT32 arm multiplies the doubled FP4 integers directly. The packed-pair arm joins two signed coefficients with radix 1,024 and extracts two products from the signed middle ten bits of one multiply. Every arm preserves the source's per-lane F32 FMA and final SIMD reduction.
+
+| Candidate | Three-row paired wall change, stock 4K | Four-row paired wall change, stock 4K |
+| --- | ---: | ---: |
+| Normalized FP16 subdots | +2.67–2.72 ms | +3.51–3.59 ms |
+| INT32 vector arithmetic | +3.71–3.78 ms | +5.02–5.42 ms |
+| Packed signed pairs | +0.58–0.60 ms | +0.77–0.85 ms |
+
+Use eight rotated plain comparisons and three separately timestamped comparisons at each width. All 924 checked F32 readout vectors matched the serial target across the short and two stock 4K fixtures. At three rows, the 88 NVFP4 products used 6.82–7.11 ms with the affine control and 7.42–7.66 ms with packed pairs. Packing slightly reduced the measured ingress time, from 0.99–1.00 ms to 0.97 ms. The first Rust build rejected an overbroad re-export, and the first Metal load rejected a scalar shifted by vector counts. The sealed run scopes the helper and broadcasts the lookup constant explicitly. Retire the integer variants and preserve the affine vector path.
+
+## 20261121-INKDECODE-49 · Fuse and quantize the multistep DSpark feed-forward projections
+
+Keep the admitted INT8 vocabulary head in all three arms. Compare the original BF16 feed-forward block, fused BF16 gate/up, and fused INT8 gate/up with INT8 down. The gate and up tiles write a combined output. Their epilogue rescales INT8 results, rounds both projections to BF16 and applies the existing SwiGLU. The INT8 down epilogue also preserves the BF16 cast before the F32 residual update. Quantize each projection row independently at load time. Attention, the one-proposal path, raw teacher-score export and the exact target are outside the candidate.
+
+Repeat the four pinned seeded 4K trajectories at 192 anchors per input. Rotate the three arms at each anchor at depths two and three. Exclude eight warm-up anchors from command timing. The representative cost model charges each measured proposal-time change and the corresponding observed acceptance.
+
+| Metric | Ordinary BF16 FFN | Fused BF16 FFN | Fused INT8 FFN |
+| --- | ---: | ---: | ---: |
+| Two proposals, wall median range | 3.61–4.32 ms | 3.59–4.29 ms | 3.12–3.69 ms |
+| Two proposals, full matches | 768 | 768 | 757 |
+| Two proposals, accepted teacher tokens | 840 | 840 | 844 |
+| Two proposals, modeled median tok/s | 55.60 | 55.64 | 56.69 |
+| Three proposals, wall median range | 3.70–4.41 ms | 3.66–4.38 ms | 3.20–3.78 ms |
+| Three proposals, full matches | 768 | 768 | 754 |
+| Three proposals, accepted teacher tokens | 1,027 | 1,027 | 1,031 |
+| Three proposals, modeled median tok/s | 55.37 | 55.41 | 56.03 |
+
+The fused BF16 arm matched every proposal and saved at most 0.04 ms. Retire that geometry. The fused INT8 arm saved 0.49–0.63 ms at two proposals. Its additional immutable weights and scales total 191,351,808 bytes (182.49 MiB).
+
+Four alternating cold 4K worker pairs per mode used the same candidate build, the INT8 vocabulary head in both arms, and two proposals for seeded sampling or three for greedy. The 16 requests used context 4,352 and zero input reuse, sampled and emitted 256 tokens each, and matched the pinned output hashes. Vision and DSpark remained resident.
+
+| Mode | BF16 FFN median | INT8 FFN median | Median paired change | Faster pairs |
+| --- | ---: | ---: | ---: | ---: |
+| Seeded sampled | 52.07 tok/s | 51.96 tok/s | +0.04% | 2/4 |
+| Greedy | 60.89 tok/s | 62.98 tok/s | +3.57% | 3/4 |
+
+Both arms used 530 sampled rounds in aggregate. Sampled candidate rates ranged from 47.44 to 53.95 tok/s. The two workers accounted for 99.88% of observed Metal counter increments over 81 intervals. Thermal samples were nominal or fair, with 141 additional pageouts and zero swapouts. The sampled worker delivered a flat paired median at the cost of a second weight bank. Archive the FFN runtime candidate and retain the INT8 vocabulary head as the strongest repeated sampled result.
+
+## 20261121-INKDECODE-50 · Poll the short verifier's Metal completion
+
+Lily previously improved with a polled Metal wait. On Inkling, poll the target verifier only, using 20 or 100 microsecond sleeps, then take the original completion fence. Preserve the existing terminal-error check. Draft, prefill and commit retain their waits. Use 12 rotated comparisons per arm and width for direct and queued verification, with the INT8 vocabulary head in both queued arms. All direct logits matched serial. The queued variants matched proposals, verified F32 rows and the committed state at each checked kept width.
+
+| Wait policy | Three-row queued paired wall change, stock 4K | Four-row queued paired wall change, stock 4K |
+| --- | ---: | ---: |
+| Poll every 20 microseconds | −0.05 to −0.06 ms | −0.09 to −0.11 ms |
+| Poll every 100 microseconds | −0.04 to +0.04 ms | +0.04 ms |
+
+In the first short run, the 20-microsecond policy saved 3.34–3.66 ms at the queued wall boundary. Direct GPU timestamps also fell by 2.63–2.70 ms, so the result cannot be attributed to wake latency. Replaying the short run with the same build left only 0.005–0.007 ms of queued change. Retire polling at this scope. The two stock 4K inputs and repeated short input put the effect below the round budget. [Lily host round trips](2026-11-19-lily-mtp-host-roundtrips.md#performance-and-memory)
+
+## 20261121-INKDECODE-51 · Split the exact verifier router into native BF16 products
+
+The short router has 128 output experts and an exact source split at 2,048 and 256 input channels. The register kernel issues four output tiles and loops over each slice in K16 blocks. First test reducing the physical cooperative tile. Metal requires a dimension of 32 for two cooperative operands and rejected the narrow K16 shapes. A register-fed BF16 M16 × N32 trial compiled, changed every inspected router word and added 3.69–3.95 ms per three-row 4K command. Retire that register-loading arm.
+
+Next vary the number of live output columns while keeping the original physical M16 × N32 × K16 operation. Exact F32 padded widths of eight and 16 both matched, with at most 0.26 ms of paired saving at three rows. The attempt to write a cooperative destination from device BF16 operands did not compile.
+
+For the native path, dispatch the two channel slices as independent device BF16 TensorOps products, write F32 partials, and add them in a separate router join. Compare widths 32, 16 and eight, with physical tile heights 16 and eight where available. The selected tile is M16 × N8. The M8 × N8 pipeline was unavailable. The selected shape retains the source split, per-row output indexing and existing expert selection.
+
+| Native candidate, stock 4K | Three-row paired wall saving | Four-row paired wall saving |
+| --- | ---: | ---: |
+| M16 × N32 | 0.91–1.00 ms | 0.99–1.28 ms |
+| M16 × N16, narrow-tile repeat | 1.16–1.37 ms | 1.13–1.53 ms |
+| M8 × N16 | 1.16–1.31 ms | 1.15–1.45 ms |
+| M16 × N8 | **1.18–1.45 ms** | **1.20–1.27 ms** |
+
+Use eight rotated plain comparisons and two separate timestamped comparisons at each width. The native arms matched every checked router F32 value at all 48 visits and every checked full-target F32 readout on the short and two stock 4K fixtures. At three rows, the M16 × N8 router plus join used 1.20–1.43 ms across the stock inputs. The same-run projection controls used 2.40–3.00 ms. The candidate uses 4 KiB of F32 partials inside the existing source-verifier memory reserve.
+
+### Paired cold 4K worker screen
+
+Pair the vector-loaded source router and native M16 × N8 router in one sealed build. Use the same verifier options and INT8 vocabulary head in both arms. Run four alternating cold 4K requests per arm and mode, with vision and DSpark resident, context 4,352, zero reused inputs, and 256 sampled and emitted outputs. Seeded sampling uses two proposals and greedy uses three.
+
+| Mode | Control decode median | Native router median | Median paired gain | Faster pairs |
+| --- | ---: | ---: | ---: | ---: |
+| Seeded sampled | 51.51 tok/s | 52.72 tok/s | +2.69% | 3/4 |
+| Greedy | 62.24 tok/s | 63.36 tok/s | +2.01% | 3/4 |
+
+All 16 output hashes and paired round counts match. The sampled proposal-plus-verifier interval fell 1.00 ms per round at the paired median. The workers accounted for 99.85% of observed Metal counter increments over 81 intervals. Thermal samples were nominal or fair, with 321 pageouts and zero swapouts during the run.
+
+Repeat the four seeded sampled pairs in reverse workload order, with candidate-first loading and reversed arm order. The control median was 51.83 tok/s and the native median was **53.28 tok/s**, with a range of 52.20–56.30 tok/s. All four pairs improved, and the median paired gain was **2.80%**. Output hashes and round counts agreed in all pairs. The combined proposal and verifier interval fell 1.11 ms per round at the paired median. The workers accounted for 99.85% of observed Metal counter increments over 41 intervals, with fair thermal readings. At the repeat's observed round counts, reaching 60 tok/s still requires recovering 2.23–4.64 ms per round across the four sampled requests.
+
+### Parity and admission
+
+The sealed native build reproduced the serial 96-output continuation and complete committed state at depths one, two and three on the four-token fixture and both stock 4K inputs. This covers direct two-row verification and queued verification at three and four rows. All 45 rejection and capacity-wrap controls passed. Abandoned commands reset the session, and a source-mode snapshot was rejected in ordinary mode.
+
+With flags unset, connected short and 4K aggregates matched. The short full-model run had zero unequal pinned F32 elements. Four stock 4K fixtures matched 16 F32 vectors, 768 BF16 residual blocks, and four exact snapshot replays. The native worker reused a 2,048-token prefix across proposal depths with exact continuation, cleared reuse on cancellation and mode switches, preserved the accepted-stop token counts, and respected short and long-context admission.
+
+Use the native router as an opt-in with `STARK_INKLING_EXPERIMENT_VERIFY_NATIVE_ROUTER=1` and the source short-verifier router selected. It runs inside the existing 96 MiB source-verifier reserve. The measured additional verifier workspace was 60,473,344 bytes on both stock 4K captures.
+
 ## Evidence identities
 
 Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1`. Original DSpark SHA-256 `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2`. The current run uses the pinned Ollama capture and host documented in the [default-router record](2026-11-21-inkling-mini-decode-default.md).
@@ -1147,3 +1236,60 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | INT8 admitted lifecycle receipt | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |
 | INT8 admitted idle memory harness | `7f811388682f744221ba02a8b133b4185ef62a26bfd7e62a908169edae55eefa` |
 | INT8 admitted idle memory receipt | `7be7d15dc9168144bce33ff38f6dfa224d16d89bb7550715346515db9b92109c` |
+| Live integer experts inkling_slice | `2a9a0abc93898c23b7fa97ab2996fa14cf426ec028ea2dfe282486d2d30f9322` |
+| Live integer experts scored-source.patch | `411015de1a9b2044da9f9c068b95838859481e1d128f98afac519e740d07f94d` |
+| Live integer experts score.sh | `51995381bbd22eaa3817839b76f4a99f1f20f698ed1bc57357d8a7672959179a` |
+| Live integer experts short.json | `1dbbfc62a2f29d0f24f4ba71e954afc5cff6b244e4e9b00b5e371b4be0679bfb` |
+| Live integer experts stock-s4096-00.json | `2779065be355e3254b3c9a42a53b6d32a066e46f8a53fe51d2a5b4c3d15861d1` |
+| Live integer experts stock-g4096-01.json | `65f14f684a1bfe810503ddb1e6bcd72ae1d86b3cb411f2748b47e38ff84b008d` |
+| Fused INT8 draft FFN replay inkling_slice | `6fbffe09cafcffe8c1e0db88b888a53335b591296f04253fac7360fefd1ff5c0` |
+| Fused INT8 draft FFN replay scored-source.patch | `4e948bd50ed10834fdb8a6208e1488502a2ff2ab12ae88caa4ece727b4105866` |
+| Fused INT8 draft FFN replay run.py | `16ec7f0d9b93e25fb4a3a16930866416cb5de47e61e4f8405ad105e140fcd3e2` |
+| Fused INT8 draft FFN replay result.json | `9fb0ac82db6764fcf53b2cd5a5055d3393f82f46acffe2568e5cde2e82ce6fe9` |
+| Fused INT8 draft FFN worker stark-generate-with-telemetry | `734b239dc6941066a36534e013b6089505abad18a62c9b2cf36241373516a499` |
+| Fused INT8 draft FFN worker worker-source.patch | `d68b8e8276e796c50b02517d8c02c01ad6414d02a172d975d2d73fccab5c1408` |
+| Fused INT8 draft FFN worker confirm.py | `929ca6485760d6d21d844a4b7e4c80a844b0676266b2298bf864ba537a522274` |
+| Fused INT8 draft FFN worker confirm-pairs.jsonl | `176fb01828e2a73ea949fa218cabb8cdd3eeed4c8c6bc31f4a8df20a4f3080b3` |
+| Fused INT8 draft FFN worker confirm-host.jsonl | `7d80848ce8566c27f3bba85db000a191601c6b6f903fe14f4bf3518c2e44d427` |
+| Short verifier Metal wait inkling_slice | `2bafaceb3601435b73297769dcb5e5f1485e5564b528efdafd7cf5c061030810` |
+| Short verifier Metal wait scored-source.patch | `ae04b3ad8f59071a497ffc4dba3d3fe89bd2045be41adeac747fc5993475b435` |
+| Short verifier Metal wait score.sh | `96433cc0091803ab3308f465b13a99562b21630ce18a2382615061127a263049` |
+| Short verifier Metal wait short.json | `ba355f5f071246b719217eecc25d84bfbaceb84db1362327a4120c64b4bdc703` |
+| Short verifier Metal wait short-repeat.json | `4f83351c18bedba9cebfaa2570a4a3a1f151604970aeebb0399569f327918177` |
+| Short verifier Metal wait stock-s4096-00.json | `252bca6dcd2ff07e82649751c518280273d4a8e0aadcba160761f28efbf5f086` |
+| Short verifier Metal wait stock-g4096-01.json | `5485cd87e6ef5b004c01d29e66189c74313718d3fc313990e357caa2f707b639` |
+| Native router cooperative inkling_slice | `2847557156dd1d93bd80edf3b9983624b7f548d20e6b870017b2689f0cc51f1d` |
+| Native router cooperative scored-source.patch | `3773bb2039d17f45c21d349c55c63076fa09c59f8a86f08353cdbd402a7e806d` |
+| Native router cooperative short.json | `77eb3330fd6b99da8cb895fffae77621fc8e132493ebe8595f69b36811f7305a` |
+| Native router cooperative stock-s4096-00.json | `e355d766578a90cd75d5b8e0f5a2c1a8a70e3ab606a6b84f57abf05fd5ad62e6` |
+| Native router cooperative stock-g4096-01.json | `70c04b5991f183282f88973d1f35e35786dac3a1da9902d4bae5e0a8eb74d717` |
+| Native router padded inkling_slice | `35cd7835fcb45ce83276679ad5a2a3ebcf0eba1f28188052a3f6d43f282b8855` |
+| Native router padded scored-source.patch | `fe0827d4c833e48a336c0877371894036cedd55c650b64ceb5ccf79cf423ba40` |
+| Native router padded short.json | `92c83a5ce7642aaac3acd986d87d9b0637ff8921221a0d81588dacc7adc77486` |
+| Native router padded stock-s4096-00.json | `1d2151d035b521e6dfef551fdc5ec6ef4c68531aa7ed2b2906f2e9084fccde4a` |
+| Native router padded stock-g4096-01.json | `fed359654c411d440e31b2b41ff5330fab7bff9e2828e20014dc80e2ebaf8249` |
+| Native router split device inkling_slice | `303bf88a398e8677dc5d2eef021c4e1e5ef6743b75be248148dc59b7943cf72b` |
+| Native router split device scored-source.patch | `da626da7da3d38fd42ec7303105578349b2421176be58e33aecaf6cac2840f14` |
+| Native router split device short.json | `3ac51ee5a325a6da6c23520a51dddf57930ccd8496ecd1f9d0c167d8d382f764` |
+| Native router split device stock-s4096-00.json | `aa06ae7c620f1291b74f6f6eafe9804f160abeef90052925e3182115f7979141` |
+| Native router split device stock-g4096-01.json | `68b72838d50146fd8615e08ec1132045f3c6600043cd03086149233b500d9f1e` |
+| Native router narrow device inkling_slice | `5cb8e303cd949bc438e7f61d074c46fe48c955bda6ad32bb7f4c7567da73eb29` |
+| Native router narrow device scored-source.patch | `8a6449075f5d4d9d36d23826f90e4e116f0d245abd18c555a2c1122123776cb3` |
+| Native router narrow device short.json | `9579dc3ee7c9b7ed1464276fb0406827881a8d5eb86c89211b2d076d1e15767b` |
+| Native router narrow device stock-s4096-00.json | `bbe59be3b642ed37f5e58d18a02ba75300d381d44aa83bd33d61ee41ccbbb7fe` |
+| Native router narrow device stock-g4096-01.json | `200bc8e26c3c8e3721b9f522e71d4fbea4c225f116caf80aba2eda43085051dc` |
+| Native router worker stark-generate-with-telemetry | `7c8a23b27d174c92b2e467c408d718a32c1aa7d34801a2bef03078b09ce4bb2f` |
+| Native router worker sealed-slice | `f305cad83bbe915e2d8a29db9bcea9a810367fe87994a57f66043a04b059e118` |
+| Native router worker worker-source.patch | `286ee27da8da95721b075dab0d163788084f15db8a5fa8d6283fabefae2bcc69` |
+| Native router worker confirm.py | `9e80cffda30f57e607a322e7589f935f5fea290a52f2d1c57fbd5876cc64712c` |
+| Native router worker confirm-pairs.jsonl | `59155848c55a862cef1446951d6ba67a2d84c178bc699372d5c289e302a44f85` |
+| Native router worker confirm-host.jsonl | `bc1b803718d6f531ee212f53dbe823a887519f51d8a48c988a6fc889a26b7648` |
+| Native router flags-unset parity | `b8a5b540c43b3942a458316f8d3f2943ed64beadfbb40fe803a93111aac3d011` |
+| Native router native short proof | `06fd93651065cd0a0cc954f54213b0873164e7155233950e7d7a846f730234e2` |
+| Native router native stock-s4096-00 proof | `8785eeaa08d47541b22f200c36b7551e715bf54b1de5dc3381dbf655587bc775` |
+| Native router native stock-g4096-01 proof | `c45febb22e0b045b86d3f3937b3ffecec2b267f5618a72a109ba0166b6e703b2` |
+| Native router lifecycle harness | `c49423bda00cd62d8154f4b48f46be8912bb0553e8f0e6720b484515e4f223b5` |
+| Native router lifecycle receipt | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |
+| Native router sampled repeat confirm.py | `d77931dfd29fe361ef040744d8cd939fe0bb4ba2f5908caa4c8a02de006903ce` |
+| Native router sampled repeat confirm-pairs.jsonl | `f92d53d838089537b0f729e0d3c747ba5f449185efb9adc832e547c61325272f` |
+| Native router sampled repeat confirm-host.jsonl | `0fb5780aaf2232bad8185a439a80722b82f4780afa8a6317040dc0155afdfc90` |

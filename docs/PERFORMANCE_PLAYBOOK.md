@@ -1,6 +1,6 @@
 # Performance playbook
 
-What to try when making a model family faster on Stark, in roughly the order to try it, with what each idea returned on Qwen3.8-Flash-Next ("Lily"). Compiled 2026-11-19 and updated 2026-11-21 from the records listed at the end.
+What to try when making a model family faster on Stark, in roughly the order to try it, with what each idea returned on Qwen3.8-Flash-Next ("Lily"). Compiled 2026-11-19 and updated 2026-11-22 from the records listed at the end.
 
 This page summarizes records; it is not one. Every number was measured on a named artifact, build, workload and host, and keeps that scope. Nothing here qualifies another artifact, and where this page and a dated record differ, the record is right. A technique that paid on Lily has to be measured again on the next family. One that failed on Lily failed for a stated reason, and the reason is the thing to check before trying it again.
 
@@ -538,6 +538,14 @@ Charge alternate proposals their verifier rows before designing tree state. The 
 Quantize a draft-only projection when target verification can still use the original weights. On four Inkling 4K trajectories, BF16 activations with INT8 vocabulary weights saved 1.03–1.20 ms per multistep draft and changed the matching teacher prefix total by one token at each depth. Per-row INT4 lost more accepted proposals and gave a lower modeled rate than INT8. The repeated cold worker reached 53.40 tok/s seeded sampled with a 6.04% median paired gain and exact output hashes. Record the 440.36 MiB bank in startup and request admission. [Draft vocabulary quantization](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-46--quantize-the-multistep-dspark-vocabulary-head)
 
 The local Metal 4 compiler accepts signed INT8 K16 products with INT32 results. The Inkling scalar screen preserves F32 per-block FMA bits by combining the two E4M3 scales. Time real routed kernels including packing and source-order accumulation before budgeting an integer verifier. [Integer block feasibility](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-47--check-exact-integer-nvfp4-block-arithmetic)
+
+Test exact integer arithmetic with the activation pack and original weight layout in place. Inkling's exact packed pairs added 0.58–0.60 ms to three-row stock 4K verifier commands. Normalized FP16 and direct INT32 products cost more. Keep the affine vector kernel for these routes. [Real-route integer screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-48--time-exact-packed-integer-expert-products)
+
+Separate projection fusion from weight precision. With the INT8 vocabulary head held fixed, the Inkling DSpark feed-forward INT8 arm reduced two-proposal command time by 0.49–0.63 ms. The fused BF16 control saved at most 0.04 ms. The INT8 worker's sampled median paired change was +0.04%. Archive the additional bank at this scope. [Draft feed-forward experiment](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-49--fuse-and-quantize-the-multistep-dspark-feed-forward-projections)
+
+Retest polled waits with the target-only fence and a repeated fixture. Inkling's 20-microsecond poll saved 0.05–0.06 ms at the three-row stock 4K queued boundary. The larger first-short result included GPU execution drift and vanished on repeat. [Metal wait screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-50--poll-the-short-verifiers-metal-completion)
+
+For small source routers, test direct device BF16 TensorOps while preserving exact accumulation boundaries. Inkling's two native router products retain the 2,048 + 256 split and join separate F32 partials. M16 × N8 saves 1.18–1.45 ms per three-row verifier command with exact routed logits. The sampled repeat gains 2.80% at the paired median and reaches 53.28 tok/s. [Native verifier router](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-51--split-the-exact-verifier-router-into-native-bf16-products)
 
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 

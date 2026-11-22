@@ -139,6 +139,25 @@ impl PrefillLanes {
                 &["ink_verify_router_source"],
             )?;
             runtime.verify_short_router = true;
+            if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_NATIVE_ROUTER").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+                && runtime.verify_native_router.is_none()
+            {
+                packed_prefill::register(
+                    runtime,
+                    include_str!("verify_router_native.metal"),
+                    &["ink_verify_router_native", "ink_verify_router_join"],
+                )?;
+                runtime.verify_native_router = Some(
+                    runtime
+                        .device
+                        .new_buffer(
+                            2 * MAX_VERIFY_ROWS * EXPERTS * size_of::<f32>(),
+                            MTLResourceOptions::STORAGE_MODE_PRIVATE,
+                        )
+                        .ok_or("Inkling verifier router allocation failed")?,
+                );
+            }
         }
         self.grouped.min_rows = 2;
         Ok(())

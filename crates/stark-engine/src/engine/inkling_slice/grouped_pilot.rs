@@ -551,12 +551,18 @@ impl GroupedExperts {
         if gpu.runtime.verify_nvfp4_matvec {
             gpu.phase(PrefillPhase::RouterProjection);
         }
-        let projection = if gpu.runtime.verify_nvfp4_matvec && gpu.runtime.verify_short_router && rows <= 4 {
-            "ink_verify_router_source"
+        let short = gpu.runtime.verify_nvfp4_matvec && gpu.runtime.verify_short_router && rows <= MAX_VERIFY_ROWS;
+        if let Some(partials) = gpu.runtime.verify_native_router.as_ref().filter(|_| short) {
+            gpu.one("ink_verify_router_native", &[input, router, partials], rows as u32, (EXPERTS / 8, 2), 32);
+            gpu.one("ink_verify_router_join", &[partials, &self.logits], (rows * EXPERTS) as u32, (rows, 1), EXPERTS);
         } else {
-            "ink_prefill_router_source"
-        };
-        gpu.one(projection, &[input, router, &self.logits], rows as u32, (EXPERTS / 32, rows.div_ceil(16)), 32);
+            let projection = if short {
+                "ink_verify_router_source"
+            } else {
+                "ink_prefill_router_source"
+            };
+            gpu.one(projection, &[input, router, &self.logits], rows as u32, (EXPERTS / 32, rows.div_ceil(16)), 32);
+        }
         if gpu.runtime.verify_nvfp4_matvec {
             gpu.phase(PrefillPhase::RouteSelect);
         }
