@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–54 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–55 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -901,6 +901,21 @@ All successful certificates reproduced the exhaustive sorted draw and exact RNG 
 
 This CPU study covers the pinned initial rows and excludes full fallback time. Defer runtime selection until it is measured on late, temperature-one sampled worker outputs. The first-row attempt savings are smaller than the remaining round budget.
 
+## 20261121-INKDECODE-55 · Fuse causal K/V convolution and cache writes
+
+On the shared local and global verifier paths, assign each K or V head to one SIMD group. Each lane processes its four channels in chronological token order and updates the three-slot history with raw BF16 projections. Preserve the original convolution tap order and BF16 cast before head normalization. Write normalized K/V directly to the cache. Batch Q and relative-head normalization in a second dispatch. Retain the old-cache reads and rollback copies. The four-token fixture serves as the short-path control.
+
+The first active 4K run hit the nine-binding convenience limit before encoding the new kernel. The corrected probe uses the full binding interface. Use eight rotated plain comparisons and three separately timestamped comparisons per width on the short and both 4K fixtures. All complete F32 logits matched.
+
+| Metric | Three live rows, two stock 4K fixtures | Four live rows, two stock 4K fixtures |
+| --- | ---: | ---: |
+| Paired wall saving | **0.56–0.58 ms** | **0.82 ms** |
+| Dispatches removed | 336 | 480 |
+| Relative and cache attention GPU, control | 3.25–3.27 ms | 4.19 ms |
+| Relative and cache attention GPU, candidate | 2.76 ms | 3.47 ms |
+
+The corrected candidate reproduced complete serial outputs and committed state on the short and both stock 4K inputs at depths one through three. All 45 rejection and capacity-wrap checks passed, including the local cache wrap and the three-slot convolution history when rejected row three overwrites the anchor slot. Continue with worker qualification. The timing above measures native verifier commands.
+
 ## Evidence identities
 
 Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1`. Original DSpark SHA-256 `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2`. The current run uses the pinned Ollama capture and host documented in the [default-router record](2026-11-21-inkling-mini-decode-default.md).
@@ -1389,3 +1404,16 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | FP4 table stock-g4096-01 native proof | `ed99e991e6ac659294f9c9b376235439862c8a47ab1e4bf7c69b27a484bf406a` |
 | FP4 table lifecycle harness | `86bb035efa478e37769250bcfd5cff9f0d1a8dd70f3057eaf65eb81d6170ea7e` |
 | FP4 table lifecycle receipt | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |
+| Fused verifier K/V inkling_slice | `34ee5c40c00d6716b8edc3f82375134ff3e0295b10e58092bb47ef7df26c5334` |
+| Fused verifier K/V scored-source.patch | `1bd4b4d624b379fa99862c3c38105e6543038032ff2657c76b1b7396479f205c` |
+| Fused verifier K/V short.json | `d909038a8cb438488b42f1a812d3a2b793d32cb57373720da0a9fdeca0089be0` |
+| Fused verifier K/V stock-s4096-00.json | `069007ec5c6525b9e49fae6b0cae839f18fd1ffcba34bfc267735bb057c545b9` |
+| Fused verifier K/V stock-g4096-01.json | `01cc7f5aca4e01f0d2270bf95def55300854aae4a55cb4a3fbdd407c22ea6df5` |
+| Fused verifier K/V proof-bin | `5f091c4a0bc6df5a59f747e5e5f425f0ca4032b8ebf081f556bba24c611d44d6` |
+| Fused verifier K/V proof-source.patch | `775c99604746a87b3a165288bb20deeed1ed64505c6e72a35744e46085c2ae49` |
+| Fused verifier K/V staged-against-fp4.patch | `9b6cd71f0718c83d127ef93282fe784960b57fac4aef3b15cce08b0ebbaf4fa3` |
+| Fused verifier K/V proof/stock-s4096-00.json | `39474e44fe09e53b820c6863af5520f794406f3ef554f7ca6668c42beca9e0a8` |
+| Fused verifier K/V proof/stock-g4096-01.json | `a530e7e6f9a556fe2731a1967cc68132c3385fc8cc20b1115028bf83fd075caa` |
+| Exact FP4 pair table check-table.py | `7224bd2c60a615b43b6e8273e9fe4019ae524bc4e6ec9f4feca7037a7c4f89a6` |
+| Exact FP4 pair table check-table.json | `55aa89954670fb89faf5f6dc5dbeafd7eada385951bc2eb419acfc30366b72e9` |
+| Fused verifier K/V proof/short.json | `45fa24f94f32bb62df8f49e8308750ed9a1ab637cfa5a5946e316a96bef1d02f` |

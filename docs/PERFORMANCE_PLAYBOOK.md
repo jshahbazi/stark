@@ -553,6 +553,8 @@ Time byte-pair coefficient lookup before changing the FP4 reduction. Inkling's e
 
 Bound the cutoff predecessor before skipping scalar tail maxima in exact sampling. Inkling's chunked CPU certificate attempt fell from 160 to 84 µs on pinned temperature-one initial rows. All of these rows still fell back to the ordinary sampler. [CPU sampler screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-54--bound-and-scan-the-exact-sampler-tail-in-chunks)
 
+Keep chronological per-channel K/V convolution and source BF16 casts when batching cache writes. Inkling's shared verifier fused cache path removed 336 dispatches and saved 0.56–0.58 ms at three rows. Native logits and rollback matched. [Fused verifier K/V](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-55--fuse-causal-kv-convolution-and-cache-writes)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates
