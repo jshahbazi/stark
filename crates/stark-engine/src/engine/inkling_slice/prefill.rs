@@ -39,7 +39,7 @@ impl PrefillLanes {
         let grouped = GroupedExperts::new(
             runtime,
             if rows <= 128 {
-                rows
+                rows.max(BATCHED_PREFILL_ROWS)
             } else {
                 BATCHED_PREFILL_ROWS
             },
@@ -79,7 +79,14 @@ impl PrefillLanes {
     }
 
     pub(super) fn for_m5_worker(runtime: &mut Runtime) -> Result<Self> {
-        let mut lanes = Self::new(runtime, M5_PREFILL_ROWS)?;
+        Self::for_m5_rows(runtime, M5_PREFILL_ROWS)
+    }
+
+    pub(super) fn for_m5_rows(
+        runtime: &mut Runtime,
+        rows: usize,
+    ) -> Result<Self> {
+        let mut lanes = Self::new(runtime, rows)?;
         lanes.enable_controllers(runtime)?;
         lanes.enable_batched_norm(runtime)?;
         lanes.direct_experts = true;
@@ -87,6 +94,14 @@ impl PrefillLanes {
         lanes.enable_wide_gemv(runtime)?;
         lanes.enable_short_expert_tiles();
         Ok(lanes)
+    }
+
+    pub(super) fn verify_taps<'a>(
+        &'a self,
+        session: &'a Session,
+        rows: usize,
+    ) -> impl Iterator<Item = &'a Buffer> + Clone {
+        self.features.iter().chain(std::iter::once(&session.draft_features)).skip(self.rows() - rows)
     }
 
     pub(super) fn enable_verify_groups(
@@ -216,7 +231,7 @@ impl Session {
         readout: bool,
         trace: Option<&PrefillTrace>,
     ) {
-        self.encode_lanes(gpu, lanes, inputs, readout, trace, None);
+        self.encode_lanes(gpu, lanes, inputs, readout, trace, None, None);
     }
 
     pub(super) fn encode_verify_rows(
@@ -227,9 +242,22 @@ impl Session {
         experts: VerifyExperts,
     ) {
         let inputs = tokens.iter().copied().map(TokenInput::Text).collect::<Vec<_>>();
-        self.encode_lanes(gpu, lanes, &inputs, true, None, Some(experts));
+        self.encode_lanes(gpu, lanes, &inputs, true, None, Some(experts), None);
     }
 
+    pub(super) fn encode_verify_transaction(
+        &self,
+        gpu: &mut Stream<'_>,
+        lanes: &PrefillLanes,
+        tokens: &[u32],
+        experts: VerifyExperts,
+        undo: &verify_state::VerifyWorkspace,
+    ) {
+        let inputs = tokens.iter().copied().map(TokenInput::Text).collect::<Vec<_>>();
+        self.encode_lanes(gpu, lanes, &inputs, true, None, Some(experts), Some(undo));
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn encode_lanes(
         &self,
         gpu: &mut Stream<'_>,
@@ -238,13 +266,14 @@ impl Session {
         readout: bool,
         trace: Option<&PrefillTrace>,
         verify: Option<VerifyExperts>,
+        undo: Option<&verify_state::VerifyWorkspace>,
     ) {
         let allow_groups = verify != Some(VerifyExperts::Singleton);
         let source_groups = verify == Some(VerifyExperts::Grouped);
         let row_count = inputs.len();
         let skip = lanes.rows() - row_count;
         let flows = lanes.flows.iter().chain(std::iter::once(&self.flow)).skip(skip);
-        let taps = lanes.features.iter().chain(std::iter::once(&self.draft_features)).skip(skip);
+        let taps = lanes.verify_taps(self, row_count);
         let draft = self.active_dspark();
         for (flow, &input) in flows.clone().zip(inputs) {
             self.encode_embedding(gpu, flow, input);
@@ -426,6 +455,12 @@ impl Session {
                     binding(&scratch.experts)
                 };
                 layer.finish_experts(gpu, visit, &flow.partial, scratch, output, state, self.position + row);
+                if row == 0
+                    && row_count == MAX_VERIFY_ROWS
+                    && let Some(undo) = undo
+                {
+                    undo.save_anchor(gpu, index, scratch, output);
+                }
                 if let Some(tap) = tap {
                     tap.output(gpu, row, scratch);
                 }
@@ -442,7 +477,7 @@ impl Session {
             } else {
                 self.finish_forward(gpu, flow, blocks, readout && row + 1 == row_count, taps);
             }
-            if let (Some(draft), Some(taps)) = (draft, taps) {
+            if let (None, Some(draft), Some(taps)) = (undo, draft, taps) {
                 draft.commit(gpu, taps, self.position + row);
             }
         }

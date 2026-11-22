@@ -992,7 +992,7 @@ pub(super) fn parallel_route_requested() -> bool {
     std::env::var_os("STARK_INKLING_EXPERIMENT_PARALLEL_ROUTE").as_deref() == Some(std::ffi::OsStr::new("1"))
 }
 
-fn register_parallel_route(runtime: &mut Runtime) -> Result<()> {
+pub(super) fn register_parallel_route(runtime: &mut Runtime) -> Result<()> {
     let library = packed_source_library(&runtime.device)?;
     let function = library.new_function_with_name(PARALLEL_ROUTE_KERNEL).ok_or(PARALLEL_ROUTE_KERNEL)?;
     let pipeline =
@@ -1030,7 +1030,7 @@ pub(super) fn register_verify_nvfp4_matvec(runtime: &mut Runtime) -> Result<()> 
     )
 }
 
-fn register(
+pub(super) fn register(
     runtime: &mut Runtime,
     source: &str,
     kernels: &[Kernel],

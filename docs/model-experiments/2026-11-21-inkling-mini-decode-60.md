@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–12 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–14 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -159,9 +159,46 @@ Apply the singleton’s exact SIMD selection independently on every verifier row
 
 All four pairs per width on the short and two stock 4K fixtures were faster. Every checked F32 logit and committed-state hash matched at widths 2, 3, 4, 6 and 8. The final combined executable also reproduced the short singleton, legacy draft replay and stock B source-mode proposal acceptance. On stock B the four-row command sits about 0.70 ms above the depth-three verification and finish budget, before rollback and host work. The diagnostic remains ahead of worker integration.
 
+## 20261121-INKDECODE-13 · Exact short-round rollback and worker integration
+
+Save the local KV slots a verifier block may overwrite and the four convolution histories per visit. In a four-row block the last row can overwrite the accepted anchor’s convolution slot, so capture that anchor’s raw inputs during verification. Undo rejected slots while leaving the global future rows outside the committed length. The target writes draft taps for every verified row and commits only the consumed inputs to DSpark. Abandoning a transaction resets the live position.
+
+The native controls covered every kept length at widths two, three and four on the short and both stock 4K prefixes. The two 4K fixtures repeated the matrix across the local ring wrap at position 4,095. All 45 cases matched the target and draft state and the next F32 continuation. Abandoned transactions reset the position, and restoring a source-draft snapshot in legacy draft mode failed. The first setup used a grouped expert workspace below its supported capacity. A subsequent proof attempted host access to private draft buffers. Neither attempt yielded timing. The final proof uses the required minimum workspace and a GPU blit for private draft readback.
+
+| Native fixture, 96 greedy tokens | Serial with draft cache | One proposal | Two proposals | Three proposals |
+| --- | ---: | ---: | ---: | ---: |
+| Four-token prefix | 46.51 tok/s | 54.26 tok/s | 66.13 tok/s | 72.65 tok/s |
+| Stock 4K A | **44.50 tok/s** | 43.43 tok/s | 40.42 tok/s | 35.39 tok/s |
+| Stock 4K B | 44.35 tok/s | 45.13 tok/s | **47.99 tok/s** | 44.47 tok/s |
+
+The measurement includes proposal, verification, acceptance and finishing. The serial control keeps DSpark cache writes active. Every schedule matched the serial token stream and final target and draft state. Two proposals on stock B averaged 5.25 ms for the draft, 36.52 ms for verification and 0.45 ms for finishing. The short result answers a separate prefix case. The cold 4K worker gates still decide whether the 60 tok/s target is reached.
+
+The worker has an experimental source-precision verifier for text prompts of at least 512 tokens on M5 Max at contexts up to 4,352. Set `STARK_INKLING_EXPERIMENT_SOURCE_VERIFY=1` and select one to three proposals through `mtp_drafts`. The worker uses its ordinary sampler on each row as the consumer requests it. A matched proposal is delivered immediately, and replacement or bonus output commits the already consumed inputs. An early stop finalizes only the inputs consumed so far. Source precision and draft mode bind the prompt snapshot, and the worker retains no speculative position between requests.
+
+The first worker launch reported the historical one-draft capability identifier alongside a maximum of three. Client validation rejected readiness before scoring. The corrected native worker and converter use a distinct short-verifier capability and preserve the existing single-draft contract. All eight request windows used 4,096 cold input tokens, context 4,352, zero prefix reuse, 256 sampled and emitted tokens, and resident vision and DSpark. One locked Rust 1.98.1 worker ran all four depths in balanced order. Vector NVFP4, parallel expert selection and certified sampling were available in every arm. All scored output hashes matched and agreed with the prior serial workload outputs.
+
+| Sampling | Proposals per round | Same-loaded drafting off | Fixed-depth median | Median paired change | Faster pairs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Greedy | 1 | 43.77 tok/s | **44.09 tok/s** | +2.73% | 3/4 |
+| Greedy | 2 | 43.77 tok/s | **50.22 tok/s** | +16.66% | 4/4 |
+| Greedy | 3 | 43.77 tok/s | **51.50 tok/s** | +18.29% | 4/4 |
+| Seeded sampled | 1 | 42.08 tok/s | **40.47 tok/s** | -3.02% | 1/4 |
+| Seeded sampled | 2 | 42.08 tok/s | **42.22 tok/s** | +2.27% | 3/4 |
+| Seeded sampled | 3 | 42.08 tok/s | **38.78 tok/s** | -4.95% | 1/4 |
+
+The best individual scored 4K rates were 54.49 greedy and 43.99 sampled tok/s. Even choosing the best measured fixed depth separately for each input gives medians of 51.78 and 42.85 tok/s. The best greedy setting accepted 628 of 1,166 proposals. The best sampled setting accepted 497 of 1,042. Active draft cache work moved the paired prefill rate by -5.05% for greedy depth three and -6.23% for sampled depth two. The worker accounted for 99.84% of the measured GPU counter change over 183 intervals, with nominal and fair thermal states and zero additional pageouts and swapouts. The worker remains below the 60 tok/s target.
+
+The final native build repeated all source stock B rollback and exact-state controls. Metal reported 57,278,464 additional allocated bytes for the verifier workspace and packed draft taps, within its 96 MiB admission reserve. The final worker stopped on a matched proposal before the round completed and matched the serial emitted prefix and sampled count. It reused a 2,048-token prompt prefix across proposal depths, compared exactly after changing the prompt tail, rejected reuse across draft mode changes, and reused zero tokens after cancellation during decode. Requests for three proposals on a 511-token prompt or at context 4,608 returned the scoped unsupported error. The final worker also matched one greedy and one sampled cold 4K pair against the prior worker with all Inkling flags unset.
+
+## 20261121-INKDECODE-14 · Screen the next verifier and weight access changes
+
+The existing packed local-attention routine in the short verifier changed a verified F32 row on stock 4K B. This screen used the full transactional guard, so it stopped at the first checked output difference and recorded no speed. The experimental wiring was retired. Any shared local-attention kernel for decode must preserve each singleton query’s shard assignment and the order of its FP32 updates, including rows whose old keys the block overwrites.
+
+A separate read-only weight survey sampled 23,740,416 BF16 values from 168 physical attention tensors and 2,359,296 values from the vocabulary head. In 64-weight blocks, 99.35% of attention blocks and 99.43% of head blocks had a nonzero exponent span of at most 14 and no exceptional nonzero exponent. These sampled blocks fit one sign bit, seven fraction bits, a four-bit exponent code with one code reserved for zero, and one base exponent per block. That layout would read about 24% fewer weight bytes in the surveyed stream with exact BF16 fallback for wide blocks. This is an encodability result. Kernel cost and sustained speed are unmeasured.
+
 ## Decision and next target
 
-Keep the vector singleton opt-in while building the faster verifier. Useful worker throughput remains below 60 tok/s. The short verifier shares NVFP4 weights and parallelizes expert selection while keeping exact logits and fully committed state. Source-mode draft acceptance confirms an adaptive path can matter on some inputs. Profile the remaining verifier work and preserve exact state on rejected suffixes. The regular token remains the key path on low-acceptance prompts.
+Keep the vector singleton opt-in while building the faster verifier. Useful worker throughput remains below 60 tok/s. The short verifier shares NVFP4 weights and parallelizes expert selection while keeping exact logits and fully committed state. Source-mode draft acceptance confirms an adaptive path can matter on some inputs. The verified transaction now restores rejected state and commits accepted draft context. Reduced target cost is still needed across 4K requests. The regular token remains the key path on low-acceptance prompts.
 
 ## Evidence identities
 
@@ -246,3 +283,27 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Final source draft stock B smoke | `97ff06f20db23615a834a3b14864dc315e522c559e71338a1e5264a4de9857b3` |
 | Final legacy draft short smoke | `04e53b4bb380131bf1e18634ea91ed5c7ed2d46f1d2ca06aeeb7c2b8474ee8e5` |
 | Final short singleton smoke | `e802ef9a3f66b9e9e80bd93f0ed08a54a75c9b85e6c1f29824073621b9e6a586` |
+| Transactional verifier native patch | `2c64fe0c7b654f434f4ae65eb2de8fd1f07349368c5360f4311d689e55770200` |
+| Transactional verifier native executable | `8adb1666d2646a5a216d3b9c6ecddbdd17c87f693990b9898674ee1a11b82a41` |
+| Transactional verifier short | `14f510aec48124a914be11ff4299d0da707b1542d4409a484bc9264119dedadb` |
+| Transactional verifier stock A | `448ec0cae07af65c893252e4dfeecd71020b025f5f810e31dadc1b0fcffb6a50` |
+| Transactional verifier stock B | `5426040b94d00e7ebb45bed8b54fe2d301ca7795313abcf28f191b94aa3c6326` |
+| Transactional verifier invalid grouped capacity | `f98471a41fe097a17b7f163718c84ef9e072d50d04d636730d902a071260112d` |
+| Transactional verifier worker source patch | `10eace33e3cd44006dd3ecb8ec6eb058fdae2155484cc33f98062cb169b0c2e3` |
+| Transactional verifier scored worker | `1378e36d906c0152a2c9156d0601d61cefc7b4690f89528be928db51756f708f` |
+| Transactional verifier worker harness | `4caaa236b4bb1d2ad712d2f3c19f08d53588ffe7c3c738c9b9b2dfb9c62c1001` |
+| Transactional verifier worker observations | `905dd2054d74fdc6e783f27313ca7c17ff50c2f733c72310f5c45dcfdb54d180` |
+| Transactional verifier host observations | `eb874cf4076dc797247b95df6fd529934dd264e23621dc43cc1a0d701680545e` |
+| Transactional verifier invalid client capability | `b754b166fe5a3e574979bf67197e3de4cc8be5b86313eed1bde26bf4b2a2a727` |
+| Transactional verifier final native executable | `73152643776887218f65e1620a6b0a403e29a954bf6e15013efce5eb9f894557` |
+| Transactional verifier final native recheck | `e4782ea0af8153a1661dce305a350420b239a93fa00ba2646143a647e55c9f1a` |
+| Transactional verifier final worker | `a4fc10114ce2b0c93dff596a95d3cf26bd9914a779c0211c9e8743fc1b4927f1` |
+| Transactional verifier lifecycle harness | `c41ce21f76b7170838513f7d1ee4bbaf09979d458e5ccf04249958e3fa18a06f` |
+| Transactional verifier lifecycle controls | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |
+| Transactional verifier final source patch | `4fef4a81c7500da8aa9b5f10e18d57a195b241ceee488532dbe5e8181ba5b809` |
+| Transactional verifier flags-unset worker pairs | `2ccfe3df802b05f4fdc9a4bdf6ea53d538c009136ffdad4474d08db59f33dc6f` |
+| Packed relative trial patch | `4faf9d36d09f3a57b0ec61f85b4faa9e69f8f0a5b55e0cbacb881961521da0a5` |
+| Packed relative trial executable | `0bff1a2c99dad62ce4b2dd1df8caf24f244abaf590f7e1b9d0eac8181dc46579` |
+| Packed relative trial outcome | `3457e2531847c055823a5360d64b45bfaba19950799f6211aecd4fe016ef2b7f` |
+| BF16 exponent survey harness | `5507b5bf1938660348b726caac31475842009b2423a01d4d9594cf43e28c0636` |
+| BF16 exponent survey receipt | `433d5dafe5f28074b4466d7ed530ea3b6697a4e6440867fdf667f45f362f1c8e` |

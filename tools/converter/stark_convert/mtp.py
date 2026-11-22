@@ -8,6 +8,7 @@ _MAX_DRAFTS = 2**32 - 1
 _SAMPLING = "exact-rejection-v1"
 _INKLING_SAMPLING = "native-target-draw-match-v1"
 _INKLING_VERIFICATION = "inkling-dspark-target-draw-v1"
+_INKLING_SHORT_VERIFICATION = "inkling-dspark-short-target-draw-v1"
 
 
 def _unsupported() -> dict[str, Any]:
@@ -52,7 +53,11 @@ def mtp_capabilities(readiness: Any) -> dict[str, Any]:
         or not isinstance(operations, list)
         or (
             sampling != _SAMPLING
-            and (sampling, verification, maximum) != (_INKLING_SAMPLING, _INKLING_VERIFICATION, 1)
+            and (sampling, verification, maximum)
+            not in (
+                (_INKLING_SAMPLING, _INKLING_VERIFICATION, 1),
+                (_INKLING_SAMPLING, _INKLING_SHORT_VERIFICATION, 3),
+            )
         )
         or not isinstance(verification, str)
         or not 1 <= len(verification) <= 128

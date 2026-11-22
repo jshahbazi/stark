@@ -21,9 +21,10 @@ use metal::{
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use session::prefill_profile::{PrefillPhase, PrefillTiming};
 pub use session::{
-    PrefillTraceMode, Session, Snapshot, VOCABULARY, measure_decode_verify, measure_dspark, measure_dspark_depth,
-    measure_full, measure_full_budget, measure_prefill, measure_prefill_speed, measure_source_dspark_depth,
-    probe_stock_nvfp4, profile_packed_prefill, profile_prefill, profile_stock_4k, trace_packed_prefill, trace_prefill,
+    MAX_VERIFY_ROWS, PrefillTraceMode, Session, Snapshot, VOCABULARY, Verification, measure_decode_verify,
+    measure_dspark, measure_dspark_depth, measure_full, measure_full_budget, measure_prefill, measure_prefill_speed,
+    measure_source_dspark_depth, measure_verify_transaction, probe_stock_nvfp4, profile_packed_prefill,
+    profile_prefill, profile_stock_4k, trace_packed_prefill, trace_prefill,
 };
 pub use validation::measure;
 pub use vision::{INKLING_IMAGE_TOKEN, ImageEmbeddings, measure_vision};
@@ -1249,11 +1250,21 @@ fn execute(
 
 fn execute_with_profile(
     runtime: &Runtime,
+    profile: Option<&mut PrefillTiming>,
+    encode: impl FnOnce(&mut Stream<'_>),
+) -> Result<Timing> {
+    execute_prepared(runtime, profile, |_| Ok(()), encode)
+}
+
+fn execute_prepared(
+    runtime: &Runtime,
     mut profile: Option<&mut PrefillTiming>,
+    prepare: impl FnOnce(&ProtocolObject<dyn MTLCommandBuffer>) -> Result<()>,
     encode: impl FnOnce(&mut Stream<'_>),
 ) -> Result<Timing> {
     let start = std::time::Instant::now();
     let command = runtime.queue.command_buffer().ok_or("Metal command allocation failed")?;
+    prepare(&command)?;
     let encoder = match profile.as_mut() {
         Some(profile) => profile.begin(&command)?,
         None => command.compute_command_encoder().ok_or("Metal encoder allocation failed")?,

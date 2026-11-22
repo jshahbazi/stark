@@ -23,7 +23,10 @@ mod prefill_relative;
 mod prefill_trace;
 #[path = "target_validation.rs"]
 mod target_validation;
-
+#[path = "transaction_validation.rs"]
+mod transaction_validation;
+#[path = "verify_state.rs"]
+mod verify_state;
 use packed_prefill::PackedPrefill;
 use prefill::PrefillLanes;
 pub use prefill_profile::{probe_stock_nvfp4, profile_packed_prefill, profile_prefill, profile_stock_4k};
@@ -31,6 +34,8 @@ pub use prefill_trace::{PrefillTraceMode, trace_packed_prefill, trace_prefill};
 pub use target_validation::{
     measure_decode_verify, measure_full, measure_full_budget, measure_prefill, measure_prefill_speed,
 };
+pub use transaction_validation::measure_verify_transaction;
+pub use verify_state::{MAX_VERIFY_ROWS, Verification};
 
 use super::{dspark::Dspark, vision::Vision, *};
 
@@ -55,6 +60,7 @@ pub struct Snapshot {
     context: usize,
     position: usize,
     dspark: bool,
+    source_text: bool,
     prefill_rows: usize,
     state: Buffer,
 }
@@ -81,6 +87,8 @@ pub struct Session {
     draft_features: Buffer,
     dspark: Option<Dspark>,
     dspark_enabled: bool,
+    verifier: Option<verify_state::VerifyWorkspace>,
+    source_verifier: bool,
     capture_draft_features: bool,
     features_ready: bool,
     capture_visits: bool,
@@ -147,6 +155,8 @@ impl Session {
             draft_features: zeroed(device, 4 * WIDTH * 2)?,
             dspark: None,
             dspark_enabled: false,
+            verifier: None,
+            source_verifier: false,
             layers,
             vision,
             visits,
@@ -261,7 +271,7 @@ impl Session {
     /// Command row bound for worker cancellation and chunk-aligned snapshots.
     pub fn prefill_batch_rows(&self) -> usize {
         if let Some(packed) = &self.packed_prefill
-            && (!self.dspark_enabled || packed.captures_all_draft_taps())
+            && (!self.dspark_enabled || self.runtime.source_text_active && packed.captures_all_draft_taps())
         {
             if self.runtime.source_text_active {
                 packed.rows()
@@ -339,8 +349,9 @@ impl Session {
     }
 
     fn apply_prefill_scope(&mut self) {
-        let source =
-            self.source_text_requested && !self.dspark_enabled && self.supports_source_text_prefill(self.context);
+        let source = self.source_text_requested
+            && (!self.dspark_enabled || self.source_verifier)
+            && self.supports_source_text_prefill(self.context);
         self.runtime.source_text_active = source;
         if let Some(packed) = &mut self.packed_prefill {
             packed.set_source_scope(source);
@@ -593,7 +604,7 @@ impl Session {
     ) -> Result<Timing> {
         if let Some(packed) = &self.packed_prefill
             && tokens.len() >= PackedPrefill::MIN_ROWS
-            && (self.active_dspark().is_none() || packed.captures_all_draft_taps())
+            && (self.active_dspark().is_none() || self.runtime.source_text_active && packed.captures_all_draft_taps())
         {
             packed.upload(tokens);
             return execute_with_profile(&self.runtime, profile, |gpu| packed.encode(self, gpu, tokens.len(), readout));
@@ -847,6 +858,7 @@ impl Session {
             context: self.context,
             position: self.position,
             dspark: self.dspark_enabled,
+            source_text: self.runtime.source_text_active,
             prefill_rows: self.prefill_batch_rows(),
             state,
         })
@@ -860,6 +872,7 @@ impl Session {
         if !Arc::ptr_eq(&self.owner, &snapshot.owner)
             || self.context != snapshot.context
             || self.dspark_enabled != snapshot.dspark
+            || self.runtime.source_text_active != snapshot.source_text
             || self.prefill_batch_rows() != snapshot.prefill_rows
         {
             return Err("Inkling snapshot belongs to another model, context, draft, or prefill mode");

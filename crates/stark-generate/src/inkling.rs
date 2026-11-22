@@ -12,7 +12,10 @@ use stark_engine::{
     engine::{
         Engine,
         hybrid::activity::InferenceActivity,
-        inkling_slice::{INKLING_IMAGE_TOKEN as IMAGE_TOKEN, ImageEmbeddings, Session, Snapshot, VOCABULARY as VOCAB},
+        inkling_slice::{
+            INKLING_IMAGE_TOKEN as IMAGE_TOKEN, ImageEmbeddings, MAX_VERIFY_ROWS, Session, Snapshot,
+            VOCABULARY as VOCAB, Verification,
+        },
     },
 };
 use tokenizers::Tokenizer;
@@ -38,11 +41,28 @@ const SOURCE_PREFILL_MIN_INPUT: usize = 512;
 const SOURCE_PROMPT_SUFFIX: usize = 4;
 const INITIAL_CONTEXT: usize = 4352;
 const MTP_VERIFICATION: &str = "inkling-dspark-target-draw-v1";
+const SHORT_MTP_VERIFICATION: &str = "inkling-dspark-short-target-draw-v1";
 
 #[derive(Default, serde::Serialize)]
 struct DraftStats {
     proposed: usize,
     accepted: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speculative: Option<SpeculationStats>,
+}
+
+#[derive(Default, serde::Serialize)]
+struct SpeculationStats {
+    rounds: [usize; MAX_VERIFY_ROWS],
+    draft_seconds: f64,
+    verify_seconds: f64,
+    finish_seconds: f64,
+}
+
+struct PendingDraft<'a> {
+    transaction: Verification<'a>,
+    proposals: Vec<u32>,
+    consumed: usize,
 }
 
 pub(crate) struct InklingBackend {
@@ -51,8 +71,9 @@ pub(crate) struct InklingBackend {
     target: Session,
     cancellation: Option<CancelSignal>,
     sampler: ProbabilityMapper,
-    retained: Option<BoundaryEntry<(bool, Snapshot)>>,
-    pending: Option<BoundaryEntry<(bool, Snapshot)>>,
+    retained: Option<BoundaryEntry<((bool, bool), Snapshot)>>,
+    pending: Option<BoundaryEntry<((bool, bool), Snapshot)>>,
+    source_verifier: bool,
     draft_stats: DraftStats,
     runtime_identity: stark_engine::engine::MetalDeviceIdentity,
 }
@@ -158,6 +179,14 @@ impl InklingBackend {
         if target.supports_batched_prefill() {
             target.set_batched_prefill(true, source_allowed).map_err(|_| "inkling_prefill_load_failed")?;
         }
+        let source_verifier = source_allowed
+            && std::env::var_os("STARK_INKLING_EXPERIMENT_SOURCE_VERIFY").as_deref() == Some(std::ffi::OsStr::new("1"))
+            && admit_request_memory(Some(fixed + prefill_reserve + Session::SOURCE_VERIFIER_RESERVE_BYTES), available)
+                .is_ok()
+            && target.set_source_verifier(true).is_ok();
+        if source_verifier {
+            target.set_source_verifier(false).map_err(|_| "inkling_prefill_load_failed")?;
+        }
         Ok(Self {
             tokenizer: artifact.tokenizer,
             config_sha256: artifact.config_sha256,
@@ -166,6 +195,7 @@ impl InklingBackend {
             sampler: ProbabilityMapper::default(),
             retained: None,
             pending: None,
+            source_verifier,
             draft_stats: DraftStats::default(),
             runtime_identity,
         })
@@ -177,7 +207,7 @@ impl InklingBackend {
         options: &GenerationOptions,
     ) -> bool {
         input_len >= SOURCE_PREFILL_MIN_INPUT
-            && options.mtp_drafts == 0
+            && (options.mtp_drafts == 0 || self.source_verifier)
             && self.target.supports_source_text_prefill(options.context_tokens as usize)
     }
 
@@ -209,10 +239,22 @@ impl InklingBackend {
         }
         self.draft_stats = DraftStats::default();
         let use_draft = options.mtp_drafts > 0;
-        if use_draft && (options.mtp_drafts > 1 || image.is_some() || !self.target.has_dspark()) {
+        let source_prefill = image.is_none() && self.source_text_prefill(input.len(), options);
+        let source_verify = self.source_verifier && use_draft && source_prefill;
+        let supported_drafts = if source_verify {
+            MAX_VERIFY_ROWS - 1
+        } else {
+            1
+        };
+        if use_draft && (options.mtp_drafts as usize > supported_drafts || image.is_some() || !self.target.has_dspark())
+        {
             return Err("mtp_not_supported");
         }
-        let source_prefill = image.is_none() && self.source_text_prefill(input.len(), options);
+        let verify_depth = if source_verify {
+            options.mtp_drafts as usize
+        } else {
+            0
+        };
         let boundary = if image.is_none() {
             Self::boundary(input.len(), options, source_prefill)
         } else {
@@ -232,6 +274,7 @@ impl InklingBackend {
         self.target.set_context(options.context_tokens as usize).map_err(|_| "native_generation_failed")?;
         self.target.reset();
         self.target.set_text_prefill_scope(source_prefill);
+        self.target.set_source_verifier(source_verify).map_err(|_| "mtp_not_supported")?;
         self.target.set_dspark_enabled(use_draft).map_err(|_| "mtp_not_supported")?;
         let mut retained = retained.filter(|_| reused > 0);
         if let Some(entry) = retained.as_ref() {
@@ -287,6 +330,7 @@ impl InklingBackend {
             &mut self.sampler,
             &mut self.cancellation,
             &mut self.draft_stats,
+            verify_depth,
             logits,
             expanded,
             options,
@@ -297,8 +341,12 @@ impl InklingBackend {
         let mut result = result?;
         result.reused_input_tokens = reused;
         if let (Some(state), Some(scope)) = (snapshot, options.cache_scope) {
-            self.pending =
-                Some(BoundaryEntry::new((use_draft, state), scope, options.context_tokens, &input[..boundary]));
+            self.pending = Some(BoundaryEntry::new(
+                ((use_draft, source_prefill), state),
+                scope,
+                options.context_tokens,
+                &input[..boundary],
+            ));
         }
         Ok(result)
     }
@@ -324,6 +372,7 @@ fn collect_output(
     mapper: &mut ProbabilityMapper,
     cancellation: &mut Option<CancelSignal>,
     draft_stats: &mut DraftStats,
+    verify_depth: usize,
     mut logits: Vec<f32>,
     input_tokens: usize,
     options: &GenerationOptions,
@@ -335,27 +384,73 @@ fn collect_output(
     let mut rng = options.seed;
     let certified_sampling =
         std::env::var_os("STARK_INKLING_EXPERIMENT_CERTIFIED_SAMPLE").as_deref() == Some(std::ffi::OsStr::new("1"));
+    let mut sample = |scores: &[f32]| {
+        if certified_sampling && let Some(token) = sample_certified_prefix(scores, &options.sampling, &mut rng) {
+            return Ok(token);
+        }
+        sample_with_mapper(scores, &options.sampling, &mut rng, Some(mapper))
+    };
+    let budget = (options.context_tokens as usize - input_tokens).min(options.max_new_tokens as usize);
+    let mut delivered = 0;
+    let mut session = Some(target);
+    let mut pending: Option<PendingDraft<'_>> = None;
+    let mut speculative = (verify_depth > 0).then(SpeculationStats::default);
     let tokens = std::iter::from_fn(|| {
         Some((|| {
-            let proposal = if let Some(anchor) = previous {
-                let proposal = target.draft_propose(anchor).map_err(|_| "native_generation_failed")?;
-                logits = target.step(anchor).map_err(|_| "native_generation_failed")?;
-                proposal
-            } else {
-                None
-            };
-            let token = match certified_sampling
-                .then(|| sample_certified_prefix(&logits, &options.sampling, &mut rng))
-                .flatten()
-            {
-                Some(token) => token,
-                None => sample_with_mapper(&logits, &options.sampling, &mut rng, Some(mapper))?,
-            };
-            if let Some(proposal) = proposal {
-                draft_stats.proposed += 1;
-                draft_stats.accepted += usize::from(proposal == token);
+            let mut legacy_proposal = None;
+            if let Some(anchor) = previous {
+                if pending.is_none() {
+                    let target = session.take().ok_or("native_generation_failed")?;
+                    let depth = verify_depth.min(budget.saturating_sub(delivered + 1));
+                    if let Some(stats) = speculative.as_mut() {
+                        stats.rounds[depth] += 1;
+                    }
+                    if depth == 0 {
+                        if verify_depth == 0 {
+                            legacy_proposal = target.draft_propose(anchor).map_err(|_| "native_generation_failed")?;
+                        }
+                        logits = target.step(anchor).map_err(|_| "native_generation_failed")?;
+                        session = Some(target);
+                    } else {
+                        let start = Instant::now();
+                        let proposals = target.propose_verify(anchor, depth).map_err(|_| "native_generation_failed")?;
+                        speculative.as_mut().unwrap().draft_seconds += start.elapsed().as_secs_f64();
+                        draft_stats.proposed += proposals.len();
+                        let input = std::iter::once(anchor).chain(proposals.iter().copied()).collect::<Vec<_>>();
+                        let start = Instant::now();
+                        let transaction = target.begin_verify(&input).map_err(|_| "native_generation_failed")?;
+                        speculative.as_mut().unwrap().verify_seconds += start.elapsed().as_secs_f64();
+                        pending = Some(PendingDraft {
+                            transaction,
+                            proposals,
+                            consumed: 0,
+                        });
+                    }
+                }
             }
+            let token = if let Some(mut draft) = pending.take() {
+                let token = sample(draft.transaction.logits(draft.consumed).map_err(|_| "native_generation_failed")?)?;
+                let matched = draft.proposals.get(draft.consumed) == Some(&token);
+                draft.consumed += 1;
+                if matched {
+                    draft_stats.accepted += 1;
+                    pending = Some(draft);
+                } else {
+                    let start = Instant::now();
+                    session = Some(draft.transaction.commit(draft.consumed).map_err(|_| "native_generation_failed")?);
+                    speculative.as_mut().unwrap().finish_seconds += start.elapsed().as_secs_f64();
+                }
+                token
+            } else {
+                let token = sample(&logits)?;
+                if let Some(proposal) = legacy_proposal {
+                    draft_stats.proposed += 1;
+                    draft_stats.accepted += usize::from(proposal == token);
+                }
+                token
+            };
             previous = Some(token);
+            delivered += 1;
             Ok(u64::from(token))
         })())
     });
@@ -363,7 +458,7 @@ fn collect_output(
     let mut filter = StopFilter::new(options.stop.clone());
     let mut raw = String::new();
     let needs_text = on_text.is_some() || !options.stop.is_empty();
-    let mut result = collect_tokens_controlled(
+    let result = collect_tokens_controlled(
         tokens,
         input_tokens,
         options,
@@ -382,7 +477,16 @@ fn collect_output(
         },
         on_progress,
         &mut || check_cancelled(cancellation, options.request_id),
-    )?;
+    );
+    let mut result = result?;
+    if let Some(draft) = pending {
+        // The consumer stopped mid-round. Its final sampled token remains
+        // pending, just as it does after a serial step.
+        let start = Instant::now();
+        draft.transaction.commit(draft.consumed).map_err(|_| "native_generation_failed")?;
+        speculative.as_mut().unwrap().finish_seconds += start.elapsed().as_secs_f64();
+    }
+    draft_stats.speculative = speculative;
     if needs_text {
         let complete = tokenizer.decode(&result.generated_token_ids, false).map_err(|_| "decoding_failed")?;
         let (tail, stopped) = filter.push(complete.strip_prefix(&raw).ok_or("decoding_failed")?);
@@ -484,18 +588,23 @@ impl GenerationBackend for InklingBackend {
         true
     }
     fn prefix_cache_key(&self) -> &'static str {
-        "model-instance+context-tokens+cache-scope+mtp-enabled"
+        if self.source_verifier {
+            "model-instance+context-tokens+cache-scope+mtp-enabled+source-precision"
+        } else {
+            "model-instance+context-tokens+cache-scope+mtp-enabled"
+        }
     }
     fn prefix_cache_plan(
         &self,
         input: &[u32],
         options: &GenerationOptions,
     ) -> usize {
-        let boundary = Self::boundary(input.len(), options, self.source_text_prefill(input.len(), options));
+        let source_prefill = self.source_text_prefill(input.len(), options);
+        let boundary = Self::boundary(input.len(), options, source_prefill);
         let reused = self
             .retained
             .as_ref()
-            .filter(|entry| entry.state.0 == (options.mtp_drafts > 0))
+            .filter(|entry| entry.state.0 == (options.mtp_drafts > 0, source_prefill))
             .map_or(0, |entry| entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()));
         if reused <= boundary {
             reused
@@ -519,10 +628,18 @@ impl GenerationBackend for InklingBackend {
     }
     fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
         self.target.has_dspark().then_some(MtpCapabilities {
-            max_drafts: 1,
+            max_drafts: if self.source_verifier {
+                MAX_VERIFY_ROWS - 1
+            } else {
+                1
+            },
             recommended_drafts: 1,
             sampling: "native-target-draw-match-v1",
-            verification: MTP_VERIFICATION,
+            verification: if self.source_verifier {
+                SHORT_MTP_VERIFICATION
+            } else {
+                MTP_VERIFICATION
+            },
         })
     }
     fn mtp_metadata(&self) -> Option<Value> {

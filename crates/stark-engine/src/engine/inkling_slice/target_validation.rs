@@ -50,7 +50,7 @@ fn native_digest<T: bytemuck::Pod>(values: &[T]) -> String {
     format!("{:x}", Sha256::digest(bytemuck::cast_slice(values)))
 }
 
-fn state_digest(session: &Session) -> String {
+pub(super) fn state_digest(session: &Session) -> String {
     let mut digest = Sha256::new();
     digest.update((session.position as u64).to_le_bytes());
     for visit in &session.visits {
