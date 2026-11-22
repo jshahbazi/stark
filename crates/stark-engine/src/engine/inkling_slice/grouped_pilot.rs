@@ -499,6 +499,10 @@ impl GroupedExperts {
             (EXPERTS / 32, rows.div_ceil(16)),
             32,
         );
+        if gpu.runtime.verify_nvfp4_matvec && gpu.runtime.parallel_route && self.source_log_weights.is_some() {
+            gpu.one(PARALLEL_ROUTE_KERNEL, &[&self.logits, bias, &self.ids, &self.weights], (), (rows, 1), 32);
+            return;
+        }
         let select = if self.source_log_weights.is_some() {
             "ink_prefill_select_log_weights"
         } else {

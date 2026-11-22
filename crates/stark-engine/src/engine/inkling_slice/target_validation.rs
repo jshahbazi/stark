@@ -715,6 +715,8 @@ pub fn measure_decode_verify(
         .as_mut()
         .ok_or("Inkling verifier lanes unavailable")?
         .enable_verify_groups(&mut session.runtime)?;
+    let compare_parallel = session.runtime.parallel_route;
+    session.runtime.parallel_route = false;
     let mut cases = Vec::new();
     let mut profiler = PrefillTiming::new(&session.runtime)?;
     for (index, width) in WIDTHS.into_iter().enumerate() {
@@ -724,6 +726,7 @@ pub fn measure_decode_verify(
         let mut vector_ms = Vec::new();
         let mut group_ms = Vec::new();
         let mut group_matvec_ms = Vec::new();
+        let mut group_parallel_ms = Vec::new();
         let mut unequal = vec![0; width];
         let mut vector_unequal = vec![0; width];
         let mut state_exact = false;
@@ -732,8 +735,12 @@ pub fn measure_decode_verify(
         let mut group_state_exact = false;
         let mut group_matvec_unequal = vec![0; width];
         let mut group_matvec_state_exact = false;
+        let mut group_parallel_unequal = vec![0; width];
+        let mut group_parallel_state_exact = false;
         let arms = if width == 1 {
             4
+        } else if compare_parallel {
+            6
         } else {
             5
         };
@@ -742,7 +749,8 @@ pub fn measure_decode_verify(
                 let mode = (trial + offset) % arms;
                 session.restore(&base)?;
                 session.runtime.nvfp4_vector = mode == 2;
-                session.runtime.verify_nvfp4_matvec = mode == 4;
+                session.runtime.verify_nvfp4_matvec = mode >= 4;
+                session.runtime.parallel_route = mode == 5;
                 let timing = execute(&session.runtime, |gpu| {
                     if width == 1 || mode == 0 {
                         for (row, &token) in rows.iter().enumerate() {
@@ -759,8 +767,16 @@ pub fn measure_decode_verify(
                 });
                 session.runtime.nvfp4_vector = false;
                 session.runtime.verify_nvfp4_matvec = false;
+                session.runtime.parallel_route = false;
                 let timing = timing?;
-                [&mut serial_ms, &mut verifier_ms, &mut vector_ms, &mut group_ms, &mut group_matvec_ms][mode]
+                [
+                    &mut serial_ms,
+                    &mut verifier_ms,
+                    &mut vector_ms,
+                    &mut group_ms,
+                    &mut group_matvec_ms,
+                    &mut group_parallel_ms,
+                ][mode]
                     .push(timing.wall_ms);
                 session.finish_append(Ok(timing), width)?;
                 if trial == 0 && mode != 0 {
@@ -770,6 +786,7 @@ pub fn measure_decode_verify(
                         2 => (&mut vector_unequal, &mut vector_state_exact),
                         3 => (&mut group_unequal, &mut group_state_exact),
                         4 => (&mut group_matvec_unequal, &mut group_matvec_state_exact),
+                        5 => (&mut group_parallel_unequal, &mut group_parallel_state_exact),
                         _ => (&mut unequal, &mut state_exact),
                     };
                     *state = same_state;
@@ -805,9 +822,13 @@ pub fn measure_decode_verify(
         }
         let mut group_profiles = Vec::new();
         if width == 4 {
-            for matvec in [false, true] {
+            for (matvec, parallel) in [(false, false), (true, false), (true, true)] {
+                if parallel && !compare_parallel {
+                    continue;
+                }
                 session.restore(&base)?;
                 session.runtime.verify_nvfp4_matvec = matvec;
+                session.runtime.parallel_route = parallel;
                 let timing = execute_with_profile(&session.runtime, Some(&mut profiler), |gpu| {
                     session.encode_verify_rows(
                         gpu,
@@ -817,9 +838,10 @@ pub fn measure_decode_verify(
                     );
                 });
                 session.runtime.verify_nvfp4_matvec = false;
+                session.runtime.parallel_route = false;
                 let timing = timing?;
                 group_profiles.push(json!({
-                    "matvec": matvec, "profile": profiler.command_report(timing.gpu_ms),
+                    "matvec": matvec, "parallel": parallel, "profile": profiler.command_report(timing.gpu_ms),
                 }));
             }
         }
@@ -832,7 +854,10 @@ pub fn measure_decode_verify(
             "group_matvec_ms": group_matvec_ms, "group_profiles": group_profiles,
             "group_matvec_unequal_logits": (width > 1).then_some(group_matvec_unequal),
             "group_matvec_exact_committed_state": (width > 1).then_some(group_matvec_state_exact),
+            "group_parallel_ms": group_parallel_ms,
+            "group_parallel_unequal_logits": (compare_parallel && width > 1).then_some(group_parallel_unequal),
+            "group_parallel_exact_committed_state": (compare_parallel && width > 1).then_some(group_parallel_state_exact),
         }));
     }
-    Ok(json!({"prefix": prefix, "context": 4352, "cases": cases}))
+    Ok(json!({"prefix": prefix, "context": 4352, "compared_parallel_route": compare_parallel, "cases": cases}))
 }

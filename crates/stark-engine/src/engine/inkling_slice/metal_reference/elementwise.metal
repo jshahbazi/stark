@@ -63,7 +63,10 @@ kernel void ink_singleton_route_weights(
 kernel void ink_singleton_route_weights_parallel(
     device const float *logits [[buffer(0)]], device const float *bias [[buffer(1)]],
     device uint *ids [[buffer(2)]], device float *weights [[buffer(3)]],
-    uint lane [[thread_index_in_simdgroup]]) {
+    uint row [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    logits += row * 128;
+    ids += row * 8;
+    weights += row * 8;
     threadgroup float scalar_choices[128];
     threadgroup uint scalar_selected[8];
     const uint first = lane * 4;

@@ -385,13 +385,19 @@ impl Dspark {
     fn mix(
         &self,
         gpu: &mut Stream<'_>,
-        taps: &Buffer,
+        taps: Binding<'_>,
         index: usize,
         norm: &Buffer,
         out: &Buffer,
     ) {
         let mixed = &self.scratch.context_mixed;
-        gpu.one("ink_draft_mix", &[taps, &self.fuse, mixed], index as u32, (WIDTH / 128, 1), 128);
+        gpu.dispatch(
+            "ink_draft_mix",
+            &[taps, binding(&self.fuse), binding(mixed)],
+            index as u32,
+            (WIDTH / 128, 1),
+            128,
+        );
         gpu.norm(binding(mixed), norm, binding(out), true);
     }
 
@@ -399,6 +405,15 @@ impl Dspark {
         &self,
         gpu: &mut Stream<'_>,
         taps: &Buffer,
+        position: usize,
+    ) {
+        self.commit_from(gpu, binding(taps), position);
+    }
+
+    pub(super) fn commit_from(
+        &self,
+        gpu: &mut Stream<'_>,
+        taps: Binding<'_>,
         position: usize,
     ) {
         let s = &self.scratch;

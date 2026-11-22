@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–10 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–12 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -131,9 +131,37 @@ With the vector experts and parallel selector in both arms, the cold uninstrumen
 
 Paired prefill moved +1.09% and +1.23%. The workers accounted for 96.22% of sampled GPU counter changes over 96 intervals. The host sampled nominal and fair thermal states with +469 pageouts and +0 swapouts. The sampler remains opt-in after the four-pair screen. Its measured CPU saving is about 0.57 ms and the 60 tok/s target needs further target computation savings.
 
+## 20261121-INKDECODE-11 · Source-precision DSpark acceptance
+
+Capture all four BF16 target taps for every packed prefill row. Feed each row into the existing draft cache commits, then run the stock 2,048 + 2,044 + 3 + 1 schedule with source precision. The first diagnostic attempt inherited the ordinary draft-mode chunk cap. The final-row tap check rejected that run before it recorded proposal timings. With the corrected chunk bound, both bulk commands matched the independent final-row tap capture on each stock fixture.
+
+The four-token input matched the pinned first continuation. Both 4K inputs matched the pinned seed and first continuation, covering five F32 logit vectors total. All 96 first proposals matched the singleton draft, and the depth variants reproduced their shared prefixes. Teacher replay also matched in every draft round.
+
+| Starting state | Accepted prefixes by proposal position, out of 32 | Median draft ms at depth 1 / 3 / 7 | Verify and finish budget at 60, depth 3 |
+| --- | --- | --- | ---: |
+| Four-token prefix | 26, 23, 18, 11, 6, 2, 0 | 4.45 / 5.15 / 6.60 | 46.41 ms |
+| Stock 4K input A | 6, 0, 0, 0, 0, 0, 0 | 4.74 / 5.46 / 6.91 | 14.34 ms |
+| Stock 4K input B | 26, 19, 12, 7, 2, 1, 0 | 4.80 / 5.53 / 6.97 | 40.83 ms |
+
+Both continuations are greedy. These source-target results supersede the legacy-target draft acceptance estimate for planning an exact source verifier. Input B leaves a viable margin if the four-row verifier and finishing fits in 40.83 ms. Input A still needs a substantially cheaper ordinary token. The packed draft tap path runs in the native diagnostic. Useful worker decode and rejection rollback remain open.
+
+## 20261121-INKDECODE-12 · Parallel selection in the short verifier
+
+Apply the singleton’s exact SIMD selection independently on every verifier row. The shared TF32 router projection stays in place. The one-dispatch selector replaces the per-row scan and the separate log weight, softmax and scale dispatches. This arm uses the previous grouped vector expert products.
+
+| Verifier rows | Same-state 4K command before | With parallel selector | Paired saving across the 4K inputs |
+| --- | ---: | ---: | ---: |
+| 2 | 32.38–32.41 ms | 30.27–30.32 ms | 2.11–2.12 ms |
+| 3 | 37.04–37.76 ms | 34.89–35.60 ms | 2.15–2.18 ms |
+| 4 | 41.09–43.62 ms | **38.95–41.52 ms** | 2.07–2.15 ms |
+| 6 | 55.31–58.10 ms | 52.70–55.57 ms | 2.20–2.21 ms |
+| 8 | 66.03–70.39 ms | 63.75–68.10 ms | 2.27–2.35 ms |
+
+All four pairs per width on the short and two stock 4K fixtures were faster. Every checked F32 logit and committed-state hash matched at widths 2, 3, 4, 6 and 8. The final combined executable also reproduced the short singleton, legacy draft replay and stock B source-mode proposal acceptance. On stock B the four-row command sits about 0.70 ms above the depth-three verification and finish budget, before rollback and host work. The diagnostic remains ahead of worker integration.
+
 ## Decision and next target
 
-Keep the vector singleton opt-in while building the faster verifier. Useful worker throughput remains below 60 tok/s. The short verifier now shares NVFP4 weights while keeping exact logits and fully committed state. Measure source-mode draft acceptance with the same target precision and profile the remaining verifier work before building rejected-suffix transactions. The regular token remains the key path on low-acceptance prompts.
+Keep the vector singleton opt-in while building the faster verifier. Useful worker throughput remains below 60 tok/s. The short verifier shares NVFP4 weights and parallelizes expert selection while keeping exact logits and fully committed state. Source-mode draft acceptance confirms an adaptive path can matter on some inputs. Profile the remaining verifier work and preserve exact state on rejected suffixes. The regular token remains the key path on low-acceptance prompts.
 
 ## Evidence identities
 
@@ -204,3 +232,17 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Sampler baseline scopes | `54dc22d9efe28e4aaca32e2018345b6c9b4be19524fe94503f740a04ce8d4501` |
 | Sampler candidate scopes | `42e7da131c20a8116ad29eb38e81f2582407c226cb7ed203b8633d93d6b7210b` |
 | Sampler instrumented parity pairs | `8638bfb70345e34016e9f2ac7dc5bf5150d2d4bb0a639efebe9d0691fbaf9d98` |
+| Source DSpark patch against 7566c8ec | `d4db0239de94f208917e48c0d100441deef3d767f3fc3e72bb67970e04b160da` |
+| Source DSpark executable | `3530ca55321eee177b41ad1bb183ee612656a2d31b27be3f184260d552f15059` |
+| Source DSpark short | `64f184a4b7315754708f54264da5fe7fd4509561611150b22d1a0e25c5fcf7db` |
+| Source DSpark stock A | `1074399b8a11f4ba2d4ff07bb38cc08bd8e27944c82e73ba94dcdf28ea72dd70` |
+| Source DSpark stock B | `4a0e021c196f0527f3c469c13c55872d82dcfad1fc05b27d4e0194b352faa2fa` |
+| Source DSpark invalid chunk cap | `c75ac078cf4f21383581562abe8a9981d402fbf63ed786dd699178135e4b16fc` |
+| Parallel verifier patch against 7566c8ec | `533697c1642e2781894560dab1d1f27219b7bb36582c597b3bf788af8b5558df` |
+| Parallel verifier executable | `1dd3da850f6b013a45e4a8ef6ae1e47c516365873b375874ae43c747a662d3c4` |
+| Parallel verifier short | `658a92960b6c8ec3ecda2dd1163856aa817334a3f2c9945df37a2cadaa4f5f48` |
+| Parallel verifier stock A | `fc5968b83e349fe99927b969869d15fda17450fdf418df1e3adf467c262dd8b5` |
+| Parallel verifier stock B | `cca52b8917bf530a9e2f15225deb2ad0d1adbc113804c224711d6d9a2e2e78a2` |
+| Final source draft stock B smoke | `97ff06f20db23615a834a3b14864dc315e522c559e71338a1e5264a4de9857b3` |
+| Final legacy draft short smoke | `04e53b4bb380131bf1e18634ea91ed5c7ed2d46f1d2ca06aeeb7c2b8474ee8e5` |
+| Final short singleton smoke | `e802ef9a3f66b9e9e80bd93f0ed08a54a75c9b85e6c1f29824073621b9e6a586` |

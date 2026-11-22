@@ -7,7 +7,7 @@ use metal::MTLBlitCommandEncoder;
 
 #[path = "dspark_validation.rs"]
 mod dspark_validation;
-pub use dspark_validation::{measure_dspark, measure_dspark_depth};
+pub use dspark_validation::{measure_dspark, measure_dspark_depth, measure_source_dspark_depth};
 
 #[path = "packed_prefill.rs"]
 mod packed_prefill;
@@ -260,8 +260,8 @@ impl Session {
 
     /// Command row bound for worker cancellation and chunk-aligned snapshots.
     pub fn prefill_batch_rows(&self) -> usize {
-        if !self.dspark_enabled
-            && let Some(packed) = &self.packed_prefill
+        if let Some(packed) = &self.packed_prefill
+            && (!self.dspark_enabled || packed.captures_all_draft_taps())
         {
             if self.runtime.source_text_active {
                 packed.rows()
@@ -593,7 +593,7 @@ impl Session {
     ) -> Result<Timing> {
         if let Some(packed) = &self.packed_prefill
             && tokens.len() >= PackedPrefill::MIN_ROWS
-            && self.active_dspark().is_none()
+            && (self.active_dspark().is_none() || packed.captures_all_draft_taps())
         {
             packed.upload(tokens);
             return execute_with_profile(&self.runtime, profile, |gpu| packed.encode(self, gpu, tokens.len(), readout));

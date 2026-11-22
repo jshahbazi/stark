@@ -24,6 +24,7 @@ pub(super) struct PackedPrefill {
     rows: usize,
     source: Option<SourcePrefill>,
     source_allowed: bool,
+    draft_taps: Option<Buffer>,
     tokens: Buffer,
     partial: Buffer,
     prelude: Buffer,
@@ -275,6 +276,7 @@ impl PackedPrefill {
                 None
             },
             source_allowed: true,
+            draft_taps: None,
             tokens: zeroed(device, rows * 4)?,
             partial: f32(WIDTH)?,
             prelude: f32(WIDTH)?,
@@ -653,6 +655,34 @@ impl PackedPrefill {
         }
     }
 
+    pub(super) fn enable_draft_taps(
+        &mut self,
+        runtime: &mut Runtime,
+    ) -> Result<()> {
+        register(runtime, include_str!("packed_draft.metal"), &["ink_packed_draft_tap", "ink_packed_draft_hidden"])?;
+        self.draft_taps = Some(zeroed(&runtime.device, self.rows * 4 * WIDTH * 2)?);
+        Ok(())
+    }
+
+    pub(super) fn captures_all_draft_taps(&self) -> bool {
+        self.draft_taps.is_some()
+    }
+
+    pub(super) fn packed_draft_row_matches(
+        &self,
+        row: usize,
+        recorded: &[u16],
+    ) -> bool {
+        self.draft_taps.as_ref().is_some_and(|taps| {
+            if row >= self.rows || recorded.len() != 4 * WIDTH {
+                return false;
+            }
+            // The diagnostic reads only after the packed command completes.
+            let base = unsafe { taps.contents().as_ptr().cast::<u16>().add(row * 4 * WIDTH) };
+            unsafe { std::slice::from_raw_parts(base, 4 * WIDTH) == recorded }
+        })
+    }
+
     pub(super) fn encode(
         &self,
         session: &Session,
@@ -674,6 +704,7 @@ impl PackedPrefill {
         let start = session.position;
         let last = rows - 1;
         let last_partial = (&self.partial, last * WIDTH * 4);
+        let draft = session.active_dspark().zip(self.draft_taps.as_ref());
         gpu.one(
             "ink_packed_embedding",
             &[&session.embedding, &session.embed_norm, &self.partial, &self.tokens],
@@ -699,16 +730,19 @@ impl PackedPrefill {
                     128,
                 );
             }
-            if session.capture_draft_features
-                && let Some(tap) = DRAFT_TAPS.iter().position(|&i| i == index)
-            {
-                gpu.dispatch(
-                    "ink_capture_feature",
-                    &[last_partial, (&session.draft_features, tap * WIDTH * 2)],
-                    (),
-                    (WIDTH / 128, 1),
-                    128,
-                );
+            if let Some(tap) = DRAFT_TAPS.iter().position(|&i| i == index) {
+                if let Some((_, features)) = draft {
+                    gpu.one("ink_packed_draft_tap", &[&self.partial, features], tap as u32, (WIDTH / 128, rows), 128);
+                }
+                if session.capture_draft_features {
+                    gpu.dispatch(
+                        "ink_capture_feature",
+                        &[last_partial, (&session.draft_features, tap * WIDTH * 2)],
+                        (),
+                        (WIDTH / 128, 1),
+                        128,
+                    );
+                }
             }
             if state.blocks > 0 {
                 let queries = layer.attn_queries.as_ref().unwrap_or(&layer.mlp_query);
@@ -893,6 +927,33 @@ impl PackedPrefill {
             }
             if let Some(trace) = trace {
                 trace.packed_partial(gpu, index, &self.partial);
+            }
+        }
+        if let Some((draft, taps)) = draft {
+            gpu.phase(PrefillPhase::Other);
+            self.mix(
+                gpu,
+                binding(&self.blocks),
+                binding(&self.partial),
+                &session.output_query,
+                binding(&self.mixed),
+                rows,
+                1,
+                blocks,
+                true,
+                4 * WIDTH,
+                WIDTH,
+            );
+            gpu.one(
+                "ink_packed_norm",
+                &[&self.mixed, &session.output_norm, &self.mlp],
+                [WIDTH as u32, WIDTH as u32],
+                (rows, 1),
+                WIDTH / 4,
+            );
+            gpu.one("ink_packed_draft_hidden", &[&self.mlp, taps], (), (WIDTH / 128, rows), 128);
+            for row in 0..rows {
+                draft.commit_from(gpu, (taps, row * 4 * WIDTH * 2), start + row);
             }
         }
         if readout || session.capture_draft_features {

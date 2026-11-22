@@ -189,6 +189,25 @@ pub fn measure_dspark_depth(
     oracle: &Path,
     prefix: usize,
 ) -> Result<Value> {
+    measure_dspark_depth_mode(checkpoint, draft, oracle, prefix, false)
+}
+
+pub fn measure_source_dspark_depth(
+    checkpoint: &Path,
+    draft: &Path,
+    oracle: &Path,
+    prefix: usize,
+) -> Result<Value> {
+    measure_dspark_depth_mode(checkpoint, draft, oracle, prefix, true)
+}
+
+fn measure_dspark_depth_mode(
+    checkpoint: &Path,
+    draft: &Path,
+    oracle: &Path,
+    prefix: usize,
+    source_target: bool,
+) -> Result<Value> {
     const ROUNDS: usize = 32;
     const DEPTHS: [usize; 3] = [1, 3, 7];
     let extra = if prefix == 4 {
@@ -206,10 +225,67 @@ pub fn measure_dspark_depth(
     let block = crate::engine::inkling_slice::dspark::DraftBlock::new(&mut session.runtime)?;
     session.set_batched_prefill(true, true)?;
     session.set_dspark_enabled(true)?;
+    if source_target {
+        let packed = session.packed_prefill.as_mut().ok_or("Inkling source prefill unavailable")?;
+        if !packed.supports_source_context(4352) {
+            return Err("Inkling source DSpark probe requires packed M5 prefill");
+        }
+        packed.enable_draft_taps(&mut session.runtime)?;
+        packed.set_source_scope(true);
+        // Only this diagnostic pairs DSpark with the source target precision.
+        session.runtime.source_text_active = true;
+    }
     let before = Instant::now();
-    let mut scores = session.prefill(&prompt[..prefix])?;
+    let mut packed_tap_checks = 0;
+    let mut scores = if source_target && prefix == 4096 {
+        session.capture_draft_features(true);
+        for chunk in [&prompt[..2048], &prompt[2048..4092]] {
+            session.ingest_many(chunk)?;
+            let recorded = session.draft_features().ok_or("Inkling source DSpark target taps unavailable")?;
+            if !session
+                .packed_prefill
+                .as_ref()
+                .is_some_and(|packed| packed.packed_draft_row_matches(chunk.len() - 1, &recorded))
+            {
+                return Err("Inkling packed DSpark features differ from the final row capture");
+            }
+            packed_tap_checks += 1;
+        }
+        session.capture_draft_features(false);
+        session.ingest_many(&prompt[4092..4095])?;
+        session.step(prompt[4095])?
+    } else if source_target {
+        session.ingest_many(&prompt[..prefix - 1])?;
+        session.step(prompt[prefix - 1])?
+    } else {
+        session.prefill(&prompt[..prefix])?
+    };
     let prefill_ms = before.elapsed().as_secs_f64() * 1000.0;
     let snapshot = session.snapshot()?;
+    let mut pinned_unequal = Vec::new();
+    if source_target {
+        let check = |file: &str, observed: &[f32]| -> Result<usize> {
+            let expected = Tensors::open(&oracle.join(file))?;
+            let logits = expected.values::<f32>("full.logits", "F32", &[1, 1, VOCABULARY])?;
+            Ok(logits.iter().zip(observed).filter(|(a, b)| a.to_bits() != b.to_bits()).count())
+        };
+        if prefix == 4096 {
+            pinned_unequal.push(check("row-0.safetensors", &scores)?);
+        }
+        let observed = session.step(prompt[prefix])?;
+        pinned_unequal.push(check(
+            if prefix == 4096 {
+                "row-1.safetensors"
+            } else {
+                "row-0.safetensors"
+            },
+            &observed,
+        )?);
+        session.restore(&snapshot)?;
+        if pinned_unequal.iter().any(|&count| count != 0) {
+            return Err("Inkling source DSpark target trace differed from pinned logits");
+        }
+    }
     let mut teacher = Vec::new();
     for _ in 0..ROUNDS + DEPTHS[2] {
         let token = greedy(&scores);
@@ -261,8 +337,10 @@ pub fn measure_dspark_depth(
         }
         decode_ms.push(start.elapsed().as_secs_f64() * 1000.0);
     }
-    Ok(json!({"prefix":prefix, "rounds":ROUNDS, "depths":DEPTHS, "prefill_ms":prefill_ms,
+    Ok(
+        json!({"prefix":prefix, "source_target":source_target, "pinned_unequal_logits":pinned_unequal, "packed_final_tap_checks":packed_tap_checks, "rounds":ROUNDS, "depths":DEPTHS, "prefill_ms":prefill_ms,
               "proposal_ms":timings, "target_step_ms":decode_ms, "conditional_exposures":tried,
               "accepted_by_position":accepted, "first_mask_matches":first_mask_exact,
-              "nested_proposal_matches":nested_exact}))
+              "nested_proposal_matches":nested_exact}),
+    )
 }
