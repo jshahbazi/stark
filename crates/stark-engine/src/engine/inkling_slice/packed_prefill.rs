@@ -957,6 +957,18 @@ pub(super) fn register_nvfp4_vector(runtime: &mut Runtime) -> Result<()> {
     )
 }
 
+pub(super) fn register_verify_nvfp4_matvec(runtime: &mut Runtime) -> Result<()> {
+    register(
+        runtime,
+        concat!(
+            "#include <metal_stdlib>\nusing namespace metal;\n#define INK_NVFP4_VECTOR_BLOCK\n",
+            include_str!("experts.metal"),
+            include_str!("verify_nvfp4.metal"),
+        ),
+        &["ink_verify_nvfp4_group_dot"],
+    )
+}
+
 fn register(
     runtime: &mut Runtime,
     source: &str,

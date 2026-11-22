@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–04 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–06 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -77,9 +77,36 @@ In the matched worker screen, four pairs per sampling mode used 4,096 input and 
 
 Paired prefill moved +2.39% greedy and +2.60% sampled. Worker GPU attribution was 99.86% over 95 intervals. The host recorded nominal and fair thermal states, with +0 pageouts and +0 swapouts. Keep the selector opt-in following this screen. One subsequent flags-unset pair per sampling mode matched the prior worker output hashes with zero reuse.
 
+## 20261121-INKDECODE-05 · NVFP4 weight sharing across short verifier runs
+
+Reuse one vector-decoded NVFP4 weight block for the active rows that route to the same expert. The short verifier uses one SIMD group per output channel and keeps an independent K16 FMA recurrence for every route, then applies the existing exact grouped gate/up and down epilogues. It avoids the BF16 ingress, padding arithmetic and replay in the bulk tensor path. Widths 2, 3, 4, 6 and 8 matched every F32 logit vector and the complete committed-state hash at the short prefix and both pinned 4K prefixes.
+
+| Rows | Separate vector expert products, 4K | Grouped tensor expert products, 4K | Shared vector expert products, 4K |
+| --- | ---: | ---: | ---: |
+| 2 | 37.70–37.85 ms | 44.31–44.32 ms | 32.23–32.27 ms |
+| 3 | 51.25–51.43 ms | 50.01–51.09 ms | 37.04–37.68 ms |
+| 4 | 64.35–64.46 ms | 54.20–59.53 ms | **40.98–43.54 ms** |
+| 6 | 93.65–94.00 ms | 67.61–76.11 ms | 54.67–58.39 ms |
+| 8 | 121.42–122.11 ms | 80.33–89.85 ms | 65.96–70.41 ms |
+
+Each endpoint is a median of four alternating same-prefix commands. Four-row profiles attributed 33.17–38.07 ms to the NVFP4 expert region with the tensor path and 19.97–22.42 ms with shared vector products. The 4K attention and relative cache regions remained about 5.9 and 5.5 ms. An initial run without grouped profiling reproduced exact parity and the same ordering across all widths.
+
+At depth three, the earlier draft measurements allowed 16.79 and 30.36 ms for verification, rollback and host work on the two 4K inputs. The four-row commands still exceed those budgets. The shared-vector arm runs in the verifier diagnostic. Rejected-suffix rollback and worker integration remain open.
+
+## 20261121-INKDECODE-06 · Screen Lily’s prompt lookup on Inkling continuations
+
+Replay the same latest-occurrence 4-gram index and backward agreement rule used by Lily at each ordinary Inkling decode position. Require 32 matching tokens, or eight with a line break, and check up to seven proposed tokens against the continuation. The eight runs used the same 4,096 inputs, 256 outputs and sampling settings as the parallel-selector pairs. All eight output hashes matched. The replay kept the prompt and continuation transient and emitted aggregate counts and output hashes. [Lily’s lookup implementation](../../crates/stark-engine/src/engine/hybrid/mtp_lookup.rs)
+
+| Sampling | Ordinary decode intervals | Positions with proposals | Positions accepting at least one | Inputs with zero proposals |
+| --- | ---: | ---: | ---: | ---: |
+| Greedy | 1,020 | 15 | 13 | 2/4 |
+| Seeded sampled | 1,020 | 7 | 6 | 3/4 |
+
+The overlapping windows contain 49 greedy and 21 sampled accepted draft rows even when every proposed depth is considered. If every one removed a full serial step without any verification cost, the gain would be at most 5.05% greedy and 2.10% sampled across these runs. Overlap and the actual verifier cost reduce the gain. Defer lookup as a route to 60 tok/s on this workload. This replay leaves copy-heavy workloads unqualified.
+
 ## Decision and next target
 
-Keep the vector singleton opt-in while building the faster verifier. Useful worker throughput remains below 60 tok/s. A promising next test replaces the small grouped tensor projection with the exact vector block recurrence and shares the decoded weights across live routes to the same expert. Require bit-exact logits and committed state at each measured width before integrating reject-and-commit behavior. Draft acceptance and verifier cost need a new combined source-mode test.
+Keep the vector singleton opt-in while building the faster verifier. Useful worker throughput remains below 60 tok/s. The short verifier now shares NVFP4 weights while keeping exact logits and fully committed state. Measure source-mode draft acceptance with the same target precision and profile the remaining verifier work before building rejected-suffix transactions. The regular token remains the key path on low-acceptance prompts.
 
 ## Evidence identities
 
@@ -121,3 +148,10 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Selector worker host observations | `890adc80eac76d9989d23a32eca76ef9df2acab1fdb1ce23cdb55de8c957d154` |
 | Selector worker harness | `285de90e6ae2bb9a3178407a48372692a893c528498166a90015a58303f8c5dd` |
 | Selector flags-unset regression pairs | `5d9c1f7a3025b94479157fdc86cf180d079b7f439a094894e46f6c63cdc2c34a` |
+| Short-run verifier source patch against 8604c5ae | `86c4dc3916ddd0670218bff091bab6a628a1ab01e4f9636815ad241c63afa4a9` |
+| Short-run verifier executable | `6d84eae9d4b1a2977486f76b5b6bfd6c3ff71313bda8ff9d7dd7d43f09a3999e` |
+| Short-run verifier four-token proof | `8c069d54f5915d4c1fb8afe2b9d75b1ff636c3c4ac6064f7bbe2346292b789dd` |
+| Short-run verifier stock A | `0a7278d79d2827de8edd68be3fcb4eda00217b74cab8a2c97943ee9eae3c0da6` |
+| Short-run verifier stock B | `ca530205f959d06ebdf644572ac20cc35652687b6006360b6090d6ac69c5d602` |
+| Prompt lookup aggregate receipt | `ff7f185d416620bbe62ec6d6c5cb9359376419f1b33f2b69465f320553533509` |
+| Prompt lookup replay harness | `58f5766d3ca99111edcf47a3a168757417103061824b1b9b6af656b901bf2b45` |

@@ -552,6 +552,22 @@ impl GroupedExperts {
         width: usize,
         gather: bool,
     ) {
+        if gpu.runtime.verify_nvfp4_matvec {
+            debug_assert!(gpu.runtime.source_text_active && (2..=8).contains(&rows));
+            gpu.phase(if gather {
+                PrefillPhase::Nvfp4UpDot
+            } else {
+                PrefillPhase::Nvfp4DownDot
+            });
+            gpu.one(
+                "ink_verify_nvfp4_group_dot",
+                &[inner, &bank.codes, &bank.blocks, routing.indices, routing.runs, &self.projected],
+                width as u32,
+                (WIDTH / 4, live_run_limit(rows, run_slots(rows))),
+                128,
+            );
+            return;
+        }
         gpu.phase(PrefillPhase::Nvfp4Quant);
         gpu.one(
             "ink_group_ingress",
