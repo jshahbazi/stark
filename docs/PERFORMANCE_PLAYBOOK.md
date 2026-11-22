@@ -561,6 +561,14 @@ Timestamp the vocabulary readout separately before changing a padded tile. Inkli
 
 Measure the residual mix before expanding a barrier reduction across the controller path. Inkling's exact barrier-sharing variant saves 0.03–0.06 ms per three-row 4K command. Archive this scheduling change. [Residual mix barrier screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-58--share-residual-mix-barriers-across-input-sources)
 
+Retest the dense stage before lifting the shared-weight GEMV to larger threadgroups. On Inkling, the loop interchange, static K and 128- or 256-thread launch sizes preserve exact logits and add time to dense attention at three live rows. [Dense verifier stream screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-59--stream-the-exact-dense-verifier-dot-across-live-rows)
+
+Measure both prepare and finish when coalescing transactional copies. Inkling's address-table dispatch saved 0.36–0.65 ms at three rows when a suffix was rejected. The worker paired median moved +0.11% with two wins in four pairs. Archive the GPU address path at this scope. [Batched undo](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-60--batch-the-verifiers-cache-and-convolution-undo-copies)
+
+Recheck depth after changing the verifier cost. The current fused-cache and FP4 lookup stack still loses all four seeded 4K pairs at depth three, with a −4.98% median paired change and exact outputs. [Sampled depth repeat](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-61--recheck-sampled-depth-on-the-current-verifier)
+
+Bind tiny projection outputs to their final offsets before adding a packing kernel. For short Inkling verifier commands direct controller rank output preserved exact logits and removed 96 dispatches. The total saving was 0.17 ms at three rows, so keep the existing path. [Controller rank output](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-62--write-short-controller-rank-projections-directly-into-packed-rows)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates

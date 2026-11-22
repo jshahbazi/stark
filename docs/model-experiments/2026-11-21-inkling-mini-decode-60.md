@@ -981,6 +981,51 @@ Use six rotated plain comparisons and three timestamped comparisons at widths th
 
 All 189 full F32 vectors matched in each arm. At three rows on the two 4K inputs, the paired medians saved **0.03–0.06 ms** of command wall time and the instrumented attention and expert input stages together saved **0.04–0.05 ms**. At four rows, the paired medians saved **0.06–0.07 ms**. Archive this barrier-only candidate at the native gate. Its measured effect leaves nearly all of the input-preparation budget intact.
 
+## 20261122-INKDECODE-59 · Stream the exact dense verifier dot across live rows
+
+Time the shared-weight BF16 GEMV at the original and wider launch sizes. Compare the original loop that retains eight F32 weight vectors to a loop that loads one vector and feeds each live row before advancing K. Keep each dot, eight-vector block sum, per-lane accumulator, SIMD shuffle tree and BF16 output in source order. Use the original low-column kernels. Also screen static K on the two attention input sizes.
+
+Use same-state paired commands and separate stage timings at three and four live rows on the short control and both stock 4K prefixes. The low-column control, native router, fused cache and FP4 pair lookup stay fixed. An advancement requires complete F32 logit parity and a consistent native saving across the two 4K cases.
+
+All 1,323 F32 vectors matched. Six plain commands and three timestamped commands per arm and width ran in rotated order on each input. The three-row control used **5.86–5.87 ms** in dense attention. The candidate stage times were **5.90–6.02 ms**. The strongest three-row paired saving was 0.02 ms on one stock input and the same arm lost 0.10 ms on the other. None of the four-row arms saved command wall time on either 4K fixture. Archive the loop interchange, larger threadgroups and static K.
+
+## 20261122-INKDECODE-60 · Batch the verifier's cache and convolution undo copies
+
+Round preparation saves convolution histories and overwritten KV rows in separate blit operations per visit. Rejected suffixes restore KV rows and the affected convolution slots, including the accepted anchor's raw values when row three reuses its slot. Test one vector-copy dispatch per visit using the same buffers and saved layout. Preserve the explicit command order for target computation and draft-tap commits.
+
+Measure prepare plus target and commit separately on alternate same-snapshot commands. Compare the direct per-visit dispatch with a single dispatch over a freshly populated visit-address table. Exercise short, stock 4K, and local-ring boundary crossing states, including a partially rejected suffix at widths three and four. Require exact logits and committed state before scoring any worker throughput.
+
+Nine rotated observations per mode and width matched all 945 F32 logit vectors and all 90 committed target and draft state controls. Each width exercised keeping one, two and all rows. Time the target command and finish independently. Matched round estimates below sum the two intervals and omit draft, sampler and diagnostic readback time.
+
+| Suffix rejected, median paired saving | Three rows, stock 4K | Four rows, stock 4K |
+| --- | ---: | ---: |
+| One direct dispatch per visit, target plus finish | −0.09 to +0.02 ms | −0.05 to −0.03 ms |
+| Single address-table dispatch, target encode | 0.15–0.16 ms | 0.15–0.17 ms |
+| Single address-table dispatch, finish | 0.12 ms | 0.16–0.20 ms |
+| Single address-table dispatch, target plus finish | **0.36–0.65 ms** | **0.27–0.31 ms** |
+
+The address-table path also saved 0.09–0.20 ms at three rows across the local ring boundary. The direct path had mixed effects and was archived. Bring the single-dispatch path to a worker comparison and keep context-bound address ownership and Metal resource registration in the timed path.
+
+The sealed worker toggled only the address-table path, with fused K/V, FP4 lookup and fixed depth two in both arms. The four cold 4K pairs matched all output hashes and both arms ran 530 rounds. Control reached **59.07 tok/s** and the candidate reached **58.12 tok/s**. The median paired gain was **0.11%** with two of four faster pairs. The two workers accounted for 99.85% of observed GPU counter increments over 38 intervals. Thermal samples were nominal, pageouts increased by 227 and swapouts were unchanged. Archive the address-table worker path. The native timing does not establish a useful decode gain.
+
+## 20261122-INKDECODE-61 · Recheck sampled depth on the current verifier
+
+The fused cache and FP4 lookup reduce four-row work more than three-row work in native measurements. Rerun fixed depths two and three on the four existing exact sampled 4K workloads with the current stack. Alternate depths within each workload on one loaded worker. Keep vision, INT8 DSpark, the exact target projection and the ordinary draw sequence. Verify that each arm samples and emits 256 tokens at context 4,352, reuses zero input tokens and matches the pinned output hash.
+
+Use the median paired useful rate, emitted tokens per round and wall cost per round to test whether the added acceptance offsets the extra row. The benchmark treats all four workloads as held fixed before looking at their rates. A sampled median at or above 60 tok/s would require a repeat and a greedy confirmation before it supports a sustained throughput claim.
+
+The November 22 repeat used the sealed `6ecc32a6` fused-cache worker. All eight outputs matched their reference hashes. Depth two reached **55.42 tok/s** and depth three reached **52.49 tok/s**. Depth three lost all four pairs and its median paired change was **−4.98%**. It cut the total speculative rounds from 530 to 493, raising average useful outputs per round from 1.92 to 2.07. Measured useful decode time per round rose from 32.34–37.05 ms to 36.80–42.33 ms, a paired cost increase of 3.78–6.05 ms. Keep depth two for seeded sampling. Depth three is already qualified for the separate greedy workload.
+
+The worker accounted for 99.85% of observed GPU counter increments over 41 intervals. Thermal readings were nominal. Pageouts and swapouts were unchanged.
+
+## 20261122-INKDECODE-62 · Write short controller rank projections directly into packed rows
+
+For the short verifier's batched RMS path, bind the four controller down-projection outputs to their final stride-64 BF16 row addresses. Remove the separate rank copy. Keep the source-order GEMV, packed input messages, gain and forget TensorOps, and weighted output RMS.
+
+Use six rotated plain comparisons and three timestamped comparisons at widths three and four on the short and two stock 4K fixtures. Keep the prior admitted fused-cache and FP4 lookup paths fixed. Measure combined attention and expert input time and check every complete F32 logit vector. Carry the candidate to a worker only if the native savings are repeatable and provide useful headroom toward the per-round budget.
+
+All 189 complete F32 vectors matched in each arm. The candidate removed **96 dispatches** on both three-row stock fixtures and saved **0.10–0.12 ms** in combined attention and expert input time. The paired wall saving was **0.17 ms** at three rows and **0.10–0.12 ms** at four rows. The source kernels use the same weights and reductions. Archive the direct packed output path at the native gate given the measured wall budget.
+
 ## Evidence identities
 
 Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1`. Original DSpark SHA-256 `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2`. The current run uses the pinned Ollama capture and host documented in the [default-router record](2026-11-21-inkling-mini-decode-default.md).
@@ -1523,3 +1568,30 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Residual mix barrier native short screen | `5d3b10109812bbf08e3ce556a26163bc7509a7dfcab3f049eb9f014e78b8ad7b` |
 | Residual mix barrier native stock-s4096-00 screen | `bdc8557dbeef5646d2e833775da1e24f2893415454dc02ac5c0c7a775fb410f8` |
 | Residual mix barrier native stock-g4096-01 screen | `b7d481e15c9903e5af78b467d55fb1acc3c7a43c2e537dda71ce4b3fe9dd19db` |
+| Streamed dense verifier native binary | `6e96316f991a1b48685e79dc2fb03c12a5d41fa514db0d3fe558b285d2dc041c` |
+| Streamed dense verifier source patch | `f7a0cdede3f140dcae8052ab0c033609c7b675bf6f5632793017783ece306757` |
+| Streamed dense verifier harness | `6ef3cb659fc83955e131f4f9eca466176a66e6fd051f634d0f4ab0b01995b39e` |
+| Streamed dense verifier short screen | `a89f78c096499415b9aa1d1c2197bcd3e51210d122d0feb761f447e209599bbb` |
+| Streamed dense verifier stock-s4096-00 screen | `163e9156f2cab08bcbadebba9fd6aa10eb5923d6c5ed932bad49657033ead053` |
+| Streamed dense verifier stock-g4096-01 screen | `14db779ab922461ef968be58aba8941e98eb7e2bda5cbecd785fe1fc717cc2f7` |
+| Batched undo native binary | `d078536bdf27632ae63270af30d9945dae8696d3a69dc3cda9a29af67fcf8e98` |
+| Batched undo native source patch | `c79d9349fa1be73835c9bc2f22b59d1bb0edaddbb42b78e9210b59c5baf5884a` |
+| Batched undo native harness | `da17f7e37d7832d071c04dc4697efb50b08847548dc76c1678a8ab6812553b90` |
+| Batched undo native short screen | `1682509c774829aff5b26f2bf8711602fe6b2eff51c009ee555e32bc2e1b1707` |
+| Batched undo native stock-s4096-00 screen | `a11973959eb88fac9e373953f353019d375b5268e27762c926f9db61a31a047d` |
+| Batched undo native stock-g4096-01 screen | `cb9805f6ef14a582b69996efc1b5993c9e254dba85106c79eab935deb7040a27` |
+| Repeated sampled depth harness | `84ab84e05c0eb371160923885023e790c22a9dbd25ed65052f9c2d0d866eb414` |
+| Repeated sampled depth worker pairs | `4abb7f52ef8a2dee98a2183efedf0ef7230134b2ae98bc8b25a7414bafef9e72` |
+| Repeated sampled depth worker host | `9e7b7a8712782231ef37f7527afe489827eeb2e84e858d854053558bc45a16b7` |
+| Batched undo worker binary | `1fb660ebb234d1044f0761fb1fba4bc71c8229fd96ab2fb5116dfc9cf953ee8d` |
+| Batched undo worker sealed native binary | `cdf54c94f8fc07d3050731c51d57a2e3e97ae96520c2c9142ad99ea7075d853c` |
+| Batched undo worker source patch | `cfac54e538dc90af22f597d45db0340708c3f03c73a85422fbfb85c3360647d3` |
+| Batched undo worker harness | `8e0af0d93ca10880df395b358afe4502e2f387158bf0210ab85faa0cf7d9aef8` |
+| Batched undo worker pairs | `5ec9c227b1d95a0f9dcfc49487124eb5b9b8ce2827db8476080c58ada1516d18` |
+| Batched undo worker host | `430a79853ec0aae5fff6e945438c2be922b64fd8ee60f137ccf4c59ef0f3e924` |
+| Direct controller rank output native binary | `629d6c559afdcd427a0da240dee12ee33569b56478f38bc839f45feb513c5d3d` |
+| Direct controller rank output source patch | `eb3eb2d28ea168919b4d5593f112e30d5c17452f31b9160b74c46afb676c4d4f` |
+| Direct controller rank output native harness | `98c0e9c6f233721dcc69e30381c50b3bde85681e9f006a729e4facb2109e4d01` |
+| Direct controller rank output short screen | `8faab62e1c7b4abf4f66091dba2bf7fcdb4e895d8ce81a82689b73f59c91e5c6` |
+| Direct controller rank output stock-s4096-00 screen | `2aba509d96a4b860196999241dcfb88920dd7c9836de65bed63ab8a25c9f7262` |
+| Direct controller rank output stock-g4096-01 screen | `7527a302993a5d58507b1a42931457eed0705c3492b7e7715c5cd2d237fc6624` |
