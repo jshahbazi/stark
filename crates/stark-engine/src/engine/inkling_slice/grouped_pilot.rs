@@ -772,7 +772,16 @@ impl GroupedExperts {
     ) {
         let out = &self.output;
         let slots = live_run_limit(rows, run_slots(rows));
-        let [up_kernel, down_kernel] = grouped_mxfp8_names(self.wide_mxfp8, self.source_mxfp8 && source_packed);
+        let [up_kernel, down_kernel] = if self.source_mxfp8
+            && source_packed
+            && gpu.runtime.verify_mxfp8_vector
+            && gpu.runtime.verify_nvfp4_matvec
+            && rows <= MAX_VERIFY_ROWS
+        {
+            ["ink_verify_mx_vector_up", "ink_verify_mx_vector_down"]
+        } else {
+            grouped_mxfp8_names(self.wide_mxfp8, self.source_mxfp8 && source_packed)
+        };
         let tensor = self.mxfp8_tensor.as_ref().filter(|_| {
             source_packed && gpu.runtime.source_text_active && gpu.runtime.mxfp8_tensor_active && rows > 64
         });

@@ -81,6 +81,31 @@ The retained source removes the worker arm switch and the extra timing diagnosti
 
 The retained binary's separate one-worker measurement reproduced all eight pinned output hashes and reached **77.39 tok/s median greedy** (75.38–78.95) and **65.18 tok/s median sampled** (62.84–66.81). The worker accounted for 99.85% of GPU counter increments over 36 intervals with nominal thermals. Keep the paired gains and the separate retained throughput estimates scoped to their sessions.
 
+## 20261122-INKDECODE-84 · Vector-load the short verifier MXFP8 products
+
+Keep residual batching and the original checkpoint, draft and sampler. The saved verifier profile places the four grouped MXFP8 visits around 2.4 ms at three rows and 3.0 ms at four. Reuse the existing source MXFP8 vector-load specialization in the short verifier. Four adjacent packed weight bytes and four activation words enter each vector load. Keep the ordered FP32 products, additions, block scaling, SIMD reduction and route order. Both shapes use the same packed banks and workspace.
+
+Restore two stock 4K prefixes and alternate the scalar and vector kernels in eight plain and four instrumented pairs per width. All 432 checked F32 vectors matched serial. Each width won all eight plain pairs on both inputs. The dispatch counts were equal. The four-row expert timestamps attribute 1.51 and 1.07 ms of savings to the MXFP8 products in the two fixtures.
+
+| Verifier rows | Stock 4K A wall saving | Stock 4K B wall saving |
+| --- | ---: | ---: |
+| 2 | 0.807 ms | 0.824 ms |
+| 3 | 1.168 ms | 0.966 ms |
+| 4 | 1.450 ms | 1.103 ms |
+
+The candidate reproduced 96 serial outputs and the committed state at each proposal depth on the short and both stock 4K fixtures. All 45 rejection and ring-wrap controls passed. For worker timing, alternate scalar and vector loads on one loaded worker, with residual batching active in both arms. Use the four pinned cold 4K workloads per mode and the same context, sampling, resident artifacts and output extent as the residual-mix study. All 16 output hashes and paired proposal counts, accepted counts and round histograms matched.
+
+| Mode | Scalar loads median | Vector loads median | Median paired gain | Faster pairs | Vector range |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Seeded sampled | 64.87 tok/s | 65.78 tok/s | +1.55% | 4/4 | 62.78–69.19 tok/s |
+| Greedy | 77.41 tok/s | 82.33 tok/s | +5.02% | 4/4 | 74.07–84.79 tok/s |
+
+Three of four greedy workloads cleared 80 tok/s. The median paired useful time saving was 0.449 ms per sampled round and 1.605 ms per greedy round. The worker accounted for 99.85% of observed GPU counter increments over 74 intervals with nominal and fair thermal samples. Retain `STARK_INKLING_EXPERIMENT_VERIFY_MXFP8_VECTOR=1` for the source short verifier. The paired measurements describe this session.
+
+The retained worker removes the diagnostic profiling and arm selector. Its native executable repeated flags-unset connected short and four-fixture 4K parity and all 45 enabled rejection and ring-wrap controls. The worker preserved exact 2,048-token prefix reuse across draft depths, cancellation, mode transitions, draft admission, vision readiness and accepted-proposal stop accounting.
+
+In a separate one-loaded-worker observation with both verifier cuts active, all eight pinned hashes matched. The retained worker reached **84.13 tok/s median greedy** (78.69–87.36) and **68.62 tok/s median sampled** (64.31–69.66). The 80 tok/s threshold was met on 3/4 greedy and 0/4 sampled requests in that observation. The paired worker comparison remains the source for the relative gain.
+
 ## Evidence
 
 The original target and DSpark artifact digests are recorded with the [integrated QKV run](2026-11-21-inkling-mini-decode-60.md#evidence-identities). The worker and native screen retain aggregate-only private receipts. No prompts, token IDs, logits, targets or fitted tensors are published.
@@ -123,3 +148,22 @@ The original target and DSpark artifact digests are recorded with the [integrate
 | Residual mix retained proof, short | `2713ca77ee793c470bd0ad47e005b517cf8a9be306fd18921cbd18c8b407070c` |
 | Residual mix retained proof, stock A | `e16b1fd568a50ac8753eb27a132f5bd3bd172d4e8ec76777c9ca8f315558a4db` |
 | Residual mix retained proof, stock B | `7a5a70b041a0238a104bb08921ffef55d0465812d11beb856b9bd850d64c508a` |
+| MXFP8 vector profile patch against 3d5a3fe5 | `76a07f72dd54f00c9b2090e0e2dc2cea901a08bbca012eddfb2f5ad72cc4cac0` |
+| MXFP8 vector profile executable | `f6357b8bb5351d8ab5200a3b1ad8968c4542dd981fdbc013914c94ea2a5cbc07` |
+| MXFP8 vector profile, stock A | `98e69b65818a213e17a1d421bb2c7849942191f846eef28832ce5ca13a621a28` |
+| MXFP8 vector profile, stock B | `1785fc065f5b714caba5f668d102db2125e7fc5f3434d3fd150db8a9ddc2889e` |
+| MXFP8 vector paired worker patch against 3d5a3fe5 | `e7b2a6bb8253c459be8b3f75fa9f53a13c203eec3277935be9d9f2167cc9843f` |
+| MXFP8 vector paired worker | `3319ba8e0bbc18407d54e8f320b29bf0ab63b05002d85c698c20edd2da54b6ec` |
+| MXFP8 vector paired worker harness | `5aa3fff73b0962993b0839f85fc5d00312210a9c7bdf3e9b55d5944a03d230d7` |
+| MXFP8 vector paired worker receipt | `4dd826755961337b48051bc753e4df13d95746e00f90df13800adfb15e91565d` |
+| MXFP8 vector paired host observations | `b28c3999e1c520c2b373b0281d809a09c8ed610610659a043721263988aeeffa` |
+| MXFP8 vector retained patch against 821c55be | `63c92804f305803e85e8ee8a7f3aea87134bf448fba658d11c7651160c0ce70a` |
+| MXFP8 vector retained worker | `42b4a068c3c2ee153f8e80dd284a073c36551c0952030f2a1e83153520627602` |
+| MXFP8 vector retained native executable | `82f86ff403f959855dcebf18336b72a515f7060493205fb38f2c7ac5340dd91d` |
+| MXFP8 vector retained worker benchmark harness | `d622d7ae6218d0818f99b75774a33b9b7c3e1ed716aa4d0938b98d8c7251fe97` |
+| MXFP8 vector retained worker benchmark receipt | `e19639164600a2d0a2961f3d18a49e921b9587e8485bdf0d20e3c63972f7a901` |
+| MXFP8 vector retained host observations | `abb5d47844f49016603b37dc6769725f6b923f1e0a68372896f5b2cfb5a0b09d` |
+| MXFP8 vector retained worker lifecycle | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |
+| MXFP8 vector retained proof, short | `9d4a4e67ab1fc350ef402e11c8d879ae526a15c7bc7f360de122ac1027042b62` |
+| MXFP8 vector retained proof, stock A | `fa2abb938322ff0299f69e7d0f7aa00c7c13b8e1d09601e4046cb79a99590ceb` |
+| MXFP8 vector retained proof, stock B | `0e3dd7c36224f9bdb08da10c33fe2a24973ecdce34b012e671b06891c4c55e77` |

@@ -117,6 +117,24 @@ impl PrefillLanes {
         }
         self.grouped.enable_source_softmax(runtime)?;
         self.grouped.enable_source_mxfp8(runtime)?;
+        if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_MXFP8_VECTOR").is_some_and(|value| value == "1") {
+            packed_prefill::register(
+                runtime,
+                concat!(
+                    "#include <metal_stdlib>\nusing namespace metal;\n",
+                    "#define INK_GROUP_MXFP8_WIDE\n#define INK_GROUP_MXFP8_SOURCE\n#define INK_MX_SOURCE_VECTOR_LOAD\n",
+                    "#define ink_group_mxfp8_wide_up ink_verify_mx_vector_up\n",
+                    "#define ink_group_mxfp8_wide_down ink_verify_mx_vector_down\n",
+                    include_str!("experts.metal"),
+                    "\n",
+                    include_str!("mxfp8.metal"),
+                    "\n",
+                    include_str!("mxfp8_grouped.metal"),
+                ),
+                &["ink_verify_mx_vector_up", "ink_verify_mx_vector_down"],
+            )?;
+            runtime.verify_mxfp8_vector = true;
+        }
         let fused_experts = std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_FUSED_FINISH").as_deref()
             == Some(std::ffi::OsStr::new("1"));
         let fused_attention = std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_FUSED_ATTENTION").as_deref()
