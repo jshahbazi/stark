@@ -81,6 +81,8 @@ pub fn measure_draft_overlap(
     let prompt = fixture.values::<u32>("tokens", "U32", &[PREFIX + 3])?;
     let mut session = Session::load(checkpoint, 4352)?;
     session.load_dspark(draft)?;
+    // This probability diagnostic uses the ordinary full rank distribution.
+    session.runtime.draft_shortlist = false;
     session.set_batched_prefill(true, true)?;
     session.set_source_verifier(true)?;
     session.set_dspark_enabled(true)?;

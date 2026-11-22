@@ -493,6 +493,8 @@ Reusing binary16 activation loads across two adjacent NVFP4 output columns kept 
 
 One TensorOps call per exact K16 block kept Inkling’s per-lane recurrence and matched every verified F32 row. The cooperative inputs required a 16-row physical tile. The fastest tested configuration took 107–122 ms for four verifier rows versus 37–40 ms for the vector control. Retire this layout for short verification. [K16 TensorOps screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-24--preserve-source-accumulation-around-tensorops-k16-dots)
 
+Allowing shorter lookup suffixes with consensus among earlier continuations raised Inkling’s eligibility. With zero charged lookup cost, the strongest replay estimates over serial were +2.23% greedy and +1.20% sampled at cold 4K. That was too small for the throughput goal. [Short-context lookup replay](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-25--replay-short-context-lookup-with-past-continuation-agreement)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates

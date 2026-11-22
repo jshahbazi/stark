@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–24 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–25 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -325,6 +325,8 @@ One sealed build compared the full shortlist plus binary16 verifier ingress agai
 
 The best request reached 57.41 tok/s greedy and the best sampled request reached 44.38 tok/s. Greedy accepted 623 of 1,181 proposals with the candidate versus 628 of 1,166 in the control. Sampled accepted 489 of 1,058 versus 497 of 1,042. Each stock worker output contained 156–189 tokens with IDs at or above 65,536. The workers accounted for 99.79% of GPU client counter increments over 106 intervals. Thermal samples were nominal and fair, with +81 pageouts and zero additional swapouts. Execution rates varied by request and session. Retain the full shortlist as `STARK_INKLING_EXPERIMENT_DRAFT_SHORTLIST=1` and keep both binary16 ingress and the shortlist opt-in. The worker comparison measures their combined effect.
 
+The probability-overlap diagnostic always uses the ordinary full rerank. With the shortlist worker flag set, its stock 4K proof reproduced the previous aggregate receipt byte-for-byte, including 18 draft argmax controls.
+
 ## 20261121-INKDECODE-23 · Share NVFP4 ingress across adjacent output columns
 
 Each SIMD group loaded one binary16 activation block and applied it to two adjacent output columns, with independent F32 recurrences and source reductions. Test the up projection alone, the down projection alone and both in eight rotated comparisons per width and input. The initial Metal build needed explicit vector widening and produced no measurements. Every checked row matched the short and both pinned 4K controls after that repair.
@@ -345,6 +347,19 @@ With four alternating comparisons per arm at verifier widths two and four, all c
 Retire both TensorOps configurations. At this geometry, one matrix operation per K16 block and preserving 32 separate source-lane recurrences was much slower than the vector control. This result covers the entire verifier command, including the unchanged binary16 ingress and expert epilogues.
 
 The retained build reproduced the flags-unset connected short and 4K slice aggregates, the pinned full-target short logits, and 16 pinned 4K F32 vectors across four inputs. All 768 visit residual comparisons and four 4K snapshot replays passed. With both new options enabled, the native build repeated all 45 rejection and cache-wrap controls and the exact serial continuation and committed state on the short and two stock 4K inputs.
+
+## 20261121-INKDECODE-25 · Replay short-context lookup with past continuation agreement
+
+Replay the four greedy and four seeded sampled stock 4K outputs using only earlier tokens to select proposals. The sealed ordinary worker produced 256 sampled and emitted tokens per request with zero reuse, and all eight output hashes matched the prior ordinary controls. For each current suffix of one to four tokens, test agreement among earlier continuations. Require support from two or four past occurrences and consensus of at least 75%, 90% or 100%. Test caps of one or three proposals. The replay advances by the accepted prefix plus one output, so overlapping windows cannot each claim the same saved work.
+
+Charge 22.8 ms for a serial step and 29.5, 34.6 and 39.2 ms for verifying one, two or three proposals. These rounded costs come from the measured vector and binary16 configurations. Charge zero time to build and query the lookup table for this screen.
+
+| Mode | Best median rule in the screen | Lookup rounds | Accepted proposals | Estimated gain over serial |
+| --- | --- | ---: | ---: | ---: |
+| Greedy | One-token suffix, unanimous support from at least two occurrences, up to three proposals | 76 | 55 | +2.23% |
+| Sampled | One-token suffix, unanimous support from at least two occurrences, one proposal | 71 | 31 | +1.20% |
+
+The best greedy rule went from -0.84% to +4.55% across the four inputs. The best sampled rule ranged from -0.71% to +2.39%. The replay considers lookup in place of an ordinary token. The existing DSpark worker already runs faster than that ordinary reference. Defer runtime integration based on the small estimated gains and sparse eligibility.
 
 ## Decision and next target
 
@@ -541,3 +556,6 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Final flags-unset full target stock 2 | `d82d38427231954108d92f2039c1528ba842fa571586b9886d6399c05e1b30f8` |
 | Final flags-unset full target stock 3 | `89ca16a9550f3d3c8c862e810de54fd19d5456b48c40118c2a18d1741db62975` |
 | Final flags-unset full target stock 4 | `0217079a7bdb3b829de6f1bb84d1af2a3642dff7b49356865d567af7caf50ba5` |
+| Short-context lookup script | `57222c0337f0ec31cbadc41692f33691bce7a048963ce8baaa7e526cdeadcde7` |
+| Short-context lookup aggregate receipt | `b516de695a3540c8a2e05588d861c737a94258608d231dc8df60553d1c67dd83` |
+| Full draft overlap with shortlist worker flag | `2b699f3aa4a6b4c7180575ba4cfcb9d0c03c8c9e346864ac7c5c76587a074b4f` |
