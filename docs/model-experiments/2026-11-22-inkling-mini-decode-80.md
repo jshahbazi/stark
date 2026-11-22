@@ -201,6 +201,53 @@ Run the macOS arm64 release, verified against its published archive digest, on t
 
 Rates are tok/s. Draft-requested medians are 69.69 greedy and 73.68 sampled. The paired text hashes differ on one greedy and both sampled workloads. The API receipt compares decoded completion text and does not expose an exact token parity or accepted-depth trace. This timing screen used the original weights and leaves the 8-bit launch benchmark unreproduced. It supports measuring verifier cost at wider short widths on Stark while preserving the pinned output checks.
 
+## 20261122-INKDECODE-91 · Price wider verification and local KV sharing
+
+At `1345327f`, use the original checkpoint and bundled INT8 DSpark proposer on the 128 GiB M5 Max. The current rollback verifier accepts up to four rows. Its local attention shares one head's cache reads across two queries, while its global attention shares three Q heads on one token. Test the additional local geometries at three and four verifier rows before changing the rollback capacity.
+
+Each geometry retains the original query's key order, physical-to-logical shard mapping, independent FP32 accumulators and use of the pre-write cache for displaced keys. Hold the other retained optimizations fixed. Rotate four arms within each input, with eight plain and four instrumented repeats at each width. All 1,008 checked F32 vocabulary rows matched serial. The 180 controls verified accepted state and the next continuation across the short prefix, two stock 4K prefixes and their local-ring crossings. The short prefix bypasses shared local attention.
+
+| Local sharing per group | Three-row 4K paired wall saving | Four-row 4K paired wall saving |
+| --- | ---: | ---: |
+| One head, up to four rows | −0.029 to −0.011 ms | −0.213 to −0.179 ms |
+| Three heads, one row | +0.154 to +0.218 ms | +0.278 to +0.326 ms |
+| Three heads, up to two rows | +0.076 to +0.099 ms | +0.174 to +0.208 ms |
+
+Positive values mean less wall time against one head with up to two rows. The strongest arm reduces the measured relative and cache attention stage by 0.170–0.180 ms at three rows and 0.304–0.310 ms at four. Keep this experiment as exact component evidence. These savings alone leave the 80 tok/s sampled round budget open.
+
+### Wider target cost
+
+Use the existing direct grouped-expert verifier diagnostic at the same two restored 4K prefixes. The first build used a previous diagnostic's build cache after an invocation with Cargo missing from PATH. The follow-up built in a dedicated target directory and added widths five and seven and separate stage timing. All grouped parallel-router arms matched the complete F32 readouts and committed target state in both runs. This graph uses the wide diagnostic's direct append. Its timing excludes draft proposals, undo, sampling and the retained four-row transaction's shared KV and fused finishing paths.
+
+| Verified rows | Grouped parallel-router wall time at 4K |
+| --- | ---: |
+| 3 | 27.83–28.15 ms |
+| 4 | 31.30–32.61 ms |
+| 5 | 40.64–42.59 ms |
+| 6 | 46.12–49.38 ms |
+| 7 | 50.85–55.34 ms |
+| 8 | 55.12–60.06 ms |
+
+Five rows add 9.33–9.99 ms over four in this graph. Separately timestamped commands account for 5.54–6.53 ms of the increase in the NVFP4 expert region and 1.22–1.41 ms in relative and cache attention. Above four rows the graph falls back from the compact route launch and short native router. The first run measured 45.51–48.65 ms at six rows and 54.63–58.17 ms at eight. Widening the optimized transaction would require replacing fixed four-row bindings and preserving any accepted convolution history overwritten by a rejected suffix.
+
+### Exact acceptance through seven proposals
+
+Replay the native INT8 draft head at 192 consecutive anchors on each trajectory. Use the exact target's seeded temperature-one draws on four 4K prefixes and its greedy continuation on two of those prefixes. Each proposal conditions on its own preceding proposal. All six initial F32 rows matched the pinned traces. Rotate proposal depths one through seven at every sixteenth anchor. All 432 shorter proposal sequences matched the corresponding prefix of the seven-proposal sequence.
+
+Replay each depth as nonoverlapping rounds with the usual tail cap. The optimistic sampled rate charges every width the incumbent depth-two round cost of 28.421 ms. The 80 tok/s budget is the median per-trajectory cost allowed by the observed round count. Neither estimate includes any increased cost of widening.
+
+| Drafts | Sampled rounds, 768 outputs | Greedy rounds, 384 outputs | Optimistic sampled median tok/s | Sampled round budget for 80 tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 457 | 212 | 59.55 | 21.16 ms |
+| 2 | 386 | 171 | 70.65 | 25.10 ms |
+| 3 | 354 | 165 | 79.34 | 28.19 ms |
+| 4 | 347 | 164 | 80.58 | 28.63 ms |
+| 5 | 345 | 164 | 81.56 | 28.98 ms |
+| 6 | 341 | 164 | 82.16 | 29.19 ms |
+| 7 | 338 | 164 | 83.39 | 29.63 ms |
+
+The deeper draft path yields real acceptance headroom. At four proposals it allows only about 0.21 ms above the incumbent round cost, and the draft command alone adds 0.19–0.20 ms at the paired median across the four sampled fixtures. At seven proposals the extra round allowance is 1.21 ms. The native target timings leave no credible budget for the current wide design. Defer expanding the rollback verifier. This is a sizing and acceptance experiment with original target outputs and no live worker rate for the new geometry.
+
 ## Evidence
 
 The original target and DSpark artifact digests are recorded with the [integrated QKV run](2026-11-21-inkling-mini-decode-60.md#evidence-identities). The worker and native screen retain aggregate-only private receipts. No prompts, token IDs, logits, targets or fitted tensors are published.
@@ -289,3 +336,10 @@ The original target and DSpark artifact digests are recorded with the [integrate
 | MLX-Serve executable | `05983e1278d6253d3648ddaa2514ec2a2f73ff3f617d41412d18334759991392` |
 | MLX-Serve original-checkpoint harness | `8820cd5dee67c14c3696ef271defbd57883cfd6a15688bb417853a52d8cc7f37` |
 | MLX-Serve original-checkpoint receipt | `7a8f803677591cb9857f8173d5a9f5d52f203deda0b42a1d75a083ef9bb6454f` |
+| Local attention and wide draft probe patch | `c4878c88fe84b6274f84d0c2fdb2f137359263600b0bef1ffc1df2088c5c1fb1` |
+| Local attention and wide draft probe executable | `489f80bfaa65a856a20593990a5e6753596515f3b76d38cde801a455e66207b9` |
+| Local attention and wide draft probe harness | `93019034b456cff828c35760c0bc811b03042f1010a73d6f67018932a70c22f5` |
+| Wider target cost follow-up patch | `5c4ca8d7e7a1c933edcac4b0f9cb6df4c3783982a83ef60a648adb91ddb6c4f1` |
+| Wider target cost follow-up executable | `530f84bc5f4fdd77a939c71091ff49d96911415551b66c65af3d27c50d7f3394` |
+| Wider target cost follow-up harness | `ce01f28c83fcbe6dacfdefcaed8be958aad1b61fbc57c4f4018b27c05e752164` |
+| Wider verifier and draft aggregate receipt | `7ef289b5237063a0a06044ca0e6795ac21c135ebca3abd36482e59b3fe43fd8f` |

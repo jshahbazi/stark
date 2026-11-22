@@ -615,6 +615,8 @@ Repeat depth comparisons after different speedups at adjacent verifier widths. O
 
 When a faster runtime reports a short greedy peak on its own quantization, first compare the original weights at matched cold prompt lengths and record the output agreement. MLX-Serve reported a 116 tok/s peak on its 8-bit Inkling pack. The original-checkpoint 4K screen on M5 Max returned 69.69 tok/s greedy and 73.68 sampled with drafting requested. One of four completion texts matched its draft-off pair. Its verifier's packed expert reads and split attention warrant width-specific tests against Stark's exact reference. [MLX-Serve preview](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-90--compare-the-mlx-serve-inkling-preview)
 
+Replay native drafts at the proposed width and price the extra target rows separately. On Inkling, four drafts reduced sampled replay rounds from 386 to 347, with only 0.21 ms of additional round cost available at 80 tok/s. Three-head local KV sharing saved 0.154–0.218 ms at the incumbent sampled width with exact logits and rollback. The direct wider graph adds several milliseconds before handling rollback, so defer the wider transaction. [Wider verifier budget](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-91--price-wider-verification-and-local-kv-sharing)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates
@@ -723,6 +725,7 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 | 2026-11-21 | [Inkling 2 Mini default fast prefill](model-experiments/2026-11-21-inkling-mini-prefill-default.md) | Flags-unset kernel admission, pinned parity, source-disable fallback and paired cold 4K worker timing |
 | 2026-11-21 | [Inkling 2 Mini default one-row router](model-experiments/2026-11-21-inkling-mini-decode-default.md) | Flags-unset router selection, restored-cache projection and useful-decode timing |
 | 2026-11-21 | [Inkling 2 Mini decode toward 60](model-experiments/2026-11-21-inkling-mini-decode-60.md) | Exact short verifier and rollback, NVFP4 sharing, shared local KV reads, certified sampling and stochastic draft overlap |
+| 2026-11-22 | [Inkling 2 Mini decode toward 80](model-experiments/2026-11-22-inkling-mini-decode-80.md) | Exact residual and projection batching, MLX-Serve comparison, local KV sharing and wider verifier budget |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 
