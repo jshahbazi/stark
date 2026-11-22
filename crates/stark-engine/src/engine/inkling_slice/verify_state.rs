@@ -55,6 +55,15 @@ impl VerifyWorkspace {
                 &["ink_verify_local_parts", "ink_verify_global_parts"],
             )?;
         }
+        if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_FUSED_CACHE").as_deref() == Some(std::ffi::OsStr::new("1"))
+        {
+            packed_prefill::register(
+                runtime,
+                include_str!("verify_cache.metal"),
+                &["ink_verify_kv_pack", "ink_verify_qr_pack"],
+            )?;
+            runtime.verify_fused_cache = true;
+        }
         let draft = DraftBlock::new(runtime)?;
         let alloc = |bytes| {
             runtime
@@ -153,6 +162,55 @@ impl VerifyWorkspace {
         Ok(())
     }
 
+    fn batch_attention_heads(
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        visit: &Visit,
+        position: usize,
+        rows: &[&Scratch],
+        window: usize,
+    ) {
+        let [a, b, c, d] = std::array::from_fn(|i| rows[i.min(rows.len() - 1)]);
+        gpu.dispatch(
+            "ink_verify_kv_pack",
+            &[
+                &a.k,
+                &b.k,
+                &c.k,
+                &d.k,
+                &a.v,
+                &b.v,
+                &c.v,
+                &d.v,
+                &a.dynamic[0],
+                &b.dynamic[0],
+                &c.dynamic[0],
+                &d.dynamic[0],
+                &a.dynamic[1],
+                &b.dynamic[1],
+                &c.dynamic[1],
+                &d.dynamic[1],
+                &layer.key_conv,
+                &layer.value_conv,
+                &visit.conv[0],
+                &visit.conv[1],
+                &visit.keys,
+                &visit.values,
+            ]
+            .map(binding),
+            [position as u32, rows.len() as u32, visit.capacity as u32, u32::from(layer.dynamic.is_some())],
+            (4, 1),
+            128,
+        );
+        gpu.dispatch(
+            "ink_verify_qr_pack",
+            &[&a.q, &b.q, &c.q, &d.q, &a.r, &b.r, &c.r, &d.r, &layer.q_scale, &layer.r_scale].map(binding),
+            [position as u32, window as u32],
+            (12, rows.len()),
+            128,
+        );
+    }
+
     pub(super) fn shares_local_attention(&self) -> bool {
         self.local_rows_per_group > 0 && self.attention_parts.is_some()
     }
@@ -167,8 +225,18 @@ impl VerifyWorkspace {
         rows: &[&Scratch],
     ) {
         let parts = self.attention_parts.as_ref().expect("shared local verifier workspace");
+        if gpu.runtime.verify_fused_cache {
+            Self::batch_attention_heads(gpu, layer, visit, position, rows, LOCAL);
+        }
         for (row, scratch) in rows.iter().enumerate() {
-            layer.attention_write_cache(gpu, scratch, visit, [(position + row) as u32, LOCAL as u32, LOCAL as u32, 64]);
+            if !gpu.runtime.verify_fused_cache {
+                layer.attention_write_cache(
+                    gpu,
+                    scratch,
+                    visit,
+                    [(position + row) as u32, LOCAL as u32, LOCAL as u32, 64],
+                );
+            }
             gpu.one(
                 "ink_prefill_relative_table_source",
                 &[&scratch.r, &layer.relative, &scratch.table],
@@ -228,8 +296,17 @@ impl VerifyWorkspace {
         let parts = self.attention_parts.as_ref().expect("shared global verifier workspace");
         let (heads_per_group, rows_per_group) = self.global_share;
         gpu.phase(PrefillPhase::KeyValue);
-        for (row, scratch) in rows.iter().enumerate() {
-            layer.attention_write_cache(gpu, scratch, visit, [(position + row) as u32, visit.capacity as u32, 0, 64]);
+        if gpu.runtime.verify_fused_cache {
+            Self::batch_attention_heads(gpu, layer, visit, position, rows, 0);
+        } else {
+            for (row, scratch) in rows.iter().enumerate() {
+                layer.attention_write_cache(
+                    gpu,
+                    scratch,
+                    visit,
+                    [(position + row) as u32, visit.capacity as u32, 0, 64],
+                );
+            }
         }
         gpu.phase(PrefillPhase::RelativeTable);
         for scratch in rows {

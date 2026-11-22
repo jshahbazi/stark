@@ -914,7 +914,39 @@ The first active 4K run hit the nine-binding convenience limit before encoding t
 | Relative and cache attention GPU, control | 3.25–3.27 ms | 4.19 ms |
 | Relative and cache attention GPU, candidate | 2.76 ms | 3.47 ms |
 
-The corrected candidate reproduced complete serial outputs and committed state on the short and both stock 4K inputs at depths one through three. All 45 rejection and capacity-wrap checks passed, including the local cache wrap and the three-slot convolution history when rejected row three overwrites the anchor slot. Continue with worker qualification. The timing above measures native verifier commands.
+The corrected candidate reproduced complete serial outputs and committed state on the short and both stock 4K inputs at depths one through three. All 45 rejection and capacity-wrap checks passed, including the local cache wrap and the three-slot convolution history when rejected row three overwrites the anchor slot. The timing above measures native verifier commands.
+
+### Cold 4K worker follow-up
+
+Use one sealed worker build based on `ebeb6825` and toggle only the fused cache selector. Both arms use the exact FP4 pair lookup, native short router, INT8 draft vocabulary projection and queued verifier. Use the original target with vision and DSpark resident, 4,096 cold input tokens, context 4,352, zero input reuse and 256 emitted and sampled tokens. Greedy uses three proposals. Seeded sampling uses two proposals with temperature and top-p both 1. Useful decode counts the 255 intervals after the first output token.
+
+| Mode | Control median | Fused cache median | Median paired change | Fused cache range | Faster pairs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Greedy | 68.71 tok/s | **69.87 tok/s** | +0.84% | 61.55–71.41 tok/s | 2/4 |
+| Seeded sampled | 56.52 tok/s | **56.83 tok/s** | +0.94% | 54.16–60.38 tok/s | 3/4 |
+| Seeded sampled, reversed order | 54.25 tok/s | **55.70 tok/s** | +2.55% | 54.42–64.30 tok/s | 4/4 |
+
+All output hashes and paired round counts matched. The two workers accounted for 99.83% of observed GPU counter increments in the first screen and 99.80% in the repeat. Both runs recorded nominal thermal state and zero swapouts. Pageouts increased by 171 and 720 pages, respectively. Prefill medians in the sampled windows moved from 954.46 to 939.65 tok/s and from 882.66 to 818.68 tok/s. The cache selector runs after prefill and the seed step. The changing prefill control shows substantial timing variation across these worker windows.
+
+The sealed build passed the flags-unset connected short and 4K checks, including 16 pinned F32 logit vectors, 768 BF16 residual blocks and four exact stock 4K snapshot replays. With the fused path enabled, the short and both stock 4K verifier runs matched serial outputs and committed state for 96 outputs at each of proposal depths one through three. All 45 rollback and capacity-crossing controls passed. The worker reused a 2,048-token prefix across draft depths and cleared saved state on cancellation and verifier-mode changes. It also passed exact accepted-proposal stop accounting.
+
+Retain the fused cache path under `STARK_INKLING_EXPERIMENT_VERIFY_FUSED_CACHE=1` for the shared short verifier. The repeat shows a modest sampled gain with matching outputs. The sampled median is still 2.45 ms per speculative round over the 60 tok/s budget.
+
+## 20261122-INKDECODE-56 · Batch relative tables and share attention gate weights
+
+Screen whether the remaining shared attention tail can reuse its relative table launch and stop recalculating shard weights for each four-channel output group. Preserve the per-token 16 + 8 physical query-head tiles, the per-lane shard order, the F32 SIMD sum and FMA order, and the final BF16 conversion. Keep fused cache writes and the FP4 pair table active in each arm.
+
+Measure three and four live rows on the short control and two stock 4K fixtures. Rotate six plain commands and three timestamped commands per arm at a restored cache and compare complete F32 verifier logits to the serial path. Compare table batching alone, dispatch batching for both stages, and 4-, 8- and 16-SIMD-group gates that compute the 64 shard factors once per head. All 756 checked F32 vectors at 4K matched, as did all 378 on the short fixture, which bypasses shared attention.
+
+| Candidate | Median paired wall savings at three 4K rows | Median paired wall savings at four 4K rows |
+| --- | ---: | ---: |
+| Batch relative table dispatches | 0.16–0.31 ms | 0.43–0.44 ms |
+| Batch relative table and source gate dispatches | **0.44–0.50 ms** | **0.64–0.86 ms** |
+| Batch tables and share factors across 4 SIMD groups | 0.17–0.26 ms | 0.46–0.47 ms |
+| Batch tables and share factors across 8 SIMD groups | 0.30–0.34 ms | 0.55–0.64 ms |
+| Batch tables and share factors across 16 SIMD groups | 0.41–0.45 ms | 0.67–0.72 ms |
+
+Batching both dispatches removed 192 and 288 dispatches at three and four rows. At three rows, the instrumented relative and cache attention stage fell from 2.76 ms to 2.31–2.32 ms. The gates that share factors use threadgroup memory and a barrier. Their three-row performance trails the batched source gate on both inputs. Archive the factor-sharing gates and carry dispatch batching into a sampled worker comparison.
 
 ## Evidence identities
 
@@ -1417,3 +1449,24 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Exact FP4 pair table check-table.py | `7224bd2c60a615b43b6e8273e9fe4019ae524bc4e6ec9f4feca7037a7c4f89a6` |
 | Exact FP4 pair table check-table.json | `55aa89954670fb89faf5f6dc5dbeafd7eada385951bc2eb419acfc30366b72e9` |
 | Fused verifier K/V proof/short.json | `45fa24f94f32bb62df8f49e8308750ed9a1ab637cfa5a5946e316a96bef1d02f` |
+| Fused verifier K/V worker binary | `b81aea9ba4b91a9c1cee45dec008fdb972ef1a4a5c9bd4947709ed382ca40a86` |
+| Fused verifier K/V sealed native binary | `44fd364fdd8a1310f2e50c0156596b7c0e9913ecd91d4e59ba25fb6617231d2e` |
+| Fused verifier K/V sealed source patch | `701d51b2fea6e4e5f0f4c25dac01633c884d5f5bc04be49d968e5d9bf5721543` |
+| Fused verifier K/V worker harness | `34cac0d72a4ac49223d21f7a09f3676b94a504e84278d2e6285ffaa5d079958e` |
+| Fused verifier K/V worker pairs | `efc5e28d6b52701d9e315270b4c177652223d3fd16737e22db3b1ede6b17c248` |
+| Fused verifier K/V worker host | `69ec639db16c883db5bc2132ecc7ca72d436744a6f31d277f9da514a7d7bed69` |
+| Fused verifier K/V sampled repeat harness | `7bde8feaa76b80ba3d3957f8a818b743c2c99c5a28a9faef8a10b449e45a5535` |
+| Fused verifier K/V sampled repeat pairs | `38b934740912f39f1ded0ad1bca20a52988d69b61e5cb8dccfa1da2288357f5d` |
+| Fused verifier K/V sampled repeat host | `9171a1a0a08b803f1fb03bd4aecb283359b857b3f68a01ba8ac5b8221d7f5ac7` |
+| Fused verifier K/V flags-unset parity | `b8a5b540c43b3942a458316f8d3f2943ed64beadfbb40fe803a93111aac3d011` |
+| Fused verifier K/V lifecycle harness | `a7f5d7180b7c91412917a4faedcc1ea98848306e53cd4a23c1bdb6e00978f70d` |
+| Fused verifier K/V lifecycle receipt | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |
+| Fused verifier K/V sealed native short proof | `21dcb1941c3eee8443881120c31e550c6e6cf9765efd29d2eb74102ea33a2c85` |
+| Fused verifier K/V sealed native stock-s4096-00 proof | `360f58052acfb92323178991ee29d26fc9a7165d21303d131e6e3b4a111f60d7` |
+| Fused verifier K/V sealed native stock-g4096-01 proof | `9c008826041639726815bbcf49e381a1e821103a5a67f73d10b48151851fd9c2` |
+| Verifier attention tail native binary | `54a02436b7143472b28aa6549df970c38997023dedcf9031952c3a0e03d2f0f8` |
+| Verifier attention tail native source patch | `5609a78216e0b6a9af1147429cf8b23f738db2990366d082ba59c15393a75fba` |
+| Verifier attention tail native harness | `27ae7f1d4c58680206ee37ab3d20aac95c2ef7eb4491e9f8812ee1a2a23ca9ff` |
+| Verifier attention tail native short screen | `dbc60ebcaf54175e0e0aa0db89009e5f6ed3348b8c382741c0fb294a71070f63` |
+| Verifier attention tail native stock-s4096-00 screen | `94266857f6ea8f13da7afb8f496bdb1eb8ba705df08938605d9b6cd1846d722d` |
+| Verifier attention tail native stock-g4096-01 screen | `ef71cf67790ed4b2cce66e51e2431f9d8866da662823daa4cb3647a154eb072d` |
