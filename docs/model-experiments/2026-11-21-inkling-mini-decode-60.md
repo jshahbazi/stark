@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–32 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–34 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -494,6 +494,39 @@ The stock 4K profile observed `ink_singleton_router_source`, the promoted 64-row
 
 The rebuilt default worker, with drafting off and every Inkling flag unset, measured **34.12 tok/s greedy** and **32.47 tok/s seeded sampled** at the medians of two cold requests per mode. The ranges were 34.04–34.21 and 32.25–32.68 tok/s. All four output receipts matched their reference hashes at 256 outputs and zero input reuse. The first smoke harness applied the experimental verifier's three-draft readiness assertion to the stock worker and stopped before scoring. The corrected harness requires the stock worker's one-draft capability and checks the same output contract.
 
+## 20261121-INKDECODE-33 · Stage NVFP4 ingress across wider output tiles
+
+The four-column short verifier has four SIMD groups per threadgroup, with each SIMD group handling one output column. Compare eight and sixteen columns per tile, with each SIMD group completing columns in sequence. This keeps one set of per-route accumulators live. Test direct activation loads and a cooperative threadgroup copy of the live run's binary16 activation rows at each wider tile width. The up and down shaders use separate staging allocations of up to 18 and 9 KiB. All variants preserve K16 dot grouping, the source-lane scaled FMA recurrence and the final SIMD reduction.
+
+| Four-row verifier variant | Paired wall increase across the two stock 4K inputs | NVFP4 product GPU medians |
+| --- | ---: | ---: |
+| Four columns, direct control | — | 9.31–11.44 ms |
+| Eight columns, direct | 0.48–0.64 ms | 9.72–12.14 ms |
+| Eight columns, staged | 1.35–1.71 ms | 10.75–13.21 ms |
+| Sixteen columns, direct | 0.39–0.96 ms | 9.78–12.23 ms |
+| Sixteen columns, staged | 0.79–0.91 ms | 10.31–12.85 ms |
+
+The wall comparisons use six rotated same-state pairs and the GPU totals use two separately instrumented pairs. The plain four-row controls took 37.16–38.10 ms. All variants reproduced serial F32 readouts at widths two through four on one short and two pinned 4K prefixes. The enabled eight-column staged arm passed all 45 rejection and wrap controls. Wider direct tiles and staged tiles also lost at widths two and three on both 4K inputs. The four-path comparisons separate the effect of staging from the cost of changing tile geometry.
+
+Retire the candidate. Fewer device requests for activation rows did not reduce whole-command wall time in these layouts. The screen measured GPU stage time, so it leaves the balance between cache hits, scratch occupancy and reduced grid parallelism unresolved. No worker speedup claim follows.
+
+## 20261121-INKDECODE-34 · Bound adaptive depth on exact seeded trajectories
+
+Start four sampled teacher trajectories from pinned stock 4K logits. At each of 192 anchors per input, run the actual full-vocabulary shortlist proposer separately at depths one, two and three. Time each draft depth in rotated order. Compare each proposal prefix against the same exact temperature-one teacher continuation. In the replay, advance by the accepted prefix plus one so overlapping draft opportunities cannot count twice.
+
+Charge a favorable 22.80 ms for an ordinary step. The measured ordinary medians in the final pass were 23.19–23.58 ms. Charge the fastest same-state plain verifier median from the wider-tile control, 27.47, 31.68 or 37.16 ms, plus the input's measured draft median at the chosen depth. The model leaves out finishing and host costs. Its rates are estimates on the recorded trajectories.
+
+| Stock 4K input, sampled | Fixed depth two | Best fixed depth per input | Anchor confidence | Future draws, ratio | Future draws, 16-token window | Hindsight optimum |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `s4096-00` | 51.84 | 51.84 | 51.84 | 52.01 | 50.99 | 68.65 |
+| `s4096-01` | 59.42 | 59.42 | 59.42 | 59.42 | 59.12 | 74.39 |
+| `g4096-01` | 63.62 | 63.62 | 61.41 | 63.50 | 63.24 | 77.13 |
+| `g4096-02` | 48.03 | 53.92 | 42.68 | 45.80 | 45.87 | 60.85 |
+
+Rates are in modeled tok/s. Fixed depth two was the best fixed setting at the median across inputs, 55.63 tok/s. Anchor confidence uses three bins of the already-sampled anchor's top-two target logit gap and whether the draw chose the top token. The future-draw arms use a copy of the local sampler state to place the next draws into eight bins. Fit the conditional proposal acceptance by depth, mask and draw bin on the other three inputs, with smoothing toward the same-mask mean. Choose depth by estimated cost per emitted token or minimize expected cost over 16 positions. The original sampler and draw sequence are unchanged by the replay. The hindsight arm uses future acceptance outcomes to compute the lowest cost among all valid depth schedules and quantifies the value of a perfect predictor at these fixed costs.
+
+The ratio policy estimates a median of 55.72 tok/s, about 0.09 more than fixed depth two, and falls behind on the hardest input. The 16-position policy estimates 55.05. Anchor confidence alone failed to improve on fixed depth two. The hindsight range of 60.85–77.13 shows that perfect round choice could matter, with only 0.85 tok/s of modeled headroom on the hardest prompt before finishing and host work. Defer implementing these predictors. The screen supports lowering per-round compute or improving the proposals themselves before revisiting depth choice. No worker throughput changed.
+
 ## Evidence identities
 
 Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1`. Original DSpark SHA-256 `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2`. The current run uses the pinned Ollama capture and host documented in the [default-router record](2026-11-21-inkling-mini-decode-default.md).
@@ -761,3 +794,15 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Short router flags-unset worker_probe.py | `c4bfb8b9d96381457015832762774cc93d3cf2872a3b5b685308baed90e1c54c` |
 | Short router flags-unset flags-unset-worker.jsonl | `bfdde50e87683c2b6bb3ac997cca255790af6cebc89484a98be07b6333c0aace` |
 | Short router flags-unset flags-unset-stock-profile.json | `8d79302c6c127216a3bafc62ec48c941b12391af93dffa617a1961eafa09c2a3` |
+| Wider NVFP4 output tile inkling_slice | `d7aabafec1f49e0408dea17decf446462f7f1f0aac1ce140ff4bdbcc434cb60f` |
+| Wider NVFP4 output tile scored-source.patch | `753da349f7d5c0e89fc0101479f314247032cf0ce6483d7cc3108b98459a0409` |
+| Wider NVFP4 output tile short.json | `abf90d2d49638d6541a4bd69d72558356e0f6f470be7f6d895f804ad7d6d02e9` |
+| Wider NVFP4 output tile stock-s4096-00.json | `a5805e0840c9fcde1f171b2411e6bd83d1b885e57279ea6b764a764d4a9be846` |
+| Wider NVFP4 output tile stock-g4096-01.json | `18e81700512ba5a6f48ee029869b351ee4b91212146d0e52bed00f7f46861c0c` |
+| Sampled depth bound inkling_slice | `97e6a4a3ba10b82e0a4b721fdeec67b32670232b438f781ff509817f32b87aa5` |
+| Sampled depth bound scored-source.patch | `ec9130f96890d7cf0e7e543c55f8ef4eae6d23e8bbc68fc0d2317c0bfb6fe09d` |
+| Sampled depth bound run.py | `5690e81545c13d38bcedfa6da9d639b1a6f164cd022b0923cd5007f4e602b285` |
+| Sampled depth bound result.json | `eead7dc77993ad7e3625fbe5d1a945859e16ab2d86ec9c3ce854f471964509a4` |
+| Sampled depth bound pre-draw/inkling_slice | `63b9f03a7d846ba4a391bf3f0dcd4f5f26bae778cb9db4bf4e11c78cacd067bf` |
+| Sampled depth bound pre-draw/scored-source.patch | `73b8668b56ed618c4a50e76f3fffdbea796c30fb59f6f03de68df6118d0af6eb` |
+| Sampled depth bound pre-draw/result.json | `aec3adb0e955e0c045fa97df5f7773fdd8e3b58b92171f5c44cd63691858c063` |
