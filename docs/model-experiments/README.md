@@ -2,7 +2,7 @@
 
 [Look up research and speed changes by model](../MODEL_RESEARCH.md), including benchmark comparisons and branch-only attempts. The [source index](source-index.md) groups individual reports by family and topic.
 
-- [Inkling 2 Mini decode toward 80 tok/s, attempts 79–84](2026-11-22-inkling-mini-decode-80.md) records the single-worker QKV repeat, smaller NVFP4 workgroups, sampled target-mode headroom a held-out DSpark bias fit, batched verifier residual mixing and grouped MXFP8 vector loads.
+- [Inkling 2 Mini decode toward 80 tok/s, attempts 79–86](2026-11-22-inkling-mini-decode-80.md) records the single-worker QKV repeat, smaller NVFP4 workgroups, sampled target-mode headroom a held-out DSpark bias fit, batched verifier residual mixing grouped MXFP8 vector loads, normalized residual caching and causal draft ranking.
 
 - [Inkling 2 Mini exact decode toward 60 tok/s, attempts 01–78](2026-11-21-inkling-mini-decode-60.md) tracks exact singleton decode, shared verifier work, exact rollback, source-precision DSpark acceptance, lookup and vocabulary eligibility, certified seeded sampling, shared KV reads and writes, and stochastic acceptance estimates for the original checkpoint on M5 Max.
 

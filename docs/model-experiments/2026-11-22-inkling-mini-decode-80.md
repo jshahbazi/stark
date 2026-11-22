@@ -106,6 +106,38 @@ The retained worker removes the diagnostic profiling and arm selector. Its nativ
 
 In a separate one-loaded-worker observation with both verifier cuts active, all eight pinned hashes matched. The retained worker reached **84.13 tok/s median greedy** (78.69–87.36) and **68.62 tok/s median sampled** (64.31–69.66). The 80 tok/s threshold was met on 3/4 greedy and 0/4 sampled requests in that observation. The paired worker comparison remains the source for the relative gain.
 
+## 20261122-INKDECODE-85 · Cache normalized residual sources
+
+At `76043606`, the retained sampled run was about 4 ms per round away from 80 tok/s at its measured acceptance. Look for repeated RMS work inside the already-batched residual mixes. After each raw block write, normalize it once into 144 KiB of private verifier scratch. Normalize the two carried vectors in place at the two pass rewinds, after the existing copies have completed. Every query uses the same FP32 normalized values and keeps its source dot, reduction and weighted sum. The changing partial vector still normalizes on demand. Neither scratch nor the temporary carried values join the retained prefix state.
+
+Alternate cache enabled and disabled from the same restored snapshot, with residual batching, QKV batching and MXFP8 vector loads active. Use eight plain and four instrumented pairs per width and fixture. Both arms use the same parameterized mix kernels. All 648 checked F32 vocabulary rows matched serial across the short and two stock 4K fixtures.
+
+| Fixture | Two-row wall saving | Three-row wall saving | Four-row wall saving |
+| --- | ---: | ---: | ---: |
+| Short | 0.033 ms | 0.092 ms | 0.037 ms |
+| Stock 4K A | 0.060 ms | −0.006 ms | 0.050 ms |
+| Stock 4K B | 0.051 ms | 0.062 ms | 0.041 ms |
+
+Three-row stage timings attribute about 0.03 ms to attention input prep and 0.02 ms to expert input prep. The complete command gain at the sampled width is too small to advance. Archive the cache at the native gate.
+
+## 20261122-INKDECODE-86 · Score draft candidates with a causal target prior
+
+At the retained verifier's measured per-request costs, the earlier privileged target-mode replay models 76.03 tok/s median sampled. The actual four sampled runs require about 2.19–2.37 useful outputs per round for 80 tok/s at unchanged cost. This reprice uses the matched round counts and timings of the retained MXFP8 vector worker.
+
+Use only the already-available target vocabulary row that produced the emitted anchor. In the native INT8 draft ranker, add a signed term of up to one logit unit based on the prior's distance below its maximum, capped at eight score units. Compare reranking the two shortlisted candidates per SIMD group and applying the same term before and after shortlisting. Test the positive and negative terms at both masks, plus positive and negative shortlist terms at mask two only. The unmodified stock ranker supplies the zero arm. The second mask reads the candidate's own first proposal. The original target draw sequence supplies the scoring trajectory.
+
+Use 192 anchors each on four stock 4K prompts and two seeds per prompt. Rotate seven arms per anchor and fit the arm on the six trajectories from the other three prompts. Count nonoverlapping accepted prefixes and verification rounds on both seeds of the held-out prompt. The native worker copies the causal prior into a shared probe buffer outside the timed proposal command. A live implementation would need to bind the resident prior row and preserve its lifetime. The initial patch generator missed the current shortlist declaration and the first Rust build retained the old fixture and arm shapes. The corrected experiment reproduced all eight pinned initial target rows.
+
+| Held-out prompt | Stock rounds | Selected rounds |
+| --- | ---: | ---: |
+| A | 205 | 204 |
+| B | 182 | 179 |
+| C | 165 | 166 |
+| D | 217 | 216 |
+| Total | 769 | 765 |
+
+The best single fixed term on the same eight trajectories uses 763 rounds. Held-out selection saves four rounds in aggregate, about 0.5%, with one held-out prompt regressing. The commonly selected arm adds about 0.005 ms to the median native proposal command. Retain the result as a proposal replay and archive the variant. The exact target and sampler establish the replay reference. The experiment produces no live throughput claim.
+
 ## Evidence
 
 The original target and DSpark artifact digests are recorded with the [integrated QKV run](2026-11-21-inkling-mini-decode-60.md#evidence-identities). The worker and native screen retain aggregate-only private receipts. No prompts, token IDs, logits, targets or fitted tensors are published.
@@ -167,3 +199,12 @@ The original target and DSpark artifact digests are recorded with the [integrate
 | MXFP8 vector retained proof, short | `9d4a4e67ab1fc350ef402e11c8d879ae526a15c7bc7f360de122ac1027042b62` |
 | MXFP8 vector retained proof, stock A | `fa2abb938322ff0299f69e7d0f7aa00c7c13b8e1d09601e4046cb79a99590ceb` |
 | MXFP8 vector retained proof, stock B | `0e3dd7c36224f9bdb08da10c33fe2a24973ecdce34b012e671b06891c4c55e77` |
+| Residual source cache diagnostic patch | `431d7395093503efdd58cc84fcf9a5553b75a9c8074472a49ebe7627c770e36c` |
+| Residual source cache native executable | `09548f1c5b9b210ebdec875dd19eb70f01512984f23b6643126075338f364af6` |
+| Residual source cache short receipt | `12b6ee440485ce68df02e58f38af8dce2975329897c636c96ab898354a7d4ab0` |
+| Residual source cache stock 4K A receipt | `d1df9b4ea54b1dee6bea60d8bf5ae2129f33bb1bc15b6f9feb808c51b919a9ae` |
+| Residual source cache stock 4K B receipt | `63fd439f183c6994d5ad965c979d72ddac7d45d758b57f5b21cea5da70f31f2a` |
+| Causal draft prior diagnostic patch | `8e3687bb34a2233e5245778b81410d8328c5a43afea77a82e2c72a7446f3a585` |
+| Causal draft prior native executable | `487884e44084dd3d8f84d9a0590eaaf01d017b1c9177b0eb2ad62817b53ff5e5` |
+| Causal draft prior replay harness | `3626d04b8e3d15f52e514b2e9f52498ccf0cf864016e6dc7e43987ca9ee06a60` |
+| Causal draft prior replay receipt | `15d991f30263f1b823c1a79dd03a9a9288dcdfb9e9f24ea34ba0fe423d833d67` |

@@ -603,6 +603,10 @@ Measure the exact critical-path ceiling before implementing a greedy shortcut. I
 
 Price sampled proposal improvements on nonoverlapping accepted prefixes from live seeded trajectories. Inkling's privileged target-mode reference reduced 530 rounds to 461 and modeled 74 tok/s with the earlier measured per-prompt costs. The alternate seeds gave a similar estimate. The fitted Markov bias tied all four stock held-out round counts, so archive the fit. [Sampled proposal headroom](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-81--replay-a-privileged-sampled-proposal-reference)
 
+Measure the remaining RMS work after batching verifier mixes. On Inkling, caching the immutable normalized block and carried vectors preserved exact logits. Three-row plain wall savings were −0.006 and +0.062 ms on the two stock 4K inputs, so archive the cache at the native gate. [Cached residual sources](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-85--cache-normalized-residual-sources)
+
+Evaluate a causal prior on complete held-out prompt trajectories. Inkling's reranking uses the target row that produced the emitted anchor. Its signed prior and shortlist alternatives use 765 rounds against 769 for stock across eight test trajectories. The separately repriced privileged target-mode policy models 76.03 tok/s at the retained costs. [Causal draft ranking](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-86--score-draft-candidates-with-a-causal-target-prior)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates
