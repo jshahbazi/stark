@@ -97,46 +97,63 @@ impl PrefillControllers {
                     gpu.norm(message, scale, (&scratch.controller_pair, WIDTH * 2), false);
                 }
             }
-            project_rows(
-                gpu,
-                None,
-                &gate.down,
-                tile.clone().map(|(s, _, _)| (binding(&s.controller_pair), &s.compressed)),
-                2 * WIDTH,
-                64,
-                wide_gemv,
-            );
-            if let Some(staged) = &staged {
-                for (batch, rows) in staged.chunks(NORM_BATCH).enumerate() {
-                    let packed = (&self.compressed, batch * NORM_BATCH * 64 * 2);
-                    let mut buffers = [packed; NORM_BATCH + 1];
-                    for (row, buffer) in buffers[..NORM_BATCH].iter_mut().enumerate() {
-                        *buffer = binding(&rows.get(row).unwrap_or(&rows[0]).0.compressed);
-                    }
-                    gpu.dispatch(NORM_KERNELS[1], &buffers, (), (rows.len(), 1), 64);
+            let native =
+                gpu.runtime.verify_nvfp4_matvec && gpu.runtime.verify_combined_short && (2..=4).contains(&size);
+            if let Some(staged) = staged.as_ref().filter(|_| native) {
+                let mut bindings = [binding(&gate.down); 9];
+                for row in 0..NORM_BATCH {
+                    let live = row.min(size - 1);
+                    bindings[row + 1] = binding(&staged[live].0.controller_pair);
+                    bindings[row + 5] = (&self.compressed, live * 64 * 2);
                 }
+                gpu.dispatch("ink_matvec_prefill", &bindings, [(2 * WIDTH) as u32, 64, size as u32], (16, 1), 128);
             } else {
-                for (row, (scratch, input, _)) in tile.clone().enumerate() {
-                    gpu.dispatch(
-                        "ink_prefill_controller_pack",
-                        &[
-                            input,
-                            (&scratch.messages, slot * WIDTH * 4),
-                            binding(&scratch.compressed),
-                            (&self.input_message, row * 2 * WIDTH * 4),
-                            (&self.compressed, row * 64 * 2),
-                        ],
-                        (),
-                        (WIDTH / 128, 1),
-                        128,
-                    );
+                project_rows(
+                    gpu,
+                    None,
+                    &gate.down,
+                    tile.clone().map(|(s, _, _)| (binding(&s.controller_pair), &s.compressed)),
+                    2 * WIDTH,
+                    64,
+                    wide_gemv,
+                );
+                if let Some(staged) = &staged {
+                    for (batch, rows) in staged.chunks(NORM_BATCH).enumerate() {
+                        let packed = (&self.compressed, batch * NORM_BATCH * 64 * 2);
+                        let mut buffers = [packed; NORM_BATCH + 1];
+                        for (row, buffer) in buffers[..NORM_BATCH].iter_mut().enumerate() {
+                            *buffer = binding(&rows.get(row).unwrap_or(&rows[0]).0.compressed);
+                        }
+                        gpu.dispatch(NORM_KERNELS[1], &buffers, (), (rows.len(), 1), 64);
+                    }
+                } else {
+                    for (row, (scratch, input, _)) in tile.clone().enumerate() {
+                        gpu.dispatch(
+                            "ink_prefill_controller_pack",
+                            &[
+                                input,
+                                (&scratch.messages, slot * WIDTH * 4),
+                                binding(&scratch.compressed),
+                                (&self.input_message, row * 2 * WIDTH * 4),
+                                (&self.compressed, row * 64 * 2),
+                            ],
+                            (),
+                            (WIDTH / 128, 1),
+                            128,
+                        );
+                    }
                 }
             }
+            let (kernel, columns, tiles) = if native {
+                ("ink_verify_controller_native_m16n16", 16, 1)
+            } else {
+                ("ink_prefill_controller_expand", 32, size.div_ceil(16))
+            };
             gpu.one(
-                "ink_prefill_controller_expand",
+                kernel,
                 &[&self.compressed, &gate.gain, &gate.forget, &self.input_message, &self.gated],
                 size as u32,
-                (WIDTH / 32, size.div_ceil(16)),
+                (WIDTH / columns, tiles),
                 32,
             );
             if let Some(staged) = &staged {

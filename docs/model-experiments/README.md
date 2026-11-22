@@ -2,7 +2,7 @@
 
 [Look up research and speed changes by model](../MODEL_RESEARCH.md), including benchmark comparisons and branch-only attempts. The [source index](source-index.md) groups individual reports by family and topic.
 
-- [Inkling 2 Mini exact decode toward 60 tok/s, attempts 01–71](2026-11-21-inkling-mini-decode-60.md) tracks exact singleton decode, shared verifier work, exact rollback, source-precision DSpark acceptance, lookup and vocabulary eligibility, certified seeded sampling, shared KV reads and writes, and stochastic acceptance estimates for the original checkpoint on M5 Max.
+- [Inkling 2 Mini exact decode toward 60 tok/s, attempts 01–74](2026-11-21-inkling-mini-decode-60.md) tracks exact singleton decode, shared verifier work, exact rollback, source-precision DSpark acceptance, lookup and vocabulary eligibility, certified seeded sampling, shared KV reads and writes, and stochastic acceptance estimates for the original checkpoint on M5 Max.
 
 - [20261121-INKPROFILE-04 · Default exact one-row router for Inkling 2 Mini](2026-11-21-inkling-mini-decode-default.md) records the flags-unset selection, pinned parity and paired decode comparison against the original source router.
 

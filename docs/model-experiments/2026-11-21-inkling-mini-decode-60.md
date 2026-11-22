@@ -1165,6 +1165,79 @@ Use the same four pinned trajectories, source state and INT8 vocabulary bank. Ro
 
 The M4 projection tile fails Metal 4's compile-time shape requirement. Both fused stores retain F32 accumulation and reproduce the checked eight-row draft values and IDs. The largest saving at eight logical rows is 0.025 ms, against the original 3.59–3.97 ms median proposal command. Four logical rows change draft attention and recover about 0.21 ms. Their replay improves from 61.40 to 63.70 modeled tok/s on s4096-00 and from 53.70 to 56.63 on g4096-02. It drops from 68.93 to 67.16 on s4096-01 and from 73.17 to 71.14 on g4096-01. The initial target F32 rows matched the pinned capture for each fixture. This screen measures proposal time and replayed acceptance. It leaves the worker's output and throughput gates open. Archive all variants and keep the original draft block.
 
+## 20261122-INKDECODE-72 · Attribute live sampled worker time on the four fixed workloads
+
+Measure the four cold 4K sampled workloads used in the fixed-depth worker repeat, at two proposals on one loaded worker. Alternate streaming and batch requests for each workload. Keep the production sampling path, exact verifier, vision, INT8 DSpark and the existing experimental verifier options, including queued one-proposal handling at the tail. Require 256 sampled and emitted tokens, zero reuse, context 4,352 and the reference output hashes.
+
+Record queued draft-plus-target wall, separate Metal command spans and encode time, logits validation, certificate attempts, fallback sampling, transaction finish and text and progress callbacks. Divide each trajectory into four 64-output blocks and verify that the aggregate counters account for all 255 timed outputs. The first draw belongs to prefill. The two Metal spans can overlap and the target encode occurs during the draft, so use the combined queued wall time to assess the remaining budget.
+
+The instrumented release worker was built from `80affd98` plus the archived probe patch. All eight output hashes matched, with 530 timed rounds per arm and 2,040 timed draws in total. Three of the four workloads remain below 60 tok/s in both arms.
+
+| Sampled workload | Timed rounds per arm | Batch tok/s | Streaming tok/s | Batch queued ms per timed round | Batch saving needed per timed round for 60 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| s4096-00 | 137 | 57.39 | 57.04 | 31.11 | 1.41 ms |
+| s4096-01 | 134 | 56.94 | 59.06 | 32.14 | 1.71 ms |
+| s4096-02 | 134 | 57.70 | 57.69 | 31.52 | 1.27 ms |
+| s4096-03 | 125 | 64.93 | 64.63 | 30.21 | Already clears 60 |
+
+The instrumented median was 57.54 tok/s batch and 58.38 tok/s streaming. The combined queued boundary used 95.6–96.2% of timed decode. Each timed round averaged 0.67–0.72 ms for logits checking and exact seeded sampling, 0.52–0.60 ms to commit, at most 0.011 ms for text and progress callbacks, and under 0.008 ms unassigned. The existing sampler certificate resolved 227–238 timed draws per request. Mean target encode was 0.69–0.83 ms per round and already ran under the draft. The two Metal command spans sum to more than their shared wall interval. Potential overlap between the draft and target undo copy and the command timestamp semantics limit attribution. Keep the two spans separate.
+
+Batch s4096-01 rises from 30.36 to 34.66 ms per queued round between its fastest and slowest 64-output blocks. The same workload's streaming arm ranges from 30.00 to 32.43 ms, with identical output and round counts. The worker accounted for 99.87% of observed GPU counter increments in 38 intervals. Thermal samples were nominal and pageouts and swapouts were unchanged. The profile leaves the sustained worker gate open. Target work or a higher accepted output count per round can cover the measured gap. Callbacks and untimed host residual cannot.
+
+## 20261122-INKDECODE-73 · Use device BF16 tensor operands for short controller expansion
+
+The cross-pass controller's gain and forget products use the source register-fed F32 tensor fragment layout at all row counts. In the short verifier, test device BF16 operands with F32 cooperative accumulators for both products. Test 16 × 32, 8 × 32 and 16 × 16. Preserve the gain and forget epilogue, including precise tanh and separate F32 products. Keep controller input RMS and compression, final normalization, target attention and routing fixed.
+
+Rotate three candidates and the existing kernel at two through four verifier rows on the short and both stock 4K fixtures. Record six plain and three timestamped trials per arm. Compare every F32 vocabulary row with serial execution and assess complete command savings before considering worker changes.
+
+All 972 vocabulary rows matched the serial F32 reference. The 16 × 16 candidate saved 0.26–0.29 ms at two rows, 0.19–0.27 ms at three and 0.25–0.28 ms at four in the plain stock 4K commands. The instrumented three-row attention and expert input stages fell from 4.52 ms combined to 4.24–4.25 ms. The unchanged dispatch count isolates the stage change to the expansion geometry and operand loading. At three rows the 16 × 32 and 8 × 32 candidates saved 0.06–0.12 ms wall. Carry 16 × 16 to the combined worker screen and archive the two wider shapes.
+
+## 20261122-INKDECODE-74 · Combine exact short verifier savings in the live worker
+
+Combine the native 16 × 16 controller with direct controller rank output, two- and three-row dense specialization, batched relative tables and gate dispatches, and a batched transactional undo table. Each change previously passed its native exactness screen. The individual native savings are small, and the batch attention and undo changes had inconclusive individual worker comparisons. Test the combination under one switch. Keep the prefill path, sampler, INT8 draft and target rounding fixed.
+
+Run the ordinary serial and 45 rejection and wrap controls first on short and stock 4K. With one sealed worker build, alternate the control and combined workers on four cold seeded 4K prompts at two proposals. Require pinned output hashes, equal rounds and 256 emitted and sampled tokens at context 4,352 with zero reuse. The live budget in attempt 72 requires around 1.3–1.7 ms per round on the three slower batch workloads. A repeat at or above 60 tok/s and a greedy check remain necessary before a sustained throughput claim.
+
+The sealed native executable reproduced the serial 96-token continuation and committed state at one, two and three proposals on short and both stock 4K fixtures. All 45 rejection and wrap cases passed. Abandoned transactions reset the live session and cross-mode snapshots were rejected on all three fixtures. The reported verifier reserve use stayed at 60,473,344 allocated bytes on stock 4K. The first worker harness resolved the private fixture directory one level too high and stopped before timed requests. The corrected harness uses the same sealed worker binary.
+
+All eight sampled worker outputs matched the pinned hashes. Both arms used 530 timed rounds. The combined arm was faster in all four pairs, with a 3.87% median paired gain and 1.22 ms less measured useful decode time per round at the paired median.
+
+| Sampled workload | Control tok/s | Combined tok/s | Paired saving per timed round | Remaining saving per timed round for 60 |
+| --- | ---: | ---: | ---: | ---: |
+| s4096-00 | 54.70 | 56.57 | 1.12 ms | 1.88 ms |
+| s4096-01 | 56.06 | 58.77 | 1.56 ms | 0.66 ms |
+| s4096-02 | 57.39 | 58.26 | 0.50 ms | 0.95 ms |
+| s4096-03 | 64.06 | 66.84 | 1.32 ms | Already clears 60 |
+| Median rate | 56.73 | 58.52 | | |
+
+Median prefill was 951.67 tok/s for the control and 947.03 for the combined arm. The workers accounted for 99.86% of observed GPU counter increments in 38 intervals. Thermal samples were nominal. Pageouts rose by 36 and swapouts were unchanged.
+
+Repeat on the same sealed worker binary in reverse load, workload and paired arm order. Include four greedy pairs at depth three and four sampled pairs at depth two. All 16 output hashes and paired round counts matched.
+
+| Sampling | Control median | Combined median | Median paired gain | Faster pairs | Combined range |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Seeded sampled | 57.86 tok/s | **59.21 tok/s** | +1.74% | 4/4 | 57.62–61.46 |
+| Greedy | 68.98 tok/s | **69.90 tok/s** | +1.03% | 3/4 | 62.43–75.21 |
+
+The repeat held at 530 sampled rounds per arm. Median prefill was 947.65 tok/s in the sampled control and 948.58 in the combined arm. The workers accounted for 99.87% of observed GPU counter increments across 76 intervals with nominal and fair thermal readings. Pageouts and swapouts were unchanged. The sampled range still crosses below 60 tok/s on two workloads, and the slower of those needs a further 1.31 ms per round at the observed acceptance.
+
+Keep the combination opt-in via `STARK_INKLING_EXPERIMENT_VERIFY_COMBINED_SHORT=1` in the existing M5 Max source verifier. The sampled timing above also uses shared local and global attention, queued INT8 DSpark and the retained verifier stack. The final build registers only the selected kernels. Batched rollback rebuilds the GPU-address table from the current session buffers and registers the underlying Metal resources for the copy. Prefix reuse keeps the ordinary committed-state boundary.
+
+The sealed implementation reproduced connected short and 4K parity with all experiment flags unset. It matched the pinned short F32 readout, all 16 stock F32 vectors, 768 BF16 visit residual blocks and four snapshot replays. With the combination enabled, the same build passed all 45 rejection and wrap checks and matched the serial continuations and state at depths one through three. The worker reused 2,048 tokens across proposal depths with exact output, rejected reuse on source-mode changes, cleared reuse after cancellation and rejected unsupported short-prompt and long-context draft requests. Final source formatting was checked against the sealed build's source patch.
+
+The retained build independently repeated the four sampled pairs. Output hashes and round counts matched in every pair. All four enabled requests exceeded 60 tok/s, ranging from 61.37 to 66.79. The median moved from 60.59 to **62.70 tok/s**, with a 3.44% median paired gain and 1.05 ms less useful decode time per round at the paired median. The session's control was faster than the preceding sessions as well. The workers accounted for 99.81% of observed GPU counter increments over 37 intervals. Thermal samples were nominal. Pageouts rose by two and swapouts were unchanged. Median prefill was 971.05 tok/s control and 976.70 combined.
+
+### Single-worker qualification at 60 tok/s
+
+Build the formatted implementation from the recorded patch against `80affd98` with locked Rust 1.98.1. Use one loaded worker on the same M5 Max and original checkpoint with the combined verifier and its measured settings enabled. Alternate the four seeded sampled requests at two proposals with the four greedy requests at three proposals, changing workload order from the paired session. Each window ingests 4,096 tokens at context 4,352, reuses zero inputs and emits and samples 256 tokens with vision and DSpark resident. All eight output hashes match the pinned references.
+
+| Sampling | Useful decode median | Range | Requests over 60 tok/s | Median prefill |
+| --- | ---: | ---: | ---: | ---: |
+| Seeded sampled | **62.61 tok/s** | 61.86–66.04 | 4/4 | 975.12 tok/s |
+| Greedy | **77.76 tok/s** | 69.90–80.60 | 4/4 | 974.80 tok/s |
+
+The worker accounted for 99.90% of observed GPU counter increments over 35 intervals. Thermal readings were nominal and pageouts and swapouts were unchanged. The retained path clears 60 tok/s across all four sampled workloads in both the paired and single-worker sessions, with exact greedy and sampled hashes. Earlier prototype sessions had sampled medians of 58.52 and 59.21 tok/s. The measured qualification is for this opt-in configuration on the pinned M5 Max workloads.
+
 ## Evidence identities
 
 Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1`. Original DSpark SHA-256 `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2`. The current run uses the pinned Ollama capture and host documented in the [default-router record](2026-11-21-inkling-mini-decode-default.md).
@@ -1800,3 +1873,43 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Reduced draft block native binary | `264408b06cc6ba2d1758102e160503bacf4df6914c7405b1c0d77db8a454649c` |
 | Reduced draft block replay harness | `90bc3b4738bf39dbbc46ee4a87b65c5a41d7f524625392be22a34dc64ef1792b` |
 | Reduced draft block aggregate receipt | `17f336eae3238601480836912898ee442a91719e14adbb19c8532183bea4a327` |
+| Live round budget native source patch | `a8bfe8db1187046f5594767b5ef5eb481e4fdb243a3302e74b538a395d5d8b9d` |
+| Live round budget worker | `a2c9635a7cd788f3ae6803f67bf3df5b318c275c1d12440cd72c93c4c02fdc79` |
+| Live round budget worker harness | `980c2fd822716d979cc24e1b6b340fc5e11ede91b4fb08e6f2d2397e4b1d5c17` |
+| Live round budget worker receipts | `8a906dff966b59faf4968dc32bf1f778111f7cda9b0327b2df6c296f1847c855` |
+| Live round budget host observations | `1302c526880eb289d01837669fad98802f6e97835d8b0954a7d6e7b9e566fedc` |
+| Native controller source patch | `9f3633bc1bdef90956e499b36334d2e1f1f082b343b55c84fe410484d8ab87e8` |
+| Native controller executable | `a28580aa1e284af3eafa4e93beaa618fdf10fcc80a947911fdeda9de2d9ef957` |
+| Native controller harness | `c77fb98f87cc36643630ba4f9f992b2974e581b4abede06d95899d24046a80d4` |
+| Native controller short screen | `2c2e01faa30bda9bcd2f769806f60a6777d31ef621531c2513e3e321594aa51a` |
+| Native controller stock-s4096-00 screen | `a4e955a584102eedd5bc3f5697797eba255c374b8e851c2cbf2ceae2976824f6` |
+| Native controller stock-g4096-01 screen | `af46ec5529a9c942d0f5474b617ab84fa2dfa0345cd8b3de8f1d0944e2b98ccd` |
+| Combined short verifier native source patch | `9669d0b4ab3128b5ceb2f874275a1a7919b358a6adb970aeab942af59ddd011a` |
+| Combined short verifier native executable | `74212360c466c5f5048c6984869108076e8f7300c0cd837e54285cff2cccddb2` |
+| Combined short verifier worker | `43adda154078ee0af0e734b5d9df6cbd5cf3c61c995915cad623d4b736e27ff3` |
+| Combined short verifier native proof harness | `458be2c43332c911c4c6510cc081b6a95fb331bd476f643f421c2083adeef3c7` |
+| Combined short verifier short proof | `d472e32bbaa85fa3ec9cd04304d3b5f3f9a4f554f149266ec5c0b1eda51df2ef` |
+| Combined short verifier stock-s4096-00 proof | `24e9f647d5af7500415f2b04e0e2a275c67699e14eb4d18658f80db3aff28d05` |
+| Combined short verifier stock-g4096-01 proof | `8f45cd836c3271d98b3b25d425dbd0bd085b2a9b4778c14d973a22f5a93d51ca` |
+| Combined short verifier worker harness | `481c3cb7da6e996aab884c0e8620571524c5ad95a2646cb4a42d8eb10c2d4588` |
+| Combined short verifier sampled worker receipts | `bc04068ba9de0304e8f565379edc5a73a51efba86de97483f61c9b8168d035fb` |
+| Combined short verifier sampled host observations | `36027249516e339fac6c7680e70d30136b9bef8bd506210a5ad4f5cc1551b4ea` |
+| Combined short verifier repeat harness | `1e46827605c297428d19ca451d4c3ac787f4fa0da24e001f223f56f53fad6556` |
+| Combined short verifier repeat host observations | `1616587c8f5e474e1a4549c51674f0b28a2aa4e3ea6bb1757af59f4fae3495d1` |
+| Combined short verifier sampled and greedy repeat receipts | `3321739f9b0061e25632c993d5e5098a8bba131be4766bc4a04e008348672a40` |
+| Retained combined verifier native source patch | `2fc73acc78565582c121b334d74478ca93f88d64e4d937613632caca6668f537` |
+| Retained combined verifier native executable | `a347d2ba8de6ed8017189d6dfe6318f71e46417c16ab580045b48238ed407ec3` |
+| Retained combined verifier worker | `8dadc91aef7726fd13e73aa6502f2fea73724e5170c59c861525b142ea2f6053` |
+| Retained combined verifier flags-unset parity | `b8a5b540c43b3942a458316f8d3f2943ed64beadfbb40fe803a93111aac3d011` |
+| Retained combined verifier lifecycle | `247f36633b1a440a544b42bd43d6edf5d4793e7e6518ec227267a15197e527fa` |
+| Retained combined verifier short proof | `23b4c1f06ecfe585228b3c624f0e34bfa0296cb92ea57890314eeff3a8d0ef55` |
+| Retained combined verifier stock-s4096-00 proof | `e989f7fafec489171e524de5a0451a2f620a10fa110ce5d287531e4a2c3acecf` |
+| Retained combined verifier stock-g4096-01 proof | `bfe4a1a77ef817fe5bb74486d6ffbc6522041539ad02bf6eea6d63ce851f2133` |
+| Retained combined verifier paired worker harness | `08fa3eccbbe4de38e640c96f190e54e8db52bf40b1e82d8e9ece316688f4232c` |
+| Retained combined verifier paired worker receipts | `ec431922f07e2ee84d498e40952f5aebf0130552f253f7667e08a29a7e638698` |
+| Retained combined verifier paired host observations | `058b12de5af603ee850044895e7d3656d5cd02eda4d37bdb3add73d63993b3f0` |
+| Combined verifier qualification source patch | `c82bbd4b887ba3ae28f09488541dda125c63a056f44d7f2294a20bd94ed14bd4` |
+| Combined verifier qualification worker | `54b9b23e4be18dbdeffdeee8a46a5e699aa303d4e80d0570cd8057fe839d4f3f` |
+| Combined verifier qualification harness | `3de64f75718c22392c694b5532656e4bc04d9271026c0394d658f1e411c400ef` |
+| Combined verifier single-worker qualification receipts | `f1c64621a2ee7b900f6369f2914b8dfa1c1c4421233f54d969aebdb98e6395ed` |
+| Combined verifier single-worker qualification host observations | `50a4d5692c31d7cf39f08d93eba63258a8130c38f5007378fa0c163edde587e3` |

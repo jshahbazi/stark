@@ -79,3 +79,31 @@ kernel void ink_matvec_prefill_wide(
     device bfloat *outputs[] = {y0, y1, y2, y3, y4, y5, y6, y7};
     ink_matvec_prefill_shared<8>(weight, inputs, outputs, shape, group, simd, lane);
 }
+
+kernel void ink_matvec_verify2(
+    device const bfloat4 *weight [[buffer(0)]],
+    device const bfloat4 *x0 [[buffer(1)]],
+    device const bfloat4 *x1 [[buffer(2)]],
+    device bfloat *y0 [[buffer(3)]],
+    device bfloat *y1 [[buffer(4)]],
+    constant uint3 &shape [[buffer(5)]], uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    device const bfloat4 *inputs[] = {x0, x1};
+    device bfloat *outputs[] = {y0, y1};
+    ink_matvec_prefill_shared<2>(weight, inputs, outputs, shape, group, simd, lane);
+}
+
+kernel void ink_matvec_verify3(
+    device const bfloat4 *weight [[buffer(0)]],
+    device const bfloat4 *x0 [[buffer(1)]],
+    device const bfloat4 *x1 [[buffer(2)]],
+    device const bfloat4 *x2 [[buffer(3)]],
+    device bfloat *y0 [[buffer(4)]],
+    device bfloat *y1 [[buffer(5)]],
+    device bfloat *y2 [[buffer(6)]],
+    constant uint3 &shape [[buffer(7)]], uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    device const bfloat4 *inputs[] = {x0, x1, x2};
+    device bfloat *outputs[] = {y0, y1, y2};
+    ink_matvec_prefill_shared<3>(weight, inputs, outputs, shape, group, simd, lane);
+}

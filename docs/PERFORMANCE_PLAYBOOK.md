@@ -581,6 +581,12 @@ Charge the draft-completion fence when a confidence policy chooses the verifier 
 
 Measure complete proposal time and accepted prefixes when shrinking a bidirectional draft block. Inkling's eight-row BF16 projection epilogue preserves proposals and saves at most 0.025 ms. Keeping four attention rows saves about 0.21 ms and improves only two of four seeded replays. [Draft block projection screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-71--reduce-the-padded-draft-block-and-fuse-projection-rounding)
 
+Use the actual worker trajectories when a restored-cache round model exceeds the worker rate. The queued draft and target boundary accounted for 95.6–96.2% of Inkling's sampled worker time. Three batch workloads needed 1.27–1.71 ms less per round at their current acceptance. Streaming callbacks contributed at most 0.011 ms per round. [Live sampled worker budget](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-72--attribute-live-sampled-worker-time-on-the-four-fixed-workloads)
+
+Test direct BF16 tensor inputs for a padded controller gate when the source products already use tensor operations. On Inkling an exact native 16 × 16 tile saved 0.19–0.27 ms per three-row stock 4K command, or about 0.27 ms in the summed input stages. [Short controller expansion](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-73--use-device-bf16-tensor-operands-for-short-controller-expansion)
+
+Retest exact native savings together when separate worker A/B effects sit within run-to-run variance. Inkling's five short verifier changes improved all 12 sampled pairs across three sessions. The retained opt-in path reached 62.70 tok/s in the paired confirmation and 62.61 tok/s sampled and 77.76 tok/s greedy with one loaded worker. All eight single-worker workloads cleared 60 with exact hashes. [Combined short verifier](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-74--combine-exact-short-verifier-savings-in-the-live-worker)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates

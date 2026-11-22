@@ -235,10 +235,12 @@ pub(super) fn project_rows<'a>(
             continue;
         }
         let first = tile[0];
-        let (kernel, width) = if tile.len() > 4 {
-            ("ink_matvec_prefill_wide", 8)
-        } else {
-            ("ink_matvec_prefill", 4)
+        let live = gpu.runtime.verify_nvfp4_matvec && gpu.runtime.verify_combined_short;
+        let (kernel, width) = match tile.len() {
+            2 if live => ("ink_matvec_verify2", 2),
+            3 if live => ("ink_matvec_verify3", 3),
+            2..=4 => ("ink_matvec_prefill", 4),
+            _ => ("ink_matvec_prefill_wide", 8),
         };
         let mut buffers = [binding(weight); 17];
         for row in 0..width {

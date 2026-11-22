@@ -13,6 +13,7 @@ const SAVED_VISIT_BYTES: usize = 2 * MAX_VERIFY_ROWS * KV_ROW_BYTES + 3 * CONV_B
 
 pub(super) struct VerifyWorkspace {
     saved: Buffer,
+    undo_table: Option<Buffer>,
     anchors: Buffer,
     attention_parts: Option<Buffer>,
     pub(super) local_rows_per_group: usize,
@@ -66,6 +67,27 @@ impl VerifyWorkspace {
             )?;
             runtime.verify_fused_cache = true;
         }
+        let combined_short = std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_COMBINED_SHORT").as_deref()
+            == Some(std::ffi::OsStr::new("1"));
+        let undo_table = if combined_short {
+            packed_prefill::register(
+                runtime,
+                include_str!("verify_controller.metal"),
+                &["ink_verify_controller_native_m16n16"],
+            )?;
+            packed_prefill::register(
+                runtime,
+                include_str!("prefill.metal"),
+                &["ink_matvec_verify2", "ink_matvec_verify3"],
+            )?;
+            packed_prefill::register(runtime, include_str!("verify_relative.metal"), &["ink_verify_relative_tables"])?;
+            packed_prefill::register(runtime, include_str!("verify_gate.metal"), &["ink_verify_gate_batched"])?;
+            packed_prefill::register(runtime, include_str!("verify_undo.metal"), &["ink_verify_undo_all"])?;
+            Some(zeroed(&runtime.device, visits * 7 * size_of::<u64>())?)
+        } else {
+            None
+        };
+        runtime.verify_combined_short = combined_short;
         let draft = DraftBlock::new(runtime)?;
         let alloc = |bytes| {
             runtime
@@ -75,6 +97,7 @@ impl VerifyWorkspace {
         };
         Ok(Self {
             saved: alloc(visits * SAVED_VISIT_BYTES)?,
+            undo_table,
             anchors: alloc(visits * CONV_BYTES)?,
             attention_parts: (shared_attention || shared_global)
                 .then(|| alloc(MAX_VERIFY_ROWS * HEADS * 64 * 130 * 4))
@@ -95,12 +118,72 @@ impl VerifyWorkspace {
         })
     }
 
+    fn copy_undo(
+        &self,
+        table: &Buffer,
+        command: &ProtocolObject<dyn MTLCommandBuffer>,
+        session: &Session,
+        rows: usize,
+        kept: usize,
+    ) -> Result<()> {
+        use metal::{MTLComputeCommandEncoderExt, MTLResource, MTLResourceUsage};
+
+        let encoder = command.compute_command_encoder().ok_or("Inkling batched undo encoder allocation failed")?;
+        let mut descriptors = Vec::<u64>::with_capacity(session.visits.len() * 7);
+        let mut resources = Vec::with_capacity(session.visits.len() * 6);
+        for visit in &session.visits {
+            for buffer in [&visit.keys, &visit.values].into_iter().chain(visit.conv.iter()) {
+                descriptors.push(buffer.gpu_address());
+                resources.push(ProtocolObject::<dyn MTLResource>::from_ref(&**buffer));
+            }
+            descriptors.push(visit.capacity as u64);
+        }
+        // Context changes recreate the visit buffers. Rebuild the addresses
+        // from the current session after the preceding verifier command completes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                descriptors.as_ptr(),
+                table.contents().as_ptr().cast::<u64>(),
+                descriptors.len(),
+            );
+        }
+        encoder.use_resources(
+            &resources,
+            if kept == 0 {
+                MTLResourceUsage::Read
+            } else {
+                MTLResourceUsage::Write
+            },
+        );
+        let mut gpu = Stream {
+            encoder: Some(encoder),
+            runtime: &session.runtime,
+            dispatches: 0,
+            nvfp4_dots: 0,
+            defer_expert_merge: false,
+            mxfp8_dots: 0,
+            profile: None,
+        };
+        gpu.one(
+            "ink_verify_undo_all",
+            &[table, &self.saved, &self.anchors],
+            [session.position as u32, rows as u32, 0, kept as u32],
+            (12, session.visits.len()),
+            128,
+        );
+        gpu.encoder.take().expect("undo compute encoder").end_encoding();
+        Ok(())
+    }
+
     fn save(
         &self,
         command: &ProtocolObject<dyn MTLCommandBuffer>,
         session: &Session,
         rows: usize,
     ) -> Result<()> {
+        if let Some(table) = &self.undo_table {
+            return self.copy_undo(table, command, session, rows, 0);
+        }
         let blit = command.blit_command_encoder().ok_or("Inkling verifier save encoder allocation failed")?;
         for (index, visit) in session.visits.iter().enumerate() {
             let base = index * SAVED_VISIT_BYTES;
@@ -132,6 +215,9 @@ impl VerifyWorkspace {
     ) -> Result<()> {
         if kept == rows {
             return Ok(());
+        }
+        if let Some(table) = &self.undo_table {
+            return self.copy_undo(table, command, session, rows, kept);
         }
         let blit = command.blit_command_encoder().ok_or("Inkling verifier undo encoder allocation failed")?;
         for (index, visit) in session.visits.iter().enumerate() {
@@ -213,6 +299,71 @@ impl VerifyWorkspace {
         );
     }
 
+    fn relative_tables(
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        rows: &[&Scratch],
+    ) {
+        if gpu.runtime.verify_combined_short {
+            let [a, b, c, d] = std::array::from_fn(|i| rows[i.min(rows.len() - 1)]);
+            gpu.dispatch(
+                "ink_verify_relative_tables",
+                &[&a.r, &b.r, &c.r, &d.r, &layer.relative, &a.table, &b.table, &c.table, &d.table].map(binding),
+                (),
+                (LOCAL / 32, HEADS.div_ceil(16) * rows.len()),
+                32,
+            );
+        } else {
+            for scratch in rows {
+                gpu.one(
+                    "ink_prefill_relative_table_source",
+                    &[&scratch.r, &layer.relative, &scratch.table],
+                    HEADS as u32,
+                    (LOCAL / 32, HEADS.div_ceil(16)),
+                    32,
+                );
+            }
+        }
+    }
+
+    fn gate_shared_attention(
+        gpu: &mut Stream<'_>,
+        parts: &Buffer,
+        rows: &[&Scratch],
+    ) {
+        if gpu.runtime.verify_combined_short {
+            let [a, b, c, d] = std::array::from_fn(|i| rows[i.min(rows.len() - 1)]);
+            gpu.dispatch(
+                "ink_verify_gate_batched",
+                &[
+                    parts,
+                    &a.attn_gate,
+                    &b.attn_gate,
+                    &c.attn_gate,
+                    &d.attn_gate,
+                    &a.attended,
+                    &b.attended,
+                    &c.attended,
+                    &d.attended,
+                ]
+                .map(binding),
+                (),
+                (8, HEADS * rows.len()),
+                128,
+            );
+        } else {
+            for (row, scratch) in rows.iter().enumerate() {
+                gpu.dispatch(
+                    "ink_attention_source_gate",
+                    &[(parts, row * HEADS * 64 * 130 * 4), binding(&scratch.attn_gate), binding(&scratch.attended)],
+                    [64u32, 64],
+                    (8, HEADS),
+                    128,
+                );
+            }
+        }
+    }
+
     pub(super) fn shares_local_attention(&self) -> bool {
         self.local_rows_per_group > 0 && self.attention_parts.is_some()
     }
@@ -239,14 +390,8 @@ impl VerifyWorkspace {
                     [(position + row) as u32, LOCAL as u32, LOCAL as u32, 64],
                 );
             }
-            gpu.one(
-                "ink_prefill_relative_table_source",
-                &[&scratch.r, &layer.relative, &scratch.table],
-                HEADS as u32,
-                (LOCAL / 32, HEADS.div_ceil(16)),
-                32,
-            );
         }
+        Self::relative_tables(gpu, layer, rows);
         let [a, b, c, d] = std::array::from_fn(|index| rows[index.min(rows.len() - 1)]);
         gpu.dispatch(
             "ink_verify_local_parts",
@@ -272,15 +417,7 @@ impl VerifyWorkspace {
             (16, HEADS * rows.len().div_ceil(self.local_rows_per_group)),
             128,
         );
-        for (row, scratch) in rows.iter().enumerate() {
-            gpu.dispatch(
-                "ink_attention_source_gate",
-                &[(parts, row * HEADS * 64 * 130 * 4), binding(&scratch.attn_gate), binding(&scratch.attended)],
-                [64u32, 64],
-                (8, HEADS),
-                128,
-            );
-        }
+        Self::gate_shared_attention(gpu, parts, rows);
     }
 
     pub(super) fn shares_global_attention(&self) -> bool {
@@ -311,15 +448,7 @@ impl VerifyWorkspace {
             }
         }
         gpu.phase(PrefillPhase::RelativeTable);
-        for scratch in rows {
-            gpu.one(
-                "ink_prefill_relative_table_source",
-                &[&scratch.r, &layer.relative, &scratch.table],
-                HEADS as u32,
-                (LOCAL / 32, HEADS.div_ceil(16)),
-                32,
-            );
-        }
+        Self::relative_tables(gpu, layer, rows);
         gpu.phase(PrefillPhase::GlobalAttention);
         let [a, b, c, d] = std::array::from_fn(|index| rows[index.min(rows.len() - 1)]);
         gpu.dispatch(
@@ -345,15 +474,7 @@ impl VerifyWorkspace {
             (16, HEADS / heads_per_group * rows.len().div_ceil(rows_per_group)),
             128,
         );
-        for (row, scratch) in rows.iter().enumerate() {
-            gpu.dispatch(
-                "ink_attention_source_gate",
-                &[(parts, row * HEADS * 64 * 130 * 4), binding(&scratch.attn_gate), binding(&scratch.attended)],
-                [64u32, 64],
-                (8, HEADS),
-                128,
-            );
-        }
+        Self::gate_shared_attention(gpu, parts, rows);
     }
 
     pub(super) fn save_anchor(
