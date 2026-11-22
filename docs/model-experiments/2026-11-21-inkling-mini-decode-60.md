@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–23 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–24 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -331,9 +331,24 @@ Each SIMD group loaded one binary16 activation block and applied it to two adjac
 
 At four verifier rows, pairing only the up projections added 0.76–1.00 ms at paired medians on the two 4K inputs. Pairing only the down projections added 0.51–0.68 ms. Pairing both added 1.22–1.58 ms. Retire the two-column shader. This measures the complete verifier command with binary16 ingress in all arms.
 
+## 20261121-INKDECODE-24 · Preserve source accumulation around TensorOps K16 dots
+
+Use cooperative FP16 input fragments and an F32 destination to regroup each exact 16-value dot. Decode packed FP4 weights into the fragment registers. Widen binary16 ingress through the matrix instruction. Keep one partial per original source lane and output, applying the E4M3 weight scale with the original FMA order over blocks lane, lane + 32 and so on. Finish with the same SIMD reduction. The Metal SDK requires 16 or 32 matrix rows when both input operands are cooperative tensors. A four-row physical tile failed compilation and yielded no timings. The tested 16-row tile pads the two to four live verifier rows.
+
+With four alternating comparisons per arm at verifier widths two and four, all checked F32 row vectors matched on one short and two stock 4K inputs.
+
+| Verified rows | Vector control, 4K | K16 TensorOps with four SIMD groups | K16 TensorOps with eight SIMD groups |
+| --- | ---: | ---: | ---: |
+| 2 | 29.11–29.31 ms | 83.80–84.05 ms | 82.20–82.52 ms |
+| 4 | 37.31–39.73 ms | 112.10–124.54 ms | 107.09–121.64 ms |
+
+Retire both TensorOps configurations. At this geometry, one matrix operation per K16 block and preserving 32 separate source-lane recurrences was much slower than the vector control. This result covers the entire verifier command, including the unchanged binary16 ingress and expert epilogues.
+
+The retained build reproduced the flags-unset connected short and 4K slice aggregates, the pinned full-target short logits, and 16 pinned 4K F32 vectors across four inputs. All 768 visit residual comparisons and four 4K snapshot replays passed. With both new options enabled, the native build repeated all 45 rejection and cache-wrap controls and the exact serial continuation and committed state on the short and two stock 4K inputs.
+
 ## Decision and next target
 
-Keep the vector singleton, transactional verifier and shared KV path opt-in. The measured acceptance and round costs leave the harder sampled input short of the 60 tok/s budget. Prioritize reducing ordinary target and verifier execution time across inputs before changing the production sampler. Distribution-preserving rejection would need separate qualification because it can change the sequence for the same seed. Keep the existing seeded path available for exact replay.
+Keep the vector singleton, transactional verifier, shared KV, binary16 ingress and shortlist opt-in. The measured acceptance and round costs leave the harder sampled input short of the 60 tok/s budget. Prioritize reducing ordinary target and verifier execution time across inputs before changing the production sampler. Distribution-preserving rejection would need separate qualification because it can change the sequence for the same seed. Keep the existing seeded path available for exact replay.
 
 ## Evidence identities
 
@@ -510,3 +525,19 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Combined worker harness | `b0151cac3deac14b5fb0bacfd44c426de88ad5651a28ca363f5e229f99fa513e` |
 | Combined worker pairs | `b0f51cbf73dc71d42516807753c82f75ba1ab135370efb665809b0acb570a54b` |
 | Combined worker host samples | `8cd2f651125ea6f008956de0e88950c80273d4f59e428e6038ddf0fb2168e50a` |
+| Exact K16 TensorOps screen inkling_slice | `33675d717b8d25da655184b0e67c3928f9536a126ed27cd4b4cd8e260695b7f1` |
+| Exact K16 TensorOps screen scored-source.patch | `3b36ab94cc13f2e5e893a799b8934696f55fe6e86f1de1fa9e69f01c2c261f26` |
+| Exact K16 TensorOps screen short.json | `4feb786b94a6bf5ae199299f5b8b0865c28aa8a48859f94853841341c5f9c3a4` |
+| Exact K16 TensorOps screen stock-s4096-00.json | `9df93b58a0edfde974fd01448fa643e252d7b111f6f6c3d40ba52e57d7835dc0` |
+| Exact K16 TensorOps screen stock-g4096-01.json | `bd3d2ecb155ebf9efc63a875e31b1285257d8d81b8558b35e1299d2e5fee6685` |
+| Final retained native executable | `2177af74dd54c72554c5665e921572dc888d4822dc44a27d005ad7929dd6a28c` |
+| Final retained opt-in short | `16cafffd43c813483b5c399f258aa8ac65e037828da43a893580b8ad948f8991` |
+| Final retained opt-in stock s4096-00 | `7b0d585aa002901e3d6b1f69f6d6cdfe7deb6968179479cf3b3d72d9558474b7` |
+| Final retained opt-in stock g4096-01 | `6f48f18cf04c2ba0fe956a9fbd5c6a8289c2628ec1396c2d8808b6e54e35dbf1` |
+| Final flags-unset connected short | `3ec9bea159f2df8ab1c508329cd2b102cb53e672c740ae3fbddc9ba677cbfa63` |
+| Final flags-unset connected 4K | `c4a5cefe72c1633b5a56a7092e2e47479698d79936933e66910289b867c40652` |
+| Final flags-unset full target short | `942f0e0f6d6b162e32ef6ad8b71dacccbe98fed7a797c060816a48d111ee6745` |
+| Final flags-unset full target stock 1 | `25547ff564e1378aab815b3165979355fa640937700ebae0923852df128c3bf6` |
+| Final flags-unset full target stock 2 | `d82d38427231954108d92f2039c1528ba842fa571586b9886d6399c05e1b30f8` |
+| Final flags-unset full target stock 3 | `89ca16a9550f3d3c8c862e810de54fd19d5456b48c40118c2a18d1741db62975` |
+| Final flags-unset full target stock 4 | `0217079a7bdb3b829de6f1bb84d1af2a3642dff7b49356865d567af7caf50ba5` |

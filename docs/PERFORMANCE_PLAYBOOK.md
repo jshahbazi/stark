@@ -491,6 +491,8 @@ For DSpark, shortlisting two base logits per SIMD group before the exact rank co
 
 Reusing binary16 activation loads across two adjacent NVFP4 output columns kept exact Inkling F32 readouts but added 1.22–1.58 ms when applied to both expert projections in the four-row verifier. [Adjacent column screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-23--share-nvfp4-ingress-across-adjacent-output-columns)
 
+One TensorOps call per exact K16 block kept Inkling’s per-lane recurrence and matched every verified F32 row. The cooperative inputs required a 16-row physical tile. The fastest tested configuration took 107–122 ms for four verifier rows versus 37–40 ms for the vector control. Retire this layout for short verification. [K16 TensorOps screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-24--preserve-source-accumulation-around-tensorops-k16-dots)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates
