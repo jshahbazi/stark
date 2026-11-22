@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–28 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–29 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -410,6 +410,22 @@ The oracle chooses the correct target token whenever it is one of the draft’s 
 
 For a separate policy that preserves the output distribution, calculate each proposal’s conditional acceptance on teacher token `y` as `min(1, q(y)/p(y))`. The replay branches on that probability and charges the same fixed costs. Compare top-4, top-8, top-16, top-32, top-128 and full-vocabulary draft supports and three draft temperatures. The strongest fixed choice used depth three, temperature 0.75 and top-16. Its estimated median was 56.46 tok/s, versus 56.44 with full support. Both fall short of 60 before extra work to draw, verify and correct proposals. The result supports keeping the probability vector small if the path is revisited. A distribution-preserving worker would have a separate seeded sequence contract. Defer changing the worker sampler.
 
+## 20261121-INKDECODE-29 · Shorten the exact FP4 activation threshold search
+
+The FP4 quantizer selects from eight magnitudes using seven ordered midpoints. Two binary-search comparisons cross odd-indexed midpoints and round upward on a tie. The last crosses an even-indexed midpoint and rounds downward on a tie. Keep the sign and the original F32 accumulation of quantization error. A scalar check compared 66 signed values covering ties, the neighboring F32 values, zero, subnormals, infinities and NaNs.
+
+Eight same-state comparisons at each width reproduced every F32 readout on short and both stock inputs for the scalar and vector candidates.
+
+| Rows | Previous half-ingress control, 4K | Scalar threshold tree, 4K | Median paired saving |
+| --- | ---: | ---: | ---: |
+| 2 | 28.61–28.73 ms | 28.44–28.60 ms | 0.14–0.18 ms |
+| 3 | 32.63–33.18 ms | 32.50–33.07 ms | 0.05–0.11 ms |
+| 4 | 36.10–38.57 ms | 35.93–38.31 ms | 0.17–0.20 ms |
+
+Processing four coefficients together slowed the four-row verifier by 0.05–0.09 ms. Retire that vector trial. The scalar tree now runs within the existing experimental binary16 ingress, so the ordinary quantizer keeps its previous behavior. The worker measurements in attempt 27 precede this scalar change.
+
+The final retained executable passed the flags-unset short and 4K slice comparisons, the pinned full-target short logits, 16 F32 vectors and 768 BF16 visit residuals across four stock 4K inputs, and four exact snapshot replays. With the compact dispatch, both fusions and binary16 ingress all enabled, the final executable passed all 45 rejection and cache-wrap controls and matched the 96-token serial output and committed-state checks for short and both stock fixtures.
+
 ## Decision and next target
 
 Keep the vector singleton, transactional verifier, shared KV, binary16 ingress and shortlist opt-in. The measured acceptance and round costs leave the harder sampled input short of the 60 tok/s budget. Prioritize reducing ordinary target and verifier execution time across inputs before changing the production sampler. Distribution-preserving rejection would need separate qualification because it can change the sequence for the same seed. Keep the existing seeded path available for exact replay.
@@ -631,3 +647,21 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Finishing fusions worker harness | `200e4c80262479f88ec53d9c8e2824df1eb7744e80bddbeefc00cfdc6a7c96ea` |
 | Finishing fusions worker pairs | `f50386d0331ab37888050049165c7db30dfc279577173e9bc08a7628609e864d` |
 | Finishing fusions worker host samples | `b6a7f1c88df9e44c717a99a9e1b0288bc4b775b95d527fd9b98f8dc7bed0894d` |
+| Quantization threshold screen inkling_slice | `c1451c15fe19231ce4d607421efb8fc3deaca6c048496dd78f288b295238e33d` |
+| Quantization threshold screen scored-source.patch | `a3d886e8ff293d7a44c898f50bbe059432f4ab2210002cfcbfc49a2de8e558e7` |
+| Quantization threshold screen thresholds.py | `cf579cd72bb5228b14ff5d1cc8a14beac264669db8911b780fb3b699975b7481` |
+| Quantization threshold screen thresholds.json | `53e6170415db9a74d1f7947d0df73144dd82205cf6b178d2b4ef663e136d2cde` |
+| Quantization threshold screen short.json | `cd99c806a6b1a3d611554f1bb43c90a1e9c98fd8415b367a0a140efec348392f` |
+| Quantization threshold screen stock-s4096-00.json | `f3072c9f2bd42bd92abba816c67433cb9eaaaf54289a079d79287d5c0f227c5c` |
+| Quantization threshold screen stock-g4096-01.json | `537a6cf672181639857b407377ee3d77190c2b0713fc1d9e72e7990757cf2b3c` |
+| Final compact runs and finishing proof inkling_slice | `4e63fb77b0015d8681f637074d9571c4076c6dd4252b9513a6c396b6049d57c5` |
+| Final compact runs and finishing proof opt-in-short.json | `966c289930184cdc3a19c0183b316c538598fd631ab06f04c1e7ff4405581fc4` |
+| Final compact runs and finishing proof opt-in-stock-s4096-00.json | `0561ce4c6b4d6f0089dd1540a49462022e82c95fdc40ff22b40af7e0304df5fa` |
+| Final compact runs and finishing proof opt-in-stock-g4096-01.json | `11a4f37c98ecc9a8ca9243735ffe2a4132f2575abe4f19c46ff6ac5481963014` |
+| Final compact runs and finishing proof flags-unset/slice-4.json | `3ec9bea159f2df8ab1c508329cd2b102cb53e672c740ae3fbddc9ba677cbfa63` |
+| Final compact runs and finishing proof flags-unset/slice-4096.json | `c4a5cefe72c1633b5a56a7092e2e47479698d79936933e66910289b867c40652` |
+| Final compact runs and finishing proof flags-unset/short-both.json | `a45201c551bd0a2952ebff682d0982cb8cf8503b9f425d54328bdd3611afe90b` |
+| Final compact runs and finishing proof flags-unset/full-0.json | `93f68099b9ecbd4f0a839d6c49613c0808e009f0fd325e9c2936dce9fa212f31` |
+| Final compact runs and finishing proof flags-unset/full-1.json | `d7a1abb9be1b88cc9f25734ac0115f23649fb3a2a2fc7a7e383143c01c07bd33` |
+| Final compact runs and finishing proof flags-unset/full-2.json | `27cee79bbc18082d1b9d5a35b4c284c316af9969cda4278e50060ede9a11410c` |
+| Final compact runs and finishing proof flags-unset/full-3.json | `2913aba71ce9b84ad35b5c0405484760cec07762b199789388ae872153a22711` |

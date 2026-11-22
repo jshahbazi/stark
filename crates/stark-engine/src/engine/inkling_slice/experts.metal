@@ -88,10 +88,19 @@ inline float ink_round_e4m3(float positive) {
 
 inline float ink_round_fp4(float value) {
     const float magnitude = abs(value);
+#ifdef INK_VERIFY_HALF_ACT
+    // The first two comparisons cross odd-indexed midpoints, which
+    // round upward to the next even code. The last uses an even midpoint.
+    const bool high = magnitude >= 1.75f;
+    const bool middle = magnitude >= (high ? 3.5f : 0.75f);
+    const float last = high ? (middle ? 5.0f : 2.5f) : (middle ? 1.25f : 0.25f);
+    const uint code = (uint(high) << 2) | (uint(middle) << 1) | uint(magnitude > last);
+#else
     uint code = 0;
     for (uint i = 0; i < 7; ++i) {
         code += magnitude > ink_fp4_midpoints[i] || (magnitude == ink_fp4_midpoints[i] && (i & 1u));
     }
+#endif
     return copysign(ink_fp4_table[code], value);
 }
 

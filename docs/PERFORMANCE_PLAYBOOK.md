@@ -501,6 +501,8 @@ Batch exact convolution finishing in token order within each channel. Combining 
 
 On four held-out sampled Inkling trajectories, rank-boundary calibration did not improve on ordinary argmax proposals. Top-16 draft distributions and full vocabulary gave similar exact-rejection estimates around 56.4 tok/s before correction overhead. [Seeded calibration and sparse rejection screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-28--screen-held-out-seeded-calibration-and-sparse-rejection)
 
+A three-comparison scalar FP4 threshold search preserved midpoint ties and saved 0.17–0.20 ms per four-row Inkling verifier command. A four-coefficient vector version was slower. The scalar search runs inside the opt-in binary16 ingress. [Quantization threshold screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-29--shorten-the-exact-fp4-activation-threshold-search)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates
