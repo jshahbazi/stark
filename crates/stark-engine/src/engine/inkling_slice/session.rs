@@ -7,7 +7,7 @@ use metal::MTLBlitCommandEncoder;
 
 #[path = "dspark_validation.rs"]
 mod dspark_validation;
-pub use dspark_validation::measure_dspark;
+pub use dspark_validation::{measure_dspark, measure_dspark_depth};
 
 #[path = "packed_prefill.rs"]
 mod packed_prefill;
@@ -28,7 +28,9 @@ use packed_prefill::PackedPrefill;
 use prefill::PrefillLanes;
 pub use prefill_profile::{probe_stock_nvfp4, profile_packed_prefill, profile_prefill, profile_stock_4k};
 pub use prefill_trace::{PrefillTraceMode, trace_packed_prefill, trace_prefill};
-pub use target_validation::{measure_full, measure_full_budget, measure_prefill, measure_prefill_speed};
+pub use target_validation::{
+    measure_decode_verify, measure_full, measure_full_budget, measure_prefill, measure_prefill_speed,
+};
 
 use super::{dspark::Dspark, vision::Vision, *};
 
@@ -769,19 +771,30 @@ impl Session {
         if !(readout || features.is_some()) {
             return;
         }
+        self.finish_hidden(gpu, flow, blocks, binding(&self.hidden), features);
+        if readout {
+            self.encode_output(gpu);
+        }
+    }
+
+    fn finish_hidden(
+        &self,
+        gpu: &mut Stream<'_>,
+        flow: &Flow,
+        blocks: usize,
+        hidden: Binding<'_>,
+        features: Option<&Buffer>,
+    ) {
         gpu.mix(&flow.blocks, &flow.partial, &self.output_query, &self.mixed, blocks, true, 1);
-        gpu.norm(binding(&self.mixed), &self.output_norm, binding(&self.hidden), true);
+        gpu.norm(binding(&self.mixed), &self.output_norm, hidden, true);
         if let Some(features) = features {
             gpu.dispatch(
                 "ink_trace_copy",
-                &[binding(&self.hidden), (features, 3 * WIDTH * 2)],
+                &[hidden, (features, 3 * WIDTH * 2)],
                 (WIDTH / 2) as u32,
                 (WIDTH.div_ceil(256), 1),
                 128,
             );
-        }
-        if readout {
-            self.encode_output(gpu);
         }
     }
 
@@ -798,10 +811,24 @@ impl Session {
                 (PADDED_VOCABULARY / 32, 1),
                 32,
             );
-            gpu.one("ink_logits_cap", &[&self.logits], VOCABULARY as u32, (VOCABULARY.div_ceil(128), 1), 128);
+            self.cap_logits(gpu, 0);
         } else {
             gpu.one("ink_unembed_f32", &buffers, VOCABULARY as u32, (VOCABULARY.div_ceil(4), 1), 128);
         }
+    }
+
+    fn cap_logits(
+        &self,
+        gpu: &mut Stream<'_>,
+        row: usize,
+    ) {
+        gpu.dispatch(
+            "ink_logits_cap",
+            &[(&self.logits, row * PADDED_VOCABULARY * size_of::<f32>())],
+            VOCABULARY as u32,
+            (VOCABULARY.div_ceil(128), 1),
+            128,
+        );
     }
 
     /// Capture the exact persistent state after the last completed command.

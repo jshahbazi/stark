@@ -243,6 +243,36 @@ kernel void ink_draft_rnn_latent(
     out[i] = bfloat(metal::precise::tanh(float(bfloat(gates[gate] + float(bias[gate])))));
 }
 
+#ifdef INK_DRAFT_MARKOV_BLOCK
+kernel void ink_draft_markov_input(
+    device const bfloat *previous [[buffer(0)]], device const bfloat *hidden [[buffer(1)]],
+    device const bfloat *feature [[buffer(2)]], device bfloat *out [[buffer(3)]],
+    device const bfloat *state [[buffer(4)]], device const uint *winners [[buffer(5)]],
+    constant uint3 &step [[buffer(6)]], uint i [[thread_position_in_grid]]) {
+    const uint token = step.x == 0 ? step.y : winners[step.x - 1];
+    if (i < rank) out[i] = step.x == 0 ? bfloat(0.0f) : state[i];
+    else if (i < 2 * rank) out[i] = previous[(token < step.z ? token : 0u) * rank + i - rank];
+    else if (i < 2 * rank + width) out[i] = hidden[i - 2 * rank];
+    else out[i] = feature[i - 2 * rank - width];
+}
+
+kernel void ink_draft_markov_state(
+    device const float *gates [[buffer(0)]], device const bfloat *bias [[buffer(1)]],
+    device bfloat *latent [[buffer(2)]], device bfloat *state [[buffer(3)]],
+    constant uint &row [[buffer(4)]], uint i [[thread_position_in_grid]]) {
+    const float keep_logit = float(bfloat(gates[i] + float(bias[i])));
+    const float keep = float(bfloat(1.0f / (1.0f + metal::precise::exp(-keep_logit))));
+    const float update = float(bfloat(metal::precise::tanh(float(bfloat(
+        gates[rank + i] + float(bias[rank + i]))))));
+    const float retain = row == 0 ? 0.0f : float(bfloat(keep * float(state[i])));
+    const float replace = float(bfloat(float(bfloat(1.0f - keep)) * update));
+    state[i] = bfloat(retain + replace);
+    const uint gate = 2 * rank + i;
+    latent[i] = bfloat(metal::precise::tanh(float(bfloat(gates[gate] + float(bias[gate])))));
+}
+
+#endif
+
 inline bool draft_better(float score, uint token, float best, uint best_token) {
     return score > best || (score == best && token < best_token);
 }

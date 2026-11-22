@@ -24,6 +24,40 @@ fn main() {
             println!("{report}");
             return Ok(0);
         }
+
+        if args.first().is_some_and(|arg| arg == "--measure-dspark-depth") {
+            if args.len() != 5 {
+                return Err(
+                    "expected --measure-dspark-depth, original and draft SafeTensors, private oracle directory and prefix",
+                );
+            }
+            let prefix =
+                args[4].to_str().and_then(|value| value.parse().ok()).ok_or("invalid Inkling prefix length")?;
+            let report = stark_engine::engine::inkling_slice::measure_dspark_depth(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                prefix,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--measure-decode-verify") {
+            if args.len() != 4 {
+                return Err(
+                    "expected --measure-decode-verify, original SafeTensors, private oracle directory and prefix length",
+                );
+            }
+            let prefix =
+                args[3].to_str().and_then(|value| value.parse().ok()).ok_or("invalid Inkling prefix length")?;
+            let report = stark_engine::engine::inkling_slice::measure_decode_verify(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                prefix,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
         if args.first().is_some_and(|arg| arg == "--prefill-speed") {
             if args.len() != 5 {
                 return Err("expected --prefill-speed, original SafeTensors, private oracle, input length and variant");

@@ -152,6 +152,16 @@ inline float ink_fp4_code(uint nibble) {
     return (nibble & 8u) ? -ink_fp4_table[nibble & 7u] : ink_fp4_table[nibble];
 }
 
+#ifdef INK_NVFP4_VECTOR_BLOCK
+inline float4 ink_nvfp4_nibbles(uint word) {
+    const uint4 nibble = (uint4(word) >> uint4(0, 4, 8, 12)) & 15u;
+    const uint4 magnitude = nibble & 7u;
+    const uint4 normal = (((magnitude >> 1) + 126u) << 23) | ((magnitude & 1u) << 22);
+    const uint4 small = select(uint4(0), uint4(0x3f000000u), magnitude == 1u);
+    return as_type<float4>(select(small, normal, magnitude >= 2u) | ((nibble & 8u) << 28));
+}
+#endif
+
 // A lane handles one original 16-channel block at a time. The publisher
 // stores consecutive channels in a byte's low then high nibble, with the
 // E4M3 block scales in a separate plane. Inputs restore their row scale
@@ -164,6 +174,15 @@ inline float ink_nvfp4_lane_dot(
         const uint2 packed = reinterpret_cast<device const uint2 *>(codes)[block];
         const float scale = ink_e4m3_positive(scales[block]);
         const device float *values = input + block * 16;
+#ifdef INK_NVFP4_VECTOR_BLOCK
+        // All 16 products share the activation's E4M3 block scale. Removing
+        // its power of two leaves an integer sum bounded by 15 * 16 * 12^2,
+        // so the block sums are exactly representable in FP32 in either order.
+        const device float4 *v = reinterpret_cast<device const float4 *>(values);
+        const float block_dot =
+            (dot(ink_nvfp4_nibbles(packed.x), v[0]) + dot(ink_nvfp4_nibbles(packed.x >> 16), v[1])) +
+            (dot(ink_nvfp4_nibbles(packed.y), v[2]) + dot(ink_nvfp4_nibbles(packed.y >> 16), v[3]));
+#else
         float block_dot = 0.0f;
         for (uint byte = 0; byte < 4; ++byte) {
             const uint lo = packed.x >> (byte * 8);
@@ -173,6 +192,7 @@ inline float ink_nvfp4_lane_dot(
             block_dot = fma(ink_fp4_code(hi & 15u), values[byte * 2 + 8], block_dot);
             block_dot = fma(ink_fp4_code((hi >> 4) & 15u), values[byte * 2 + 9], block_dot);
         }
+#endif
         sum = fma(block_dot, scale, sum);
     }
     return sum;

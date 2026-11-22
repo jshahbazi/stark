@@ -654,3 +654,149 @@ pub fn measure_prefill(
         "pairs": pairs,
     }))
 }
+
+pub fn measure_decode_verify(
+    checkpoint: &Path,
+    oracle: &Path,
+    prefix: usize,
+) -> Result<Value> {
+    const WIDTHS: [usize; 6] = [1, 2, 3, 4, 6, 8];
+    const REPEATS: usize = 4;
+    let appended = if prefix == 4 {
+        4
+    } else if prefix == 4096 {
+        3
+    } else {
+        return Err("Inkling verifier diagnostic needs the short or stock 4K fixture");
+    };
+    let source = Tensors::open(&oracle.join("tokens.safetensors"))?;
+    let prompt = source.values::<u32>("tokens", "U32", &[prefix + appended])?;
+    let mut session = Session::load(checkpoint, 4352)?;
+    session.set_batched_prefill(true, true)?;
+    if session.prefill_batch_rows() != Session::SOURCE_PREFILL_ROWS {
+        return Err("Inkling verifier diagnostic requires source prefill");
+    }
+    let mut logits = if prefix == 4096 {
+        session.ingest_many(&prompt[..2048])?;
+        session.ingest_many(&prompt[2048..4092])?;
+        session.ingest_many(&prompt[4092..4095])?;
+        session.step(prompt[4095])?
+    } else {
+        session.prefill(&prompt[..prefix])?
+    };
+    let base = session.snapshot()?;
+    let mut serial_tokens = Vec::new();
+    let mut serial_logits = Vec::new();
+    let mut serial_states = Vec::new();
+    for row in 1..=*WIDTHS.last().unwrap() {
+        let token = logits
+            .iter()
+            .enumerate()
+            .fold((0, f32::NEG_INFINITY), |best, (i, &v)| {
+                if v > best.1 {
+                    (i, v)
+                } else {
+                    best
+                }
+            })
+            .0 as u32;
+        serial_tokens.push(token);
+        logits = session.step(token)?;
+        serial_logits.push(logits.clone());
+        if WIDTHS.contains(&row) {
+            serial_states.push(state_digest(&session));
+        }
+    }
+
+    packed_prefill::register_nvfp4_vector(&mut session.runtime)?;
+    session
+        .prefill_lanes
+        .as_mut()
+        .ok_or("Inkling verifier lanes unavailable")?
+        .enable_verify_groups(&mut session.runtime)?;
+    let mut cases = Vec::new();
+    let mut profiler = PrefillTiming::new(&session.runtime)?;
+    for (index, width) in WIDTHS.into_iter().enumerate() {
+        let rows = &serial_tokens[..width];
+        let mut serial_ms = Vec::new();
+        let mut verifier_ms = Vec::new();
+        let mut vector_ms = Vec::new();
+        let mut group_ms = Vec::new();
+        let mut unequal = vec![0; width];
+        let mut vector_unequal = vec![0; width];
+        let mut state_exact = false;
+        let mut vector_state_exact = false;
+        let mut group_unequal = vec![0; width];
+        let mut group_state_exact = false;
+        for trial in 0..REPEATS {
+            for offset in 0..4 {
+                let mode = (trial + offset) % 4;
+                session.restore(&base)?;
+                session.runtime.nvfp4_vector = mode == 2;
+                let timing = execute(&session.runtime, |gpu| {
+                    if width == 1 || mode == 0 {
+                        for (row, &token) in rows.iter().enumerate() {
+                            session.encode_token(gpu, TokenInput::Text(token), prefix + row, true, false);
+                        }
+                    } else {
+                        let kind = if mode == 3 {
+                            prefill::VerifyExperts::Grouped
+                        } else {
+                            prefill::VerifyExperts::Singleton
+                        };
+                        session.encode_verify_rows(gpu, session.prefill_lanes.as_ref().unwrap(), rows, kind);
+                    }
+                });
+                session.runtime.nvfp4_vector = false;
+                let timing = timing?;
+                [&mut serial_ms, &mut verifier_ms, &mut vector_ms, &mut group_ms][mode].push(timing.wall_ms);
+                session.finish_append(Ok(timing), width)?;
+                if trial == 0 && mode != 0 {
+                    let same_state = state_digest(&session) == serial_states[index];
+                    let scores = read_shared::<f32>(&session.logits, width * PADDED_VOCABULARY);
+                    let (counts, state) = match mode {
+                        2 => (&mut vector_unequal, &mut vector_state_exact),
+                        3 => (&mut group_unequal, &mut group_state_exact),
+                        _ => (&mut unequal, &mut state_exact),
+                    };
+                    *state = same_state;
+                    for (row, (got, want)) in scores.chunks_exact(PADDED_VOCABULARY).zip(&serial_logits).enumerate() {
+                        counts[row] =
+                            got[..VOCABULARY].iter().zip(want).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+                    }
+                }
+            }
+        }
+        let mut profiles = Vec::new();
+        if width == 1 || width == 4 {
+            profiler.fold_verify_phases = width != 1;
+            for vector in [false, true] {
+                session.restore(&base)?;
+                session.runtime.nvfp4_vector = vector;
+                let timing = execute_with_profile(&session.runtime, Some(&mut profiler), |gpu| {
+                    if width == 1 {
+                        session.encode_token(gpu, TokenInput::Text(rows[0]), prefix, true, false);
+                    } else {
+                        session.encode_verify_rows(
+                            gpu,
+                            session.prefill_lanes.as_ref().unwrap(),
+                            rows,
+                            prefill::VerifyExperts::Singleton,
+                        );
+                    }
+                });
+                session.runtime.nvfp4_vector = false;
+                let timing = timing?;
+                profiles.push(profiler.command_report(timing.gpu_ms));
+            }
+        }
+        cases.push(json!({
+            "rows": width, "unequal_logits": unequal, "exact_committed_state": state_exact,
+            "serial_single_command_ms": serial_ms, "verifier_ms": verifier_ms,
+            "vector_ms": vector_ms, "vector_unequal_logits": vector_unequal,
+            "vector_exact_committed_state": vector_state_exact, "profiles": profiles,
+            "group_ms": group_ms, "group_unequal_logits": group_unequal, "group_exact_committed_state": group_state_exact,
+        }));
+    }
+    Ok(json!({"prefix": prefix, "context": 4352, "cases": cases}))
+}

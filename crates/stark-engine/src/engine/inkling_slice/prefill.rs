@@ -8,6 +8,12 @@ use crate::engine::inkling_slice::grouped_pilot::GroupedExperts;
 mod prefill_controller;
 use prefill_controller::PrefillControllers;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum VerifyExperts {
+    Singleton,
+    Grouped,
+}
+
 pub(super) struct PrefillLanes {
     flows: Vec<Flow>,
     features: Vec<Buffer>,
@@ -81,6 +87,17 @@ impl PrefillLanes {
         lanes.enable_wide_gemv(runtime)?;
         lanes.enable_short_expert_tiles();
         Ok(lanes)
+    }
+
+    pub(super) fn enable_verify_groups(
+        &mut self,
+        runtime: &mut Runtime,
+    ) -> Result<()> {
+        self.grouped.enable_source_epilogue(runtime)?;
+        self.grouped.enable_source_softmax(runtime)?;
+        self.grouped.enable_source_mxfp8(runtime)?;
+        self.grouped.min_rows = 2;
+        Ok(())
     }
 
     pub(super) fn enable_controllers(
@@ -199,6 +216,31 @@ impl Session {
         readout: bool,
         trace: Option<&PrefillTrace>,
     ) {
+        self.encode_lanes(gpu, lanes, inputs, readout, trace, None);
+    }
+
+    pub(super) fn encode_verify_rows(
+        &self,
+        gpu: &mut Stream<'_>,
+        lanes: &PrefillLanes,
+        tokens: &[u32],
+        experts: VerifyExperts,
+    ) {
+        let inputs = tokens.iter().copied().map(TokenInput::Text).collect::<Vec<_>>();
+        self.encode_lanes(gpu, lanes, &inputs, true, None, Some(experts));
+    }
+
+    fn encode_lanes(
+        &self,
+        gpu: &mut Stream<'_>,
+        lanes: &PrefillLanes,
+        inputs: &[TokenInput<'_>],
+        readout: bool,
+        trace: Option<&PrefillTrace>,
+        verify: Option<VerifyExperts>,
+    ) {
+        let allow_groups = verify != Some(VerifyExperts::Singleton);
+        let source_groups = verify == Some(VerifyExperts::Grouped);
         let row_count = inputs.len();
         let skip = lanes.rows() - row_count;
         let flows = lanes.flows.iter().chain(std::iter::once(&self.flow)).skip(skip);
@@ -298,7 +340,8 @@ impl Session {
             project_rows(gpu, lanes.dense.as_ref(), &layer.output, output, 3072, WIDTH, lanes.wide_gemv);
 
             gpu.phase(PrefillPhase::ExpertInputs);
-            let direct = lanes.direct_experts
+            let direct = allow_groups
+                && lanes.direct_experts
                 && trace.is_none()
                 && lanes.grouped.supports(layer, row_count)
                 && (!state.later || controllers.is_some());
@@ -347,15 +390,15 @@ impl Session {
             for start in (0..row_count).step_by(expert_rows) {
                 let count = (row_count - start).min(expert_rows);
                 let tile = scratches.clone().skip(start).take(count);
-                if lanes.grouped.supports(layer, count) {
+                if allow_groups && lanes.grouped.supports(layer, count) {
                     if direct {
-                        lanes.grouped.encode(gpu, layer, count, lanes.source_router, false);
+                        lanes.grouped.encode(gpu, layer, count, source_groups || lanes.source_router, source_groups);
                         continue;
                     }
                     for (row, scratch) in tile.clone().enumerate() {
                         lanes.grouped.copy_input(gpu, binding(&scratch.mlp_input), row);
                     }
-                    lanes.grouped.encode(gpu, layer, count, lanes.source_router, false);
+                    lanes.grouped.encode(gpu, layer, count, source_groups || lanes.source_router, source_groups);
                     for (row, scratch) in tile.enumerate() {
                         lanes.grouped.copy_output(gpu, row, binding(&scratch.experts));
                         if let Some(tap) = tap {
@@ -394,9 +437,19 @@ impl Session {
 
         gpu.phase(PrefillPhase::Other);
         for (row, (flow, taps)) in flows.zip(tap_rows).enumerate() {
-            self.finish_forward(gpu, flow, blocks, readout && row + 1 == row_count, taps);
+            if verify.is_some() {
+                self.finish_hidden(gpu, flow, blocks, (&self.hidden, row * WIDTH * 2), taps);
+            } else {
+                self.finish_forward(gpu, flow, blocks, readout && row + 1 == row_count, taps);
+            }
             if let (Some(draft), Some(taps)) = (draft, taps) {
                 draft.commit(gpu, taps, self.position + row);
+            }
+        }
+        if verify.is_some() {
+            self.encode_output(gpu);
+            for row in 1..row_count {
+                self.cap_logits(gpu, row);
             }
         }
     }

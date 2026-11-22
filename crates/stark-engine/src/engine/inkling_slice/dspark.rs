@@ -138,7 +138,7 @@ impl Scratch {
             rnn_input: zeroed(device, TILE_ROWS * RNN * 2)?,
             latent: private(device, RANK * 2)?,
             groups: private(device, GROUPS * 8)?,
-            winner: zeroed(device, 4)?,
+            winner: zeroed(device, size_of::<u32>())?,
         })
     }
 
@@ -169,6 +169,38 @@ impl Scratch {
     ) {
         self.matmul(gpu, input, weight, shape.0, shape.1);
         round(gpu, &self.raw, out, ROWS * shape.1);
+    }
+}
+
+pub(super) struct DraftBlock {
+    state: Buffer,
+    gates: Buffer,
+    winners: Buffer,
+}
+
+impl DraftBlock {
+    pub(super) fn new(runtime: &mut Runtime) -> Result<Self> {
+        let options = MTLCompileOptions::new();
+        options.set_math_mode(MTLMathMode::Safe);
+        options.set_language_version(MTLLanguageVersion::Version4_0);
+        let library = runtime
+            .device
+            .new_library_with_source(
+                concat!("#define INK_DRAFT_MARKOV_BLOCK\n", include_str!("dspark.metal")),
+                Some(&options),
+            )
+            .map_err(|_| "Inkling draft block diagnostic library compilation failed")?;
+        for name in ["ink_draft_markov_input", "ink_draft_markov_state"] {
+            let function = library.new_function_with_name(name).ok_or(name)?;
+            let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
+            runtime.pipelines.insert(name, pipeline);
+        }
+        let device = &runtime.device;
+        Ok(Self {
+            state: private(device, RANK * 2)?,
+            gates: private(device, TILE_ROWS * 3 * RANK * 4)?,
+            winners: zeroed(device, (ROWS - 1) * size_of::<u32>())?,
+        })
     }
 }
 
@@ -397,11 +429,7 @@ impl Dspark {
     ) -> Result<u32> {
         let s = &self.scratch;
         execute(runtime, |gpu| {
-            gpu.one("ink_embedding", &[embedding, embed_norm, &s.anchor], anchor, (1, 1), WIDTH / 4);
-            gpu.one("ink_draft_block", &[&s.anchor, &self.mask, &s.residual], (), (WIDTH / 128, ROWS), 128);
-            for (layer, cache) in self.layers.iter().zip(&self.cache) {
-                self.decode_layer(gpu, layer, cache, position);
-            }
+            self.encode_block(gpu, anchor, position, embedding, embed_norm);
             // Row 0 is the anchor. The first mask row supplies the one
             // proposal, while all eight rows participated in attention.
             gpu.norm((&s.residual, WIDTH * 4), &self.norm, binding(&s.norm), true);
@@ -429,6 +457,103 @@ impl Dspark {
             return Err("Inkling draft did not produce a finite vocabulary score");
         }
         Ok(winner)
+    }
+
+    pub(super) fn propose_many(
+        &self,
+        runtime: &Runtime,
+        anchor: u32,
+        position: usize,
+        embedding: &Buffer,
+        embed_norm: &Buffer,
+        unembedding: &Buffer,
+        count: usize,
+        block: &DraftBlock,
+    ) -> Result<Vec<u32>> {
+        if !(1..ROWS).contains(&count) || anchor as usize >= VOCABULARY {
+            return Err("Inkling draft proposal block is out of range");
+        }
+        let s = &self.scratch;
+        execute(runtime, |gpu| {
+            self.encode_block(gpu, anchor, position, embedding, embed_norm);
+            for row in 0..count {
+                gpu.norm((&s.residual, (row + 1) * WIDTH * 4), &self.norm, (&s.norm, row * WIDTH * 2), true);
+            }
+            // The source's padded vocabulary tile projects all live mask rows
+            // together. A separate, small recurrent output preserves those scores.
+            s.matmul(gpu, &s.norm, unembedding, WIDTH, PADDED_VOCABULARY);
+            for row in 0..count {
+                gpu.dispatch(
+                    "ink_draft_markov_input",
+                    &[
+                        binding(&self.previous),
+                        (&s.norm, row * WIDTH * 2),
+                        binding(&self.feature),
+                        binding(&s.rnn_input),
+                        binding(&block.state),
+                        binding(&block.winners),
+                    ],
+                    [row as u32, anchor, VOCABULARY as u32, 0],
+                    (RNN / 128, 1),
+                    128,
+                );
+                gpu.one(
+                    "ink_unembed_tensor",
+                    &[&s.rnn_input, &self.recurrent, &block.gates],
+                    [RNN as u32, (3 * RANK) as u32],
+                    (3 * RANK / 32, 1),
+                    32,
+                );
+                gpu.one(
+                    "ink_draft_markov_state",
+                    &[&block.gates, &self.recurrent_bias, &s.latent, &block.state],
+                    row as u32,
+                    (RANK / 128, 1),
+                    128,
+                );
+                gpu.dispatch(
+                    "ink_draft_rank",
+                    &[
+                        (&s.raw, row * PADDED_VOCABULARY * 4),
+                        binding(&self.folded),
+                        binding(&self.folded_bias),
+                        binding(&s.latent),
+                        binding(&s.groups),
+                    ],
+                    VOCABULARY as u32,
+                    (GROUPS, 1),
+                    128,
+                );
+                gpu.dispatch(
+                    "ink_draft_winner",
+                    &[binding(&s.groups), (&block.winners, row * size_of::<u32>())],
+                    GROUPS as u32,
+                    (1, 1),
+                    256,
+                );
+            }
+        })?;
+        let winners = session::read_shared::<u32>(&block.winners, count);
+        if winners.iter().any(|&token| token as usize >= VOCABULARY) {
+            return Err("Inkling draft did not produce a finite vocabulary score");
+        }
+        Ok(winners)
+    }
+
+    fn encode_block(
+        &self,
+        gpu: &mut Stream<'_>,
+        anchor: u32,
+        position: usize,
+        embedding: &Buffer,
+        embed_norm: &Buffer,
+    ) {
+        let s = &self.scratch;
+        gpu.one("ink_embedding", &[embedding, embed_norm, &s.anchor], anchor, (1, 1), WIDTH / 4);
+        gpu.one("ink_draft_block", &[&s.anchor, &self.mask, &s.residual], (), (WIDTH / 128, ROWS), 128);
+        for (layer, cache) in self.layers.iter().zip(&self.cache) {
+            self.decode_layer(gpu, layer, cache, position);
+        }
     }
 
     fn decode_layer(

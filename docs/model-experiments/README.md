@@ -2,6 +2,8 @@
 
 [Look up research and speed changes by model](../MODEL_RESEARCH.md), including benchmark comparisons and branch-only attempts. The [source index](source-index.md) groups individual reports by family and topic.
 
+- [20261121-INKDECODE-01–03 · Inkling 2 Mini exact decode toward 60 tok/s](2026-11-21-inkling-mini-decode-60.md) measures exact short verifier blocks, native DSpark depth and vector NVFP4 singleton decode on the original M5 Max checkpoint.
+
 - [20261121-INKPROFILE-04 · Default exact one-row router for Inkling 2 Mini](2026-11-21-inkling-mini-decode-default.md) records the flags-unset selection, pinned parity and paired decode comparison against the original source router.
 
 - [20261121-INKPREFILL-14 · Default fast prefill for Inkling 2 Mini](2026-11-21-inkling-mini-prefill-default.md) records default kernel selection, flags-unset parity and the cold 4K worker comparison against the prior opt-in configuration.

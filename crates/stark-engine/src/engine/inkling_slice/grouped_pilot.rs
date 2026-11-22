@@ -94,6 +94,14 @@ fn run_slots(rows: usize) -> usize {
     run_slots_for(rows, TILE)
 }
 
+fn live_run_limit(
+    rows: usize,
+    slots: usize,
+) -> usize {
+    // A nonempty run must contain at least one routed row.
+    slots.min(rows * TOP)
+}
+
 fn run_slots_for(
     rows: usize,
     tile: usize,
@@ -560,9 +568,9 @@ impl GroupedExperts {
         let buffers =
             [&self.activation, &bank.codes, &bank.blocks, routing.runs, &self.quantum, &self.maxima, &self.projected];
         let grid = if active_rows64(gpu) {
-            (WIDTH / 32, run_slots_for(rows, 64))
+            (WIDTH / 32, live_run_limit(rows, run_slots_for(rows, 64)))
         } else {
-            (WIDTH / 64, run_slots(rows))
+            (WIDTH / 64, live_run_limit(rows, run_slots(rows)))
         };
         if let Some(probe) = &gpu.runtime.nvfp4_probe
             && gpu.nvfp4_dots < PROBE_DOTS
@@ -668,7 +676,7 @@ impl GroupedExperts {
         source_packed: bool,
     ) {
         let out = &self.output;
-        let slots = run_slots(rows);
+        let slots = live_run_limit(rows, run_slots(rows));
         let [up_kernel, down_kernel] = grouped_mxfp8_names(self.wide_mxfp8, self.source_mxfp8 && source_packed);
         let tensor = self.mxfp8_tensor.as_ref().filter(|_| {
             source_packed && gpu.runtime.source_text_active && gpu.runtime.mxfp8_tensor_active && rows > 64

@@ -182,3 +182,87 @@ pub fn measure_dspark(
         "draft_proposal_seconds": proposal_seconds,
     }))
 }
+
+pub fn measure_dspark_depth(
+    checkpoint: &Path,
+    draft: &Path,
+    oracle: &Path,
+    prefix: usize,
+) -> Result<Value> {
+    const ROUNDS: usize = 32;
+    const DEPTHS: [usize; 3] = [1, 3, 7];
+    let extra = if prefix == 4 {
+        4
+    } else if prefix == 4096 {
+        3
+    } else {
+        return Err("Inkling draft depth diagnostic needs the short or stock 4K fixture");
+    };
+    let source = Tensors::open(&oracle.join("tokens.safetensors"))?;
+    let prompt = source.values::<u32>("tokens", "U32", &[prefix + extra])?;
+
+    let mut session = Session::load(checkpoint, 4352)?;
+    session.load_dspark(draft)?;
+    let block = crate::engine::inkling_slice::dspark::DraftBlock::new(&mut session.runtime)?;
+    session.set_batched_prefill(true, true)?;
+    session.set_dspark_enabled(true)?;
+    let before = Instant::now();
+    let mut scores = session.prefill(&prompt[..prefix])?;
+    let prefill_ms = before.elapsed().as_secs_f64() * 1000.0;
+    let snapshot = session.snapshot()?;
+    let mut teacher = Vec::new();
+    for _ in 0..ROUNDS + DEPTHS[2] {
+        let token = greedy(&scores);
+        teacher.push(token);
+        scores = session.step(token)?;
+    }
+    session.restore(&snapshot)?;
+
+    let mut timings = std::array::from_fn::<_, { DEPTHS.len() }, _>(|_| Vec::new());
+    let mut tried = [0; DEPTHS[2]];
+    let mut accepted = [0; DEPTHS[2]];
+    let mut first_mask_exact = 0;
+    let mut nested_exact = 0;
+    let mut decode_ms = Vec::new();
+    for index in 0..ROUNDS {
+        let anchor = teacher[index];
+        let Some(draft) = session.active_dspark() else {
+            return Err("Inkling draft unavailable");
+        };
+        let mut proposals = std::array::from_fn::<_, { DEPTHS.len() }, _>(|_| Vec::new());
+        for offset in 0..DEPTHS.len() {
+            let level = (index + offset) % DEPTHS.len();
+            let start = Instant::now();
+            proposals[level] = draft.propose_many(
+                &session.runtime,
+                anchor,
+                session.position,
+                &session.embedding,
+                &session.embed_norm,
+                &session.unembedding,
+                DEPTHS[level],
+                &block,
+            )?;
+            timings[level].push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        first_mask_exact += usize::from(session.draft_propose(anchor)? == Some(proposals[0][0]));
+        nested_exact +=
+            usize::from(DEPTHS.iter().zip(&proposals).all(|(&depth, tokens)| proposals[2][..depth] == *tokens));
+        for (offset, (&proposal, &target)) in proposals[2].iter().zip(&teacher[index + 1..]).enumerate() {
+            tried[offset] += 1;
+            if proposal != target {
+                break;
+            }
+            accepted[offset] += 1;
+        }
+        let start = Instant::now();
+        if greedy(&session.step(anchor)?) != teacher[index + 1] {
+            return Err("Inkling draft depth changed serial replay");
+        }
+        decode_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    Ok(json!({"prefix":prefix, "rounds":ROUNDS, "depths":DEPTHS, "prefill_ms":prefill_ms,
+              "proposal_ms":timings, "target_step_ms":decode_ms, "conditional_exposures":tried,
+              "accepted_by_position":accepted, "first_mask_matches":first_mask_exact,
+              "nested_proposal_matches":nested_exact}))
+}

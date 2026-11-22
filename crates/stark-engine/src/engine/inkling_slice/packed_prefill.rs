@@ -82,6 +82,9 @@ impl PackedPrefill {
                 let _ = grouped_pilot::enable_rows64(runtime);
             }
             let _ = packed.experts.enable_mxfp8_tensor(runtime, layers);
+            if nvfp4_vector_requested() {
+                runtime.nvfp4_vector = register_nvfp4_vector(runtime).is_ok();
+            }
             return Ok(packed);
         }
         Self::new(runtime, M5_PACKED_ROWS, true, None, false, false, false)
@@ -919,6 +922,23 @@ impl PackedPrefill {
             }
         }
     }
+}
+
+pub(super) fn nvfp4_vector_requested() -> bool {
+    std::env::var_os("STARK_INKLING_EXPERIMENT_NVFP4_VECTOR_BLOCK").as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
+pub(super) fn register_nvfp4_vector(runtime: &mut Runtime) -> Result<()> {
+    register(
+        runtime,
+        concat!(
+            "#include <metal_stdlib>\nusing namespace metal;\n",
+            "#define INK_NVFP4_VECTOR_BLOCK\n#define INK_SOURCE_SINGLETON_EPILOGUE\n",
+            "#define ink_nvfp4_up ink_nvfp4_vector_up\n#define ink_nvfp4_down ink_nvfp4_vector_down\n",
+            include_str!("experts.metal"),
+        ),
+        &["ink_nvfp4_vector_up", "ink_nvfp4_vector_down"],
+    )
 }
 
 fn register(

@@ -21,9 +21,9 @@ use metal::{
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use session::prefill_profile::{PrefillPhase, PrefillTiming};
 pub use session::{
-    PrefillTraceMode, Session, Snapshot, VOCABULARY, measure_dspark, measure_full, measure_full_budget,
-    measure_prefill, measure_prefill_speed, probe_stock_nvfp4, profile_packed_prefill, profile_prefill,
-    profile_stock_4k, trace_packed_prefill, trace_prefill,
+    PrefillTraceMode, Session, Snapshot, VOCABULARY, measure_decode_verify, measure_dspark, measure_dspark_depth,
+    measure_full, measure_full_budget, measure_prefill, measure_prefill_speed, probe_stock_nvfp4,
+    profile_packed_prefill, profile_prefill, profile_stock_4k, trace_packed_prefill, trace_prefill,
 };
 pub use validation::measure;
 pub use vision::{INKLING_IMAGE_TOKEN, ImageEmbeddings, measure_vision};
@@ -73,6 +73,7 @@ struct Runtime {
     pinned_m5: bool,
     source_text_active: bool,
     singleton_router: Kernel,
+    nvfp4_vector: bool,
     grouped_qmm: Kernel,
     nvfp4_probe: Option<grouped_pilot::Nvfp4Probe>,
     mxfp8_tensor_active: bool,
@@ -161,6 +162,7 @@ impl Runtime {
             pinned_m5,
             source_text_active: false,
             singleton_router: "ink_prefill_router_source",
+            nvfp4_vector: false,
             grouped_qmm: "ink_group_qmm",
             nvfp4_probe: None,
             mxfp8_tensor_active: false,
@@ -661,7 +663,9 @@ impl Layer {
         gpu.one("ink_nvfp4_activation", &[&s.mlp_input, &s.up_inner, &s.up_max], WIDTH as u32, (1, 1), 256);
         gpu.phase(PrefillPhase::Nvfp4UpDot);
         gpu.one(
-            if gpu.runtime.source_text_active {
+            if gpu.runtime.source_text_active && gpu.runtime.nvfp4_vector {
+                "ink_nvfp4_vector_up"
+            } else if gpu.runtime.source_text_active {
                 "ink_nvfp4_up_source"
             } else {
                 "ink_nvfp4_up"
@@ -675,7 +679,11 @@ impl Layer {
         gpu.one("ink_nvfp4_activation", &[&s.mid, &s.down_inner, &s.down_max], MID as u32, (8, 1), 256);
         gpu.phase(PrefillPhase::Nvfp4DownDot);
         gpu.one(
-            "ink_nvfp4_down",
+            if gpu.runtime.source_text_active && gpu.runtime.nvfp4_vector {
+                "ink_nvfp4_vector_down"
+            } else {
+                "ink_nvfp4_down"
+            },
             &[&s.down_inner, &s.down_max, &s.routes, &down.codes, &down.blocks, &down.maxima, &s.down],
             down.args(),
             (WIDTH / 4, 8),

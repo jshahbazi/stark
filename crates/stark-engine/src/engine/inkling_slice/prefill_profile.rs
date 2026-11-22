@@ -213,13 +213,14 @@ pub(in crate::engine::inkling_slice) struct PrefillTiming {
     device: Retained<Device>,
     samples: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
     spans: Vec<Span>,
+    pub(super) fold_verify_phases: bool,
     start: (u64, u64),
     tile: Totals,
     totals: Totals,
 }
 
 impl PrefillTiming {
-    fn new(runtime: &Runtime) -> Result<Self> {
+    pub(super) fn new(runtime: &Runtime) -> Result<Self> {
         let device = &runtime.device;
         if !runtime.pinned_m5 || !device.supports_counter_sampling(MTLCounterSamplingPoint::AtStageBoundary) {
             return Err("Inkling prefill profiling requires M5 Max stage timestamps");
@@ -242,10 +243,18 @@ impl PrefillTiming {
             device: device.clone(),
             samples,
             spans: Vec::with_capacity(SAMPLE_COUNT / 2),
+            fold_verify_phases: false,
             start: (0, 0),
             tile: Totals::default(),
             totals: Totals::default(),
         })
+    }
+
+    pub(in crate::engine::inkling_slice) fn command_report(
+        &self,
+        gpu_ms: f64,
+    ) -> Value {
+        self.tile.report(gpu_ms)
     }
 
     pub(in crate::engine::inkling_slice) fn begin(
@@ -287,6 +296,27 @@ impl PrefillTiming {
         dispatches: usize,
         phase: PrefillPhase,
     ) {
+        let phase = if self.fold_verify_phases {
+            match phase {
+                PrefillPhase::KeyValue
+                | PrefillPhase::RelativeTable
+                | PrefillPhase::LocalAttention
+                | PrefillPhase::GlobalAttention => PrefillPhase::RelativeCacheAttention,
+                PrefillPhase::RouterProjection
+                | PrefillPhase::RouteSelect
+                | PrefillPhase::Nvfp4Quant
+                | PrefillPhase::Nvfp4UpDot
+                | PrefillPhase::Nvfp4DownDot
+                | PrefillPhase::Nvfp4Epilogue
+                | PrefillPhase::ExpertCombine
+                | PrefillPhase::Mxfp8
+                | PrefillPhase::Mxfp8Up
+                | PrefillPhase::Mxfp8Down => PrefillPhase::Experts,
+                other => other,
+            }
+        } else {
+            phase
+        };
         let span = self.spans.last_mut().expect("profile started");
         if span.phase == phase {
             return;
@@ -492,6 +522,9 @@ fn profile_stock(
         return Err("Inkling stock profile requires the source-aligned M5 Max path");
     }
     let mut profiler = PrefillTiming::new(&session.runtime)?;
+    if packed_prefill::nvfp4_vector_requested() && !session.runtime.nvfp4_vector {
+        return Err("Inkling vector NVFP4 experiment did not load");
+    }
     if grouped_pilot::mxfp8_tensor_audit_requested() && !session.runtime.mxfp8_tensor_available {
         return Err("Inkling MXFP8 tensor audit requires the tensor path");
     }
@@ -518,6 +551,7 @@ fn profile_stock(
         "drafting": false,
         "grouped_nvfp4_kernel": if nvfp4_probe { "ink_group_qmm_probe" } else { session.runtime.grouped_qmm },
         "singleton_router_kernel": session.runtime.singleton_router,
+        "singleton_nvfp4_vector": session.runtime.nvfp4_vector,
         "mxfp8_tensor": session.runtime.mxfp8_tensor_active,
         "cases": cases,
     }))
