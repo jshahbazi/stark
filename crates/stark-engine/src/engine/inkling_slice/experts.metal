@@ -95,9 +95,18 @@ inline float ink_round_fp4(float value) {
     return copysign(ink_fp4_table[code], value);
 }
 
+#ifdef INK_VERIFY_HALF_ACT
+// Every decoded activation is a half-integer FP4 value times an E4M3
+// scale. Its significand has at most eight bits and the magnitude of
+// each nonzero coefficient is in [2^-10, 2688], within binary16.
+typedef half ink_nvfp4_activation_word;
+#else
+typedef float ink_nvfp4_activation_word;
+#endif
+
 kernel void ink_nvfp4_activation(
     device const bfloat *input [[buffer(0)]],
-    device float *inner [[buffer(1)]],
+    device ink_nvfp4_activation_word *inner [[buffer(1)]],
     device float *amax [[buffer(2)]],
     constant uint &width [[buffer(3)]],
     uint row [[threadgroup_position_in_grid]],

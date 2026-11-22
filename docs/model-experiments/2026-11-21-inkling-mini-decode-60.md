@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–20 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–23 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -289,6 +289,48 @@ Four alternating cold 4K pairs per mode used the same sealed binary, with shared
 
 The planner issued [1, 3, 73, 326] greedy and [165, 7, 288, 132] sampled rounds at depths zero through three. GPU client counters attributed 99.83% of observed increments to the two workers over 104 intervals. Thermal samples were nominal and fair. Pageouts changed by +155 and swapouts by +0 pages. Retire this planner integration after the screen. The fixed paths remain available within the experimental verifier.
 
+## 20261121-INKDECODE-21 · Store exact verifier NVFP4 ingress in binary16
+
+The activation quantizer emits FP4 half-integers multiplied by finite positive E4M3 scales. Each exact product has at most eight significant bits and a nonzero magnitude between 2⁻¹⁰ and 2,688. Store those coefficients in binary16 and widen to F32 at the grouped verifier dot. The dot grouping, scaled FMA recurrence, SIMD reduction, route-weight epilogue and BF16 rounding stay in source order. The scratch allocation still fits both formats.
+
+Alternate seven arms on the same restored snapshot at widths two, three and four. The eight comparisons per arm and width checked every F32 row on both stock 4K inputs and the short input. The first Metal compilation failed because the activation vector pointer needed an explicit device address space. It yielded zero timed rows.
+
+| Verified rows | F32 ingress median, 4K | Binary16 ingress median, 4K | Median paired saving |
+| --- | ---: | ---: | ---: |
+| 2 | 29.60–30.47 ms | 29.32–30.23 ms | 0.23–0.47 ms |
+| 3 | 34.70–34.79 ms | 34.22–34.37 ms | 0.34–0.56 ms |
+| 4 | 38.78–40.48 ms | 38.13–40.00 ms | 0.47–0.67 ms |
+
+One, two and eight SIMD groups per threadgroup with ordinary ingress had mixed timings. Eight SIMD groups with binary16 ingress was slower on one stock input and near even on the other. Polling Metal completion on the four-SIMD F32 arm saved about 0.02–0.06 ms at the paired median on 4K. Retire those variants. Keep the four-SIMD binary16 candidate under `STARK_INKLING_EXPERIMENT_VERIFY_HALF_INGRESS=1`. The subsequent shortlist build also repeated the short and two stock 4K rejection, ring-wrap and committed-state controls with binary16 ingress on.
+
+## 20261121-INKDECODE-22 · Rerank a smaller set of DSpark vocabulary candidates
+
+Each SIMD group chooses the two highest base BF16 logits in 32 consecutive vocabulary entries, with ascending token ID to break ties. Only those candidates run the existing BF16 Markov correction and final softcap. This changes proposal selection. The target still samples ordinarily from exact logits and verifies every proposed row. Compare the full shortlist and contiguous vocabulary caps of 65,536 and 32,768 against ordinary full reranking at 64 consecutive greedy anchors per input, with arm order rotated within each anchor.
+
+| Three-proposal arm | Median paired saving, stock 4K | Accepted prefixes through masks 1 / 2 / 3 on `s4096-00` | On `g4096-01` |
+| --- | ---: | ---: | ---: |
+| Ordinary full rerank | — | 45 / 31 / 19 | 37 / 8 / 0 |
+| Full-vocabulary shortlist | 0.80–0.81 ms | 45 / 29 / 17 | 37 / 8 / 0 |
+| First 65,536 vocabulary entries | 2.20–2.23 ms | 10 / 0 / 0 | 0 / 0 / 0 |
+| First 32,768 vocabulary entries | 2.56–2.59 ms | 10 / 0 / 0 | 0 / 0 / 0 |
+
+The full shortlist changed 6–8 of 64 three-proposal rounds on the stock inputs. It saved 0.24–0.25 ms at depth one and 0.53 ms at depth two. The native continuation and complete committed state matched the serial target on the short and both 4K cases. Drop both fixed vocabulary caps because they removed most first-mask acceptances.
+
+One sealed build compared the full shortlist plus binary16 verifier ingress against the previous full rerank plus F32 ingress. Both arms used exact run widths and shared local KV. Vision and DSpark were resident. Four alternating cold 4K pairs per mode used context 4,352, zero reuse and exactly 256 sampled and emitted tokens. Greedy used three proposals and sampled used two. All 16 output hashes matched the ordinary target.
+
+| Mode | Control useful decode | Combined useful decode | Median paired decode change | Faster combined pairs | Median paired prefill change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Greedy | 52.70 tok/s | 53.05 tok/s | +2.48% | 4/4 | -0.74% |
+| Sampled | 43.12 tok/s | 43.32 tok/s | +1.97% | 3/4 | +0.35% |
+
+The best request reached 57.41 tok/s greedy and the best sampled request reached 44.38 tok/s. Greedy accepted 623 of 1,181 proposals with the candidate versus 628 of 1,166 in the control. Sampled accepted 489 of 1,058 versus 497 of 1,042. Each stock worker output contained 156–189 tokens with IDs at or above 65,536. The workers accounted for 99.79% of GPU client counter increments over 106 intervals. Thermal samples were nominal and fair, with +81 pageouts and zero additional swapouts. Execution rates varied by request and session. Retain the full shortlist as `STARK_INKLING_EXPERIMENT_DRAFT_SHORTLIST=1` and keep both binary16 ingress and the shortlist opt-in. The worker comparison measures their combined effect.
+
+## 20261121-INKDECODE-23 · Share NVFP4 ingress across adjacent output columns
+
+Each SIMD group loaded one binary16 activation block and applied it to two adjacent output columns, with independent F32 recurrences and source reductions. Test the up projection alone, the down projection alone and both in eight rotated comparisons per width and input. The initial Metal build needed explicit vector widening and produced no measurements. Every checked row matched the short and both pinned 4K controls after that repair.
+
+At four verifier rows, pairing only the up projections added 0.76–1.00 ms at paired medians on the two 4K inputs. Pairing only the down projections added 0.51–0.68 ms. Pairing both added 1.22–1.58 ms. Retire the two-column shader. This measures the complete verifier command with binary16 ingress in all arms.
+
 ## Decision and next target
 
 Keep the vector singleton, transactional verifier and shared KV path opt-in. The measured acceptance and round costs leave the harder sampled input short of the 60 tok/s budget. Prioritize reducing ordinary target and verifier execution time across inputs before changing the production sampler. Distribution-preserving rejection would need separate qualification because it can change the sequence for the same seed. Keep the existing seeded path available for exact replay.
@@ -448,3 +490,23 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Adaptive verifier worker harness | `c118058a3ea084fc41ea5f2ef46769e418bccd93d27b9751489ef6cc319af300` |
 | Adaptive verifier worker pairs | `fae03fab02edde52bfbea8ec1bd4b4cfb51b4b330cea0add5e02f25d0965d071` |
 | Adaptive verifier host samples | `0d800841a554e080ce7e00ac928bfe7cbbd7380332546ecddb692c940dcbd9d0` |
+| Verifier ingress and launch screen inkling_slice | `02e2197d67f63a349dca6e197637bdce243064666aea0d6d290b8a8238e6a9e6` |
+| Verifier ingress and launch screen scored-source.patch | `c1d24465ae7cec006f61db72db3face3b3bd3fd6200c911e63d5d9abbe9d616d` |
+| Verifier ingress and launch screen short.json | `1fb6a7b4c82ceced5fbdd6fee6b7227136147af0930f09665e861cc0df8f0858` |
+| Verifier ingress and launch screen stock-s4096-00.json | `5012f7c1f4cf936255e811d75763fb823192be6c77506bf34c235a4a2645eb07` |
+| Verifier ingress and launch screen stock-g4096-01.json | `170edc7fed7f2fa519147ccd3a6c3638b78399b770aacb153e7a6a612008a96a` |
+| Draft shortlist and retained ingress native inkling_slice | `38285bf6047deb59935369d350ae8946259df37bc0b8e10f3b249aa6773958f6` |
+| Draft shortlist and retained ingress native scored-source.patch | `51aaaa26772f64116b3ce08855a0638c68cd2c641cd08cbc343040964f481bf1` |
+| Draft shortlist and retained ingress native short.json | `c1ccf02a260b214b4b72eae1b782fc4f021b227aa21136608a3e8ff6ffbfaad4` |
+| Draft shortlist and retained ingress native stock-s4096-00.json | `71037a4d96fabdd24fc5d08a6282e3f465b04aa0e4b41a8e248983364d54e702` |
+| Draft shortlist and retained ingress native stock-g4096-01.json | `e96ad68e9bb6e88170f44379f836f65365725b6dcfcfa112131acacee70318f6` |
+| Adjacent output column screen inkling_slice | `d546261eb91f6229d270a925da4ae438290b45de780f785a58de0118dd69ce20` |
+| Adjacent output column screen scored-source.patch | `64df71e683ca2138de006d389be2a03e3ac52052101d1fa68438650ef3e6f7e3` |
+| Adjacent output column screen short.json | `daf12444f3a1a7c32d41c1b55ff1fdd4d893d3a03a101768b38a6f75644af7b3` |
+| Adjacent output column screen stock-s4096-00.json | `af11508df29938a0ec7a10e527341e765498d46aa2c08cf53cd7cd6285d41217` |
+| Adjacent output column screen stock-g4096-01.json | `baf968a8c447a986e3dabb3de0e3b5a9bed6fadd2c024dd780e7d04777c986cf` |
+| Binary16 ingress and full shortlist worker | `60b9a9f16f597114e8cc8de53309aeb92acd0df82d0667e144ded8c31d051295` |
+| Combined worker source patch | `93f798f65f4db89a5b3e921d29ad58842e51b781aa44158cbe6d33ca0352b672` |
+| Combined worker harness | `b0151cac3deac14b5fb0bacfd44c426de88ad5651a28ca363f5e229f99fa513e` |
+| Combined worker pairs | `b0f51cbf73dc71d42516807753c82f75ba1ab135370efb665809b0acb570a54b` |
+| Combined worker host samples | `8cd2f651125ea6f008956de0e88950c80273d4f59e428e6038ddf0fb2168e50a` |

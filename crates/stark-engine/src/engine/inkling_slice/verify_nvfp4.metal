@@ -5,7 +5,7 @@
 // existing grouped gate/up and down epilogues.
 template <uint Batch, uint Width>
 inline void ink_verify_nvfp4_route_dot(
-    device const float *input, device const uchar *codes, device const uchar *scales,
+    device const ink_nvfp4_activation_word *input, device const uchar *codes, device const uchar *scales,
     device const uint *order, device float *output,
     uint start, uint count, uint out_col, uint lane) {
     constexpr bool up = Width == 2304;
@@ -22,8 +22,12 @@ inline void ink_verify_nvfp4_route_dot(
 #pragma clang loop unroll(full)
         for (uint row = 0; row < Batch; ++row) {
             if (row < count) {
-                const device float4 *v = reinterpret_cast<device const float4 *>(input + offsets[row]) + block * 4;
-                const float dot16 = (dot(w0, v[0]) + dot(w1, v[1])) + (dot(w2, v[2]) + dot(w3, v[3]));
+                // The half ingress stores exactly the same decoded FP4 ×
+                // E4M3 coefficients. Widen before the unchanged F32 dot.
+                const device auto *v = reinterpret_cast<device const vec<ink_nvfp4_activation_word, 4> *>(
+                    input + offsets[row]) + block * 4;
+                const float dot16 = (dot(w0, float4(v[0])) + dot(w1, float4(v[1]))) +
+                    (dot(w2, float4(v[2])) + dot(w3, float4(v[3])));
                 sums[row] = fma(dot16, scale, sums[row]);
             }
         }
@@ -39,7 +43,7 @@ inline void ink_verify_nvfp4_route_dot(
 
 template <uint Width>
 inline void ink_verify_nvfp4_route_tile(
-    device const float *input, device const uchar *codes, device const uchar *scales,
+    device const ink_nvfp4_activation_word *input, device const uchar *codes, device const uchar *scales,
     device const uint *order, device float *output,
     uint start, uint count, uint expert, uint out_col, uint lane) {
     const uint channel = expert * 2304 + out_col;
@@ -69,7 +73,7 @@ inline void ink_verify_nvfp4_route_tile(
 }
 
 kernel void ink_verify_nvfp4_group_dot(
-    device const float *input [[buffer(0)]],
+    device const ink_nvfp4_activation_word *input [[buffer(0)]],
     device const uchar *codes [[buffer(1)]],
     device const uchar *scales [[buffer(2)]],
     device const uint *order [[buffer(3)]],

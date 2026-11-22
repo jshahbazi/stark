@@ -139,7 +139,7 @@ fn screen_run_width(
 ) -> Result<Vec<Value>> {
     const CONTROL: Kernel = "ink_verify_nvfp4_group_dot";
     let candidate = session.runtime.verify_nvfp4_kernel;
-    if candidate == CONTROL {
+    if candidate == CONTROL || session.runtime.verify_half_act {
         return Ok(Vec::new());
     }
     session.restore(base)?;
@@ -166,6 +166,56 @@ fn screen_run_width(
     }
     session.runtime.verify_nvfp4_kernel = candidate;
     Ok(report)
+}
+
+fn screen_draft_shortlist(
+    session: &mut Session,
+    base: &Snapshot,
+    teacher: &[u32],
+) -> Result<Vec<Value>> {
+    if !session.runtime.draft_shortlist {
+        return Ok(Vec::new());
+    }
+    session.restore(base)?;
+    let mut timings = [const { [const { Vec::new() }; 2] }; MAX_VERIFY_ROWS - 1];
+    let mut changed = [0; MAX_VERIFY_ROWS - 1];
+    let mut accepted = [[0; MAX_VERIFY_ROWS - 1]; 2];
+    for index in 0..64 {
+        let anchor = teacher[index];
+        for depth in 1..MAX_VERIFY_ROWS {
+            let mut proposals = [Vec::new(), Vec::new()];
+            for arm in [index % 2, 1 - index % 2] {
+                session.runtime.draft_shortlist = arm == 1;
+                let start = Instant::now();
+                proposals[arm] = session.propose_verify(anchor, depth)?;
+                timings[depth - 1][arm].push(start.elapsed().as_secs_f64() * 1000.0);
+                if depth == MAX_VERIFY_ROWS - 1 {
+                    let matches = proposals[arm]
+                        .iter()
+                        .zip(&teacher[index + 1..])
+                        .take_while(|(proposal, target)| proposal == target)
+                        .count();
+                    for count in accepted[arm].iter_mut().take(matches) {
+                        *count += 1;
+                    }
+                }
+            }
+            changed[depth - 1] += usize::from(proposals[0] != proposals[1]);
+        }
+        session.ingest_many(&[anchor])?;
+    }
+    session.runtime.draft_shortlist = true;
+    Ok(timings
+        .into_iter()
+        .enumerate()
+        .map(|(i, [ordinary, shortlist])| {
+            json!({
+                "depth":i+1, "ordinary_ms":ordinary, "shortlist_ms":shortlist,
+                "different_proposal_rounds":changed[i],
+                "depth_three_teacher_matches":(i==MAX_VERIFY_ROWS-2).then_some(accepted),
+            })
+        })
+        .collect())
 }
 
 pub fn measure_verify_transaction(
@@ -225,6 +275,7 @@ pub fn measure_verify_transaction(
 
     let candidate_commands = screen_verifier(&mut session, &base, &teacher)?;
     let fixed_run_commands = screen_run_width(&mut session, &base, &teacher)?;
+    let shortlist_drafts = screen_draft_shortlist(&mut session, &base, &teacher)?;
     let mut rounds = Vec::new();
     for depth in 1..MAX_VERIFY_ROWS {
         session.restore(&base)?;
@@ -294,6 +345,6 @@ pub fn measure_verify_transaction(
         "prefix": prefix, "output_tokens": OUTPUTS, "additional_metal_bytes": verifier_bytes, "rejection_controls": controls,
         "crossing_controls": crossing_controls, "abandoned_transaction_reset": true, "cross_mode_snapshot_rejected": true,
         "serial_ms": serial_ms, "serial_decode_tok_s": 1000.0 * (OUTPUTS - 1) as f64 / serial_ms,
-        "rounds": rounds, "candidate_commands": candidate_commands, "fixed_run_commands": fixed_run_commands,
+        "rounds": rounds, "candidate_commands": candidate_commands, "fixed_run_commands": fixed_run_commands, "shortlist_drafts": shortlist_drafts,
     }))
 }

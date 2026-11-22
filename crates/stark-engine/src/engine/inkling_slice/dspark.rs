@@ -433,6 +433,15 @@ impl Dspark {
         self.mix(gpu, taps, self.layers.len(), &self.feature_norm, &self.feature);
     }
 
+    fn rank_geometry(runtime: &Runtime) -> (Kernel, usize, usize) {
+        if runtime.source_text_active && runtime.draft_shortlist {
+            let groups = VOCABULARY.div_ceil(128);
+            ("ink_draft_shortlist", groups, groups * 4)
+        } else {
+            ("ink_draft_rank", GROUPS, GROUPS)
+        }
+    }
+
     pub(super) fn propose(
         &self,
         runtime: &Runtime,
@@ -443,6 +452,7 @@ impl Dspark {
         unembedding: &Buffer,
     ) -> Result<u32> {
         let s = &self.scratch;
+        let (rank, dispatch_groups, winner_groups) = Self::rank_geometry(runtime);
         execute(runtime, |gpu| {
             self.encode_block(gpu, anchor, position, embedding, embed_norm);
             // Row 0 is the anchor. The first mask row supplies the one
@@ -459,13 +469,13 @@ impl Dspark {
             gpu.one("ink_draft_rnn_latent", &[&s.raw, &self.recurrent_bias, &s.latent], (), (RANK / 128, 1), 128);
             s.matmul(gpu, &s.norm, unembedding, WIDTH, PADDED_VOCABULARY);
             gpu.one(
-                "ink_draft_rank",
+                rank,
                 &[&s.raw, &self.folded, &self.folded_bias, &s.latent, &s.groups],
                 VOCABULARY as u32,
-                (GROUPS, 1),
+                (dispatch_groups, 1),
                 128,
             );
-            gpu.one("ink_draft_winner", &[&s.groups, &s.winner], GROUPS as u32, (1, 1), 256);
+            gpu.one("ink_draft_winner", &[&s.groups, &s.winner], winner_groups as u32, (1, 1), 256);
         })?;
         let winner = unsafe { s.winner.contents().as_ptr().cast::<u32>().read() };
         if winner as usize >= VOCABULARY {
@@ -543,6 +553,7 @@ impl Dspark {
         scores: Option<&Buffer>,
     ) -> Result<()> {
         let s = &self.scratch;
+        let (rank, dispatch_groups, winner_groups) = Self::rank_geometry(runtime);
         execute(runtime, |gpu| {
             self.encode_block(gpu, anchor, position, embedding, embed_norm);
             for row in 0..count {
@@ -580,9 +591,9 @@ impl Dspark {
                     (RANK / 128, 1),
                     128,
                 );
-                let (pipeline, output) = match scores {
-                    Some(scores) => ("ink_draft_export_scores", (scores, row * PADDED_VOCABULARY * 4)),
-                    None => ("ink_draft_rank", binding(&s.groups)),
+                let (pipeline, output, groups) = match scores {
+                    Some(scores) => ("ink_draft_export_scores", (scores, row * PADDED_VOCABULARY * 4), GROUPS),
+                    None => (rank, binding(&s.groups), dispatch_groups),
                 };
                 gpu.dispatch(
                     pipeline,
@@ -594,14 +605,14 @@ impl Dspark {
                         output,
                     ],
                     VOCABULARY as u32,
-                    (GROUPS, 1),
+                    (groups, 1),
                     128,
                 );
                 if scores.is_none() {
                     gpu.dispatch(
                         "ink_draft_winner",
                         &[binding(&s.groups), (&block.winners, row * size_of::<u32>())],
-                        GROUPS as u32,
+                        winner_groups as u32,
                         (1, 1),
                         256,
                     );
@@ -700,6 +711,20 @@ fn register(runtime: &mut Runtime) -> Result<()> {
         let function = library.new_function_with_name(name).ok_or(name)?;
         let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
         pipelines.push((name, pipeline));
+    }
+    if std::env::var_os("STARK_INKLING_EXPERIMENT_DRAFT_SHORTLIST").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        let library = runtime
+            .device
+            .new_library_with_source(
+                concat!("#define INK_DRAFT_SHORTLIST\n", include_str!("dspark.metal")),
+                Some(&options),
+            )
+            .map_err(|_| "Inkling draft shortlist library compilation failed")?;
+        let name = "ink_draft_shortlist";
+        let function = library.new_function_with_name(name).ok_or(name)?;
+        let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
+        pipelines.push((name, pipeline));
+        runtime.draft_shortlist = true;
     }
     runtime.pipelines.extend(pipelines);
     Ok(())

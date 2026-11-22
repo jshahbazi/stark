@@ -485,6 +485,12 @@ Match the NVFP4 short-verifier kernel width to the live expert run. Specializing
 
 Reusing Lily’s depth planner with measured Inkling round costs kept exact output. Four 4K pairs per sampling mode gave no sustained improvement over fixed depth three greedy and depth two sampled. Keep tuning inputs and costs tied to the artifact and target sampler. [Adaptive depth screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-20--replay-lilys-depth-planner-with-inkling-round-costs)
 
+Decoded FP4 times E4M3 activations fit exactly in binary16. On original Inkling the four-SIMD verifier widened those coefficients before its F32 dots and saved 0.47–0.67 ms per four-row command. Different threadgroup sizes and polling gave little or inconsistent benefit. [Exact ingress and launch screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-21--store-exact-verifier-nvfp4-ingress-in-binary16)
+
+For DSpark, shortlisting two base logits per SIMD group before the exact rank correction saved about 0.8 ms at three proposals. Fixed contiguous vocabulary caps removed most first-mask acceptances on both 4K inputs. Check proposal coverage before shrinking the draft vocabulary. [Draft shortlist screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-22--rerank-a-smaller-set-of-dspark-vocabulary-candidates)
+
+Reusing binary16 activation loads across two adjacent NVFP4 output columns kept exact Inkling F32 readouts but added 1.22–1.58 ms when applied to both expert projections in the four-row verifier. [Adjacent column screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-23--share-nvfp4-ingress-across-adjacent-output-columns)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates

@@ -564,7 +564,11 @@ impl GroupedExperts {
                 PrefillPhase::Nvfp4DownDot
             });
             gpu.one(
-                gpu.runtime.verify_nvfp4_kernel,
+                if gpu.runtime.verify_half_act {
+                    "ink_verify_nvfp4_half_dot"
+                } else {
+                    gpu.runtime.verify_nvfp4_kernel
+                },
                 &[inner, &bank.codes, &bank.blocks, routing.indices, routing.runs, &self.projected],
                 width as u32,
                 (WIDTH / 4, live_run_limit(rows, run_slots(rows))),
@@ -648,8 +652,13 @@ impl GroupedExperts {
         up_dot_tap: Option<&Buffer>,
     ) {
         let out = &self.output;
+        let activation = if gpu.runtime.verify_nvfp4_matvec && gpu.runtime.verify_half_act {
+            "ink_verify_half_activation"
+        } else {
+            "ink_nvfp4_activation"
+        };
         gpu.phase(PrefillPhase::Nvfp4Quant);
-        gpu.one("ink_nvfp4_activation", &[input, &self.up_inner, &self.up_max], WIDTH as u32, (rows, 1), 256);
+        gpu.one(activation, &[input, &self.up_inner, &self.up_max], WIDTH as u32, (rows, 1), 256);
         self.encode_dot(gpu, up, &self.up_inner, &routing, rows, WIDTH, true);
         if let Some(tap) = up_dot_tap {
             let words = rows * TOP * WIDTH;
@@ -668,13 +677,7 @@ impl GroupedExperts {
             128,
         );
         gpu.phase(PrefillPhase::Nvfp4Quant);
-        gpu.one(
-            "ink_nvfp4_activation",
-            &[&out.middle, &self.down_inner, &self.down_max],
-            MID as u32,
-            (rows * TOP, 1),
-            256,
-        );
+        gpu.one(activation, &[&out.middle, &self.down_inner, &self.down_max], MID as u32, (rows * TOP, 1), 256);
         self.encode_dot(gpu, down, &self.down_inner, &routing, rows, MID, false);
         gpu.phase(PrefillPhase::Nvfp4Epilogue);
         gpu.one(

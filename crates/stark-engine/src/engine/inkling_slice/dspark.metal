@@ -333,6 +333,45 @@ kernel void ink_draft_rank(
     }
 }
 
+#ifdef INK_DRAFT_SHORTLIST
+// Each SIMD group selects two candidates using the base head and reranks
+// them with the same BF16 recurrence. The complete target still verifies
+// every proposal and applies its usual sampling policy.
+kernel void ink_draft_shortlist(
+    device const float *base [[buffer(0)]], device const bfloat *folded [[buffer(1)]],
+    device const bfloat *bias [[buffer(2)]], device const bfloat *latent [[buffer(3)]],
+    device uint2 *winners [[buffer(4)]], constant uint &vocab [[buffer(5)]],
+    uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    const uint token = group * 128 + simd * 32 + lane;
+    const float value = token < vocab ? float(bfloat(base[token])) : -INFINITY;
+    const bool valid = token < vocab && !isnan(value);
+    const float first_max = simd_max(valid ? value : -INFINITY);
+    const uint first = simd_min(valid && value == first_max ? token : UINT_MAX);
+    const bool remaining = valid && token != first;
+    const float second_max = simd_max(remaining ? value : -INFINITY);
+    const uint second = simd_min(remaining && value == second_max ? token : UINT_MAX);
+
+    float best = -INFINITY;
+    uint winner = UINT_MAX;
+    if (first < vocab) {
+        const float score = draft_rank_score(base, folded, bias, latent, first, lane);
+        if (isfinite(score)) {
+            best = score;
+            winner = first;
+        }
+    }
+    if (second < vocab) {
+        const float score = draft_rank_score(base, folded, bias, latent, second, lane);
+        if (isfinite(score) && draft_better(score, second, best, winner)) {
+            best = score;
+            winner = second;
+        }
+    }
+    if (lane == 0) winners[group * 4 + simd] = uint2(as_type<uint>(best), winner);
+}
+#endif
+
 kernel void ink_draft_winner(
     device const uint2 *groups [[buffer(0)]], device uint *out [[buffer(1)]],
     constant uint &count [[buffer(2)]], uint tid [[thread_index_in_threadgroup]]) {
