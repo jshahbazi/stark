@@ -595,6 +595,10 @@ Charge Metal certificate preparation to every verified row and host sampling to 
 
 Score draft calibration on held-out trajectories at the same verifier width. Scaling the shipped Inkling Markov correction looked promising on one training fixture and used 388 held-out verification rounds against 386 for the stock draft. [DSpark Markov sweep](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-77--check-compatible-draft-availability-and-replay-proposal-calibration)
 
+Measure the exact critical-path ceiling before implementing a greedy shortcut. Inkling's four-row QKV trace puts embedding and vocabulary readout at 2.14 ms. Returning the entire stage to the earlier paired greedy worker would model about 77.9 tok/s. Two-column NVFP4 workgroups also add 0.096–0.146 ms wall across both stock 4K prefixes. [One-worker repeat and verifier screen](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-80--screen-smaller-nvfp4-workgroups)
+
+Price sampled proposal improvements on nonoverlapping accepted prefixes from live seeded trajectories. Inkling's privileged target-mode reference reduced 530 rounds to 461 and modeled 74 tok/s with the earlier measured per-prompt costs. The alternate seeds gave a similar estimate. The fitted Markov bias tied all four stock held-out round counts, so archive the fit. [Sampled proposal headroom](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-81--replay-a-privileged-sampled-proposal-reference)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates
