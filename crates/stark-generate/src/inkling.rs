@@ -187,6 +187,20 @@ impl InklingBackend {
                 .is_ok()
             && target.set_source_verifier(true).is_ok();
         if source_verifier {
+            if std::env::var_os("STARK_INKLING_EXPERIMENT_DRAFT_INT8").as_deref() == Some(std::ffi::OsStr::new("1"))
+                && admit_request_memory(
+                    Some(
+                        fixed
+                            + prefill_reserve
+                            + Session::SOURCE_VERIFIER_RESERVE_BYTES
+                            + Session::DSPARK_INT8_HEAD_BYTES,
+                    ),
+                    available,
+                )
+                .is_ok()
+            {
+                target.prepare_dspark_int8_head().map_err(|_| "inkling_draft_load_failed")?;
+            }
             target.set_source_verifier(false).map_err(|_| "inkling_prefill_load_failed")?;
         }
         Ok(Self {
@@ -360,7 +374,9 @@ impl InklingBackend {
     ) -> Option<usize> {
         let target = Session::context_memory_bytes(context, retain)?;
         if self.target.has_dspark() {
-            target.checked_add(Session::dspark_memory_bytes(context, retain)?)
+            target
+                .checked_add(Session::dspark_memory_bytes(context, retain)?)?
+                .checked_add(self.target.dspark_int8_head_resident_bytes())
         } else {
             Some(target)
         }

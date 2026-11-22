@@ -443,6 +443,9 @@ pub fn measure_verify_transaction(
     let before_verifier = session.runtime.device.current_allocated_size();
     session.set_source_verifier(true)?;
     let verifier_bytes = session.runtime.device.current_allocated_size().saturating_sub(before_verifier);
+    if std::env::var_os("STARK_INKLING_EXPERIMENT_DRAFT_INT8").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        session.prepare_dspark_int8_head()?;
+    }
     session.set_dspark_enabled(true)?;
     let cap_crossing = if prefix == 4096 {
         session.ingest_many(&prompt[..2048])?;
@@ -573,10 +576,15 @@ pub fn measure_verify_transaction(
         return Err("Inkling source draft snapshot was accepted in legacy mode");
     }
 
-    Ok(json!({
+    let mut report = json!({
         "prefix": prefix, "output_tokens": OUTPUTS, "additional_metal_bytes": verifier_bytes, "rejection_controls": controls,
         "crossing_controls": crossing_controls, "abandoned_transaction_reset": true, "cross_mode_snapshot_rejected": true,
         "serial_ms": serial_ms, "serial_decode_tok_s": 1000.0 * (OUTPUTS - 1) as f64 / serial_ms,
         "rounds": rounds, "candidate_commands": candidate_commands, "fixed_run_commands": fixed_run_commands, "shortlist_drafts": shortlist_drafts, "compact_runs": compact_runs, "fused_finish": fused_finish, "fused_attention": fused_attention,"short_router":short_router, "shared_global": shared_global, "overlapped_rounds": overlapped,
-    }))
+    });
+    let draft_int8_head_bytes = session.dspark_int8_head_resident_bytes();
+    if draft_int8_head_bytes != 0 {
+        report["draft_int8_head_bytes"] = json!(draft_int8_head_bytes);
+    }
+    Ok(report)
 }

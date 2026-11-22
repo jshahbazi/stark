@@ -30,6 +30,71 @@ fn private(
     device.new_buffer(bytes, MTLResourceOptions::STORAGE_MODE_PRIVATE).ok_or("Inkling draft allocation failed")
 }
 
+struct Int8Head {
+    weight: Buffer,
+    scales: Buffer,
+}
+
+impl Int8Head {
+    const BYTES: usize = PADDED_VOCABULARY * (WIDTH + size_of::<f32>());
+    const SHAPE: [u32; 2] = [WIDTH as u32, PADDED_VOCABULARY as u32];
+
+    fn load(
+        runtime: &mut Runtime,
+        unembedding: &Buffer,
+    ) -> Result<Self> {
+        let options = MTLCompileOptions::new();
+        options.set_math_mode(MTLMathMode::Safe);
+        options.set_language_version(MTLLanguageVersion::Version4_0);
+        let library = runtime
+            .device
+            .new_library_with_source(include_str!("draft_int8_head.metal"), Some(&options))
+            .map_err(|_| "Inkling INT8 draft head Metal library compilation failed")?;
+        for name in ["ink_draft_pack_int8_head", "ink_draft_int8_head", "ink_draft_scale_int8_head"] {
+            let function = library.new_function_with_name(name).ok_or(name)?;
+            let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
+            runtime.pipelines.insert(name, pipeline);
+        }
+        let weight = private(&runtime.device, PADDED_VOCABULARY * WIDTH)?;
+        let scales = private(&runtime.device, PADDED_VOCABULARY * size_of::<f32>())?;
+        execute(runtime, |gpu| {
+            gpu.one(
+                "ink_draft_pack_int8_head",
+                &[unembedding, &weight, &scales],
+                Self::SHAPE,
+                (PADDED_VOCABULARY, 1),
+                128,
+            );
+        })?;
+        Ok(Self {
+            weight,
+            scales,
+        })
+    }
+
+    fn encode(
+        &self,
+        gpu: &mut Stream<'_>,
+        scratch: &Scratch,
+        count: usize,
+    ) {
+        gpu.one(
+            "ink_draft_int8_head",
+            &[&scratch.norm, &self.weight, &scratch.raw],
+            Self::SHAPE,
+            (PADDED_VOCABULARY / 32, 1),
+            32,
+        );
+        gpu.one(
+            "ink_draft_scale_int8_head",
+            &[&scratch.raw, &self.scales],
+            [PADDED_VOCABULARY as u32, count as u32],
+            (PADDED_VOCABULARY.div_ceil(128), count),
+            128,
+        );
+    }
+}
+
 struct DraftLayer {
     input_norm: Buffer,
     ff_norm: Buffer,
@@ -221,10 +286,28 @@ pub(super) struct Dspark {
     recurrent_bias: Buffer,
     folded: Buffer,
     folded_bias: Buffer,
+    int8_head: Option<Int8Head>,
     scratch: Scratch,
 }
 
 impl Dspark {
+    pub(super) const INT8_HEAD_BYTES: usize = Int8Head::BYTES;
+
+    pub(super) fn prepare_int8_head(
+        &mut self,
+        runtime: &mut Runtime,
+        unembedding: &Buffer,
+    ) -> Result<()> {
+        if self.int8_head.is_none() {
+            self.int8_head = Some(Int8Head::load(runtime, unembedding)?);
+        }
+        Ok(())
+    }
+
+    pub(super) fn int8_head_resident_bytes(&self) -> usize {
+        self.int8_head.as_ref().map_or(0, |_| Self::INT8_HEAD_BYTES)
+    }
+
     pub(super) fn load(
         runtime: &mut Runtime,
         checkpoint: File,
@@ -309,6 +392,7 @@ impl Dspark {
             recurrent_bias: tensor("markov_head.rnn_proj.bias", &[3 * RANK])?,
             folded,
             folded_bias,
+            int8_head: None,
             scratch: Scratch::new(device)?,
         })
     }
@@ -609,7 +693,11 @@ impl Dspark {
                 }
                 // The source's padded vocabulary tile projects all live mask rows
                 // together. A separate, small recurrent output preserves those scores.
-                s.matmul(gpu, &s.norm, unembedding, WIDTH, PADDED_VOCABULARY);
+                if let Some(head) = self.int8_head.as_ref().filter(|_| scores.is_none()) {
+                    head.encode(gpu, s, count);
+                } else {
+                    s.matmul(gpu, &s.norm, unembedding, WIDTH, PADDED_VOCABULARY);
+                }
                 for row in 0..count {
                     gpu.dispatch(
                         "ink_draft_markov_input",

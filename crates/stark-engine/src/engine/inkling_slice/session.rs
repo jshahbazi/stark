@@ -407,6 +407,23 @@ impl Session {
         Ok(())
     }
 
+    pub const DSPARK_INT8_HEAD_BYTES: usize = Dspark::INT8_HEAD_BYTES;
+
+    /// Reserve the optional immutable proposal projection at model admission.
+    pub fn prepare_dspark_int8_head(&mut self) -> Result<()> {
+        if self.position != 0 || !self.source_verifier {
+            return Err("Inkling INT8 draft head requires source verification before prefill");
+        }
+        self.dspark
+            .as_mut()
+            .ok_or("Inkling DSpark weights are unavailable")?
+            .prepare_int8_head(&mut self.runtime, &self.unembedding)
+    }
+
+    pub fn dspark_int8_head_resident_bytes(&self) -> usize {
+        self.dspark.as_ref().map_or(0, Dspark::int8_head_resident_bytes)
+    }
+
     pub fn has_dspark(&self) -> bool {
         self.dspark.is_some()
     }

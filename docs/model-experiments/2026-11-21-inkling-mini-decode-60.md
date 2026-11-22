@@ -684,6 +684,74 @@ Remove the staging arrays and per-tile threadgroup barriers from attempt 42. Kee
 
 Six rotated comparisons per width and stock input preserved all checked live F32 logits. The shadow output stays in scratch. At three rows, direct register unpacking took more than eight times the vector control before the certificate or any exact replay. Retire this layout. Both the staged and direct-register screens leave the existing affine vector worker as the strongest measured path. The queued worker's 52.87 tok/s sampled repeat remains the end-to-end evidence for the current branch.
 
+## 20261121-INKDECODE-45 · Replay exact seeded draft branches
+
+Replay 192 anchors in each of four original-checkpoint stock 4K trajectories. Confirm the first complete F32 vocabulary row against the pinned oracle and produce the teacher continuation with the source-precision serial target and its original sampler draws. At each anchor, run the native one-, two-, and three-mask proposer. Also inspect the full first-mask score row for the two highest-ranked tokens distinct from the production two-mask choice. A fork receives credit only for the matching root and any verified primary child. Each step emits one fresh target draw and consumes the same seeded sequence.
+
+Charge equal per-round costs to chains and forks at the same verifier width. Use representative costs of 23.5, 32.0, 36.0, and 40.8 ms at depths zero through three. Also test a favorable schedule of 22.8, 30.0, 34.5, and 38.5 ms. Both schedules omit tree bookkeeping and assume it is possible to verify the added rows with the existing width costs. These are replay estimates.
+
+| Proposal policy | Representative median, tok/s | Favorable median, tok/s |
+| --- | ---: | ---: |
+| Best fixed chain | 56.17 | 58.70 |
+| Two roots | 48.59 | 50.70 |
+| Three roots | 45.13 | 47.82 |
+| Two roots and one primary child | 52.61 | 55.76 |
+| Perfect alternate root and one primary child | 59.18 | 62.71 |
+
+With real alternate roots and a primary child, even an extra branch row at zero cost gives 59.52 tok/s at representative costs. A 1 ms added row gives 57.93, and a 2 ms row gives 56.43. A hindsight choice among fixed chains reaches 71.65 tok/s. Giving hindsight the measured alternate roots adds 1.85 tok/s. Retire this ranked fork before building branched cache and rollback support. The results favor reducing verifier cost or improving conditional acceptance at the existing width.
+
+## 20261121-INKDECODE-46 · Quantize the multistep DSpark vocabulary head
+
+Pack a separate copy of the complete vocabulary matrix with one symmetric scale per token row. Use the highest absolute BF16 coefficient divided by 127 for INT8 or seven for signed packed INT4, with scale one for zero padding. Feed the mixed Metal TensorOps matmul the same BF16 draft activations and accumulate in F32. Scale the live rows before Markov reranking. The projection shares the draft's normalized inputs and scratch. It uses the original BF16 head for one proposal and retains the exact target projection and sampler for every verification row.
+
+Replay the four stock 4K trajectories and seeded teacher continuations from attempt 45. Rotate the BF16, INT8 and INT4 arms at each of 192 anchors per input and depth. Time the whole ordinary proposal, including Metal command submission and completion, after eight warm-up anchors. Check each proposal vector against the BF16 control and count the length of its matching prefix against the exact target continuation. Reuse the representative verifier costs from attempt 45, adjusted by each variant's observed draft-time difference, to estimate the effect of changed acceptance.
+
+| Depth and metric | BF16 | INT8 | INT4 |
+| --- | ---: | ---: | ---: |
+| Two proposals, wall median range | 4.65–5.15 ms | 3.61–3.96 ms | 3.13–3.35 ms |
+| Two proposals, matching complete proposal vectors | 768 | 758 | 553 |
+| Two proposals, accepted teacher tokens | 841 | 840 | 818 |
+| Two proposals, modeled median tok/s | 55.93 | 57.21 | 56.92 |
+| Three proposals, wall median range | 4.73–5.22 ms | 3.69–4.03 ms | 3.20–3.43 ms |
+| Three proposals, matching complete proposal vectors | 768 | 755 | 387 |
+| Three proposals, accepted teacher tokens | 1,028 | 1,027 | 996 |
+| Three proposals, modeled median tok/s | 55.37 | 56.80 | 54.93 |
+
+The packed INT4 arm saved an extra 0.45–0.61 ms per proposal command, with lower modeled throughput than INT8 at both depths. Retire the per-row INT4 layout. Retain the INT8 candidate for the paired worker gate. It adds 461,747,712 bytes (440.36 MiB) of immutable weights and scales to the existing DSpark memory admission. Prefix snapshots continue to hold the same mutable state.
+
+### Paired cold 4K worker results
+
+Compare the queued BF16 control with the queued INT8 proposal head in the same worker build. Both arms use the affine NVFP4 verifier and full-vocabulary shortlist. Vision and DSpark stay resident. Each of four alternating pairs per mode uses 4,096 cold input tokens, context 4,352, zero reuse and exactly 256 sampled and emitted tokens. The seeded sampled requests use two proposals with temperature and top-p both set to one. Greedy uses three proposals.
+
+| Mode | BF16 control median | INT8 median | INT8 range | Median paired change | Faster pairs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Seeded sampled | 50.82 tok/s | **53.40 tok/s** | 52.12–54.55 | +6.04% | 4/4 |
+| Greedy | 62.89 tok/s | **61.86 tok/s** | 54.43–67.97 | +2.59% | 3/4 |
+
+All 16 outputs match the pinned worker hashes. Sampled rounds total 531 with BF16 and 530 with INT8. Greedy rounds total 397 and 398. The two workers account for 99.86% of observed Metal counter increments across 81 intervals. Thermal samples report nominal or fair, with zero additional pageouts and swapouts. Median prefill rates were 898.61 and 914.21 tok/s in the sampled pairs, and 940.47 and 929.15 in the greedy pairs. These paired runs load two workers and enable the experimental verifier stack.
+
+An initial worker build screened the same math before the admission revision. Sampled moved from 47.56 to 52.12 tok/s and gained 9.93% at the paired median. Greedy moved from 60.82 to 55.93 tok/s with a −0.95% median paired change and two faster pairs. That build charged the INT8 bank at per-request admission after allocating it at startup. The repeat uses the revised startup gate and leaves the teacher score export on BF16. Greedy timing varied by session. The sampled repeat still needs 3.40–4.79 ms less per round on the four requests to reach 60 tok/s at their observed round counts.
+
+### Short and stock 4K parity
+
+With flags unset, the connected short and 4K slice receipts matched the qualified controls. The four-token full-target run had zero unequal pinned F32 values. Four stock 4K fixtures matched all 16 checked F32 vectors and 768 BF16 visit-residual blocks, with four exact snapshot replays.
+
+With the INT8 head enabled, the native verifier matched its serial continuation and complete committed state through 96 outputs at each of proposal depths one, two and three, on the short input and two stock 4K fixtures. All 45 rejected-suffix and capacity-wrap controls passed, along with abandoned-command reset and cross-mode snapshot rejection. Each diagnostic run recorded 461,747,712 bytes of INT8 head and scale storage.
+
+With flags unset, the same build completed four cold 4K requests per mode with the exact one-row router and matching output hashes. Useful decode medians were **33.89 tok/s greedy** and **32.20 tok/s seeded sampled**. Prefill medians were **1,048.15 tok/s greedy** and **1,050.30 tok/s seeded sampled**.
+
+The INT8 worker reused a 2,048-token prefix across source proposal depths with exact continuation. It cleared the prefix on cancellation and when switching between source drafting and ordinary generation. The applicable short and long-context requests still reject three drafts, and an early stop on an accepted proposal preserved the exact output and sampled-token count. The first lifecycle harness was rejected before generation because its private image-check directory lacked owner-only permissions. The corrected harness completed all checks.
+
+Keep the INT8 head opt-in under `STARK_INKLING_EXPERIMENT_DRAFT_INT8=1` with the admitted source verifier. Charge the optional bank at startup and its actual resident bytes during request admission. The idle worker's Metal allocation increased by 461,750,272 bytes, within 2,560 bytes of the expected bank size. The BF16 proposal head remains the default and supplies the existing raw teacher-score diagnostic.
+
+## 20261121-INKDECODE-47 · Check exact integer NVFP4 block arithmetic
+
+The unsigned E4M3 scales are constant within each source K16 activation and weight block. Twice each decoded FP4 coefficient fits in signed INT8. A K16 dot of the doubled coefficients fits in signed INT32. Combine the activation and weight scales, divide by four and use the integer dot in the original per-lane F32 FMA recurrence. Preserve block and lane reduction order.
+
+The local Metal 4 compiler accepts a BF16 × INT8 → F32 vocabulary projection and a separate typed INT8 × INT8 → INT32 K16 product. A host calculation matched 3,806,444 F32 block FMA controls across 59 signed-code patterns, all 127 finite unsigned scale codes for each operand and four prior accumulators. The direct integer screen used explicit Metal `int8_t` after the equivalent `char` spelling failed template dispatch.
+
+Leave the integer expert path open. A useful GPU screen must include packing or repacking, the scale recurrence and real route occupancy before considering a new represented weight bank. This attempt establishes compiler and scalar arithmetic feasibility only.
+
 ## Evidence identities
 
 Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1`. Original DSpark SHA-256 `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2`. The current run uses the pinned Ollama capture and host documented in the [default-router record](2026-11-21-inkling-mini-decode-default.md).
@@ -1048,3 +1116,34 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | NVFP4 register tensor budget scored-source.patch | `a9f4f02772551339345ab86ce1243590bf32997f647c0e59cf73fbec25878d4d` |
 | NVFP4 register tensor budget stock-s4096-00.json | `625317a00dd960a773c2d199c2c5a270b72cad91186442e7d7c111dc3b125c16` |
 | NVFP4 register tensor budget stock-g4096-01.json | `fce4a352ffa3b6959c2fe9916c7aec588378955a1913d9a814e9038352aa2ec4` |
+| Ranked branch replay inkling_slice | `2e6f29d2767a8e362e5056c13aa411afb031af23abd436a6397b46ee476af801` |
+| Ranked branch replay scored-source.patch | `385dc0c0bde01690f7a49fd30b5d4812bd2b8f21ce1a82d2233b0719ebc80731` |
+| Ranked branch replay run.py | `bd7ba11f10e4237263716656a523e6a27ebefac7cce55bbb7bb571b6a5a6b006` |
+| Ranked branch replay result.json | `c2253af4b65ebdf9e0da55ced506bc0a083e2a607278f65a2e141ebcc64cbbc8` |
+| Quantized draft replay inkling_slice | `5fd46685d37336f0b2e85eed2e4bd6b05b2d1c396dab570b4130ebd84e0cf60c` |
+| Quantized draft replay scored-source.patch | `7ed11662dc64e081cad2005ea1daa6876f45c2a2b879a33b61de670bcbbc5a06` |
+| Quantized draft replay run.py | `db424caa265a15f61094c6db453002fe8a4cade7a5ba587f73413f2359e88afd` |
+| Quantized draft replay result.json | `2c140b8edd79b811825bcafac036663f82581fc611985037575d50d9709e0368` |
+| INT8 initial worker stark-generate | `5758fc0430b8733564c61027bbcabcf6100b1bf1aa8dc6a9a76005db388de03e` |
+| INT8 initial worker source | `1b581d149e18f1be19e43a86713bf166e138fc98c7572ca16b3a1b52d9a5009c` |
+| INT8 initial worker pairs | `0a719402158f4edccf234973ec2ca319c6acf8ecc226022911fa16dc59c22997` |
+| INT8 admitted worker stark-generate | `ee05d63c6aa2ed1ae40e1a8f6e7d7e1120db2cbce5ba85401659503bc2593079` |
+| INT8 admitted diagnostic inkling_slice | `3e6e2c4192af1d6ab52b2ba9f3bfc90043d77ae8370e0f7a41ad9caf3ff66082` |
+| INT8 admitted worker source | `60ff5c82979a4e58eecf7bb851c071163c57b24becb4037e11deeb494c9b5ec7` |
+| INT8 admitted worker pair harness | `7158ac77cb1b818e79c41a3a67b9e178f73da867758e48188749e1873d3589ce` |
+| INT8 admitted worker pairs | `287d747833fd5e5470aea84cb422856eb552f8360a52b121662413e5dc09d1f5` |
+| INT8 admitted worker host | `269c612d444f172dfae166f2b7c2493a5d81b08f9a4610674ce71ad884b8142a` |
+| INT8 branch flags-unset parity aggregate | `b8a5b540c43b3942a458316f8d3f2943ed64beadfbb40fe803a93111aac3d011` |
+| INT8 branch flags-unset parity checker | `1b7ca3b5754cee623336984f3d3a1c761cdf485a2e0e549a1fe52a211da8e9cf` |
+| Exact integer K16 Metal source | `4bb5affeee76c633a60bc7a716c6aed17b6937ea16ac445d31435ef9975d6668` |
+| Exact integer K16 Metal object | `a5351d48ebcd079be0b7de323170f912984d1d4cf6d224dc37701e16824a220d` |
+| Exact integer K16 scalar script | `08c28a408e1b3cbd11fc95ad75c23d88f276d4ac27c66eb49b8629ca62b341b7` |
+| Exact integer K16 scalar receipt | `cd68a8601d29eb49a3b2c219bf290b102c730583e45275d5b880052d99825cc3` |
+| INT8 native parity short | `6d808c16b9833e1c402eb93e9e7eebbc66d4ea0242704c6d71c11b275d4b8a78` |
+| INT8 native parity stock-s4096-00 | `9c3a151ff93d85479417260857f7b058d280a36ca1b0a9481287a8701db42836` |
+| INT8 native parity stock-g4096-01 | `0d0886f26f4173a6a6d0f80c3725a13886432374c27b988651098d35baf7d0a1` |
+| INT8 branch flags-unset worker windows | `3bd9387036acd282faac61005d5d817349e1163f1117aa381f96c5c9b052e0aa` |
+| INT8 admitted lifecycle harness | `2f99879ab363e99073cea504a3af0b087b6b8a4e72ce1cc3b7347a8662f9d3ef` |
+| INT8 admitted lifecycle receipt | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |
+| INT8 admitted idle memory harness | `7f811388682f744221ba02a8b133b4185ef62a26bfd7e62a908169edae55eefa` |
+| INT8 admitted idle memory receipt | `7be7d15dc9168144bce33ff38f6dfa224d16d89bb7550715346515db9b92109c` |
