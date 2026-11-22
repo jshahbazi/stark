@@ -1026,6 +1026,55 @@ Use six rotated plain comparisons and three timestamped comparisons at widths th
 
 All 189 complete F32 vectors matched in each arm. The candidate removed **96 dispatches** on both three-row stock fixtures and saved **0.10–0.12 ms** in combined attention and expert input time. The paired wall saving was **0.17 ms** at three rows and **0.10–0.12 ms** at four rows. The source kernels use the same weights and reductions. Archive the direct packed output path at the native gate given the measured wall budget.
 
+## 20261122-INKDECODE-63 · Submit the accepted suffix commit with the next draft
+
+The current worker completes a separate Metal commit after sampling a rejected proposal or reaching the end of the verified block. Test putting the rejected-suffix restoration and accepted draft-tap updates at the front of the next proposal command. Keep the target command on the same queue and preserve the existing encoding overlap. The logical target position advances by the accepted rows and errors drain before reset.
+
+Use two successive transactions on the short and both stock 4K states, including local ring boundary crossing. Rotate standalone commits and commit-with-next-proposal at both active depths and all accepted prefix lengths. Compare the next proposal IDs, all provisional F32 logits, and final committed target and DSpark state. Time from the previous commit through the next target completion. Worker adoption requires a repeatable gain at this boundary and exact request-lifecycle behavior.
+
+The rotated runs passed **140 paired controls** across five states. The combined schedule saved **0.08–0.22 ms** at two proposals and **0.19–0.31 ms** at three proposals on the two steady 4K fixtures. At two proposals across the local ring boundary it saved **0.16–0.21 ms**. Most of the standalone commit interval moved into the combined draft and target boundary. Archive the change at the native gate given its small end-to-end ceiling and the added request-lifecycle states.
+
+## 20261122-INKDECODE-64 · Replay a context-dependent proposal vocabulary
+
+Screen a smaller DSpark vocabulary before implementing an indexed Metal projection. Compare the full INT8 proposer with 2,048-, 8,192- and 16,384-entry candidate sets drawn from the target logits that produced the anchor, recent prompt and emitted IDs, and the preceding 16 target top-128 lists. Compare those sets with equally sized lists from the anchor distribution alone. Neither candidate sees target logits from after the anchor.
+
+Replay 192 anchors for each of four pinned 4K trajectories. Score both masks from the INT8 draft head, conditioning the second mask on the actual first target continuation for the accepted-prefix calculation. Compare the production INT8 shortlist and unrestricted INT8 score export separately. Keep token vectors and ranks in memory and report only aggregate coverage, matched prefixes, and modeled sequential-round rates. At the current 34 ms round budget, advance only if there is a robust acceptance and throughput case with a 0.7–1.0 ms projection discount.
+
+The pinned 4K seed matched on all four inputs. The INT8 export agreed with the native proposal on 712 of 768 anchors when comparing the first mask and each second mask reached by the native proposal. The full-rank export and the native SIMD shortlist therefore have separate controls.
+
+| Proposal policy | First-mask matches | Two-mask prefix matches | Median modeled tok/s |
+| --- | ---: | ---: | ---: |
+| Native INT8 shortlist, 34 ms per round | 532 | 308 | 59.05 |
+| Unrestricted INT8 export, 34 ms per round | 527 | 310 | 58.98 |
+| Context, 2,048 IDs, 33 ms per round | 510 | 289 | 57.81 |
+| Context, 8,192 IDs, 33 ms per round | 518 | 295 | 58.92 |
+| Context, 16,384 IDs, 33 ms per round | 523 | 301 | 59.86 |
+| Anchor distribution, 16,384 IDs, 33 ms per round | 506 | 279 | 57.88 |
+
+The 16,384-ID context set contained 761 of the 768 first-mask teacher tokens and 747 second-mask tokens. It beat the native model in three of four trajectories with the 0.7 ms discount and in all four with the 1.0 ms discount. These rates model fixed-depth rounds on the four pinned trajectories. Use them to select a projection test.
+
+## 20261122-INKDECODE-65 · Measure the compact INT8 proposal projection on real candidate IDs
+
+Use the saved normalized draft rows at eight causal anchors per trajectory. Compare the full INT8 head against gathering the context candidates' original packed INT8 rows, applying the same M8 × N32 TensorOps kernel, and scaling by their original row scales. Include the gather each time. Check both live F32 score rows against the matching entries of the full head. Time the projection and gather on the same loaded state in rotated order. The acceptance replay prices a separate full round and omits candidate construction and ranking costs.
+
+The compact head matched **1,703,936 F32 scores** across all four trajectories and three capacities. Each anchor used six rotations of the full head, gather plus projection, and projection with the compact rows already resident.
+
+| Candidate rows | Paired wall saving, gather included | Paired wall saving, rows already gathered |
+| --- | ---: | ---: |
+| 2,048 | 0.99–1.01 ms | 1.01–1.03 ms |
+| 8,192 | 0.97–1.00 ms | 1.01–1.04 ms |
+| 16,384 | **0.86–0.88 ms** | **0.98–1.00 ms** |
+
+At 16,384 rows, the full head's wall median was 1.23–1.25 ms and gather plus projection took 0.36–0.37 ms. The compact path reads 37.75 MB of INT8 weights from the full bank and projects from that gathered buffer. The unembedding and rank logic of the exact target stay outside this diagnostic.
+
+## 20261122-INKDECODE-66 · Measure host construction of the causal vocabulary set
+
+Use the pinned initial target rows to compare partial sorting with histogram selection for the 16,384-ID policy. Preserve the current top 8,192, append the fixed ordered history, and fill from the highest remaining target scores. Time extraction of the current top-128 summary as part of the operation. Compare each final membership set and the ordered history summary with an exhaustive total-order control. Include only aggregate timing and match counts. This measures host work given the causal history, independently of proposal ranking and the Metal command.
+
+Both methods matched the exhaustive result on all 16 pinned target rows. Across 768 observations per arm, partial sorting took **0.389 ms** at the median with a 0.375–0.411 ms P10–P90 range. Histogram selection took **0.465 ms** with a 0.446–0.498 ms range. The fixed history supplied the preceding lists in memory.
+
+Charge the measured 0.389 ms host calculation and credit each fixture's measured 0.86–0.88 ms projection saving. The 16,384-ID replay then moves from **59.05 to 58.93 tok/s** at the median, with three of four modeled wins. The estimate still omits candidate ranking and updates for other emitted rows. Even free candidate construction and ranking give a modeled median of **59.62 tok/s** at the measured projection saving. Defer the CPU-built candidate and archive the component probes.
+
 ## Evidence identities
 
 Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1`. Original DSpark SHA-256 `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2`. The current run uses the pinned Ollama capture and host documented in the [default-router record](2026-11-21-inkling-mini-decode-default.md).
@@ -1595,3 +1644,27 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Direct controller rank output short screen | `8faab62e1c7b4abf4f66091dba2bf7fcdb4e895d8ce81a82689b73f59c91e5c6` |
 | Direct controller rank output stock-s4096-00 screen | `2aba509d96a4b860196999241dcfb88920dd7c9836de65bed63ab8a25c9f7262` |
 | Direct controller rank output stock-g4096-01 screen | `7527a302993a5d58507b1a42931457eed0705c3492b7e7715c5cd2d237fc6624` |
+| Commit with next draft native binary | `bfef563a8213fe5464b850c149b98b55ae55c5e9230f758fc49c6e95c54f5800` |
+| Commit with next draft source patch | `13b37db88ca9126a39537fcd9653dca41b4640588adde2fff049424b41af4d9f` |
+| Commit with next draft native harness | `a139c7c7a843d5e703709347b8f54756ac6226dbb36303151b889334978bea56` |
+| Commit with next draft short screen | `d5f8fbd592520b37130ba70105f9a179a73be5e68f9333250080a7ebd983ec80` |
+| Commit with next draft stock-s4096-00 screen | `92714882df3145ca6d1e75bce80d86e618dde9e06dc0e2b063a1257456cf4fe7` |
+| Commit with next draft stock-g4096-01 screen | `1c1d7b31c6ee56713de4e53d24a697af62f0b96dcaa2ccda58e4c19cae91e781` |
+| Causal vocabulary replay native binary | `d908d76195bda1b472ebe4ebaff8690bb90a4d7ceb3e3353791f3c3e4dcc9b43` |
+| Causal vocabulary replay source patch | `251d35e430221f6d8505cc23a371a7a93b2190ad425ed5a3933f50653d2a78ef` |
+| Causal vocabulary replay harness | `f824a4b6c172a2d759fa9420c6004d4750444f0f9d30fc1ae70ccea962aed020` |
+| Causal vocabulary replay s4096-00 | `f974b88622c5eff4436915da7c9b425159ae5ca154d902e3927679bd3fd02026` |
+| Causal vocabulary replay s4096-01 | `6fb2df590a6c20578f9eb5902d632ead75bfa051aaf4250792863aba5abfa02e` |
+| Causal vocabulary replay g4096-01 | `c7106803077f52c7c705a8df33a87785b41ad1f584ede64029d877b3ac97ea71` |
+| Causal vocabulary replay g4096-02 | `2060060f964c684787b98f1c2adaaa9cb80c89d1503137e81ae1caf70a8776e5` |
+| Compact INT8 projection native binary | `9860f6243ab0a0c049df0372c71a8e9b9642aaab045d3c6700f69c089d89825f` |
+| Compact INT8 projection source patch | `b3e98bc5824f098b09aa81a4e14f49ebc1bbdef655a92d3e3311f82da715e8a2` |
+| Compact INT8 projection harness | `4594420296688b090fca8bfc141727536597ceb77ca0dd0e877f0c296db66a94` |
+| Compact INT8 projection s4096-00 | `204c3601b429893fbea54ab172c6b63f4718ae75d686d0729421c9e29ad7717a` |
+| Compact INT8 projection s4096-01 | `483239e6646d2b07d3d408137fd81793e5ea0d49ed20419b2003b51b867a4022` |
+| Compact INT8 projection g4096-01 | `98ef0e2fe6b6dacae160253ca9848fd27a318c4545e4d945dbd5ddf910758693` |
+| Compact INT8 projection g4096-02 | `ec55ae668be358be2170b44c77683b998f2450945cc3bcaccb3895b8646ba9c8` |
+| Host causal vocabulary benchmark source | `ad5faf7e5df25ba00bdb16a5714983776fbccdf10a0d1fe6d8155b645ea36cd8` |
+| Host causal vocabulary benchmark binary | `71efdca3ed1ad9371b4639d9827ba04152e5c5efa1a3fe8eb7ad2ed5b44b34e7` |
+| Host causal vocabulary benchmark receipt | `54d2377b57b5768e0c38d210b4e0c0e4440552c7821e5f9d667516b4353c1f11` |
+| Host causal vocabulary pinned row offsets | `454b9845f6ab89ff22c44dc7c7606bcaec4ce7e1057b4322d9a531025e695f64` |

@@ -569,6 +569,10 @@ Recheck depth after changing the verifier cost. The current fused-cache and FP4 
 
 Bind tiny projection outputs to their final offsets before adding a packing kernel. For short Inkling verifier commands direct controller rank output preserved exact logits and removed 96 dispatches. The total saving was 0.17 ms at three rows, so keep the existing path. [Controller rank output](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-62--write-short-controller-rank-projections-directly-into-packed-rows)
 
+Measure the entire boundary when appending accepted draft-tap commits to the next proposal command. Inkling's combined schedule preserved proposals, F32 logits and state, and saved 0.08–0.22 ms at two proposals on stock 4K. Archive the scheduling change at the native gate. [Commit scheduling](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-63--submit-the-accepted-suffix-commit-with-the-next-draft)
+
+Price candidate construction and acceptance when shrinking a proposal vocabulary. Inkling's 16K context-selected INT8 head saved 0.86–0.88 ms including the gather and matched all checked base scores. The shortlist lost some accepted prefixes and host construction took 0.389 ms. The combined replay measured 58.93 modeled tok/s against 59.05 for the full head. [Causal vocabulary, projection and host costs](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-64--replay-a-context-dependent-proposal-vocabulary)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates
