@@ -9,6 +9,8 @@ use metal::MTLBlitCommandEncoder;
 mod dspark_validation;
 pub use dspark_validation::{measure_dspark, measure_dspark_depth, measure_source_dspark_depth};
 
+#[path = "draft_overlap.rs"]
+mod draft_overlap;
 #[path = "packed_prefill.rs"]
 mod packed_prefill;
 #[path = "prefill.rs"]
@@ -27,6 +29,7 @@ mod target_validation;
 mod transaction_validation;
 #[path = "verify_state.rs"]
 mod verify_state;
+pub use draft_overlap::measure_draft_overlap;
 use packed_prefill::PackedPrefill;
 use prefill::PrefillLanes;
 pub use prefill_profile::{probe_stock_nvfp4, profile_packed_prefill, profile_prefill, profile_stock_4k};

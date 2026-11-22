@@ -277,6 +277,33 @@ inline bool draft_better(float score, uint token, float best, uint best_token) {
     return score > best || (score == best && token < best_token);
 }
 
+inline float draft_rank_score(
+    device const float *base, device const bfloat *folded, device const bfloat *bias,
+    device const bfloat *latent, uint token, uint lane) {
+    float sum = 0.0f;
+    for (uint i = lane; i < rank; i += 32)
+        sum = fma(float(folded[token * rank + i]), float(latent[i]), sum);
+    const float correction = simd_sum(sum) + float(bias[token]);
+    const float corrected = float(bfloat(float(bfloat(base[token])) + float(bfloat(correction))));
+    return float(bfloat(30.0f * metal::precise::tanh(corrected / 30.0f)));
+}
+
+#ifdef INK_DRAFT_EXPORT_LOGITS
+kernel void ink_draft_export_scores(
+    device const float *base [[buffer(0)]], device const bfloat *folded [[buffer(1)]],
+    device const bfloat *bias [[buffer(2)]], device const bfloat *latent [[buffer(3)]],
+    device float *scores [[buffer(4)]], constant uint &vocab [[buffer(5)]],
+    uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    const uint token = group * 4 + simd;
+    if (token < vocab) {
+        const float score = draft_rank_score(base, folded, bias, latent, token, lane);
+        if (lane == 0)
+            scores[token] = score;
+    }
+}
+#endif
+
 kernel void ink_draft_rank(
     device const float *base [[buffer(0)]], device const bfloat *folded [[buffer(1)]],
     device const bfloat *bias [[buffer(2)]], device const bfloat *latent [[buffer(3)]],
@@ -287,14 +314,8 @@ kernel void ink_draft_rank(
     threadgroup uint partial_tokens[4];
     const uint token = group * 4 + simd;
     float score = -INFINITY;
-    if (token < vocab) {
-        float sum = 0.0f;
-        for (uint i = lane; i < rank; i += 32)
-            sum = fma(float(folded[token * rank + i]), float(latent[i]), sum);
-        const float correction = simd_sum(sum) + float(bias[token]);
-        const float corrected = float(bfloat(float(bfloat(base[token])) + float(bfloat(correction))));
-        score = float(bfloat(30.0f * metal::precise::tanh(corrected / 30.0f)));
-    }
+    if (token < vocab)
+        score = draft_rank_score(base, folded, bias, latent, token, lane);
     if (lane == 0) {
         partial_scores[simd] = isfinite(score) ? score : -INFINITY;
         partial_tokens[simd] = isfinite(score) ? token : UINT_MAX;

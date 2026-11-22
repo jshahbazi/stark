@@ -22,9 +22,9 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use session::prefill_profile::{PrefillPhase, PrefillTiming};
 pub use session::{
     MAX_VERIFY_ROWS, PrefillTraceMode, Session, Snapshot, VOCABULARY, Verification, measure_decode_verify,
-    measure_dspark, measure_dspark_depth, measure_full, measure_full_budget, measure_prefill, measure_prefill_speed,
-    measure_source_dspark_depth, measure_verify_transaction, probe_stock_nvfp4, profile_packed_prefill,
-    profile_prefill, profile_stock_4k, trace_packed_prefill, trace_prefill,
+    measure_draft_overlap, measure_dspark, measure_dspark_depth, measure_full, measure_full_budget, measure_prefill,
+    measure_prefill_speed, measure_source_dspark_depth, measure_verify_transaction, probe_stock_nvfp4,
+    profile_packed_prefill, profile_prefill, profile_stock_4k, trace_packed_prefill, trace_prefill,
 };
 pub use validation::measure;
 pub use vision::{INKLING_IMAGE_TOKEN, ImageEmbeddings, measure_vision};

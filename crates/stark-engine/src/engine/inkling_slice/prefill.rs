@@ -335,7 +335,15 @@ impl Session {
                 }
             }
             gpu.phase(PrefillPhase::RelativeCacheAttention);
-            if let Some(relative) = lanes.relative.as_ref().filter(|_| layer.local && visit.capacity == LOCAL) {
+            if let Some(shared) = undo.filter(|workspace| workspace.shares_local_attention())
+                && layer.local
+                && visit.capacity == LOCAL
+                && self.position >= LOCAL
+                && trace.is_none()
+            {
+                let rows = scratches.clone().collect::<Vec<_>>();
+                shared.encode_shared_local(gpu, index, layer, visit, self.position, &rows);
+            } else if let Some(relative) = lanes.relative.as_ref().filter(|_| layer.local && visit.capacity == LOCAL) {
                 relative.gather(gpu, visit, self.position, row_count, true);
                 for (row, scratch) in scratches.clone().enumerate() {
                     if let Some(tap) = tap {

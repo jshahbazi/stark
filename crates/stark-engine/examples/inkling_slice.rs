@@ -42,6 +42,22 @@ fn main() {
             println!("{report}");
             return Ok(0);
         }
+        if args.first().is_some_and(|arg| arg == "--measure-draft-overlap") {
+            if args.len() != 5 {
+                return Err(
+                    "expected --measure-draft-overlap, original and draft SafeTensors, private oracle and seed",
+                );
+            }
+            let seed = args[4].to_str().and_then(|value| value.parse().ok()).ok_or("invalid Inkling sampling seed")?;
+            let report = stark_engine::engine::inkling_slice::measure_draft_overlap(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                seed,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
         if args.first().is_some_and(|arg| arg == "--measure-verify-transaction") {
             if args.len() != 5 {
                 return Err(

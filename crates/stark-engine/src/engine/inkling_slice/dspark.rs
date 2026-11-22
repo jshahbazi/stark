@@ -488,6 +488,60 @@ impl Dspark {
         if !(1..ROWS).contains(&count) || anchor as usize >= VOCABULARY {
             return Err("Inkling draft proposal block is out of range");
         }
+        self.execute_proposal_block(runtime, anchor, position, embedding, embed_norm, unembedding, count, block, None)?;
+        let winners = session::read_shared::<u32>(&block.winners, count);
+        if winners.iter().any(|&token| token as usize >= VOCABULARY) {
+            return Err("Inkling draft did not produce a finite vocabulary score");
+        }
+        Ok(winners)
+    }
+
+    pub(super) fn teacher_proposal_logits(
+        &self,
+        runtime: &Runtime,
+        anchor: u32,
+        position: usize,
+        embedding: &Buffer,
+        embed_norm: &Buffer,
+        unembedding: &Buffer,
+        previous: &[u32],
+        block: &DraftBlock,
+        scores: &Buffer,
+    ) -> Result<()> {
+        debug_assert!(previous.len() < ROWS - 1);
+        // This diagnostic owns the scratch. Metal commands complete before reuse.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                previous.as_ptr(),
+                block.winners.contents().as_ptr().cast::<u32>(),
+                previous.len(),
+            );
+        }
+        self.execute_proposal_block(
+            runtime,
+            anchor,
+            position,
+            embedding,
+            embed_norm,
+            unembedding,
+            previous.len() + 1,
+            block,
+            Some(scores),
+        )
+    }
+
+    fn execute_proposal_block(
+        &self,
+        runtime: &Runtime,
+        anchor: u32,
+        position: usize,
+        embedding: &Buffer,
+        embed_norm: &Buffer,
+        unembedding: &Buffer,
+        count: usize,
+        block: &DraftBlock,
+        scores: Option<&Buffer>,
+    ) -> Result<()> {
         let s = &self.scratch;
         execute(runtime, |gpu| {
             self.encode_block(gpu, anchor, position, embedding, embed_norm);
@@ -526,33 +580,35 @@ impl Dspark {
                     (RANK / 128, 1),
                     128,
                 );
+                let (pipeline, output) = match scores {
+                    Some(scores) => ("ink_draft_export_scores", (scores, row * PADDED_VOCABULARY * 4)),
+                    None => ("ink_draft_rank", binding(&s.groups)),
+                };
                 gpu.dispatch(
-                    "ink_draft_rank",
+                    pipeline,
                     &[
                         (&s.raw, row * PADDED_VOCABULARY * 4),
                         binding(&self.folded),
                         binding(&self.folded_bias),
                         binding(&s.latent),
-                        binding(&s.groups),
+                        output,
                     ],
                     VOCABULARY as u32,
                     (GROUPS, 1),
                     128,
                 );
-                gpu.dispatch(
-                    "ink_draft_winner",
-                    &[binding(&s.groups), (&block.winners, row * size_of::<u32>())],
-                    GROUPS as u32,
-                    (1, 1),
-                    256,
-                );
+                if scores.is_none() {
+                    gpu.dispatch(
+                        "ink_draft_winner",
+                        &[binding(&s.groups), (&block.winners, row * size_of::<u32>())],
+                        GROUPS as u32,
+                        (1, 1),
+                        256,
+                    );
+                }
             }
         })?;
-        let winners = session::read_shared::<u32>(&block.winners, count);
-        if winners.iter().any(|&token| token as usize >= VOCABULARY) {
-            return Err("Inkling draft did not produce a finite vocabulary score");
-        }
-        Ok(winners)
+        Ok(())
     }
 
     fn encode_block(

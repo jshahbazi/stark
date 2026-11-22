@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–14 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–17 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -196,9 +196,56 @@ The existing packed local-attention routine in the short verifier changed a veri
 
 A separate read-only weight survey sampled 23,740,416 BF16 values from 168 physical attention tensors and 2,359,296 values from the vocabulary head. In 64-weight blocks, 99.35% of attention blocks and 99.43% of head blocks had a nonzero exponent span of at most 14 and no exceptional nonzero exponent. These sampled blocks fit one sign bit, seven fraction bits, a four-bit exponent code with one code reserved for zero, and one base exponent per block. That layout would read about 24% fewer weight bytes in the surveyed stream with exact BF16 fallback for wide blocks. This is an encodability result. Kernel cost and sustained speed are unmeasured.
 
+## 20261121-INKDECODE-15 · Lossless BF16 attention weights on Metal
+
+Pack blocks of 64 BF16 values into 64 sign-and-fraction bytes, 32 bytes of exponent codes and one base exponent. Reserve one code for signed zero and keep an ordinary BF16 block for exceptional values or a wider exponent span. Audit reconstruction on the CPU and reconstruct each BF16 value in an otherwise identical source matvec. The GPU kept the same K groups, FP32 accumulation order and BF16 output. Inputs came from a pinned stock 4K capture whose seed and first continuation matched.
+
+| Same-loaded native control | BF16 words matched | Ordinary GPU | Packed GPU | Ordinary wall | Packed wall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| One layer-11 attention gate, 20 pairs | 3,072 | 0.0616 ms | 0.0844 ms | 0.2107 ms | 0.2368 ms |
+| 336 projections over 48 visits and 168 physical banks, 12 comparisons | 523,392 | 5.408 ms | 7.297 ms | 5.877 ms | 7.817 ms |
+
+The rotating test estimated 24.1% fewer weight bytes, 2.582 GB to 1.960 GB including fallback loads. Paired GPU and wall costs rose 1.920 ms and 1.957 ms. Retire this reconstruction kernel. The result covers attention projections on one 4K input, with no complete worker change.
+
+## 20261121-INKDECODE-16 · Share local KV reads in the exact short verifier
+
+Rotate the shared absolute-key shard to each query’s original logical shard. Preserve each query’s chronological FP32 updates, softmax sink and output gate. Read overwritten old keys from the transaction’s undo buffer. With two queries per group, an unpaired row gets its own group. The initial all-row implementation matched the checked logits but ran one 4K depth-three native trajectory at 32.13 tok/s with roughly 60 ms spent in verification per round. The timing cause was unresolved.
+
+In the second screen, eight comparisons at each width alternated candidate order on the same loaded model and snapshot. Timings begin before transaction encoding and end when verified logits are available. The measured range shows the two distinct 4K inputs. All of the checked F32 rows and 45 rejected-suffix and wrap controls matched across the short and two 4K fixtures.
+
+| Verified rows | Baseline median | Two queries per group median | Median paired saving |
+| --- | ---: | ---: | ---: |
+| 2 | 30.59–30.62 ms | 30.28–30.36 ms | 0.27–0.28 ms |
+| 3 | 35.28–35.95 ms | 34.86–35.50 ms | 0.43–0.44 ms |
+| 4 | 39.35–42.00 ms | 38.90–41.35 ms | 0.52–0.60 ms |
+
+A separate exact NVFP4 fusion shared ingress coefficient reads between grouped gate and up projections while keeping both BF16 roundings and the original nonlinearity. It increased paired verifier time by 0.61–0.69 ms at two rows and 1.07–1.19 ms at four. Combining the fusion with shared KV reads cost time over the shared KV arm. Retire the fusion. Retain two-query KV sharing via `STARK_INKLING_EXPERIMENT_SHARED_LOCAL=1` within the experimental source verifier. The final native build repeated all short and stock `g4096-01` controls. The verifier allocated 60,473,344 extra Metal bytes including draft taps, up 3,194,880 bytes from attempt 13 and within the existing 96 MiB reserve.
+
+The final worker ran two cold 4K pairs per sampling mode with both arms on the same build, vision and DSpark resident, context 4,352 and zero input reuse. Each request sampled and emitted 256 tokens. All eight output hashes agreed with the ordinary target. Greedy used three proposals and sampled used two.
+
+| Mode | Shared KV off | Shared KV on | Median paired decode change | Median paired prefill change |
+| --- | ---: | ---: | ---: | ---: |
+| Greedy | 51.54 tok/s | 52.84 tok/s | +2.54% | +2.54% |
+| Sampled | 41.06 tok/s | 43.73 tok/s | +6.52% | +13.00% |
+
+All four pairs favored sharing on useful decode. Load order was reversed for the second input and prefill varied across the launches. Treat the worker rates as a small follow-up screen. The same-snapshot command comparison isolates the KV change.
+
+## 20261121-INKDECODE-17 · Measure stochastic DSpark acceptance before changing decode
+
+Collect 96 anchor positions on each of two stock 4K inputs using a source-target teacher sampled at temperature 1 with no probability filters. The pinned 4K seed logits matched bit-for-bit on both inputs. Export three DSpark score rows conditioned on the teacher continuation. Check argmax through all three masks against the normal proposal path at six positions per input. All 36 masks matched. Raw logits, tokens and draws stayed in diagnostic memory.
+
+For an exact distribution-preserving rejection sampler, the one-position acceptance is the overlap mass `Σ min(p, q)` of target `p` and draft `q`. On target-sampled teacher tokens, accumulate the product of `min(1, q(token)/p(token))` through each mask to estimate joint acceptance. The sum of the three prefix probabilities plus one estimates useful output per round. Also compare selecting draft proposals with the ordinary target’s random number and vocabulary order, which preserves existing seeded output after target verification.
+
+| 4K input | Draft temperature with highest estimated yield of four tried | Estimated rejection acceptance through masks 1 / 2 / 3 | Estimated useful output per round | Current greedy draft match counts on sampled teacher | Best common-draw counts at depth 3 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `s4096-00` | 1.00 | 71.0% / 42.2% / 23.9% | 2.372 | 59 / 31 / 15 of 96 | 17 of 96 at 0.50 |
+| `g4096-01` | 0.75 | 82.4% / 65.0% / 49.5% | 2.969 | 75 / 58 / 42 of 96 | 48 of 96 at 1.00 |
+
+At 60 tok/s, the three-mask estimates leave 39.53 and 49.48 ms total per round. Subtract earlier draft medians of 5.53 and 5.46 ms and compare four-row verifier medians of 41.35 and 38.90 ms on the corresponding stock input. The first budget is already 7.35 ms short. The second leaves about 5.1 ms for correction sampling, rollback and host work. These estimates use 96 consecutive anchors per input and a single restored verifier state per input. They put a bound on where to investigate and do not measure worker speed. Shared-draw counts vary with draft temperature and show little improvement on the harder input.
+
 ## Decision and next target
 
-Keep the vector singleton opt-in while building the faster verifier. Useful worker throughput remains below 60 tok/s. The short verifier shares NVFP4 weights and parallelizes expert selection while keeping exact logits and fully committed state. Source-mode draft acceptance confirms an adaptive path can matter on some inputs. The verified transaction now restores rejected state and commits accepted draft context. Reduced target cost is still needed across 4K requests. The regular token remains the key path on low-acceptance prompts.
+Keep the vector singleton, transactional verifier and shared KV path opt-in. The measured acceptance and round costs leave the harder sampled input short of the 60 tok/s budget. Prioritize reducing ordinary target and verifier execution time across inputs before changing the production sampler. Distribution-preserving rejection would need separate qualification because it can change the sequence for the same seed. Keep the existing seeded path available for exact replay.
 
 ## Evidence identities
 
@@ -307,3 +354,23 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Packed relative trial outcome | `3457e2531847c055823a5360d64b45bfaba19950799f6211aecd4fe016ef2b7f` |
 | BF16 exponent survey harness | `5507b5bf1938660348b726caac31475842009b2423a01d4d9594cf43e28c0636` |
 | BF16 exponent survey receipt | `433d5dafe5f28074b4466d7ed530ea3b6697a4e6440867fdf667f45f362f1c8e` |
+| BF16 exponent screen executable | `8061ee7c66704b8dbb2b52373ed3dbf4ebb3e52d05c3836bfc67ddeb9979abfb` |
+| BF16 exponent screen source patch | `2faca2b8d0c933f066093b08cd80a6a75d4cc82afbdf7cd154b45bd9c8ce4668` |
+| BF16 exponent screen stock 4K | `75e032067f179b5d9c0f79fc395aa564ca827048d50b1c079e85f50ec11e1984` |
+| Initial shared KV executable | `e68110ef2144a83597c73b6fa8e420c7d0845af737b46555aa1f5248f94a7ee0` |
+| Initial shared KV patch | `e28cd0b92c0c15c58f64ba64c2dcbe32c3c28676cddb157075e9f2fb0983d28d` |
+| Initial shared KV 4K receipt | `d21bbcbdf480d971fe981e44873e8ca77f8f91a17fe922c0589d9dbddf2e8080` |
+| Fused expert and shared KV screen executable | `6e5978804c7360d9e0201f141241481a5cfd97b143ab85372c44d261551dbb54` |
+| Fused expert and shared KV screen patch | `cb0b60a9153ca0ea989f8d223865bab9d9796431dbc702946a55e775eb9f3e3c` |
+| Fused expert and shared KV short receipt | `6a537a37991c09b9869a5c779c0abc3ca126e3ae8fe566e66a76b9dbcab3af1b` |
+| Fused expert and shared KV stock s4096-00 | `7e4e0ddbcfbeb05730eda56753b9eed6b161d0717b96a992e415f78980cf32cc` |
+| Fused expert and shared KV stock g4096-01 | `7db6ef42c19e35f8310d33859e5936a0b13f5445fd44eb82ab60e447a6b1cca9` |
+| Final shared KV and draft overlap source patch | `83f3ad64a6aa789d80ad8ecb59235935aa7f224325e7abe71493a4548ff86e1d` |
+| Final shared KV and draft overlap diagnostic | `76daac573bfcb5bf438373d6e7e9fec5681bdd9538112ef319bfa16f61a779d3` |
+| Final shared KV short | `c8c9d726979e9d63a191174e37e74c6a68366d926c5d1d7bf45197769908d74f` |
+| Final shared KV stock g4096-01 | `01d2b254f7dde66895b9c411dc1b09585865c4c9842baa56fb680f7ff8b105af` |
+| Draft overlap stock s4096-00 | `2b699f3aa4a6b4c7180575ba4cfcb9d0c03c8c9e346864ac7c5c76587a074b4f` |
+| Draft overlap stock g4096-01 | `d1c8fa0a9cec82b7d1b09e6260b93ac8b04914f77bdbca1096f7b91e86611dd8` |
+| Shared KV worker executable | `7e828c42c843236b99ba281bc81c65a089c34ddfdd59b2438a8205fd2122f25b` |
+| Shared KV worker harness | `19cc3e7c6d692f44ab6e1227a68c9dd8e3dc373fafcf82a616d054e389cef1ab` |
+| Shared KV worker pairs | `7ce148dbc61ef573e96b73330da18b9ee2880fdc2e8ff0b62fe858ab0010024c` |

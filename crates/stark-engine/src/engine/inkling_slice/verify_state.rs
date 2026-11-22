@@ -14,6 +14,8 @@ const SAVED_VISIT_BYTES: usize = 2 * MAX_VERIFY_ROWS * KV_ROW_BYTES + 3 * CONV_B
 pub(super) struct VerifyWorkspace {
     saved: Buffer,
     anchors: Buffer,
+    local_parts: Option<Buffer>,
+    pub(super) local_rows_per_group: usize,
     lanes: PrefillLanes,
     draft: DraftBlock,
 }
@@ -28,6 +30,11 @@ impl VerifyWorkspace {
         packed_prefill::register_verify_nvfp4_matvec(runtime)?;
         packed_prefill::register_parallel_route(runtime)?;
         packed_prefill::register(runtime, include_str!("verify_state.metal"), &["ink_save_anchor_convolution"])?;
+        let shared_attention =
+            std::env::var_os("STARK_INKLING_EXPERIMENT_SHARED_LOCAL").as_deref() == Some(std::ffi::OsStr::new("1"));
+        if shared_attention {
+            packed_prefill::register(runtime, include_str!("verify_attention.metal"), &["ink_verify_local_parts"])?;
+        }
         let draft = DraftBlock::new(runtime)?;
         let alloc = |bytes| {
             runtime
@@ -38,6 +45,13 @@ impl VerifyWorkspace {
         Ok(Self {
             saved: alloc(visits * SAVED_VISIT_BYTES)?,
             anchors: alloc(visits * CONV_BYTES)?,
+            local_parts: shared_attention.then(|| alloc(MAX_VERIFY_ROWS * HEADS * 64 * 130 * 4)).transpose()?,
+
+            local_rows_per_group: if shared_attention {
+                2
+            } else {
+                0
+            },
             lanes,
             draft,
         })
@@ -110,6 +124,66 @@ impl VerifyWorkspace {
         }
         blit.end_encoding();
         Ok(())
+    }
+
+    pub(super) fn shares_local_attention(&self) -> bool {
+        self.local_rows_per_group > 0 && self.local_parts.is_some()
+    }
+
+    pub(super) fn encode_shared_local(
+        &self,
+        gpu: &mut Stream<'_>,
+        index: usize,
+        layer: &Layer,
+        visit: &Visit,
+        position: usize,
+        rows: &[&Scratch],
+    ) {
+        let parts = self.local_parts.as_ref().expect("shared local verifier workspace");
+        for (row, scratch) in rows.iter().enumerate() {
+            layer.attention_write_cache(gpu, scratch, visit, [(position + row) as u32, LOCAL as u32, LOCAL as u32, 64]);
+            gpu.one(
+                "ink_prefill_relative_table_source",
+                &[&scratch.r, &layer.relative, &scratch.table],
+                HEADS as u32,
+                (LOCAL / 32, HEADS.div_ceil(16)),
+                32,
+            );
+        }
+        let [a, b, c, d] = std::array::from_fn(|index| rows[index.min(rows.len() - 1)]);
+        gpu.dispatch(
+            "ink_verify_local_parts",
+            &[
+                binding(&a.q),
+                binding(&b.q),
+                binding(&c.q),
+                binding(&d.q),
+                binding(&a.table),
+                binding(&b.table),
+                binding(&c.table),
+                binding(&d.table),
+                binding(&a.sink),
+                binding(&b.sink),
+                binding(&c.sink),
+                binding(&d.sink),
+                binding(&visit.keys),
+                binding(&visit.values),
+                (&self.saved, index * SAVED_VISIT_BYTES),
+                binding(parts),
+            ],
+            [position as u32, rows.len() as u32, self.local_rows_per_group as u32, 0],
+            (16, HEADS * rows.len().div_ceil(self.local_rows_per_group)),
+            128,
+        );
+        for (row, scratch) in rows.iter().enumerate() {
+            gpu.dispatch(
+                "ink_attention_source_gate",
+                &[(parts, row * HEADS * 64 * 130 * 4), binding(&scratch.attn_gate), binding(&scratch.attended)],
+                [64u32, 64],
+                (8, HEADS),
+                128,
+            );
+        }
     }
 
     pub(super) fn save_anchor(

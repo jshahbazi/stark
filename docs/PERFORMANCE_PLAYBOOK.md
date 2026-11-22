@@ -475,7 +475,11 @@ Reuse the exact singleton selector across short grouped verifier rows. This remo
 
 On Inkling, save only the local KV slots and convolution histories a short verifier can overwrite. Defer draft commits until acceptance. The exact four-row transaction needs the anchor convolution input because the history wraps at three rows. The worker reached 51.50 tok/s greedy at three proposals and 42.22 tok/s sampled at two, with matching output hashes and verified early-stop and cancellation handling. [Transactional worker screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-13--exact-short-round-rollback-and-worker-integration)
 
-Existing packed local attention failed short-verifier F32 parity on an Inkling 4K state. A separate weight survey showed over 99% of sampled 64-value BF16 blocks can use a lossless four-bit exponent code plus a base. Measure reconstruction overhead before adopting a compressed layout. [Verifier and weight access screens](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-14--screen-the-next-verifier-and-weight-access-changes)
+Existing packed local attention failed short-verifier F32 parity on Inkling. Sharing absolute-key reads while preserving each query’s singleton shard and chronological updates saved 0.52–0.60 ms per four-row command with exact logits and rollback. A fused grouped NVFP4 gate/up projection was slower. Keep shared KV opt-in while measuring useful throughput. [Verifier kernel screens](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-16--share-local-kv-reads-in-the-exact-short-verifier)
+
+Lossless BF16 exponent packing reduced estimated rotating weight reads by 24.1% on Inkling, but GPU time rose from 5.41 to 7.30 ms. Test reconstruction overhead with rotating real banks before adopting compressed storage. [Lossless BF16 screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-15--lossless-bf16-attention-weights-on-metal)
+
+Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates
 
@@ -582,7 +586,7 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 | 2026-11-21 | [Inkling 2 Mini tensor MXFP8 prefill](model-experiments/2026-11-21-inkling-mini-mxfp8-tensor.md) | Real-route certificate density, grouped source replay, compensated tensor partials, worker timing and wider-tile scale sharing |
 | 2026-11-21 | [Inkling 2 Mini default fast prefill](model-experiments/2026-11-21-inkling-mini-prefill-default.md) | Flags-unset kernel admission, pinned parity, source-disable fallback and paired cold 4K worker timing |
 | 2026-11-21 | [Inkling 2 Mini default one-row router](model-experiments/2026-11-21-inkling-mini-decode-default.md) | Flags-unset router selection, restored-cache projection and useful-decode timing |
-| 2026-11-21 | [Inkling 2 Mini decode toward 60](model-experiments/2026-11-21-inkling-mini-decode-60.md) | Exact short verifier geometry, DSpark conditional acceptance vector singleton decode, parallel exact expert selection, short-run weight sharing lookup eligibility, certified sampling, source-precision draft verification and exact rollback |
+| 2026-11-21 | [Inkling 2 Mini decode toward 60](model-experiments/2026-11-21-inkling-mini-decode-60.md) | Exact short verifier and rollback, NVFP4 sharing, shared local KV reads, certified sampling and stochastic draft overlap |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 

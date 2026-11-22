@@ -90,6 +90,48 @@ fn check_rejections(
     Ok(controls)
 }
 
+fn screen_verifier(
+    session: &mut Session,
+    base: &Snapshot,
+    teacher: &[u32],
+) -> Result<Vec<Value>> {
+    if !session.verifier.as_ref().is_some_and(|workspace| workspace.shares_local_attention()) {
+        return Ok(Vec::new());
+    }
+    let options = [0, 2, 4];
+    session.restore(base)?;
+    let expected = teacher[..MAX_VERIFY_ROWS].iter().map(|&id| session.step(id)).collect::<Result<Vec<_>>>()?;
+    let mut report = Vec::new();
+    for width in 2..=MAX_VERIFY_ROWS {
+        let mut observations = vec![Vec::new(); options.len()];
+        for trial in 0..8 {
+            for offset in 0..options.len() {
+                let arm = (trial + offset) % options.len();
+                session.restore(base)?;
+                let local_rows = options[arm];
+                session.verifier.as_mut().ok_or("missing verifier workspace")?.local_rows_per_group = local_rows;
+                let start = Instant::now();
+                let txn = session.begin_verify(&teacher[..width])?;
+                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                if trial == 0 {
+                    for (row, want) in expected.iter().take(width).enumerate() {
+                        if !same_logits(txn.logits(row)?, want) {
+                            return Err("Inkling verifier candidate changed timed row logits");
+                        }
+                    }
+                }
+                txn.commit(1)?;
+                observations[arm].push(ms);
+            }
+        }
+        for (local_rows, wall_ms) in options.iter().zip(observations) {
+            report.push(json!({"width":width,"local_rows_per_group":local_rows,"wall_ms":wall_ms}));
+        }
+    }
+    session.verifier.as_mut().ok_or("missing verifier workspace")?.local_rows_per_group = 2;
+    Ok(report)
+}
+
 pub fn measure_verify_transaction(
     checkpoint: &Path,
     draft: &Path,
@@ -145,6 +187,7 @@ pub fn measure_verify_transaction(
         0
     };
 
+    let candidate_commands = screen_verifier(&mut session, &base, &teacher)?;
     let mut rounds = Vec::new();
     for depth in 1..MAX_VERIFY_ROWS {
         session.restore(&base)?;
@@ -214,6 +257,6 @@ pub fn measure_verify_transaction(
         "prefix": prefix, "output_tokens": OUTPUTS, "additional_metal_bytes": verifier_bytes, "rejection_controls": controls,
         "crossing_controls": crossing_controls, "abandoned_transaction_reset": true, "cross_mode_snapshot_rejected": true,
         "serial_ms": serial_ms, "serial_decode_tok_s": 1000.0 * (OUTPUTS - 1) as f64 / serial_ms,
-        "rounds": rounds,
+        "rounds": rounds, "candidate_commands": candidate_commands,
     }))
 }
