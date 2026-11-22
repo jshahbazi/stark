@@ -82,6 +82,9 @@ impl PackedPrefill {
                 let _ = grouped_pilot::enable_rows64(runtime);
             }
             let _ = packed.experts.enable_mxfp8_tensor(runtime, layers);
+            if parallel_route_requested() {
+                runtime.parallel_route = register_parallel_route(runtime).is_ok();
+            }
             if nvfp4_vector_requested() {
                 runtime.nvfp4_vector = register_nvfp4_vector(runtime).is_ok();
             }
@@ -922,6 +925,19 @@ impl PackedPrefill {
             }
         }
     }
+}
+
+pub(super) fn parallel_route_requested() -> bool {
+    std::env::var_os("STARK_INKLING_EXPERIMENT_PARALLEL_ROUTE").as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
+fn register_parallel_route(runtime: &mut Runtime) -> Result<()> {
+    let library = packed_source_library(&runtime.device)?;
+    let function = library.new_function_with_name(PARALLEL_ROUTE_KERNEL).ok_or(PARALLEL_ROUTE_KERNEL)?;
+    let pipeline =
+        runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| PARALLEL_ROUTE_KERNEL)?;
+    runtime.pipelines.insert(PARALLEL_ROUTE_KERNEL, pipeline);
+    Ok(())
 }
 
 pub(super) fn nvfp4_vector_requested() -> bool {

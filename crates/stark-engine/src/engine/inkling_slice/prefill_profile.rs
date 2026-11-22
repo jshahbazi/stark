@@ -522,6 +522,9 @@ fn profile_stock(
         return Err("Inkling stock profile requires the source-aligned M5 Max path");
     }
     let mut profiler = PrefillTiming::new(&session.runtime)?;
+    if packed_prefill::parallel_route_requested() && !session.runtime.parallel_route {
+        return Err("Inkling parallel route experiment did not load");
+    }
     if packed_prefill::nvfp4_vector_requested() && !session.runtime.nvfp4_vector {
         return Err("Inkling vector NVFP4 experiment did not load");
     }
@@ -551,6 +554,7 @@ fn profile_stock(
         "drafting": false,
         "grouped_nvfp4_kernel": if nvfp4_probe { "ink_group_qmm_probe" } else { session.runtime.grouped_qmm },
         "singleton_router_kernel": session.runtime.singleton_router,
+        "singleton_parallel_route": session.runtime.parallel_route,
         "singleton_nvfp4_vector": session.runtime.nvfp4_vector,
         "mxfp8_tensor": session.runtime.mxfp8_tensor_active,
         "cases": cases,
@@ -667,8 +671,13 @@ fn profile_stock_decode(
 ) -> Result<Value> {
     let snapshot = session.snapshot()?;
     let candidate_router = session.runtime.singleton_router;
-    let original_router = "ink_prefill_router_source";
-    let compare_router = candidate_router != original_router;
+    let parallel_route = session.runtime.parallel_route;
+    let original_router = if parallel_route {
+        candidate_router
+    } else {
+        "ink_prefill_router_source"
+    };
+    let compare_router = parallel_route || candidate_router != original_router;
     let mut source_runs = Vec::new();
     let mut legacy_runs = Vec::new();
     let mut legacy_logits = None;
@@ -681,10 +690,12 @@ fn profile_stock_decode(
             session.runtime.source_text_active = source || compare_router;
             if compare_router && !source {
                 session.runtime.singleton_router = original_router;
+                session.runtime.parallel_route = false;
             }
             let result = stock_command(session, &[token], true, instrument.then_some(&mut *profiler));
             session.runtime.source_text_active = true;
             session.runtime.singleton_router = candidate_router;
+            session.runtime.parallel_route = parallel_route;
             let command = result?;
             let started = std::time::Instant::now();
             let logits = session.read_logits()?;
@@ -720,8 +731,10 @@ fn profile_stock_decode(
         };
         session.restore(&snapshot)?;
         session.runtime.singleton_router = original_router;
+        session.runtime.parallel_route = false;
         let result = session.step(token);
         session.runtime.singleton_router = candidate_router;
+        session.runtime.parallel_route = parallel_route;
         result?;
         let original = read(session);
         session.restore(&snapshot)?;

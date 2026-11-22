@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–03 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–04 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -55,9 +55,31 @@ With the vector flag set, short and connected 4K aggregates repeated exactly. Fo
 
 The final build isolated the multi-mask draft scratch and shaders in the diagnostic. A fresh short and 4K check reproduced the scored vector outputs and cache hashes. One final 4K worker pair per sampling mode reproduced the scored output hashes. The throughput table comes from the original matched scoring window.
 
+## 20261121-INKDECODE-04 · Parallel exact expert selection
+
+In the source singleton, one SIMD group scores four experts per lane. At each of the eight selection steps, it reduces the maximum score and then the lowest expert ID at that score. It masks the selected score and retains the prior MLX normalization order. Non-finite score cases that contain a NaN use the prior ordered scan. The experiment is opt-in with `STARK_INKLING_EXPERIMENT_PARALLEL_ROUTE=1` in the existing source text scope. The original one-row projection runs in both arms.
+
+Against the preceding shader, 99 synthetic fixtures matched the eight selected IDs and eight F32 weights exactly, including ties, NaN and infinities. The native short test reproduced the previous F32 logits, draft taps, cache hash and snapshot comparison. Four pinned 4K states matched 128 projected F32 logits, eight IDs and eight F32 weights at all 48 visits. The pinned prefill seed and first continuation matched in each case.
+
+| Same-cache one-token boundary | Ordered scan median | Parallel selector median | Median paired saving | Faster pairs |
+| --- | ---: | ---: | ---: | ---: |
+| Instrumented route selection and weights over the 44 NVFP4 visits | 2.611 ms | 0.626 ms | 1.973 ms | 8/8 |
+| Plain whole command | 29.499 ms | 26.871 ms | 2.238 ms | 8/8 |
+
+Both arms used the vector NVFP4 kernel. The first worker launch lacked the native template helper needed for startup image checks and yielded zero requests. The measured launch uses a locked Rust 1.98.1 build of the helper with the normal image checks enabled.
+
+In the matched worker screen, four pairs per sampling mode used 4,096 input and 256 emitted and sampled tokens with zero prefix reuse. Both arms used the same binary, one-row projection, vector NVFP4, prefill policy and resident vision and DSpark. Every eligible output hash matched.
+
+| Sampling | Vector NVFP4 alone | Vector NVFP4 with parallel selection | Median paired change | Selector range | Faster pairs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Greedy | 40.54 tok/s | **44.24 tok/s** | +8.69% | 43.65–44.52 | 4/4 |
+| Seeded sampled | 38.28 tok/s | **41.08 tok/s** | +7.21% | 40.41–41.55 | 4/4 |
+
+Paired prefill moved +2.39% greedy and +2.60% sampled. Worker GPU attribution was 99.86% over 95 intervals. The host recorded nominal and fair thermal states, with +0 pageouts and +0 swapouts. Keep the selector opt-in following this screen. One subsequent flags-unset pair per sampling mode matched the prior worker output hashes with zero reuse.
+
 ## Decision and next target
 
-Keep the vector singleton opt-in while building the faster verifier. Useful worker throughput remains below 60 tok/s. A promising next test replaces the small grouped tensor projection with the exact vector block recurrence and shares the decoded weights across live routes to the same expert. Time the route-selection stage separately on the same cache. An exact SIMD top-eight selection can remove the serial scan while preserving expert tie order and normalization. Require bit-exact logits and committed state at each measured width before integrating reject-and-commit behavior. Draft acceptance and verifier cost need a new combined source-mode test.
+Keep the vector singleton opt-in while building the faster verifier. Useful worker throughput remains below 60 tok/s. A promising next test replaces the small grouped tensor projection with the exact vector block recurrence and shares the decoded weights across live routes to the same expert. Require bit-exact logits and committed state at each measured width before integrating reject-and-commit behavior. Draft acceptance and verifier cost need a new combined source-mode test.
 
 ## Evidence identities
 
@@ -88,3 +110,14 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Final vector short | `d1a6bd0b8aa2faa77d7853dbb730c348f6e0c98042a425a6bed6f4e301f268b7` |
 | Final vector 4K | `fd2423f86fef11ecc5e61715f38311aba33e67279b03cca2dc9ec36fea3e7712` |
 | Final worker smoke pairs | `d869bc8eceb4354df54f09f70e1e2a7cdfe9d63925addded2a8561ee5aab3e4a` |
+| Selector source patch against ab4d108f | `053858bf568126c84dccdd72ce152c26ebcac939cdc6f3a5715264aef002b072` |
+| Selector native example | `401f2407aa4dc466acc068b75de294b326f1cedf776d1913758ee6bcd63702a2` |
+| Selector sealed worker | `539c2d77eee51fe5a4e8f3309403fecd76c24473912fa5f295f7c8b2a1ed1d9a` |
+| Selector same-cache profile | `cab0af2c541636be0ec9b63acd0af382236dbf37f3fe542c963023a15da169af` |
+| Selector short parity | `05bb62f4e3a366aeee266be4a2c19185d4a0237767d57be4164fd30787b20f08` |
+| Selector synthetic oracle harness | `c4f3e781896cc189bdf2326cbd6e907037daadb0e96d8cde39de03a8784bce19` |
+| Selector synthetic outcome | `76890bf975f191e6aa306fc096e278bb4e625228b0d0b9d8e10ee927e312b3dd` |
+| Selector worker pairs | `575bb91241f883a118a22c78653b010d81e9db1c085d1e3963da5453e82b34ae` |
+| Selector worker host observations | `890adc80eac76d9989d23a32eca76ef9df2acab1fdb1ce23cdb55de8c957d154` |
+| Selector worker harness | `285de90e6ae2bb9a3178407a48372692a893c528498166a90015a58303f8c5dd` |
+| Selector flags-unset regression pairs | `5d9c1f7a3025b94479157fdc86cf180d079b7f439a094894e46f6c63cdc2c34a` |

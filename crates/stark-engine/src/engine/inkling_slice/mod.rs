@@ -30,6 +30,7 @@ pub use vision::{INKLING_IMAGE_TOKEN, ImageEmbeddings, measure_vision};
 
 const WIDTH: usize = 2304;
 const EXPERTS: usize = 128;
+const PARALLEL_ROUTE_KERNEL: Kernel = "ink_singleton_route_weights_parallel";
 const MID: usize = 1152;
 const KV: usize = 1024;
 const LOCAL: usize = 1024;
@@ -73,6 +74,7 @@ struct Runtime {
     pinned_m5: bool,
     source_text_active: bool,
     singleton_router: Kernel,
+    parallel_route: bool,
     nvfp4_vector: bool,
     grouped_qmm: Kernel,
     nvfp4_probe: Option<grouped_pilot::Nvfp4Probe>,
@@ -162,6 +164,7 @@ impl Runtime {
             pinned_m5,
             source_text_active: false,
             singleton_router: "ink_prefill_router_source",
+            parallel_route: false,
             nvfp4_vector: false,
             grouped_qmm: "ink_group_qmm",
             nvfp4_probe: None,
@@ -637,13 +640,12 @@ impl Layer {
             if nvfp4 {
                 gpu.phase(PrefillPhase::RouteSelect);
             }
-            gpu.one(
-                "ink_singleton_route_weights",
-                &[&s.logits, &self.bias, &s.routes, &s.route_weights],
-                (),
-                (1, 1),
-                EXPERTS,
-            );
+            let (kernel, threads) = if gpu.runtime.parallel_route {
+                (PARALLEL_ROUTE_KERNEL, 32)
+            } else {
+                ("ink_singleton_route_weights", EXPERTS)
+            };
+            gpu.one(kernel, &[&s.logits, &self.bias, &s.routes, &s.route_weights], (), (1, 1), threads);
             return;
         }
         gpu.one("ink_router_logits", &[&s.mlp_input, &self.router, &s.logits], WIDTH as u32, (EXPERTS, 1), 32);

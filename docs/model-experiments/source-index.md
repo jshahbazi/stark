@@ -251,7 +251,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Tensor MXFP8 with source-order replay and wider-tile NVFP4 scale sharing](2026-11-21-inkling-mini-mxfp8-tensor.md) · Experiment, 2026-11-21
 - [Default fast prefill with flags unset](2026-11-21-inkling-mini-prefill-default.md) · Experiment, 2026-11-21
 - [Default one-row router with flags unset](2026-11-21-inkling-mini-decode-default.md) · Experiment, 2026-11-21
-- [Exact decode verifier, DSpark depth and vector NVFP4](2026-11-21-inkling-mini-decode-60.md) · Experiment, 2026-11-21
+- [Exact decode verifier, DSpark depth, vector NVFP4 and parallel expert selection](2026-11-21-inkling-mini-decode-60.md) · Experiment, 2026-11-21
 
 ### Protocols and aggregates
 

@@ -459,6 +459,8 @@ The default one-row Inkling router saved 0.884 ms across the 44 NVFP4 projection
 
 An Inkling NVFP4 block has one E4M3 activation scale across 16 FP4 values. Proving the inner products and all partial sums fit on an exact FP32 grid allowed four vector dots without changing the scaled lane recurrence. At cold 4K the opt-in worker reached 38.66 greedy and 36.75 sampled tok/s. The exact four-row grouped verifier still took 55–60 ms, and the native multi-mask draft had input-dependent acceptance. Measure conditional acceptance and complete round cost to choose a depth. [Decode and draft-depth screens](model-experiments/2026-11-21-inkling-mini-decode-60.md)
 
+One SIMD exact top-eight selector removed the source singleton's serial scan and preserved its lowest-ID tie handling and F32 normalization. Same-cache selection went from 2.61 to 0.63 ms. With vector NVFP4 in both worker arms, the opt-in selector reached 44.24 greedy and 41.08 sampled tok/s in four cold 4K pairs per mode. [Parallel selector screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-04--parallel-exact-expert-selection)
+
 ## Correctness gates
 
 A speed change that is meant to leave output alone has to pass all of these, in this order of cost:
@@ -564,7 +566,7 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 | 2026-11-21 | [Inkling 2 Mini tensor MXFP8 prefill](model-experiments/2026-11-21-inkling-mini-mxfp8-tensor.md) | Real-route certificate density, grouped source replay, compensated tensor partials, worker timing and wider-tile scale sharing |
 | 2026-11-21 | [Inkling 2 Mini default fast prefill](model-experiments/2026-11-21-inkling-mini-prefill-default.md) | Flags-unset kernel admission, pinned parity, source-disable fallback and paired cold 4K worker timing |
 | 2026-11-21 | [Inkling 2 Mini default one-row router](model-experiments/2026-11-21-inkling-mini-decode-default.md) | Flags-unset router selection, restored-cache projection and useful-decode timing |
-| 2026-11-21 | [Inkling 2 Mini decode toward 60](model-experiments/2026-11-21-inkling-mini-decode-60.md) | Exact short verifier geometry, DSpark conditional acceptance and vector singleton decode |
+| 2026-11-21 | [Inkling 2 Mini decode toward 60](model-experiments/2026-11-21-inkling-mini-decode-60.md) | Exact short verifier geometry, DSpark conditional acceptance vector singleton decode and parallel exact expert selection |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 
