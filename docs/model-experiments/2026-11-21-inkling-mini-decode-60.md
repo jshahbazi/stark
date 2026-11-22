@@ -1268,7 +1268,7 @@ The first worker screen alternated two workers built from the same source patch,
 
 The workers accounted for 99.84% of observed GPU counter increments over 74 intervals, with nominal thermals, 85 additional pageouts and zero swapouts. The native saving warrants a same-loaded sampled repeat to check the smaller effect against worker variation.
 
-The [four-arm repeat](#same-loaded-comparison-with-controller-batching) gave batched QKV alone four wins in four pairs and the best paired median gain. Advance it first for opt-in integration. The prototype stays archived with its sealed source and executable.
+The [four-arm repeat](#same-loaded-comparison-with-controller-batching) gave batched QKV alone four wins in four pairs and the best paired median gain. [Attempt 78](#20261122-inkdecode-78--integrate-batched-q-k-and-v-controllers) records the opt-in integration. The prototype stays archived with its sealed source and executable.
 
 ## 20261122-INKDECODE-76 · Prepare an exact sampler certificate on Metal
 
@@ -1315,6 +1315,33 @@ Every pinned initial target row matched. Use 192 temperature-one teacher anchors
 | g4096-02 | 1.00 / 0.75 | 110 | 110 |
 
 The held-out selection used **388 rounds against 386** for the stock draft, with zero improved fixtures and paired proposal timing changes under 0.007 ms. The best fixed scale on these same four fixtures reduces one round in aggregate. The leave-one-out result favors the stock scale. Archive the calibration probe at the native gate.
+
+## 20261122-INKDECODE-78 · Integrate batched Q, K and V controllers
+
+Enable the batch with `STARK_INKLING_EXPERIMENT_VERIFY_QKV_BATCH=1` within the opt-in combined short verifier on the original Mini checkpoint. Copy the selected four Metal stages from attempt 75. The source-order input RMS, rank projection, 16 × 16 expansion and output RMS each use one dispatch across all three slots. The workspace is owned by the short verifier and its controller intermediates never enter a prefix snapshot. The expert controller continues on its existing path.
+
+The four scratch buffers add 443,904 bytes of payload within the existing 96 MiB verifier reserve. Shader registration and allocation use the same initialization error handling as the existing combined verifier.
+
+Build from `cc663014` with locked Rust 1.98.1. Run the flags-unset connected short and 4K fixture suite, then test the enabled verifier on short and both stock 4K transaction fixtures, including rollback and ring wrap. Recheck prefix reuse, cancellation, accepted stops and draft admission on the enabled worker.
+
+Run four cold paired worker windows per mode with the combined verifier enabled in both arms. Toggle only QKV batching. Keep vision and DSpark loaded, at 4,096 input tokens and context 4,352, with 256 sampled and emitted tokens and zero prefix reuse. Use two proposals for seeded temperature-one, top-p-one sampled decoding and three for greedy. Reverse both worker load order and paired order from the earlier screen. Require pinned output hashes and equal round histograms before scoring the runs.
+
+With flags unset, the connected short and 4K slices were exact. The full short target matched the pinned F32 output, and the four stock 4K fixtures matched 16 F32 logit vectors, 768 BF16 visit residuals and four snapshot replays.
+
+With batching enabled, the short fixture and both stock 4K fixtures matched the serial 96-token continuation and committed state at depths one through three. All 45 rejection and ring-wrap controls passed, and each fixture confirmed reset after an abandoned transaction and rejection of cross-mode snapshots. The enabled verifier allocated 60,932,096 bytes on both stock fixtures.
+
+The enabled worker restored a 2,048-token prefix across draft counts with exact continuation, cleared reuse on source-mode switches and cancellation, enforced the short-prompt and long-context draft limits, and matched accepted-proposal stop semantics. A separate stock 4K command profile reproduced serial F32 rows and confirmed 192 fewer dispatches at each width. At three rows, dispatches fell from 2,235 to 2,043.
+
+The first paired session passed the output-hash and round-count checks but had GPU contention. WindowServer accounted for 20.43% of observed counter increments and the two workers for 79.03% over 80 intervals. The recorded medians were 57.69 and 58.34 tok/s sampled, and 69.29 and 72.19 tok/s greedy. Keep those measurements as a contended run. The retry starts after idle GPU observations return to a nominal state and reverses the worker and request order using the same sealed binary.
+
+The retry matched all 16 pinned output hashes and every paired round histogram. The sampled arms each used 530 rounds and the greedy arms each used 398. Useful decode covers the 255 intervals after the first emitted token. The paired change is the median of the per-workload rate ratios.
+
+| Mode | Existing verifier | Batched QKV | Median paired gain | Faster pairs | Batched range |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Seeded sampled | 60.47 tok/s | **61.91 tok/s** | **+3.80%** | 4/4 | 59.19–67.67 tok/s |
+| Greedy | 72.45 tok/s | **73.18 tok/s** | **+1.03%** | 4/4 | 63.91–83.69 tok/s |
+
+The two workers accounted for 99.85% of observed GPU counter increments over 74 intervals. Thermal samples were nominal or fair. Pageouts rose by 295 and swapouts were unchanged. Keep batching as an opt-in under the combined short verifier.
 
 ## Evidence identities
 
@@ -2019,3 +2046,22 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Markov sweep native executable | `9dcabf234ca77a6547083984ee42b29cb5938ee801476c100b8ed88583dfc928` |
 | Markov sweep harness | `edb0917db995beb60798c5018feceb2460d1a92728651c2e8383a5899f77a6ab` |
 | Markov sweep aggregate receipt | `8be6f27c04e367893612df073e98418ee1169dab2ccc065578c43698b4d65ad3` |
+| Integrated QKV source patch | `8e80f1a2f5a87cf24e7cbe611708df316a7407580de533d370547a45e33033a6` |
+| Integrated QKV native executable | `8cc2d8569660b8514ebf13ec1d4af72440d1ed223741995053ff439e06fef48f` |
+| Integrated QKV worker | `638741dc417d72591a96b3fe5f4bccac64b345950319c09bfcded6d11100b485` |
+| Integrated QKV flags-unset parity | `b8a5b540c43b3942a458316f8d3f2943ed64beadfbb40fe803a93111aac3d011` |
+| Integrated QKV transaction harness | `fb5418344b23f39401b9f401c26da64737494349a28f92995b5569855a93e7c2` |
+| Integrated QKV worker harness | `69fb7d9c83851a5db4ebf686d51f774e5f374f6c7a71600e54420f100f3bf9e7` |
+| Integrated QKV lifecycle harness | `356200d3ffd1ce66ae141e214258992a656af6f24980f487a703c6fc92f1f640` |
+| Integrated QKV command profile harness | `10dee319fa002a96710f192269096b48bc2658d7c5e401d48c504231a5c945cc` |
+| Integrated QKV short transaction proof | `1b3640e7bb55c176fd207985084c5607b2271358688b9f2425b81075732daa67` |
+| Integrated QKV stock-s4096-00 transaction proof | `a535e5703a059ac6682e2a83c1f37e172571b3996d9aeef6668f14836be105f9` |
+| Integrated QKV stock-g4096-01 transaction proof | `35c09d2be0e5b807aa5d1d412ae43275fbcefd3ded72c6889f36d520fdc31087` |
+| Integrated QKV lifecycle receipt | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |
+| Integrated QKV control command profile | `e7be15f73ea4d1d8eea4bf8ac43676668675ee6afed7b2e24da62e9b53f6695f` |
+| Integrated QKV enabled command profile | `97c2d3c94a3192edfe9b0d7b7667cc2822359558ea3a9e1ed78be441123ea89c` |
+| Integrated QKV contended worker pairs | `d90d4df0a34f11657fb33c34621ec368eb403b394f03d3d9e2416371ffe24e99` |
+| Integrated QKV contended host observations | `0360df1052085e786114e627b5c9c582f0d26f76a8cda2e177d0808822474a65` |
+| Integrated QKV benchmark retry harness | `89617dff0f74a9be550efdf8b7a259ff5af320a9170b84447f7eb7c3fed0769d` |
+| Integrated QKV benchmark retry worker pairs | `fc000e64c26cfa9d29b1a624e50ea9e4b4c927860771f174a68a6cba7b556235` |
+| Integrated QKV benchmark retry host observations | `f72ef2f148438ada3379b9d86cf5a08ed8a74210ad1425e39f3e43e1238a345c` |

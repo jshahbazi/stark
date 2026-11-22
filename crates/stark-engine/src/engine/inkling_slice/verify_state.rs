@@ -88,6 +88,10 @@ impl VerifyWorkspace {
             None
         };
         runtime.verify_combined_short = combined_short;
+        let qkv_batch = std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_QKV_BATCH").is_some_and(|value| value == "1");
+        if combined_short && qkv_batch {
+            lanes.enable_verify_qkv_batch(runtime)?;
+        }
         let draft = DraftBlock::new(runtime)?;
         let alloc = |bytes| {
             runtime

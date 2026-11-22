@@ -163,6 +163,13 @@ impl PrefillLanes {
         Ok(())
     }
 
+    pub(super) fn enable_verify_qkv_batch(
+        &mut self,
+        runtime: &mut Runtime,
+    ) -> Result<()> {
+        self.controllers.as_mut().ok_or("Inkling verifier controllers unavailable")?.enable_verify_qkv_batch(runtime)
+    }
+
     pub(super) fn enable_controllers(
         &mut self,
         runtime: &mut Runtime,
@@ -370,7 +377,10 @@ impl Session {
                     layer.attention_inputs(gpu, flow, &flow.partial, scratch, state);
                 }
             }
-            if let Some(controllers) = controllers {
+            if let Some(controllers) = controllers
+                && !(undo.is_some()
+                    && controllers.try_encode_verify_qkv(gpu, layer, state, flows.clone().zip(scratches.clone())))
+            {
                 for slot in 0..3 {
                     let rows = flows.clone().zip(scratches.clone()).map(|(flow, scratch)| {
                         (
