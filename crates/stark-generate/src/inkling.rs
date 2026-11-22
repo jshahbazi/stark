@@ -54,6 +54,8 @@ struct DraftStats {
 #[derive(Default, serde::Serialize)]
 struct SpeculationStats {
     rounds: [usize; MAX_VERIFY_ROWS],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    overlapped_rounds: Option<usize>,
     draft_seconds: f64,
     verify_seconds: f64,
     finish_seconds: f64,
@@ -412,14 +414,27 @@ fn collect_output(
                         logits = target.step(anchor).map_err(|_| "native_generation_failed")?;
                         session = Some(target);
                     } else {
-                        let start = Instant::now();
-                        let proposals = target.propose_verify(anchor, depth).map_err(|_| "native_generation_failed")?;
-                        speculative.as_mut().unwrap().draft_seconds += start.elapsed().as_secs_f64();
+                        let stats = speculative.as_mut().unwrap();
+                        let (proposals, transaction) = if depth >= 2 && target.overlaps_verify() {
+                            let (proposals, transaction, before_verify_ms, verify_wall_ms) = target
+                                .begin_overlapped_verify(anchor, depth)
+                                .map_err(|_| "native_generation_failed")?;
+                            *stats.overlapped_rounds.get_or_insert(0) += 1;
+                            stats.draft_seconds += before_verify_ms * 0.001;
+                            stats.verify_seconds += verify_wall_ms * 0.001;
+                            (proposals, transaction)
+                        } else {
+                            let start = Instant::now();
+                            let proposals =
+                                target.propose_verify(anchor, depth).map_err(|_| "native_generation_failed")?;
+                            stats.draft_seconds += start.elapsed().as_secs_f64();
+                            let input = std::iter::once(anchor).chain(proposals.iter().copied()).collect::<Vec<_>>();
+                            let start = Instant::now();
+                            let transaction = target.begin_verify(&input).map_err(|_| "native_generation_failed")?;
+                            stats.verify_seconds += start.elapsed().as_secs_f64();
+                            (proposals, transaction)
+                        };
                         draft_stats.proposed += proposals.len();
-                        let input = std::iter::once(anchor).chain(proposals.iter().copied()).collect::<Vec<_>>();
-                        let start = Instant::now();
-                        let transaction = target.begin_verify(&input).map_err(|_| "native_generation_failed")?;
-                        speculative.as_mut().unwrap().verify_seconds += start.elapsed().as_secs_f64();
                         pending = Some(PendingDraft {
                             transaction,
                             proposals,

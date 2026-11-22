@@ -179,6 +179,10 @@ pub(super) struct DraftBlock {
 }
 
 impl DraftBlock {
+    pub(super) fn winners(&self) -> &Buffer {
+        &self.winners
+    }
+
     pub(super) fn new(runtime: &mut Runtime) -> Result<Self> {
         let options = MTLCompileOptions::new();
         options.set_math_mode(MTLMathMode::Safe);
@@ -495,15 +499,52 @@ impl Dspark {
         count: usize,
         block: &DraftBlock,
     ) -> Result<Vec<u32>> {
+        self.propose_many_with_submit(
+            runtime,
+            anchor,
+            position,
+            embedding,
+            embed_norm,
+            unembedding,
+            count,
+            block,
+            || Ok(()),
+        )
+        .map(|(winners, _)| winners)
+    }
+
+    pub(super) fn propose_many_with_submit(
+        &self,
+        runtime: &Runtime,
+        anchor: u32,
+        position: usize,
+        embedding: &Buffer,
+        embed_norm: &Buffer,
+        unembedding: &Buffer,
+        count: usize,
+        block: &DraftBlock,
+        on_submit: impl FnOnce() -> Result<()>,
+    ) -> Result<(Vec<u32>, Timing)> {
         if !(1..ROWS).contains(&count) || anchor as usize >= VOCABULARY {
             return Err("Inkling draft proposal block is out of range");
         }
-        self.execute_proposal_block(runtime, anchor, position, embedding, embed_norm, unembedding, count, block, None)?;
+        let timing = self.execute_proposal_block(
+            runtime,
+            anchor,
+            position,
+            embedding,
+            embed_norm,
+            unembedding,
+            count,
+            block,
+            None,
+            on_submit,
+        )?;
         let winners = session::read_shared::<u32>(&block.winners, count);
         if winners.iter().any(|&token| token as usize >= VOCABULARY) {
             return Err("Inkling draft did not produce a finite vocabulary score");
         }
-        Ok(winners)
+        Ok((winners, timing))
     }
 
     pub(super) fn teacher_proposal_logits(
@@ -537,7 +578,9 @@ impl Dspark {
             previous.len() + 1,
             block,
             Some(scores),
+            || Ok(()),
         )
+        .map(|_| ())
     }
 
     fn execute_proposal_block(
@@ -551,75 +594,81 @@ impl Dspark {
         count: usize,
         block: &DraftBlock,
         scores: Option<&Buffer>,
-    ) -> Result<()> {
+        on_submit: impl FnOnce() -> Result<()>,
+    ) -> Result<Timing> {
         let s = &self.scratch;
         let (rank, dispatch_groups, winner_groups) = Self::rank_geometry(runtime);
-        execute(runtime, |gpu| {
-            self.encode_block(gpu, anchor, position, embedding, embed_norm);
-            for row in 0..count {
-                gpu.norm((&s.residual, (row + 1) * WIDTH * 4), &self.norm, (&s.norm, row * WIDTH * 2), true);
-            }
-            // The source's padded vocabulary tile projects all live mask rows
-            // together. A separate, small recurrent output preserves those scores.
-            s.matmul(gpu, &s.norm, unembedding, WIDTH, PADDED_VOCABULARY);
-            for row in 0..count {
-                gpu.dispatch(
-                    "ink_draft_markov_input",
-                    &[
-                        binding(&self.previous),
-                        (&s.norm, row * WIDTH * 2),
-                        binding(&self.feature),
-                        binding(&s.rnn_input),
-                        binding(&block.state),
-                        binding(&block.winners),
-                    ],
-                    [row as u32, anchor, VOCABULARY as u32, 0],
-                    (RNN / 128, 1),
-                    128,
-                );
-                gpu.one(
-                    "ink_unembed_tensor",
-                    &[&s.rnn_input, &self.recurrent, &block.gates],
-                    [RNN as u32, (3 * RANK) as u32],
-                    (3 * RANK / 32, 1),
-                    32,
-                );
-                gpu.one(
-                    "ink_draft_markov_state",
-                    &[&block.gates, &self.recurrent_bias, &s.latent, &block.state],
-                    row as u32,
-                    (RANK / 128, 1),
-                    128,
-                );
-                let (pipeline, output, groups) = match scores {
-                    Some(scores) => ("ink_draft_export_scores", (scores, row * PADDED_VOCABULARY * 4), GROUPS),
-                    None => (rank, binding(&s.groups), dispatch_groups),
-                };
-                gpu.dispatch(
-                    pipeline,
-                    &[
-                        (&s.raw, row * PADDED_VOCABULARY * 4),
-                        binding(&self.folded),
-                        binding(&self.folded_bias),
-                        binding(&s.latent),
-                        output,
-                    ],
-                    VOCABULARY as u32,
-                    (groups, 1),
-                    128,
-                );
-                if scores.is_none() {
-                    gpu.dispatch(
-                        "ink_draft_winner",
-                        &[binding(&s.groups), (&block.winners, row * size_of::<u32>())],
-                        winner_groups as u32,
-                        (1, 1),
-                        256,
-                    );
+        execute_prepared_with_submit(
+            runtime,
+            None,
+            |_| Ok(()),
+            |gpu| {
+                self.encode_block(gpu, anchor, position, embedding, embed_norm);
+                for row in 0..count {
+                    gpu.norm((&s.residual, (row + 1) * WIDTH * 4), &self.norm, (&s.norm, row * WIDTH * 2), true);
                 }
-            }
-        })?;
-        Ok(())
+                // The source's padded vocabulary tile projects all live mask rows
+                // together. A separate, small recurrent output preserves those scores.
+                s.matmul(gpu, &s.norm, unembedding, WIDTH, PADDED_VOCABULARY);
+                for row in 0..count {
+                    gpu.dispatch(
+                        "ink_draft_markov_input",
+                        &[
+                            binding(&self.previous),
+                            (&s.norm, row * WIDTH * 2),
+                            binding(&self.feature),
+                            binding(&s.rnn_input),
+                            binding(&block.state),
+                            binding(&block.winners),
+                        ],
+                        [row as u32, anchor, VOCABULARY as u32, 0],
+                        (RNN / 128, 1),
+                        128,
+                    );
+                    gpu.one(
+                        "ink_unembed_tensor",
+                        &[&s.rnn_input, &self.recurrent, &block.gates],
+                        [RNN as u32, (3 * RANK) as u32],
+                        (3 * RANK / 32, 1),
+                        32,
+                    );
+                    gpu.one(
+                        "ink_draft_markov_state",
+                        &[&block.gates, &self.recurrent_bias, &s.latent, &block.state],
+                        row as u32,
+                        (RANK / 128, 1),
+                        128,
+                    );
+                    let (pipeline, output, groups) = match scores {
+                        Some(scores) => ("ink_draft_export_scores", (scores, row * PADDED_VOCABULARY * 4), GROUPS),
+                        None => (rank, binding(&s.groups), dispatch_groups),
+                    };
+                    gpu.dispatch(
+                        pipeline,
+                        &[
+                            (&s.raw, row * PADDED_VOCABULARY * 4),
+                            binding(&self.folded),
+                            binding(&self.folded_bias),
+                            binding(&s.latent),
+                            output,
+                        ],
+                        VOCABULARY as u32,
+                        (groups, 1),
+                        128,
+                    );
+                    if scores.is_none() {
+                        gpu.dispatch(
+                            "ink_draft_winner",
+                            &[binding(&s.groups), (&block.winners, row * size_of::<u32>())],
+                            winner_groups as u32,
+                            (1, 1),
+                            256,
+                        );
+                    }
+                }
+            },
+            on_submit,
+        )
     }
 
     fn encode_block(

@@ -2,12 +2,21 @@
 
 kernel void ink_embedding(
     device const bfloat *embedding [[buffer(0)]], device const bfloat *weight [[buffer(1)]],
-    device float *residual [[buffer(2)]], constant uint &token [[buffer(3)]],
+    device float *residual [[buffer(2)]],
+#ifdef INK_VERIFY_DRAFT_EMBEDDING
+    device const uint *proposals [[buffer(3)]], constant uint2 &row_vocabulary [[buffer(4)]],
+#else
+    constant uint &token [[buffer(3)]],
+#endif
     uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
     threadgroup float sums[18];
     threadgroup float scale;
     const uint column = tid * 4;
+#ifdef INK_VERIFY_DRAFT_EMBEDDING
+    const uint proposed = proposals[row_vocabulary.x];
+    const uint token = proposed < row_vocabulary.y ? proposed : 0u;
+#endif
     const uint row = token * ink_width;
     const float4 values = float4(*reinterpret_cast<device const bfloat4 *>(embedding + row + column));
     float total = 0;

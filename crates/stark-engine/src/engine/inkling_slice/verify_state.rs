@@ -31,6 +31,19 @@ impl VerifyWorkspace {
         packed_prefill::register_verify_nvfp4_matvec(runtime)?;
         packed_prefill::register_parallel_route(runtime)?;
         packed_prefill::register(runtime, include_str!("verify_state.metal"), &["ink_save_anchor_convolution"])?;
+        if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_OVERLAP").as_deref() == Some(std::ffi::OsStr::new("1")) {
+            packed_prefill::register(
+                runtime,
+                concat!(
+                    "#define INK_VERIFY_DRAFT_EMBEDDING\n#define ink_embedding ink_embedding_draft_ids\n",
+                    include_str!("serial.metal"),
+                    "\n",
+                    include_str!("session.metal"),
+                ),
+                &["ink_embedding_draft_ids"],
+            )?;
+            runtime.verify_overlap = true;
+        }
         let shared_attention =
             std::env::var_os("STARK_INKLING_EXPERIMENT_SHARED_LOCAL").as_deref() == Some(std::ffi::OsStr::new("1"));
         let shared_global =
@@ -414,6 +427,91 @@ impl Session {
         )
     }
 
+    pub fn overlaps_verify(&self) -> bool {
+        self.source_verifier && self.runtime.verify_overlap
+    }
+
+    /// Submit the short verifier while the prior draft command is running.
+    /// Report wall time before verifier encoding followed by the verifier's
+    /// wall time, which includes any draft work still outstanding.
+    pub fn begin_overlapped_verify(
+        &mut self,
+        anchor: u32,
+        depth: usize,
+    ) -> Result<(Vec<u32>, Verification<'_>, f64, f64)> {
+        if !self.overlaps_verify()
+            || !self.runtime.source_text_active
+            || self.active_dspark().is_none()
+            || self.position == 0
+            || !(2..MAX_VERIFY_ROWS).contains(&depth)
+            || anchor as usize >= VOCABULARY
+        {
+            return Err("Inkling overlapped verifier requires source draft mode and two or three proposals");
+        }
+        let rows = depth + 1;
+        self.check_append(rows)?;
+        let workspace = self.verifier.as_ref().ok_or("Inkling verifier workspace unavailable")?;
+        // Only the anchor is already known on the CPU. Draft rows read the
+        // preceding command's proposal buffer in their embedding dispatches.
+        let inputs = [anchor, 0, 0, 0];
+        let mut target_timing = None;
+        let parallel = self.runtime.parallel_route;
+        let matvec = self.runtime.verify_nvfp4_matvec;
+        self.runtime.parallel_route = true;
+        self.runtime.verify_nvfp4_matvec = true;
+        let draft = self.active_dspark().expect("checked source verifier draft");
+        let command = draft.propose_many_with_submit(
+            &self.runtime,
+            anchor,
+            self.position,
+            &self.embedding,
+            &self.embed_norm,
+            &self.unembedding,
+            depth,
+            &workspace.draft,
+            || {
+                target_timing = Some(execute_prepared(
+                    &self.runtime,
+                    None,
+                    |command| workspace.save(command, self, rows),
+                    |gpu| {
+                        self.encode_verify_transaction(
+                            gpu,
+                            &workspace.lanes,
+                            &inputs[..rows],
+                            VerifyExperts::Grouped,
+                            workspace,
+                            Some(workspace.draft.winners()),
+                        )
+                    },
+                )?);
+                Ok(())
+            },
+        );
+        self.runtime.verify_nvfp4_matvec = matvec;
+        self.runtime.parallel_route = parallel;
+        match (command, target_timing) {
+            (Ok((proposals, total)), Some(target)) => {
+                let draft_prefix = total.wall_ms - target.wall_ms;
+                Ok((
+                    proposals,
+                    Verification {
+                        session: Some(self),
+                        rows,
+                    },
+                    draft_prefix,
+                    target.wall_ms,
+                ))
+            },
+            (result, _) => {
+                // Both commands have completed before a fault can clear the
+                // session. Invalid proposal IDs were clamped in the GPU shader.
+                self.reset();
+                Err(result.err().unwrap_or("Inkling overlapped verifier did not submit"))
+            },
+        }
+    }
+
     pub fn begin_verify(
         &mut self,
         tokens: &[u32],
@@ -444,7 +542,9 @@ impl Session {
             &self.runtime,
             profile,
             |command| workspace.save(command, self, tokens.len()),
-            |gpu| self.encode_verify_transaction(gpu, &workspace.lanes, tokens, VerifyExperts::Grouped, workspace),
+            |gpu| {
+                self.encode_verify_transaction(gpu, &workspace.lanes, tokens, VerifyExperts::Grouped, workspace, None)
+            },
         );
         self.runtime.verify_nvfp4_matvec = matvec;
         self.runtime.parallel_route = parallel;

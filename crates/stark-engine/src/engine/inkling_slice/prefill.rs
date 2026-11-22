@@ -260,7 +260,7 @@ impl Session {
         readout: bool,
         trace: Option<&PrefillTrace>,
     ) {
-        self.encode_lanes(gpu, lanes, inputs, readout, trace, None, None);
+        self.encode_lanes(gpu, lanes, inputs, readout, trace, None, None, None);
     }
 
     pub(super) fn encode_verify_rows(
@@ -271,7 +271,7 @@ impl Session {
         experts: VerifyExperts,
     ) {
         let inputs = tokens.iter().copied().map(TokenInput::Text).collect::<Vec<_>>();
-        self.encode_lanes(gpu, lanes, &inputs, true, None, Some(experts), None);
+        self.encode_lanes(gpu, lanes, &inputs, true, None, Some(experts), None, None);
     }
 
     pub(super) fn encode_verify_transaction(
@@ -281,9 +281,10 @@ impl Session {
         tokens: &[u32],
         experts: VerifyExperts,
         undo: &verify_state::VerifyWorkspace,
+        proposals: Option<&Buffer>,
     ) {
         let inputs = tokens.iter().copied().map(TokenInput::Text).collect::<Vec<_>>();
-        self.encode_lanes(gpu, lanes, &inputs, true, None, Some(experts), Some(undo));
+        self.encode_lanes(gpu, lanes, &inputs, true, None, Some(experts), Some(undo), proposals);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -296,6 +297,7 @@ impl Session {
         trace: Option<&PrefillTrace>,
         verify: Option<VerifyExperts>,
         undo: Option<&verify_state::VerifyWorkspace>,
+        proposals: Option<&Buffer>,
     ) {
         let allow_groups = verify != Some(VerifyExperts::Singleton);
         let source_groups = verify == Some(VerifyExperts::Grouped);
@@ -304,8 +306,20 @@ impl Session {
         let flows = lanes.flows.iter().chain(std::iter::once(&self.flow)).skip(skip);
         let taps = lanes.verify_taps(self, row_count);
         let draft = self.active_dspark();
-        for (flow, &input) in flows.clone().zip(inputs) {
-            self.encode_embedding(gpu, flow, input);
+        for (row, (flow, &input)) in flows.clone().zip(inputs).enumerate() {
+            if row > 0
+                && let Some(proposals) = proposals
+            {
+                gpu.one(
+                    "ink_embedding_draft_ids",
+                    &[&self.embedding, &self.embed_norm, &flow.partial, proposals],
+                    [(row - 1) as u32, VOCABULARY as u32],
+                    (1, 1),
+                    WIDTH / 4,
+                );
+            } else {
+                self.encode_embedding(gpu, flow, input);
+            }
         }
 
         let tap_rows = taps.map(Some).enumerate().map(|(row, taps)| {

@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–37 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–39 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -581,6 +581,48 @@ Measure the live multi-mask proposal command at depths two and three on two stoc
 
 Plain command GPU medians were 4.37–4.40 ms at depth two and 4.45–4.48 ms at depth three. The extra timestamps added 0.01–0.02 ms at the paired wall medians. The eight-row block includes the final normalization before the vocabulary projection. The fixed draft-block and vocabulary costs explain most of the proposal command. The shortlist rank stage has less than 0.09 ms left to recover on these inputs. Keep the timestamps in the archived diagnostic patch. This measurement does not change worker throughput.
 
+## 20261121-INKDECODE-38 · Shrink and widen the DSpark vocabulary projection tile
+
+Keep the stock eight-row bidirectional draft, live masks and BF16 weights. Change only the shared vocabulary projection. Compare 8 × 32, 8 × 64, 8 × 128, 16 × 64 and 16 × 128 against the stock 16 × 32 tile. Use twelve rotated plain pairs and four timestamped pairs at each of two and three proposals on both stock 4K prefixes. Copy the private live F32 base scores after each timed command for the bit check.
+
+All five shapes compiled and matched 160,051,200 F32 scores at the live rows, including vocabulary padding, and every proposed ID between arms. The 8 × 128 tile had the strongest wall results. At two proposals it saved 0.02–0.04 ms at the paired median, and at three it saved 0.04–0.05 ms. Instrumented vocabulary time fell from 2.03–2.07 ms to 2.00–2.02 ms. The kernel still reads the same weight bytes with fewer padded output rows and fewer output tiles.
+
+The finer timestamps also split the original draft backbone. Attention parts and join together used about 0.34 ms, and feed-forward projections, activation and residual update used 1.14–1.16 ms across the three layers. Retire the vocabulary tile variants because the whole-command saving is small. Keep the exact stock geometry.
+
+## 20261121-INKDECODE-39 · Encode the verifier while the draft command runs
+
+Submit the same DSpark command first. While it runs, the CPU encodes and submits the target verifier to the same Metal queue. The anchor embedding still takes its ID from the CPU. Each proposed row reads its ID from the first command's winner buffer and uses the same embedding reduction and BF16 rounding. The queue preserves the dependency on draft completion. The target command retains the original undo copies, row order and arithmetic. Verify both command statuses and the draft ID extent before exposing the transaction. If either command fails or a proposal ID is invalid, wait for the queued work and reset the session. The embedding shader bounds its read even on the invalid-ID path.
+
+| Proposals | Short paired wall saving | Stock 4K paired savings | 4K wrap controls, paired savings |
+| --- | ---: | ---: | ---: |
+| Two | 1.38 ms | 1.49–3.03 ms | 1.16–2.06 ms |
+| Three | 1.96 ms | 0.24–2.72 ms | 1.06–1.67 ms |
+
+The timing boundary includes the draft and verifier commands through completion and readback. Restore the same snapshot before each arm and rotate command order. The 48 normal native pairs and 32 capacity-crossing pairs matched proposals, every provisional F32 readout and committed target and draft state. Each width exercises every nonempty accepted prefix. The queued path also reproduced the full 96-token serial continuation at each depth and all abandoned-transaction resets. The usual 45 rejection and capacity-wrap checks passed in the same runs.
+
+The queued path is admitted for two or three proposals in source text mode under `STARK_INKLING_EXPERIMENT_VERIFY_OVERLAP=1`. Single-proposal and final-tail rounds use the existing calls. The timed split assigns the pre-verifier wall interval to draft and the rest to verification. In this mode the verification interval can include draft work still running on the GPU. Use the combined interval for cross-arm comparisons.
+
+The flags-unset executable reproduced the pinned connected short and 4K slices. The full-model short logits matched, and four stock 4K captures reproduced the 16 F32 vectors, 768 BF16 visit residuals and four snapshot replays. The input cache and committed state format used by prefix reuse are the same in both queued and ordinary transactions.
+
+### Cold worker screen
+
+The two arms used the same sealed worker and baseline affine FP4 verifier settings. Only the candidate selected the queued path. Compare four alternating cold 4K pairs per mode at context 4,352, zero input reuse and 256 sampled and emitted tokens. Vision and DSpark stayed resident. Greedy used three proposals and seeded sampled used two. All 16 generated output hashes and paired proposal and acceptance totals matched.
+
+| Mode | Control median | Queued median | Median paired gain | Candidate range | Faster pairs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Greedy | 60.60 tok/s | 61.16 tok/s | +1.00% | 52.15–64.17 | 4/4 |
+| Seeded sampled | 48.39 tok/s | 48.89 tok/s | +0.40% | 46.85–51.25 | 2/4 |
+
+The workers accounted for 99.86% of observed GPU counter increments over 85 intervals. Host readings were nominal or fair, with 509 pageouts and zero swapouts. This screen shows a small greedy effect and mixed sampled results. The stronger two-proposal native savings did not transfer consistently to useful sampled decode.
+
+### Sampled repeat with explicit overlap counts
+
+The final worker adds `overlapped_rounds` to distinguish measurements whose timing boundaries include pending draft work. Repeat all four seeded sampled pairs with the same scope. Each candidate receipt counted exactly its depth-two and depth-three rounds, and the ordinary receipts omitted the field. All eight outputs and paired proposal and acceptance totals matched.
+
+The repeat moved the median from 50.93 to **52.87 tok/s** and improved all four pairs. The median paired gain was **3.82%**, and candidate rates ranged from 51.58 to 56.60 tok/s. The combined proposal and verifier interval dropped by 1.37 ms per round at the paired median. The earlier sampled screen saved 0.15 ms at that boundary. The repeat's two workers accounted for 99.86% of measured GPU counter increments over 41 intervals, with fair thermal readings, 25 pageouts and zero swapouts. Keep the queued mode opt-in given the variation across sessions. At the observed acceptance and other costs in the repeat, sampled decode still needs 2.04–5.07 ms less per round across the four inputs to reach 60 tok/s.
+
+The final worker reused 2,048 aligned input tokens across source draft depths and matched the cold output. It cleared retained prefix state on decode cancellation and when switching between source drafting and ordinary generation. The opt-in kept the same short and long-context admission decisions. An early stop on an accepted proposal matched the ordinary continuation and preserved sampled-token accounting.
+
 ## Evidence identities
 
 Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1`. Original DSpark SHA-256 `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2`. The current run uses the pinned Ollama capture and host documented in the [default-router record](2026-11-21-inkling-mini-decode-default.md).
@@ -894,3 +936,31 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | DSpark proposal stage profile scored-source.patch | `e5c605c710ed2ccd157b9982dcb956765d5f9dbef7a4925caffbe11a5631ad44` |
 | DSpark proposal stage profile stock-s4096-00.json | `753bd5066802dd2620cd5ee851b47250aa81b0ebb8e3edbf6a67d80b3703ead7` |
 | DSpark proposal stage profile stock-g4096-01.json | `6594f05ae38d5d30f79b2b306645600a78d435e8fb923a104499683233e85314` |
+| DSpark vocabulary tile inkling_slice | `3b96ebb50a2f44f19f7c6e344ba068fe40a653ddf16c4ccf5c9f96a72aafd479` |
+| DSpark vocabulary tile scored-source.patch | `e4a751452332816b550b084bf3e525152c0a05cf6e1238c445597dd481845cc9` |
+| DSpark vocabulary tile stock-g4096-01.json | `4a1b79531b4b8558d1485e73e75dd4aa4c74e2cdd29aa94c6be7527f57f716e2` |
+| DSpark vocabulary tile stock-s4096-00.json | `83cdba7bc57853a4107ad5d148ddd19eb020a4f1a5d4ea7dc69518d52e1bd1c1` |
+| Overlapped verifier inkling_slice | `9c5e7e761c926e04f4cc09b1e9ed1fd37eed89df358bde5a54d0be0ad7b5d9ee` |
+| Overlapped verifier scored-source.patch | `8456d7c39565fda903b408d5f99f2ae628d347418ca84bfee9ddafe868199001` |
+| Overlapped verifier short.json | `0de6c5263801e0b2bac726665e16627c7a1b07c003c75d495cc8725ecb6a127c` |
+| Overlapped verifier stock-s4096-00.json | `d3de1b45715179104bd62a8e9cecd9838c9aad2d4923cda3ac8d95c98ef8bf46` |
+| Overlapped verifier stock-g4096-01.json | `e943dc45dc6ead0a4e4e03e0c4ded551ab154695b8bf0bf2693f39e9faf4d160` |
+| Overlapped verifier flags-unset final/flags-unset/slice-4.json | `3ec9bea159f2df8ab1c508329cd2b102cb53e672c740ae3fbddc9ba677cbfa63` |
+| Overlapped verifier flags-unset final/flags-unset/slice-4096.json | `c4a5cefe72c1633b5a56a7092e2e47479698d79936933e66910289b867c40652` |
+| Overlapped verifier flags-unset final/flags-unset/short-both.json | `58eddd281b2bd8ea1d502bcdd764bfbb3a93a5c3b165da8a110e2cbb4f45d55a` |
+| Overlapped verifier flags-unset final/flags-unset/full-0.json | `ab63da118a07cd53c3b5f72caf6b3d3dca053cda3420daa9eaae80a8fb44ecb9` |
+| Overlapped verifier flags-unset final/flags-unset/full-1.json | `d7e7b69a82d2163116b092dd5a687a06e61f802a8e508d00b4b95255e89c057f` |
+| Overlapped verifier flags-unset final/flags-unset/full-2.json | `ef5633dc607d2293ee3017cd2a12c7aa2a8943c140132d5a07b03a00aa1ffefa` |
+| Overlapped verifier flags-unset final/flags-unset/full-3.json | `336af745c75edbec827071aedaef4adce1aa99faa9b30bd0f554c4acdcb9f9e9` |
+| Overlapped verifier worker worker-scored.patch | `8456d7c39565fda903b408d5f99f2ae628d347418ca84bfee9ddafe868199001` |
+| Overlapped verifier worker stark-generate | `03b64caa5cd91a3db693122ddf13917ccd28b81aacbdec104171ed0a2537a4eb` |
+| Overlapped verifier worker worker_probe.py | `050f746cd3473fd82c1ec96b5741e3f21168e46adc706cabe066d1c4bae3bd1a` |
+| Overlapped verifier worker worker-pairs.jsonl | `23df6697e417b41e57f108cc4467a8cfc914da1c17102813f5012921d3945f31` |
+| Overlapped verifier worker worker-host.jsonl | `254e8cd636528e75df6e69360e9af622853fe4cdbdf92b629b23e20d83fd82fc` |
+| Overlapped verifier repeat confirm-source.patch | `f68590d1ee99e8c3ce295853857d18601aa763872a899e28fd1095b03aab1c23` |
+| Overlapped verifier repeat stark-generate-with-telemetry | `ada452a22f7959c7fa88b1005742a8e2fe6b329612a68e502c08b22f3b3647bc` |
+| Overlapped verifier repeat confirm.py | `4ce02fc558929455443871b2a791e8c00d0c85cb452866e967f561a7e128b1a9` |
+| Overlapped verifier repeat confirm-pairs.jsonl | `4af369ca34f4cbb4094172928c8f11d38ef6536006777f628022af14fec9a462` |
+| Overlapped verifier repeat confirm-host.jsonl | `0e1c1cdbb81e52a6902d6c4b798b1bc900c4f0d0e8f0929c9536bf9e724ff3e1` |
+| Overlapped verifier lifecycle lifecycle.py | `58fd4621e615d0531d92533268c405dba777e4eeb447e84503fb7f4ea62444dd` |
+| Overlapped verifier lifecycle lifecycle.jsonl | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |

@@ -82,6 +82,7 @@ struct Runtime {
     verify_fused_finish: bool,
     verify_fused_attention: bool,
     verify_short_router: bool,
+    verify_overlap: bool,
     parallel_route: bool,
     nvfp4_vector: bool,
     draft_shortlist: bool,
@@ -180,6 +181,7 @@ impl Runtime {
             verify_fused_finish: false,
             verify_fused_attention: false,
             verify_short_router: false,
+            verify_overlap: false,
             parallel_route: false,
             nvfp4_vector: false,
             draft_shortlist: false,
@@ -1314,9 +1316,19 @@ fn execute_with_profile(
 
 fn execute_prepared(
     runtime: &Runtime,
+    profile: Option<&mut PrefillTiming>,
+    prepare: impl FnOnce(&ProtocolObject<dyn MTLCommandBuffer>) -> Result<()>,
+    encode: impl FnOnce(&mut Stream<'_>),
+) -> Result<Timing> {
+    execute_prepared_with_submit(runtime, profile, prepare, encode, || Ok(()))
+}
+
+fn execute_prepared_with_submit(
+    runtime: &Runtime,
     mut profile: Option<&mut PrefillTiming>,
     prepare: impl FnOnce(&ProtocolObject<dyn MTLCommandBuffer>) -> Result<()>,
     encode: impl FnOnce(&mut Stream<'_>),
+    on_submit: impl FnOnce() -> Result<()>,
 ) -> Result<Timing> {
     let start = std::time::Instant::now();
     let command = runtime.queue.command_buffer().ok_or("Metal command allocation failed")?;
@@ -1341,10 +1353,12 @@ fn execute_prepared(
     }
     let encode_ms = start.elapsed().as_secs_f64() * 1000.0;
     command.commit();
+    let submitted = on_submit();
     command.wait_until_completed();
     if command.status() != MTLCommandBufferStatus::Completed {
         return Err("Inkling command failed");
     }
+    submitted?;
     let timing = Timing {
         dispatches: gpu.dispatches,
         wall_ms: start.elapsed().as_secs_f64() * 1000.0,

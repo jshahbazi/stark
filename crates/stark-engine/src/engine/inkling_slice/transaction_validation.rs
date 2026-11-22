@@ -291,6 +291,59 @@ fn screen_verifier_flag(
     Ok(report)
 }
 
+fn screen_overlapped_verify(
+    session: &mut Session,
+    base: &Snapshot,
+    anchors: &[u32],
+    crossing: bool,
+) -> Result<Vec<Value>> {
+    if !session.overlaps_verify() {
+        return Ok(Vec::new());
+    }
+    let mut report = Vec::new();
+    for depth in 2..MAX_VERIFY_ROWS {
+        for (trial, &anchor) in anchors.iter().take(8).enumerate() {
+            let kept = 1 + trial % (depth + 1);
+            let mut checks = [None, None];
+            for arm in [trial % 2, 1 - trial % 2] {
+                session.restore(base)?;
+                let started = Instant::now();
+                let (proposals, txn, draft_ms, verify_ms) = if arm == 1 {
+                    session.begin_overlapped_verify(anchor, depth)?
+                } else {
+                    let proposals = session.propose_verify(anchor, depth)?;
+                    let draft_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    let mut inputs = vec![anchor];
+                    inputs.extend(&proposals);
+                    let start = Instant::now();
+                    let txn = session.begin_verify(&inputs)?;
+                    (proposals, txn, draft_ms, start.elapsed().as_secs_f64() * 1000.0)
+                };
+                let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let mut logits = Vec::with_capacity(depth + 1);
+                for row in 0..=depth {
+                    logits.push(txn.logits(row)?.to_vec());
+                }
+                let state = state_digest(txn.commit(kept)?)?;
+                checks[arm] = Some((proposals, logits, state));
+                report.push(json!({
+                    "depth":depth,"trial":trial,"kept":kept,"crossing":crossing,"queued":arm==1,
+                    "wall_ms":wall_ms,"draft_ms":draft_ms,"verify_ms":verify_ms,
+                }));
+            }
+            let (proposals, logits, state) = checks[0].take().unwrap();
+            let (queued_proposals, queued_logits, queued_state) = checks[1].take().unwrap();
+            if proposals != queued_proposals
+                || state != queued_state
+                || logits.iter().zip(&queued_logits).any(|(a, b)| !same_logits(a, b))
+            {
+                return Err("Inkling overlapped verifier changed proposals, F32 logits or committed state");
+            }
+        }
+    }
+    Ok(report)
+}
+
 fn profile_exact_verifier(
     session: &mut Session,
     base: &Snapshot,
@@ -421,9 +474,9 @@ pub fn measure_verify_transaction(
     let serial_ms = started.elapsed().as_secs_f64() * 1000.0;
     let serial_state = state_digest(&session)?;
     let controls = check_rejections(&mut session, &base, &teacher)?;
-    let crossing_controls = if let Some(snapshot) = cap_crossing {
+    let crossing_controls = if let Some(snapshot) = cap_crossing.as_ref() {
         let inputs = std::iter::once(prompt[4095]).chain(teacher.iter().copied()).collect::<Vec<_>>();
-        check_rejections(&mut session, &snapshot, &inputs)?
+        check_rejections(&mut session, snapshot, &inputs)?
     } else {
         0
     };
@@ -437,6 +490,10 @@ pub fn measure_verify_transaction(
         screen_verifier_flag(&mut session, &base, &teacher, |runtime| &mut runtime.verify_fused_attention)?;
     let short_router = screen_verifier_flag(&mut session, &base, &teacher, |runtime| &mut runtime.verify_short_router)?;
     let shared_global = screen_shared_global(&mut session, &base, &teacher)?;
+    let mut overlapped = screen_overlapped_verify(&mut session, &base, &teacher, false)?;
+    if let Some(crossing) = cap_crossing.as_ref() {
+        overlapped.extend(screen_overlapped_verify(&mut session, crossing, &[prompt[4095]; 8], true)?);
+    }
     let mut rounds = Vec::new();
     for depth in 1..MAX_VERIFY_ROWS {
         session.restore(&base)?;
@@ -456,16 +513,25 @@ pub fn measure_verify_transaction(
                 output.push(greedy(&session.step(anchor)?));
                 continue;
             }
-            let start = Instant::now();
-            let proposals = session.propose_verify(anchor, next_depth)?;
-            draft_ms += start.elapsed().as_secs_f64() * 1000.0;
+            let (proposals, txn) = if next_depth >= 2 && session.overlaps_verify() {
+                let (proposals, txn, before_verify_ms, verify_wall_ms) =
+                    session.begin_overlapped_verify(anchor, next_depth)?;
+                draft_ms += before_verify_ms;
+                verify_ms += verify_wall_ms;
+                (proposals, txn)
+            } else {
+                let start = Instant::now();
+                let proposals = session.propose_verify(anchor, next_depth)?;
+                draft_ms += start.elapsed().as_secs_f64() * 1000.0;
+                let inputs = std::iter::once(anchor).chain(proposals.iter().copied()).collect::<Vec<_>>();
+                let start = Instant::now();
+                let txn = session.begin_verify(&inputs)?;
+                verify_ms += start.elapsed().as_secs_f64() * 1000.0;
+                (proposals, txn)
+            };
             proposed += proposals.len();
-            let inputs = std::iter::once(anchor).chain(proposals.iter().copied()).collect::<Vec<_>>();
-            let start = Instant::now();
-            let txn = session.begin_verify(&inputs)?;
-            verify_ms += start.elapsed().as_secs_f64() * 1000.0;
             let mut kept = 1;
-            for row in 0..inputs.len() {
+            for row in 0..=proposals.len() {
                 let token = greedy(txn.logits(row)?);
                 output.push(token);
                 if proposals.get(row) != Some(&token) {
@@ -491,7 +557,12 @@ pub fn measure_verify_transaction(
     }
     // A caller that abandons a provisional transaction cannot use its state.
     session.restore(&base)?;
-    drop(session.begin_verify(&teacher[..2])?);
+    if session.overlaps_verify() {
+        let (_, txn, _, _) = session.begin_overlapped_verify(teacher[0], 2)?;
+        drop(txn);
+    } else {
+        drop(session.begin_verify(&teacher[..2])?);
+    }
     if session.position != 0 {
         return Err("Inkling abandoned transaction retained a live position");
     }
@@ -506,6 +577,6 @@ pub fn measure_verify_transaction(
         "prefix": prefix, "output_tokens": OUTPUTS, "additional_metal_bytes": verifier_bytes, "rejection_controls": controls,
         "crossing_controls": crossing_controls, "abandoned_transaction_reset": true, "cross_mode_snapshot_rejected": true,
         "serial_ms": serial_ms, "serial_decode_tok_s": 1000.0 * (OUTPUTS - 1) as f64 / serial_ms,
-        "rounds": rounds, "candidate_commands": candidate_commands, "fixed_run_commands": fixed_run_commands, "shortlist_drafts": shortlist_drafts, "compact_runs": compact_runs, "fused_finish": fused_finish, "fused_attention": fused_attention,"short_router":short_router, "shared_global": shared_global,
+        "rounds": rounds, "candidate_commands": candidate_commands, "fixed_run_commands": fixed_run_commands, "shortlist_drafts": shortlist_drafts, "compact_runs": compact_runs, "fused_finish": fused_finish, "fused_attention": fused_attention,"short_router":short_router, "shared_global": shared_global, "overlapped_rounds": overlapped,
     }))
 }
