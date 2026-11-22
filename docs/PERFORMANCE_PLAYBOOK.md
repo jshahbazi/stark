@@ -523,6 +523,16 @@ A smaller and wider DSpark vocabulary tile preserved every checked F32 score and
 
 Submit a GPU proposal command before encoding the dependent verifier. Read the proposed IDs directly from device memory and keep both commands on the same queue. Inkling's two-proposal native 4K pairs saved 1.49–3.03 ms, with exact scores and committed state across normal and wrap controls. A sampled worker screen gained 0.40% at the paired median and the four-pair repeat gained 3.82%, at 52.87 tok/s. Compare combined wall time because the separate spans overlap. [Overlapped verifier screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-39--encode-the-verifier-while-the-draft-command-runs)
 
+Putting the Inkling draft and verifier in one command buffer preserved exact state and cost 0.38–1.80 ms more than the queued path at two proposals on stock 4K. The queued path already overlaps draft execution with CPU verifier encoding. [Single-buffer screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-40--compare-one-command-buffer-with-queued-verification)
+
+Specializing the existing dense dot to three live rows saved 0.14–0.18 ms in a native Inkling verifier command. Keep the four-row noise control when screening such a change. [Live-width dense screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-41--specialize-dense-gemv-to-the-live-verifier-width)
+
+Time the raw packed-to-tensor path before implementing exact replay. On Inkling M5 Max, the three-row affine NVFP4 vector shadows used 7.29–7.74 ms and the fastest staged K32 tensor shadows used 15.67–16.82 ms. Retire the staged layout before paying for a certificate. [NVFP4 tensor budget](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-42--measure-the-raw-k32-nvfp4-tensor-budget)
+
+Folding each exact NVFP4 K16 inner product into one horizontal reduction saved at most 0.08 ms in the three-row product stage. Fully unrolling the source-lane loop added about 2 ms to three-row Inkling verifier commands. Preserve the affine vector path. [K16 accumulation screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-43--fold-k16-dot-reductions-and-specialize-the-lane-loop)
+
+Removing threadgroup staging did not recover the K32 tensor budget. Three-row register-fed NVFP4 shadows used 59.78–61.75 ms on Inkling against 7.10–7.37 ms for the vector control. The packed per-coordinate decode remains inside the measured tensor kernel. [Register-fed tensor screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-44--time-register-fed-k32-nvfp4-tensor-tiles)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates

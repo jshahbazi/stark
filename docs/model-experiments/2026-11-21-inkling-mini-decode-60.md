@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–39 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–44 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -623,6 +623,67 @@ The repeat moved the median from 50.93 to **52.87 tok/s** and improved all four 
 
 The final worker reused 2,048 aligned input tokens across source draft depths and matched the cold output. It cleared retained prefix state on decode cancellation and when switching between source drafting and ordinary generation. The opt-in kept the same short and long-context admission decisions. An early stop on an accepted proposal matched the ordinary continuation and preserved sampled-token accounting.
 
+## 20261121-INKDECODE-40 · Compare one command buffer with queued verification
+
+Keep the GPU-resident draft IDs and the original target rollback. For the one-buffer arm, save the undo slots, encode the unchanged draft block and append the verifier dispatches to the same command. The queued arm first submits the draft and encodes the dependent verifier while the GPU is running. The third arm completes the draft, reads its IDs on the host and then encodes verification. Compare eight rotated observations for two and three proposals on the same restored short and two stock 4K states. Repeat both depths at the capacity-crossing states. Each mode matched the proposals, every provisional F32 vector and the committed state for every accepted prefix tested. The one-buffer mode also matched the serial 96-token continuation and abandoned-transaction reset.
+
+| Proposals | One-buffer wall increase over queued, short | One-buffer wall increase over queued, stock 4K | 4K capacity-crossing increase |
+| --- | ---: | ---: | ---: |
+| Two | 0.93 ms | 0.38–1.80 ms | 0.86–1.75 ms |
+| Three | 0.99 ms | 1.22–1.29 ms | 0.95–2.42 ms |
+
+The boundary includes proposal and verifier encode, submission, completion and readback before acceptance. The one-buffer path has fewer submits and encodes both stages before starting GPU work. It lost to the existing queue schedule on both 4K states at both depths. Retire the one-buffer candidate and keep the queued worker path. No worker speed claim follows from the native comparison.
+
+## 20261121-INKDECODE-41 · Specialize dense GEMV to the live verifier width
+
+The existing shared dense kernel accumulates four independent dots at widths two and three. The unused inputs alias the first input, and the runtime width guards the stores. Compile two- and three-row variants using the same weight loads, K grouping, FP32 accumulation, SIMD reduction and BF16 output. Select the specialization only in the short target verifier. At width four both arms retain the same kernel and serve as a noise control.
+
+| Verification width | Plain paired saving across stock 4K inputs | Dense-attention GPU saving across stock 4K inputs |
+| --- | ---: | ---: |
+| Two | 0.30–0.38 ms | 0.16–0.23 ms |
+| Three | 0.14–0.18 ms | 0.08–0.17 ms |
+| Four, unchanged kernel | −0.22 to +0.12 ms | −0.14 to −0.07 ms |
+
+Each fixture used eight alternating plain comparisons and four separate timestamped comparisons per width. All checked F32 logits matched serial at short and 4K. The enabled candidate also passed all 45 rejection and wrap controls and the queued continuation and committed-state comparisons. The short whole-command effect was mixed. The three-row saving is below 0.2 ms at the usual sampled depth and close to the unchanged control's variation. Retire the specialization and keep the common dense path.
+
+## 20261121-INKDECODE-42 · Measure the raw K32 NVFP4 tensor budget
+
+Before building a certificate and replay scheduler, time raw TensorOps over the real sorted short-verifier runs. Decode the packed NVFP4 weights to exact binary16 in K32 threadgroup tiles and gather the original binary16 activation rows. Compare two SIMD groups over 64 output columns with M8 and M16 tensor fragments. Test continuous FP32 accumulation and independent K32 partials merged with TwoSum compensation. Run each shadow before the unchanged live expert dot, with the same weights, inputs, active routes and private scratch. Rerun the existing vector dot into that scratch as the control. Six rotated timestamped comparisons per width and input matched all live serial F32 readouts. Neither tensor result feeds the model.
+
+| Shadow GPU time across 88 routed products | Three verifier rows, stock 4K | Four verifier rows, stock 4K |
+| --- | ---: | ---: |
+| Current affine vector dot | 7.29–7.74 ms | 8.18–9.86 ms |
+| M8 continuous K32 | 15.67–16.89 ms | 17.58–21.87 ms |
+| M8 compensated K32 | 16.87–18.25 ms | 19.11–23.29 ms |
+| M16 continuous K32 | 15.81–16.82 ms | 18.12–22.92 ms |
+| M16 compensated K32 | 18.07–19.03 ms | 20.09–24.77 ms |
+
+Both geometries compiled. The fastest raw tensor tile took over twice the vector control's time at three rows before any BF16 certificate or replay. The live vector products after the shadow remained within about 0.27 ms of the corresponding same-input vector shadow arm's live medians. Retire this staged TensorOps layout before implementing replay. These measurements cover the tiled decode, synchronization, multiplication and scratch stores as one stage. A different input layout would need a new component screen.
+
+## 20261121-INKDECODE-43 · Fold K16 dot reductions and specialize the lane loop
+
+Use the affine half-ingress verifier as control. Form each K16 inner product with four vertical F32 FMA accumulators and one horizontal reduction. The K16 products and all partials are exact on the common activation-scale lattice. Keep the outer E4M3 weight-scale FMA and final per-lane SIMD reduction. Test the fold alone, fully unrolling the static number of K16 blocks per lane with a guarded final block, and both changes together.
+
+| Variant | Three-row plain paired change, stock 4K | Four-row plain paired change, stock 4K |
+| --- | ---: | ---: |
+| Fold the K16 reduction | 0.07–0.36 ms faster | 0.03–0.07 ms slower |
+| Unroll the lane loop | 1.97–2.02 ms slower | 2.54–2.88 ms slower |
+| Fold and unroll | 1.87–2.02 ms slower | 2.61–2.69 ms slower |
+
+Use eight rotated plain and two separate timestamped comparisons per width and fixture. Folding alone removed only 0.01–0.08 ms from the three-row native NVFP4 dot stage. The four-row product medians rose by 0.14–0.18 ms. All checked F32 rows matched serial on the short and stock 4K inputs. The selected fold arm passed all 45 wrap and rejection checks and reproduced the queued serial continuation. Retire both changes. The folded dot gives little component saving, and static unrolling materially increases GPU time.
+
+## 20261121-INKDECODE-44 · Time register-fed K32 NVFP4 tensor tiles
+
+Remove the staging arrays and per-tile threadgroup barriers from attempt 42. Keep two SIMD groups per 64 output columns. Fill each lane's cooperative activation and weight fragments directly from the live sorted routes and packed source tensors. The weight path unpacks each requested FP4 coefficient and applies its E4M3 scale before the exact binary16 conversion. Compare continuous accumulation and independent K32 partials with compensation. The eight-row cooperative pipeline was unavailable in this build. The sixteen-row pipeline ran both variants.
+
+| Shadow GPU time across 88 products | Three verifier rows, stock 4K | Four verifier rows, stock 4K |
+| --- | ---: | ---: |
+| Affine vector control | 7.10–7.37 ms | 8.00–9.49 ms |
+| Register-fed M16 continuous K32 | 61.67–61.75 ms | 69.54–79.88 ms |
+| Register-fed M16 compensated K32 | 59.78–60.21 ms | 69.39–80.80 ms |
+
+Six rotated comparisons per width and stock input preserved all checked live F32 logits. The shadow output stays in scratch. At three rows, direct register unpacking took more than eight times the vector control before the certificate or any exact replay. Retire this layout. Both the staged and direct-register screens leave the existing affine vector worker as the strongest measured path. The queued worker's 52.87 tok/s sampled repeat remains the end-to-end evidence for the current branch.
+
 ## Evidence identities
 
 Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1`. Original DSpark SHA-256 `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2`. The current run uses the pinned Ollama capture and host documented in the [default-router record](2026-11-21-inkling-mini-decode-default.md).
@@ -964,3 +1025,26 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Overlapped verifier repeat confirm-host.jsonl | `0e1c1cdbb81e52a6902d6c4b798b1bc900c4f0d0e8f0929c9536bf9e724ff3e1` |
 | Overlapped verifier lifecycle lifecycle.py | `58fd4621e615d0531d92533268c405dba777e4eeb447e84503fb7f4ea62444dd` |
 | Overlapped verifier lifecycle lifecycle.jsonl | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |
+| Single-buffer verifier inkling_slice | `4aa240edd472e2154433f784f4e46c38c74deed633c46262fa425b787280e8cf` |
+| Single-buffer verifier scored-source.patch | `4f33f199c74a359fa22dc277ba66fd7a8aa82a2f80448f79d6bbe062a3b01d79` |
+| Single-buffer verifier short.json | `80b01c003cb23fef83a8f2e775777a97df26a23921f414d6b276006640baac21` |
+| Single-buffer verifier stock-s4096-00.json | `3dc2791ca904d6969c5f38d4363d2ef924cf5518e6fe90f2a2014488f4d1c043` |
+| Single-buffer verifier stock-g4096-01.json | `9cb07c8852a2507a40fe87b6a50a9850f9b45535b5908e772aa0f3662e7ae7c1` |
+| Live-width dense verifier inkling_slice | `44bdd778c06e8448e8de9b0bff45914be11dae5da891d3ea882d8430517ef0e6` |
+| Live-width dense verifier scored-source.patch | `36c60470d4324dce323da89a93d4dfb6a70f67cf3556453f397481a4b547afed` |
+| Live-width dense verifier short.json | `b9ab603c6c1d4e9a8cdbecc341e87ce11ae532bc1ede095baa460be80ad4f253` |
+| Live-width dense verifier stock-s4096-00.json | `81ca185fcb3fd552d986d5ee8693964bb8571cec77d0d049a57ec37d6aee3205` |
+| Live-width dense verifier stock-g4096-01.json | `585087db4e2d1ab79d3c855db9f180d39907e10da77cb1a98da2e7ef57af69af` |
+| NVFP4 tensor budget inkling_slice | `eec502b991f4628bbab137c5749f7c23ad7ab06e3b73e7f95b0eada24e4a8277` |
+| NVFP4 tensor budget scored-source.patch | `f2de30478ff0d07ac2ffb28f3e0a0213507c211173bcf76d4ec9ecbb33c761a9` |
+| NVFP4 tensor budget stock-s4096-00.json | `57e87288d1f76c39e34edc55db27a7b4baa6f28bf901ebb5853b696a377bc515` |
+| NVFP4 tensor budget stock-g4096-01.json | `32a4e840b539f3778af20b86349f67cc24a83cbaba7a455e37e24261e4c2d994` |
+| NVFP4 K16 accumulation screen inkling_slice | `d7634e460bb27bff7ad400af247f65dc4838dc2b061186abc6ab7ad40bc1041b` |
+| NVFP4 K16 accumulation screen scored-source.patch | `3466e3a2ecfdeef2a3f13ea26b7e15719ebe2b30f1a967ba250b340c595707c9` |
+| NVFP4 K16 accumulation screen short.json | `a7ea69536cd9f6c6c13e66dbd7334a6bb08c7cdb16abb71f221c5e5383290775` |
+| NVFP4 K16 accumulation screen stock-s4096-00.json | `b9e1f0b8badb7204df4dc9793d2a5de647fb5151eb2b340d64f6aa7bd69f2906` |
+| NVFP4 K16 accumulation screen stock-g4096-01.json | `b73c92b4a08f128ec858d2f307bedab84d9abaf80ffb27045267e6776ea93f8a` |
+| NVFP4 register tensor budget inkling_slice | `5a56a8feea6441b901dbde90ade226758c7c07d1a6d99e80be493fda9ef8de08` |
+| NVFP4 register tensor budget scored-source.patch | `a9f4f02772551339345ab86ce1243590bf32997f647c0e59cf73fbec25878d4d` |
+| NVFP4 register tensor budget stock-s4096-00.json | `625317a00dd960a773c2d199c2c5a270b72cad91186442e7d7c111dc3b125c16` |
+| NVFP4 register tensor budget stock-g4096-01.json | `fce4a352ffa3b6959c2fe9916c7aec588378955a1913d9a814e9038352aa2ec4` |
