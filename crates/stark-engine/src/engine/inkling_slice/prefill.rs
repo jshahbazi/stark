@@ -386,7 +386,9 @@ impl Session {
                 && gpu.runtime.verify_fused_attention
                 && trace.is_none()
                 && !state.capture;
-            let first_norm = batched_mix && !state.later && row_count == MAX_VERIFY_ROWS;
+            let first_norm = batched_mix
+                && !state.later
+                && (row_count == MAX_VERIFY_ROWS || (row_count == 3 && gpu.runtime.verify_fast_three));
             let mix_bindings = || {
                 (
                     std::array::from_fn(|i| flows.clone().nth(i.min(row_count - 1)).expect("verified flow")),

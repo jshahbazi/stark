@@ -447,6 +447,80 @@ Register the two batched RMS kernels with the existing opt-in residual mixer. Th
 
 The retained worker preserves exact 2,048-token prefix reuse across proposal depths, clears reuse on a source-mode change or cancellation, and passes short and long-context admission and accepted-proposal stop accounting. A separate cold 4K observation uses the same eight pinned requests and matches every output hash. The medians are **84.09 tok/s greedy** (78.68–90.60, three of four at or above 80) and **66.99 tok/s seeded sampled** (62.84–69.29). The worker accounts for 99.85% of Metal counter increments across 35 request-interior intervals with fair thermal readings and unchanged pageout and swapout counts. Use the same-loaded comparisons above for relative speed.
 
+## 20261122-INKDECODE-103 · Reorder exact dense weights for coalesced verifier reads
+
+At `5d1a7767`, reorder the original BF16 query, key, value, relative, attention gate and attention output matrices. Pair adjacent output columns so the two halves of each SIMD group read one contiguous stripe. A second layout also places adjacent terms for each lane together so one 16-byte load supplies two BF16 vectors. Both layouts preserve the source dot grouping, final shuffle reduction and BF16 rounding. Check every rearranged vector against its original bits. The two layouts hold 144 banks each and allocate 2,576,351,232 bytes together.
+
+Rotate the three layouts on the short and four stock 4K captures. All four 4K boundaries match the pinned F32 row. Across four profiled rotations per width, all 540 full F32 readouts match serial. Across 16 queued rotations at each of three and four rows per capture, all proposals, verifier logits and 320 candidate committed states agree.
+
+| Layout | Three-row dense GPU saving across 4K | Three-row paired queued saving | Four-row paired queued saving |
+| --- | ---: | ---: | ---: |
+| Adjacent-output stripes | +0.034 to +0.048 ms | −0.148 to +0.237 ms | −0.782 to +0.517 ms |
+| Adjacent-output stripes with 16-byte lane loads | −0.015 to +0.046 ms | −0.325 to +0.496 ms | −0.925 to +0.545 ms |
+
+Positive savings indicate lower wall or GPU time. The sampled-width dense stage uses about 5.7 ms in the control. The permutations change that stage by under 0.05 ms, and the complete queued effects vary by capture. Archive both layouts at the native gate.
+
+## 20261122-INKDECODE-104 · Share DSpark attention reads across its draft block
+
+At `5d1a7767`, keep all eight rows of the DSpark block and the original shard boundaries. Group two or four query rows under one committed K/V load, group the three attention heads that already share one K/V head, or combine the two-row and three-head layouts. Per query, retain the same visit order, FP32 dot, running maximum, weighted sum and BF16 join.
+
+Run the short and four stock 4K fixtures with the original checkpoint and native INT8 draft head. Each stock initial row matches pinned F32. At 16 consecutive anchors per depth and fixture, compare each geometry against stock both as an isolated proposal command and queued with the actual target verifier. All 3,686,400 checked BF16 draft hidden words, proposals, provisional target logits and 640 candidate commits agree, including rejected suffixes.
+
+| Shared queries | Isolated two-proposal savings across 4K | Paired queued savings across 4K |
+| --- | ---: | ---: |
+| Two rows | +0.132 to +0.853 ms | −0.407 to +0.484 ms |
+| Four rows | +0.473 to +0.591 ms | −0.097 to +0.373 ms |
+| Three heads | +0.307 to +0.565 ms | −0.200 to +0.055 ms |
+| Two rows and three heads | +0.358 to +0.624 ms | −0.296 to +0.245 ms |
+
+The four-row variant is the most consistent isolated two-proposal gain. At depth three its queued comparisons all regress by 0.090–0.389 ms. At depth two, no geometry improves the complete queued round on all four captures, and the best paired median is under 0.16 ms. Keep the isolated measurements and archive the layouts at the queued gate.
+
+## 20261122-INKDECODE-105 · Compute exact FP4 pair dots with packed multiplication
+
+At `5d1a7767`, preserve the four-over-six activation selection and the source K16 accumulation. Map each FP4 coefficient to twice its signed value, then add 12 to get a digit in 0–24. Pack the activation pair in base 2,048 and the weight pair in reverse order. One integer product then gives their unsigned two-term dot in its middle 11 bits. The low digit is at most 576 and the middle digit at most 1,152, so neither affects the next digit by carry. Subtract the original bias contributions and recover the source FP32 activation and weight scales before the existing scaled FMA. The weight table uses 1 KiB, and each K16 activation occupies 24 bytes.
+
+On the M5 Max, check all 65,536 activation and weight byte pairs against the signed integer dot. The short capture and four stock 4K captures match all checked F32 verifier rows and the paired queued proposals and committed states. The initial 4K logits match pinned F32. Rotate four profiled comparisons at widths two through four and 16 uninstrumented queued comparisons at three and four rows per fixture.
+
+At three rows, the packed multiply adds **0.047–0.109 ms** to the measured NVFP4 dot stage and **0.290–0.321 ms** to activation quantization across 4K captures. The paired queued savings span **−0.741 to +0.315 ms** at three rows and **−0.539 to +0.212 ms** at four. The smaller table avoids most of the earlier lookup's regression. Packing the live activations widens the remaining regression. Archive the candidate at the native gate.
+
+## 20261122-INKDECODE-106 · Combine the strongest remaining sampled-width changes
+
+At `5d1a7767`, combine three-row first-pass RMS batching from attempt 102, three-head local K/V sharing in the target from attempt 91, and four-query-row K/V sharing in DSpark from attempt 104. The control uses the existing three-row RMS and DSpark paths, with the target local kernel recompiled in the generalized shader at its incumbent one-head, two-row grouping. Both arms use the production target sampler.
+
+Rotate both arms at 16 consecutive anchors on short and four stock 4K captures, at proposal depths two and three. All stock initial F32 rows, checked draft hidden words, proposals, provisional F32 target logits and committed target and draft states match. At the sampled width, the short queued savings are 0.480 ms control first and 0.469 ms candidate first. On the stock 4K captures, savings range from −0.302 to +0.024 ms with control first and +1.516 to +2.114 ms with candidate first. The isolated draft measurements also depend on position. Use the loaded worker with reversed pairs to judge speed.
+
+The first worker build used the unqualified name of the sampling enum. The timed build selects the probe only for a stochastic depth-two request and resets it when a request falls outside that scope.
+
+### Cold sampled worker pairs
+
+Run four pinned 4K sampled requests in both arms, then reverse the workload order and each arm order in the same loaded worker. Use 4,096 cold inputs with no reuse, context 4,352, the original checkpoint with vision and INT8 DSpark resident, two proposals, and exactly 256 sampled and emitted tokens. All 16 pinned output hashes, accepted and proposed counts and round histograms match. Both arms execute 1,060 rounds.
+
+| Pass | Control median | Candidate median | Median paired gain | Faster pairs |
+| --- | ---: | ---: | ---: | ---: |
+| First order | 63.53 tok/s | 66.41 tok/s | +2.86% | 3/4 |
+| Reversed | 56.19 tok/s | 58.82 tok/s | +3.07% | 4/4 |
+| Both passes | 62.56 tok/s | 62.61 tok/s | +2.86% | 7/8 |
+
+The median paired useful-time saving is **0.896 ms per round**. Absolute speed drifts across the session, and the fastest candidate request is 70.98 tok/s. The worker accounts for 99.84% of observed Metal counter increments across 58 request-interior intervals. Thermal readings are nominal or fair, with unchanged pageout and swapout counts. Compare within each pair to judge the effect. The prior retained worker needs a median 4.73 ms less per round to put each of these workload budgets at 80 tok/s at its measured acceptance.
+
+### Three-row verifier with a generalized local shader
+
+Remove the worker A/B selector. Admit the changes under the existing opt-in residual mixer and shared local attention. The target uses batched norms and three-head local attention only at three rows. DSpark shares K/V loads only for two live proposals in source-text mode. This includes a two-proposal tail of a longer request. The kernels use the existing snapshot format and sampler state.
+
+The flags-unset build reproduces connected short and 4K parity, the pinned short F32 row, and the stock 16 F32 vectors, 768 BF16 residual comparisons and four snapshot replays. The enabled verifier also passes all 45 rejected-suffix and local-ring controls and matches the 96-token serial continuation and committed state at every proposal depth on short and both stock 4K inputs.
+
+All eight cold 4K worker hashes match on the retained build. It preserves exact 2,048-token prefix reuse across proposal depths, clears reuse on mode changes or cancellation, and passes admission and accepted-proposal stop accounting. Its median rates in this observation are **77.81 tok/s greedy** (67.49–83.80) and **62.85 tok/s seeded sampled** (60.15–68.89). Prefill spans 723–843 tok/s. The worker accounts for 99.77% of Metal counter increments across 39 request-interior intervals with fair thermals, and pageouts and swapouts are unchanged.
+
+Recheck the previous sealed worker and then the generalized-shader worker with the same eight requests. The previous build scores 80.95 greedy and 67.20 sampled at nominal thermals. The generalized-shader build scores 79.56 greedy and 67.84 sampled at fair thermals. Median prefill is 948.38 and 929.96 tok/s respectively. All 16 output hashes match. These are separate loaded-worker observations.
+
+### Final shader selection
+
+Keep the incumbent local-attention shader source, registration and dispatch for widths outside the three-row path. Register a separate three-head shader for the fast three-row verifier. It writes the same per-row, head and shard parts and reads pre-write K/V for displaced positions. Retain first-pass norm batching and DSpark sharing under the same verified widths. The first build of the separate shader variant ran out of disk space during compilation. Reclaim the previous probe's reproducible Cargo cache and build again.
+
+The final native executable repeats the flags-unset short and stock 4K pinned controls and all 45 enabled rejection and ring-wrap checks. At each proposal depth it matches the 96-token serial continuation and committed state.
+
+The final worker matches all eight pinned cold 4K output hashes. It repeats lifecycle checks for exact 2,048-token prefix reuse across proposal depths, cancellation and mode changes, admission and accepted-proposal stops. In its separate bench run, median throughput is **82.91 tok/s greedy** (79.14–86.05, three of four at or above 80) and **69.37 tok/s seeded sampled** (67.22–71.48). The worker accounts for 99.87% of observed Metal counter increments across 35 intervals at fair thermals with zero pageout or swapout deltas. At the four sampled requests' measured acceptance, reaching 80 still requires a median **3.77 ms less per round**. Retain the exact three-row geometry under the existing opt-in verifier configuration.
+
 ## Evidence
 
 The original target and DSpark artifact digests are recorded with the [integrated QKV run](2026-11-21-inkling-mini-decode-60.md#evidence-identities). The worker and native screen retain aggregate-only private receipts. No prompts, token IDs, logits, targets or fitted tensors are published.
@@ -500,6 +574,38 @@ The first source exports for attempts 97, 99 and 100 used Git's configured exter
 | Four-row norm lifecycle receipt | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |
 | Four-row norm stock 4K worker results | `0bccab39fd8a3ce9f564f5c3921c902d2697244114c794db9e0a99350689db43` |
 | Four-row norm worker host observations | `ef78cba7143095c72a893ffd174a9df3af732dbe1a8aeebc5d1d31f08a757eb3` |
+| Dense weight panel Git source patch | `e6bfab17d075d01588edd2c035b3d99cc135a4e2f249d8ab366a4fec620484bd` |
+| Dense weight panel executable and driver | `50b5067ff9f6073a77f51686c9a0afc9f6d60e6561f2d74cf94df794634e940b`, `dab7e32cc071ea62382609068c3ae3b7d50f0803173592e8ffc153683fc9a2da` |
+| Dense weight panel short receipt | `4ec4c857c9ef32c4679c710a5bb7411125aff5307be93d508929c26791248f9c` |
+| Dense weight panel stock receipts | `dac81a1586785ae964df8ac37ff9d4edd89bad924f5261841b83a5155382d709`, `8e4237eba579140da791c0c10bfb491bff74d201f8e15bdac4769a768f9600af`, `e67c66c12badf8724ed3c117939a0db07016ff50879b9155772653bea202d7b2`, `02a0be9baa53126148adc8ad4706986021319ab9df4aa225ac7f1ce6009e267a` |
+| DSpark K/V sharing Git source patch | `aa3199a6c6873aa1fe157e3841a4735752591f6aa2a78d2115d0a9a5e3c9d530` |
+| DSpark K/V sharing executable and driver | `9368a8e5a86fff54aeb4a878c47012a6a6df60894dfe67860863057f953905cf`, `e9a2fb750ff60be502726c9538e615a550b07676ab5069a01fd1526f93300358` |
+| DSpark K/V sharing short receipt | `e6f5e5f0b5149a271d00a596eb29fe211c89cd9877d02798a90aedcfbdb761a4` |
+| DSpark K/V sharing stock receipts | `a1931fbdf878cadba1da7990b9a2dae842a3e726361a0808b612acee2c358450`, `c1ef10af4358c3ea273e65f000cb7f388441e97007a6b8f9301bfe58d7a08f64`, `448f4fd2f2b06eddfb79ae94b16785b696aa95aae71159dd745556e68dcbb330`, `1100fce77f322c364bb0b4038b8a697310bf29bc06f7f260716f86344981735e` |
+| FP4 packed multiply Git source patch | `835d045e9eaac46ad14c52a47ca1827fb493755d4649b06fffd2a67e56ea5af6` |
+| FP4 packed multiply executable and driver | `c871020b167770e2ace38380fa6f3647c10c863c737fbed0f21fb4efe51a22a8`, `52980c763aa557cef533c8be1527659a7a42c8d0f56f1a9f4c64599705070c9d` |
+| FP4 packed multiply short receipt | `6a8fe69ab7d58c61aa618cd562bc0276b4563d62c199a2d7a0e57c974a7041f8` |
+| FP4 packed multiply stock receipts | `cfdfa8527b18ae1b43734a30a8f91655cc9ec512d4d3c309b331b32e6a6cfe60`, `bd27974f3fc276a2c704f3805a4600b49a079fa3cc1c50609f27822d573a0dde`, `3d47a9a86bd6ea53ba30bba258989484cf655157350d0ac9c20e2c18a4f86f3c`, `4ee7e8d8a4cb21fe055df9ad4cb8d931e3bc66450808b3aa3d48239552f236e5` |
+| Sampled-width combination native and worker Git source patches | `b17735290dc6022c342b3be13af8d075718e0dcf953138dc8f1814f7e1ed37a0`, `462e050108b9a82620e23a3224621cfa0f817cc6976da7235ceeb0b118e80d0a` |
+| Sampled-width combination executables | `41bb998ea52e886a5fc35ffd8ef4bad2e15795a60ea28b02f8a1fdc7caa0a805`, `6d52489f6b8691a87cbf5da490fafe7e19125eff872a7c0e9168acc13ba4cb82` |
+| Sampled-width combination native driver, worker scorer and worker driver | `a852790e552a7818cd185e7e5e1ee9db220834bb12e4e4356e303826fc6fccb9`, `4520498e54936c854eeabb20781e7168d586579cc1b6cf28966d63726592d5d9`, `1100818ff99bab478400dfa98ba2c19f19fbb96262d6f9f920016de36e4dc5e4` |
+| Sampled-width combination native short and stock receipts | `1d3d12154694b2683a95a55694eef2ca9e5ea083e5a702f8ee77dc20be856325`, `140b64b9bd5b6038414e5de979b3aae1b7d134ab1d2352a7fcf16dc4ca72ffe5`, `9383dc394e3b6044efa7f92ddec823252b3da7ddbb1f40a7ab43673403be69bd`, `b1aee6448ce9dda91d63b5a695c1e5592ac46d5a0efac8a7dacc8e864fc04702`, `3c54d8a0eec6c86c7fdacfc68da3165cbf0301700ef33d6cbb5fcf88f6b0f0fe` |
+| Sampled-width combination worker pairs and host observations | `270b9df4b273c7519b24dae136ab6fca4d2187d8e6ba091c8491479ee42c9c19`, `0b06f90c3efdca8e7dd9608c2890442554e8a4706db627ca87b3398d0db46de6` |
+| Retained three-row verifier Git source patch | `a5469c8d7c94f812bb3523fe3d510abe056c011bbfc67ae2d481146793c02562` |
+| Retained three-row verifier native and worker executables | `dee109cd684bfb35c61a2a1acb70ffb0fe1ef4a3a1042cb4454b6a8fb6772d95`, `e02eb6f2d1bdf3aba56f1929d79a268c33c656cdb5399bf2be994eb21491d975` |
+| Retained three-row verifier qualification driver | `28d6455fc20403d2b2114df3631dd4af5530d3d88a5495adcf7e5ba17d02db78` |
+| Retained three-row verifier flags-unset summary | `b8a5b540c43b3942a458316f8d3f2943ed64beadfbb40fe803a93111aac3d011` |
+| Retained three-row verifier proof receipts | `b0daa01723ad01ff5649114b177b22b6b3eb9c83f57630c9843dc368ffc5f6b5`, `7295d26de74bdb28c3e80752c6ac7b085bf4b27d75b939f0d555d6ab4a509766`, `d42435a50913bc937468297faccd57399ca364d1f251287ab57950e7243c8d3d` |
+| Retained three-row verifier lifecycle receipt | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |
+| Retained three-row verifier worker results and host observations | `a05589f7abc024b198db833a2710b73f3f08dc5c9a60cbb970726a3d90220c03`, `99988f3dfce28670d4d2f28d98686bf4dd3dabc95b5d34f66de1a84f08a82e7b` |
+| Previous worker recheck driver, results and host observations | `6296687e852d8d09f7a812a372b6c42cb0642f162060de57ea37f7f76da04e5c`, `bf8ed49a3edfb16f8a1ac2cfc73d05d5cdb6906b60049756b057bb48d1366620`, `8f3a69edbf6ed9c0373071d15d919c484cc5da6200147e7700bfbe40dfca2f8c` |
+| Generalized-shader recheck driver, results and host observations | `3d0d35984a704d87a9d63ae716b8c549f874d5360578e0af97adec764c713587`, `1bbbba235ba439120dcfe005efd6068630a6f710029f158a1645d2c56b745aa6`, `325c729f8bbd3d2fbc426867e1b86ce0bc0e15c30f18a566a53996944a040f6a` |
+| Final three-row verifier Git source patch and qualification driver | `b6024fe0fd600d3389a2b66f01fab20cfeffb84fe2816d446a5703ee248beb8c`, `045f65f6b890d439d56ba451e15bfc9ef5a34864a530cd42e10f7a664b63ef3b` |
+| Final three-row verifier native and worker executables | `85572badeaecd19a2004b55511edbe6716884eba423eb955ad2f90363f490c4a`, `eee6d6a24856464717cb12cce083242d9c835652ebadc4bdbab31f88d67bc980` |
+| Final three-row verifier flags-unset summary | `b8a5b540c43b3942a458316f8d3f2943ed64beadfbb40fe803a93111aac3d011` |
+| Final three-row verifier proof receipts | `5fe2f38a28b0ff2ad9d03ccf552eb6b558078a52f2993af2511a8b175b37f676`, `ea48ba9c4b141c51c9cbe60a5b43add86369fc1603858823cb29cb99ff96fbd0`, `729c17255de2be5fb2dee6a9343cab6fdba1e632afad636e9ae3386d867426c6` |
+| Final three-row verifier lifecycle receipt | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |
+| Final three-row verifier worker results and host observations | `3124244e9dfb5634436e7a51ca3c936206cd2c9a122d73667a45526911514821`, `c2da352bf4cda5cd4d140652c6d01a0ba2c34c8eab0b044051448c197b65a072` |
 | One-worker harness | `d950570aad9ffa2ae0f0a5e46f4e608096836ea99535ded1ddcf59a47220d7d9` |
 | One-worker receipt | `8bb65ca242a3db7388f64bbbf2d7a2425918847e5380979b98ea1f47475bd261` |
 | One-worker host observations | `da15251353b67f433c9956d4c9a67c7b01fe62afd6233792ce8b04a6961dbf85` |

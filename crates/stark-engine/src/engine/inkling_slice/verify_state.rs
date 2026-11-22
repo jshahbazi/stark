@@ -114,6 +114,19 @@ impl VerifyWorkspace {
                 ],
             )?;
         }
+        runtime.verify_fast_three = mix_rows && shared_attention;
+        if runtime.verify_fast_three {
+            packed_prefill::register(
+                runtime,
+                concat!(include_str!("verify_attention.metal"), "\n", include_str!("verify_local_three.metal")),
+                &["ink_verify_local_three_parts"],
+            )?;
+            packed_prefill::register(
+                runtime,
+                concat!(include_str!("dspark.metal"), "\n", include_str!("verify_draft_kv.metal")),
+                &["ink_draft_kv_four_rows"],
+            )?;
+        }
         let draft = DraftBlock::new(runtime)?;
         let alloc = |bytes| {
             runtime
@@ -474,8 +487,13 @@ impl VerifyWorkspace {
         }
         Self::relative_tables(gpu, layer, rows);
         let [a, b, c, d] = std::array::from_fn(|index| rows[index.min(rows.len() - 1)]);
+        let (kernel, head_group, row_group) = if rows.len() == 3 && gpu.runtime.verify_fast_three {
+            ("ink_verify_local_three_parts", 3, 1)
+        } else {
+            ("ink_verify_local_parts", 1, self.local_rows_per_group)
+        };
         gpu.dispatch(
-            "ink_verify_local_parts",
+            kernel,
             &[
                 binding(&a.q),
                 binding(&b.q),
@@ -494,8 +512,8 @@ impl VerifyWorkspace {
                 (&self.saved, index * SAVED_VISIT_BYTES),
                 binding(parts),
             ],
-            [position as u32, rows.len() as u32, self.local_rows_per_group as u32, 0],
-            (16, HEADS * rows.len().div_ceil(self.local_rows_per_group)),
+            [position as u32, rows.len() as u32, row_group as u32, 0],
+            (16, HEADS / head_group * rows.len().div_ceil(row_group)),
             128,
         );
         Self::gate_shared_attention(gpu, parts, rows);

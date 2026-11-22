@@ -542,7 +542,7 @@ impl Dspark {
         let s = &self.scratch;
         let (rank, dispatch_groups, winner_groups) = Self::rank_geometry(runtime);
         execute(runtime, |gpu| {
-            self.encode_block(gpu, anchor, position, embedding, embed_norm);
+            self.encode_block(gpu, anchor, position, embedding, embed_norm, false);
             // Row 0 is the anchor. The first mask row supplies the one
             // proposal, while all eight rows participated in attention.
             gpu.norm((&s.residual, WIDTH * 4), &self.norm, binding(&s.norm), true);
@@ -687,7 +687,8 @@ impl Dspark {
             None,
             |_| Ok(()),
             |gpu| {
-                self.encode_block(gpu, anchor, position, embedding, embed_norm);
+                let share_kv = runtime.source_text_active && runtime.verify_fast_three && count == 2;
+                self.encode_block(gpu, anchor, position, embedding, embed_norm, share_kv);
                 for row in 0..count {
                     gpu.norm((&s.residual, (row + 1) * WIDTH * 4), &self.norm, (&s.norm, row * WIDTH * 2), true);
                 }
@@ -766,12 +767,13 @@ impl Dspark {
         position: usize,
         embedding: &Buffer,
         embed_norm: &Buffer,
+        share_kv: bool,
     ) {
         let s = &self.scratch;
         gpu.one("ink_embedding", &[embedding, embed_norm, &s.anchor], anchor, (1, 1), WIDTH / 4);
         gpu.one("ink_draft_block", &[&s.anchor, &self.mask, &s.residual], (), (WIDTH / 128, ROWS), 128);
         for (layer, cache) in self.layers.iter().zip(&self.cache) {
-            self.decode_layer(gpu, layer, cache, position);
+            self.decode_layer(gpu, layer, cache, position, share_kv);
         }
     }
 
@@ -781,6 +783,7 @@ impl Dspark {
         layer: &DraftLayer,
         cache: &Cache,
         position: usize,
+        share_kv: bool,
     ) {
         let s = &self.scratch;
         normalize_rows(gpu, &s.residual, &layer.input_norm, &s.norm);
@@ -794,11 +797,16 @@ impl Dspark {
         } else {
             0
         };
+        let (kernel, query_groups) = if share_kv {
+            ("ink_draft_kv_four_rows", ROWS * HEADS / 4)
+        } else {
+            ("ink_draft_attend_parts", ROWS * HEADS)
+        };
         gpu.one(
-            "ink_draft_attend_parts",
+            kernel,
             &[&s.q, &cache.keys, &cache.values, &s.k, &s.v, &s.parts],
             [start as u32, position as u32, cache.capacity as u32, 0],
-            (SHARDS, ROWS * HEADS),
+            (SHARDS, query_groups),
             32,
         );
         gpu.one("ink_draft_attend_join", &[&s.parts, &s.attended], (), (ROWS * HEADS, 1), HEAD_DIM);
