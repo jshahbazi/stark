@@ -24,7 +24,7 @@ use crate::{
         MtpCapabilities, PreparedImageMetadata, ProgressCallback, TextCallback, admit_request_memory,
         collect_tokens_controlled,
     },
-    hybrid::{ProbabilityMapper, sample_with_mapper},
+    hybrid::{ProbabilityMapper, sample_certified_prefix, sample_with_mapper},
     inkling_artifact::{self, Artifact},
     prefix_cache::{self, BoundaryEntry},
     text_stop::StopFilter,
@@ -333,6 +333,8 @@ fn collect_output(
 ) -> Result<GeneratedTokens, &'static str> {
     let mut previous = None;
     let mut rng = options.seed;
+    let certified_sampling =
+        std::env::var_os("STARK_INKLING_EXPERIMENT_CERTIFIED_SAMPLE").as_deref() == Some(std::ffi::OsStr::new("1"));
     let tokens = std::iter::from_fn(|| {
         Some((|| {
             let proposal = if let Some(anchor) = previous {
@@ -342,7 +344,13 @@ fn collect_output(
             } else {
                 None
             };
-            let token = sample_with_mapper(&logits, &options.sampling, &mut rng, Some(mapper))?;
+            let token = match certified_sampling
+                .then(|| sample_certified_prefix(&logits, &options.sampling, &mut rng))
+                .flatten()
+            {
+                Some(token) => token,
+                None => sample_with_mapper(&logits, &options.sampling, &mut rng, Some(mapper))?,
+            };
             if let Some(proposal) = proposal {
                 draft_stats.proposed += 1;
                 draft_stats.accepted += usize::from(proposal == token);

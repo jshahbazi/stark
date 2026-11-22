@@ -465,6 +465,10 @@ With two to eight verifier rows, share decoded NVFP4 weights inside each same-ex
 
 Replaying Lily’s 4-gram agreement rule on original Inkling’s eight stock 4K outputs offered drafts at 15 of 1,020 greedy steps and seven of 1,020 sampled steps. The opportunity was too sparse to justify building lookup for the 60 tok/s target. [Lookup eligibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-06--screen-lilys-prompt-lookup-on-inkling-continuations)
 
+An Inkling one-row dense fusion removed 256 dispatches but saved only 0.17 ms per plain token command in the matched 4K profile. Exact FP16 NVFP4 coefficients and a narrower TensorOps router were slower. Keep component savings separate from useful throughput. [Singleton kernel screens](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-0709--three-single-token-kernel-screens)
+
+For unrestricted seeded sampling, bound the mass omitted from a sorted prefix and take the original draw only when the full threshold interval falls in one token. Keep the original full sort and RNG state for fallback. On Inkling 233/256 draws certified and the CPU sampler fell from 0.865 to 0.291 ms in one instrumented pair. The worker screen measured +4.28% useful decode. [Certified sampler screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-10--certified-seeded-draws-with-a-sorted-prefix)
+
 ## Correctness gates
 
 A speed change that is meant to leave output alone has to pass all of these, in this order of cost:

@@ -1142,6 +1142,78 @@ pub(crate) fn sample_with_mapper(
     Ok(*distribution.indices.last().ok_or("native_generation_failed")? as u32)
 }
 
+/// Prove an unrestricted draw using only its sorted high-probability prefix.
+/// A failed proof leaves the RNG available for the ordinary full-vocabulary draw.
+pub(crate) fn sample_certified_prefix(
+    logits: &[f32],
+    sampling: &Sampling,
+    rng: &mut u64,
+) -> Option<u32> {
+    const TAIL_LOG_WEIGHT: f32 = -16.0;
+    // Twice 2^-23 is more than twice exp(-16), leaving room for libm rounding.
+    const TAIL_WEIGHT_BOUND: f64 = 1.0 / 4_194_304.0;
+    const MAX_CANDIDATES: usize = 4096;
+    let Sampling::Stochastic {
+        temperature,
+        top_k,
+        top_p,
+        min_p,
+    } = sampling
+    else {
+        return None;
+    };
+    if top_k.is_some()
+        || top_p.is_some_and(|p| p != 1.0)
+        || min_p.is_some()
+        || !temperature.is_finite()
+        || *temperature <= 0.0
+        || logits.len() > 1_048_576
+    {
+        return None;
+    }
+    let _scope = profile::Scope::new("sample.certified_prefix");
+    let max = logits[greedy_index(logits)?];
+    let cutoff = max + TAIL_LOG_WEIGHT * *temperature;
+    let mut prefix = Vec::new();
+    let mut tail_max = f32::NEG_INFINITY;
+    for (index, &logit) in logits.iter().enumerate() {
+        if logit >= cutoff {
+            if prefix.len() == MAX_CANDIDATES {
+                return None;
+            }
+            prefix.push(index);
+        } else {
+            tail_max = tail_max.max(logit);
+        }
+    }
+    let tail_count = logits.len() - prefix.len();
+    if tail_count > 0 && (tail_max - max) / *temperature > TAIL_LOG_WEIGHT {
+        return None;
+    }
+    prefix.sort_unstable_by(|&a, &b| logits[b].total_cmp(&logits[a]).then_with(|| a.cmp(&b)));
+    let weights = probability_values(logits, &prefix, max, *temperature, None);
+    let prefix_mass = weights.iter().sum::<f64>();
+    // Every omitted weight is nonnegative. The rounded accumulation also
+    // stays below this upper bound, allowing over eight times the maximum
+    // relative F64 summation error at the admitted vocabulary size.
+    let full_upper = (prefix_mass + tail_count as f64 * TAIL_WEIGHT_BOUND) * (1.0 + 1.0e-9);
+    let mut trial_rng = *rng;
+    let fraction = uniform(&mut trial_rng);
+    let lower = fraction * prefix_mass;
+    let upper = fraction * full_upper;
+    let mut mass = 0.0;
+    for (&index, &weight) in prefix.iter().zip(&weights) {
+        let start = mass;
+        mass += weight;
+        if lower >= start && upper < mass {
+            *rng = trial_rng;
+            let _scope = profile::Scope::new("sample.certified_prefix.accept");
+            return Some(index as u32);
+        }
+    }
+    None
+}
+
 struct Distribution {
     indices: Vec<usize>,
     weights: Vec<f64>,
@@ -1879,6 +1951,34 @@ mod tests {
         for pair in logits.windows(2) {
             assert!(descending_sample_key(pair[0]).cmp(&descending_sample_key(pair[1])) == pair[1].total_cmp(&pair[0]));
         }
+    }
+
+    #[test]
+    fn certified_prefix_draw_preserves_token_and_rng_or_falls_back() {
+        let sampling = Sampling::Stochastic {
+            temperature: 1.0,
+            top_k: None,
+            top_p: Some(1.0),
+            min_p: None,
+        };
+        let mut logits = vec![-30.0; 20_000];
+        logits[..8].copy_from_slice(&[6.0, 6.0, 4.0, 3.0, 0.0, -0.0, -5.0, -29.0]);
+        let mut hits = 0;
+        for seed in 1..128u64 {
+            let mut candidate = seed;
+            let mut reference = seed;
+            let drawn = sample_with_mapper(&logits, &sampling, &mut reference, None).unwrap();
+            if let Some(token) = sample_certified_prefix(&logits, &sampling, &mut candidate) {
+                assert_eq!(drawn, token);
+                assert_eq!(reference, candidate);
+                hits += 1;
+            } else {
+                assert_eq!(seed, candidate);
+            }
+        }
+        assert!(hits > 100);
+        assert_eq!(sample_certified_prefix(&vec![0.0; 5000], &sampling, &mut 1), None);
+        assert_eq!(sample_certified_prefix(&[0.0, f32::INFINITY], &sampling, &mut 1), None);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–06 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–10 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -104,6 +104,33 @@ Replay the same latest-occurrence 4-gram index and backward agreement rule used 
 
 The overlapping windows contain 49 greedy and 21 sampled accepted draft rows even when every proposed depth is considered. If every one removed a full serial step without any verification cost, the gain would be at most 5.05% greedy and 2.10% sampled across these runs. Overlap and the actual verifier cost reduce the gain. Defer lookup as a route to 60 tok/s on this workload. This replay leaves copy-heavy workloads unqualified.
 
+## 20261121-INKDECODE-07–09 · Three single-token kernel screens
+
+Each candidate used the same source singleton, vector NVFP4 and parallel expert selection as the control and changed one operation. The profile restored four stock 4K states, alternated the order and recorded eight instrumented and eight plain pairs per candidate. Short F32 logits, target taps and state hashes matched the preceding build. Each 4K seed, first continuation and all 48 visits’ router logits, IDs and weights matched the control.
+
+| Candidate | Component median, control → candidate | Plain command median paired change | Faster plain pairs |
+| --- | ---: | ---: | ---: |
+| Fuse the independent QKV, relative, gate, sink and dynamic projections into one dispatch | 6.166 → 5.045 ms | 0.170 ms faster | 6/8 |
+| Factor the E4M3 activation scale out of each exact NVFP4 block, then use four FP16 coefficient dots | 5.269 → 5.367 ms | 0.196 ms slower | 1/8 |
+| Use a 32 × 16 × 16 TensorOps singleton router tile in eight groups, with the same K split | 2.344 → 6.175 ms | 4.183 ms slower | 0/8 |
+
+Fusing dense projections removed 256 dispatches and saved 1.087 ms at the paired component median. The whole-command effect was under 1%. The FP16 expert trial stored FP4 coefficients and the shared scale separately. Four products of half-integers fit exactly in FP16 on the quarter-unit grid, and the scaled K16 accumulation stayed FP32. The short report’s raw quantizer comparison read the former F32 scratch layout, so those two quantizer taps need a decoder to compare the new layout. Every other reported short boundary matched. The narrower router tile reproduced the full projection output, but its longer component time precluded worker scoring. All three prototypes were retired after these screens.
+
+## 20261121-INKDECODE-10 · Certified seeded draws with a sorted prefix
+
+For full-vocabulary stochastic sampling with no effective top-p truncation, compute the existing F64 weights in exactly sorted order for a bounded prefix. The omitted logits must all be at least 16 log-weight units below the maximum under the original F32 temperature calculation. Their combined weight and rounding allowance bound the full draw threshold. Use the original seeded draw and accept a prefix token only if the entire possible threshold interval falls within that token’s original cumulative mass. Otherwise use the existing full sort with the RNG still at its original state. The flag is `STARK_INKLING_EXPERIMENT_CERTIFIED_SAMPLE=1`.
+
+The sampler test verified exact token choice and RNG advancement across 127 seeds, including tied logits, signed zeros and flat or invalid fallback inputs. On one separately instrumented 4K sampled pair, 233 of 256 draws were certified and 23 used the full sort. Mean sampler time fell from 0.865 to 0.291 ms per draw. Greedy used the existing scan in both arms.
+
+With the vector experts and parallel selector in both arms, the cold uninstrumented worker matched all eight output hashes. Every eligible window used 4,096 input and 256 output tokens with no prefix reuse.
+
+| Sampling | Control | Candidate | Median paired change | Faster pairs |
+| --- | ---: | ---: | ---: | ---: |
+| Greedy control | 42.90 tok/s | 42.19 tok/s | +0.83% | 3/4 |
+| Seeded sampled | 39.94 tok/s | **41.15 tok/s** | +4.28% | 3/4 |
+
+Paired prefill moved +1.09% and +1.23%. The workers accounted for 96.22% of sampled GPU counter changes over 96 intervals. The host sampled nominal and fair thermal states with +469 pageouts and +0 swapouts. The sampler remains opt-in after the four-pair screen. Its measured CPU saving is about 0.57 ms and the 60 tok/s target needs further target computation savings.
+
 ## Decision and next target
 
 Keep the vector singleton opt-in while building the faster verifier. Useful worker throughput remains below 60 tok/s. The short verifier now shares NVFP4 weights while keeping exact logits and fully committed state. Measure source-mode draft acceptance with the same target precision and profile the remaining verifier work before building rejected-suffix transactions. The regular token remains the key path on low-acceptance prompts.
@@ -155,3 +182,25 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Short-run verifier stock B | `ca530205f959d06ebdf644572ac20cc35652687b6006360b6090d6ac69c5d602` |
 | Prompt lookup aggregate receipt | `ff7f185d416620bbe62ec6d6c5cb9359376419f1b33f2b69465f320553533509` |
 | Prompt lookup replay harness | `58f5766d3ca99111edcf47a3a168757417103061824b1b9b6af656b901bf2b45` |
+| Fused QKV source patch | `01e37f3f48af1741f83fe8bc48940202b1652bcaa0c4bc3a35ca2ccda1d7eb66` |
+| Fused QKV executable | `cff28e72bf081d39697f41cdcdebbfb8d2cc97806bccedd9906b65504037adb7` |
+| Fused QKV short receipt | `62d6d350cf6e7b40927f327ec738211bfce8b9126138c7def1d6b7a736d45382` |
+| Fused QKV 4K profile | `a55d6368c119ffded5d731169f79d575e0510c0bff4735002eb1a110512090ae` |
+| Half NVFP4 source patch | `7b4ef4e783816940aa084e4e7bbb0f32e9430902c878f89f4686d58b0af1168d` |
+| Half NVFP4 executable | `2667b17ed3f69e398a7a0d571084b20f810c378f5515a8832a2db03338616ee6` |
+| Half NVFP4 short receipt | `1cde5e5e5cda6653e4acec917fb3f3304373bff92b8c3b0e65d370b01fb99b7f` |
+| Half NVFP4 4K profile | `8336cfdaadc7b7924b1ef5f6669305d080296b8f4c86b2110a43bf6432ff9e39` |
+| Thin router source patch | `f141c3786a65a7c1236e5f6c1d150bfd7042a278843de2ca0407ceb9ea770518` |
+| Thin router executable | `fbdabff8ac4936426208ededee63a372cd00fb39779c728c56d5ed18bb61e43b` |
+| Thin router short receipt | `73a0c56e36ff833535d60cbf1413d191efa2a9614c71dd5ba0563def0537e458` |
+| Thin router 4K profile | `4ac89a04634280100620b73bf8a9e6ddde49aee548c36276c496c8bea1737522` |
+| Sampler source patch | `7b304d77efe070d3b9af42082e1fcd28ce54d128563ff81addc5e1898aa66bcc` |
+| Sampler worker | `72a3e72f2cedce39f7fb3ee7bca2c0e2d0fa8c30fede8462fe48931a11b85b58` |
+| Sampler worker pairs | `709bf93cf8ae213b9e5b0272d9fe82e6ca360d4675fd49c1eba3da50575a79e3` |
+| Sampler worker host | `7d23a1b94938d11fb7eb8b04de4b42b7be92218f6d14fe65c10947d9189c2b5f` |
+| Sampler worker harness | `8b7e7f4fae5eb0db29276dbc41edc9974f74b90c35a44caf8df96a3608f26b65` |
+| Sampler profiling patch on candidate | `48d6bd9548e151fcf8fc548dd198eb01d937b5d51cf773eaf9d03ce144d147e6` |
+| Sampler profiling worker | `1476805738e302ed02227dacff7a631671338eaca5978c557694a97d0a216811` |
+| Sampler baseline scopes | `54dc22d9efe28e4aaca32e2018345b6c9b4be19524fe94503f740a04ce8d4501` |
+| Sampler candidate scopes | `42e7da131c20a8116ad29eb38e81f2582407c226cb7ed203b8633d93d6b7210b` |
+| Sampler instrumented parity pairs | `8638bfb70345e34016e9f2ac7dc5bf5150d2d4bb0a639efebe9d0691fbaf9d98` |
