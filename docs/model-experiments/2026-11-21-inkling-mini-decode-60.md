@@ -1251,6 +1251,71 @@ done
 
 The worker accounted for 99.90% of observed GPU counter increments over 35 intervals. Thermal readings were nominal and pageouts and swapouts were unchanged. The retained path clears 60 tok/s across all four sampled workloads in both the paired and single-worker sessions, with exact greedy and sampled hashes. Earlier prototype sessions had sampled medians of 58.52 and 59.21 tok/s. The measured qualification is for this opt-in configuration on the pinned M5 Max workloads.
 
+## 20261122-INKDECODE-75 · Batch the Q, K and V cross-pass controllers
+
+On the combined short verifier, pack the Q, K and V controller inputs in one dispatch. Use one shared grid per stage for the source-order RMS, rank projection, native 16 × 16 expansion and weighted output RMS. Each threadgroup keeps its own slot's weights, source BF16 boundaries and F32 reductions. The expert controller keeps the existing path.
+
+Alternate the normal and batched controller on the same restored model state. Use six plain and three instrumented pairs at widths two through four on the short and two stock 4K captures. Require exact full F32 logit rows. Compare native dispatch counts, crossed attention input GPU time and whole-command wall time. Use the ordinary decode entry point and exact pinned worker hashes for any candidate that warrants a worker comparison.
+
+All 486 F32 vocabulary rows matched the serial reference. Each candidate command removed 192 dispatches, eight launches at each of 24 cross-pass visits. Paired plain savings at three rows were 0.44 ms on short and 0.48–0.57 ms on stock 4K. The instrumented three-row attention-input stage saved 0.53 ms on both stock fixtures. At two rows the stock command saved 0.57–0.65 ms and at four it saved 0.48–0.57 ms.
+
+The first worker screen alternated two workers built from the same source patch, with the combined verifier in both arms. All 16 pinned output hashes and paired round counts matched for 256 emitted and sampled outputs, zero reuse, 4,096 cold prompts and 4,352 context.
+
+| Sampling | Control median | Batched median | Median paired gain | Faster pairs |
+| --- | ---: | ---: | ---: | ---: |
+| Seeded sampled | 60.62 tok/s | 62.11 tok/s | +0.85% | 2/4 |
+| Greedy | 73.15 tok/s | 74.91 tok/s | +1.56% | 3/4 |
+
+The workers accounted for 99.84% of observed GPU counter increments over 74 intervals, with nominal thermals, 85 additional pageouts and zero swapouts. The native saving warrants a same-loaded sampled repeat to check the smaller effect against worker variation.
+
+The [four-arm repeat](#same-loaded-comparison-with-controller-batching) gave batched QKV alone four wins in four pairs and the best paired median gain. Advance it first for opt-in integration. The prototype stays archived with its sealed source and executable.
+
+## 20261122-INKDECODE-76 · Prepare an exact sampler certificate on Metal
+
+Screen GPU preparation on real target logits. Compare the stock CPU certificate with Metal finding the finite maximum and compacting the prefix above the original cutoff. Keep sorted prefix F64 probability arithmetic, the RNG and exhaustive fallback on the host. Charge GPU preparation to all materialized verifier rows and host work only to consumed rows. Compare successful and fallback draws to the existing sampler before judging speed.
+
+The standalone component reproduced the CPU certificate's 229 accepted draws out of 768 on 16 pinned stock readouts over three temperatures. Verified draws matched the exhaustive sort and exact RNG state. Rejected proofs kept the starting RNG, including the synthetic overflow, signed-zero and nonfinite controls. The standalone GPU arm includes copy-in and its own completion wait. Its measured median was 172.40 µs including the host certificate, against 154.92 µs for the CPU certificate. Measure an integrated arm with both Metal launches attached to the full verifier command before making a worker decision.
+
+The integrated temperature-one prototype uses one atomic reservation per nonempty tile and compacts IDs into a verifier-owned buffer. It runs both kernels inside the verifier command and bypasses the duplicated CPU finite/max scan when Metal supplies the certificate inputs. In the first four paired sampled requests it certified 927 of 1,019 checked draws, and the remaining draws took the exact exhaustive fallback. The paired median gain was **2.05%** with four faster pairs. The useful-decode medians were **59.88 and 62.31 tok/s**. All eight output hashes and paired round counts matched.
+
+Subtracting queued commands and finish time left 0.75–0.94 ms per round in controls and 0.15–0.37 ms with GPU preparation, a 0.57–0.62 ms drop in the residual. This residual also contains ordinary loop work and any serial tail. The workers accounted for 99.89% of observed GPU increments over 38 intervals. Thermal readings were nominal. Pageouts increased by 297 and swapouts were unchanged. Repeat the two candidates together on one loaded worker with a four-arm control.
+
+The initial integrated build stopped because the cloned Metal precompiled headers referenced their original module-cache directory. Regenerating the cache at the scratch checkout's path enabled the sealed build. The failed build yielded no worker measurements.
+
+### Same-loaded comparison with controller batching
+
+Run the combined short verifier on one loaded worker with both candidate workspaces resident. Rotate four arms over the four cold sampled 4K workloads: baseline, batched QKV only, GPU certificate only, and both changes. Each arm samples and emits 256 tokens, with two proposals, context 4,352 and zero prefix reuse. Check the worker's actual arm and GPU counters on every request. Reject a run before timing aggregation if output hashes, round counts or work extents differ.
+
+The first harness started its rotation at the request IDs already consumed by image readiness checks and failed the arm check before recording a window. The retry begins at the next complete rotation boundary after readiness, using the same sealed binary.
+
+All 16 outputs matched the pinned hashes and all arms used the same 530 rounds. Throughput is useful sampled decode across the 255 intervals after the first token.
+
+| Arm | Median tok/s | Median paired change | Faster pairs | Rate range |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline | 59.75 | | | 54.75–65.83 |
+| Batched QKV | **63.63** | **+3.05%** | **4/4** | 56.56–67.67 |
+| GPU certificate | 60.11 | +0.57% | 3/4 | 53.63–67.75 |
+| Both | 61.97 | +1.11% | 2/4 | 54.52–64.79 |
+
+The GPU certificate lowered the median paired residual by 0.50 ms per round and increased the queued interval by 0.37 ms per round on its own. The combination also lowered the residual by 0.50 ms. The observed queue variation includes whole verifier work. The worker accounted for 99.82% of observed GPU increments over 77 intervals, with nominal and fair readings and no new pageouts or swapouts. Archive the sampler prototype and combined arm. Keep the CPU certificate as the worker path at this scope.
+
+## 20261122-INKDECODE-77 · Check compatible draft availability and replay proposal calibration
+
+Check available Mini-format draft weights, then measure whether a calibration of the shipped draft improves the accepted prefix on held-out exact seeded target trajectories. Use native INT8 vocabulary scores and the draft's own first proposal as input to its second mask. Select the correction from other workloads before scoring the held-out input. Measure proposal costs and replay the observed round count before considering a worker change.
+
+The publisher's Mini release contains one DSpark shard. Unsloth's BF16 and Q8_0 DSpark files convert that shard. The publisher's Small draft has five layers, width 4,608 and eight target taps, compared with Mini's three layers, width 2,304 and four taps. No separately trained native-compatible draft was identified. The bounded experiment varies the shipped Mini draft's BF16-rounded Markov correction in F32 before the existing BF16 addition and soft cap. [Mini release files](https://huggingface.co/thinkingmachines/Inkling-2-Mini/tree/main) · [Unsloth DSpark conversion](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF/blob/main/dspark/README.md) · [Small architecture](https://huggingface.co/thinkingmachines/Inkling-2-Small/blob/main/config.json)
+
+Every pinned initial target row matched. Use 192 temperature-one teacher anchors per fixture and rotate seven scale pairs across each anchor. The control uses the production rank kernel. The six candidates use 0.75 or 1.25 at the first mask, second mask, or both masks. The second mask consumes that arm's first GPU-selected token. This test samples all four prompts, including the two captured as greedy fixtures.
+
+| Held-out fixture | Scale pair selected on the other three | Stock depth-two rounds | Selected depth-two rounds |
+| --- | ---: | ---: | ---: |
+| s4096-00 | 1.00 / 1.00 | 102 | 102 |
+| s4096-01 | 1.25 / 1.00 | 90 | 91 |
+| g4096-01 | 1.25 / 1.00 | 84 | 85 |
+| g4096-02 | 1.00 / 0.75 | 110 | 110 |
+
+The held-out selection used **388 rounds against 386** for the stock draft, with zero improved fixtures and paired proposal timing changes under 0.007 ms. The best fixed scale on these same four fixtures reduces one round in aggregate. The leave-one-out result favors the stock scale. Archive the calibration probe at the native gate.
+
 ## Evidence identities
 
 Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1`. Original DSpark SHA-256 `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2`. The current run uses the pinned Ollama capture and host documented in the [default-router record](2026-11-21-inkling-mini-decode-default.md).
@@ -1926,3 +1991,31 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Combined verifier qualification harness | `3de64f75718c22392c694b5532656e4bc04d9271026c0394d658f1e411c400ef` |
 | Combined verifier single-worker qualification receipts | `f1c64621a2ee7b900f6369f2914b8dfa1c1c4421233f54d969aebdb98e6395ed` |
 | Combined verifier single-worker qualification host observations | `50a4d5692c31d7cf39f08d93eba63258a8130c38f5007378fa0c163edde587e3` |
+| Batched QKV source patch | `0b5589f178294b3cac3d963a572e9f1f30aec509a1bf08db73c328e5e7e52f5f` |
+| Batched QKV native executable | `1086d357856381cf3b4bc18dd48ff9b85fc5109de264487ed37793cd486bf34f` |
+| Batched QKV native harness | `a3303d3a0b5f2e45bbed3fb43139f5b35614f105b40a2eeb02771c8dd843bd87` |
+| Batched QKV short screen | `ca618991ec2fafd24a193f668809602edb63fb8ba92297cee842e64a307364eb` |
+| Batched QKV stock-s4096-00 screen | `36788d595f04e2c28af98eaf8ca41d2222c0b0577d68e37c0e349799b9f78e62` |
+| Batched QKV stock-g4096-01 screen | `2f153090948a3f5c35ed52617f3207a1d7512b2b01321337433283ce7b9dedf5` |
+| Batched QKV worker | `4799a2975083bd428c497c07753be1c2da61b8aff038e80a949c7b26974879a7` |
+| Batched QKV worker harness | `a5dfa1cfa3ab37662496a6791dd085cc1831b285a3b0964e4176ae6cce3317a7` |
+| Batched QKV worker pairs | `0e1cf63c3a1c401a294113dd36224951d11265c80858e2285483b0f3fbf4ca7d` |
+| Batched QKV worker host observations | `f946800b364e3843d4370e042db3528ed5fcedf425f33ab76315de2de695cd13` |
+| Standalone GPU certificate Metal source | `28a071c924ad8512d595028277fa343243f2cd3bb88d4c0094da97c8f4e6616a` |
+| Standalone GPU certificate replay | `fa1fe6e9db1ab9c9544df7ffd7e3c48f2d6bb77fff9ad05f6aa02b744ab213ef` |
+| Standalone GPU certificate harness | `a6b71f995e7ef9553b6a715eb884441e2d923f6f1bdcfe53314fb2de81b06196` |
+| Standalone GPU certificate aggregate | `8428d6de30cf446fbbd34dbf32f1a20d689182c53e76bbc9528de18cabbde7ff` |
+| Integrated GPU certificate source patch | `03e99958114c1bbc336efe01a6f14c9ae75ed57d0565ea2f07b947761fb12a7a` |
+| Integrated GPU certificate worker | `f5b8ef7a521c8fa25f0bebd9631b43fc7213ef375442b23b5d8a54e05028b4a2` |
+| Integrated GPU certificate harness | `2b343b9cfcd4d4925ed3f023af0d06b763bf99def363469713e860448eba194f` |
+| Integrated GPU certificate worker pairs | `2422b3b21079f85aa19b7265d72035b66ad0443e62f0f22ee7d67c599a0baeab` |
+| Integrated GPU certificate host observations | `597368d7709b70fc490acfb9eaa605a06ffb0c98d7c064dd19b9cffc3a8cdda6` |
+| Same-loaded QKV and GPU certificate source patch | `ec6d58692f5611d746ce76db7fbd39415d9937d684f721ca61f19d49ab81ff11` |
+| Same-loaded QKV and GPU certificate worker | `5c011832e4f648e7e028ba6ce757175eed9e1b84376c31f0c660a8fa244f39f6` |
+| Same-loaded QKV and GPU certificate harness | `cc06505e56c3864dafc4ed456d022fa71fa5e6dfd9f96e3994c9f5a811081321` |
+| Same-loaded QKV and GPU certificate worker receipts | `09870f68f9528608d8f43fd11e527389cff1e128f059355ced205b900f2f7468` |
+| Same-loaded QKV and GPU certificate host observations | `d8d53307e5599d0f8064fbfc58de23ef3ecb614e0399e96518a89f54917cac25` |
+| Markov sweep source patch | `3843f95a7f81a55b3e7cac0848914f95e6fb94eff2abbed4b0d7e0734ada37f2` |
+| Markov sweep native executable | `9dcabf234ca77a6547083984ee42b29cb5938ee801476c100b8ed88583dfc928` |
+| Markov sweep harness | `edb0917db995beb60798c5018feceb2460d1a92728651c2e8383a5899f77a6ab` |
+| Markov sweep aggregate receipt | `8be6f27c04e367893612df073e98418ee1169dab2ccc065578c43698b4d65ad3` |
