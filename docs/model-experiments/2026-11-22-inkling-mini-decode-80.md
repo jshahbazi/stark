@@ -38,6 +38,8 @@ Observe the existing worker's exact target logits only as each output is consume
 
 All four pinned full-output hashes matched. The four alternate-seed trajectories each completed the same extents. Pricing the pinned reference at the new one-worker observation gives a 64.35 tok/s median. A separate optimistic replay keeps the modal first proposal, grants a perfect second proposal whenever the first matches and lets hindsight shorten accepted prefixes. It needs 394 rounds on the pinned trajectories and models 85.07 tok/s median at the earlier paired costs. The conditional-mode reference measures headroom for this family of proposals. A future draw-aware policy or a different first proposal can have a different outcome. These rates are replay estimates.
 
+With the later retained MXFP8 vector worker's matched per-request costs, this privileged target-mode replay models **76.03 tok/s median sampled**. Its four workloads require 2.19–2.37 useful outputs per round for 80 tok/s at unchanged cost.
+
 ## 20261122-INKDECODE-82 · Fit the existing draft-head bias
 
 Train only DSpark's 2,304-value Markov output bias. Use four archived pinned 4K captures, with both original greedy fixtures sampled at temperature one for this experiment. Draw 192 anchor continuations per fixture. For each held-out prompt, fit on the other three complete trajectories. Use the normalized difference between the frozen unembedding rows for the target mode and the stock proposer as the pairwise training feature. Include a mask-two training pair when the stock first proposal matches the actual sampled first token. Fix the ridge scale and L2 cap before scoring. Round the fitted bias to BF16 and use the existing Metal fold, shortlist and second-mask recurrence. The original target, proposal geometry and draft backbone supply the same work in each arm. Evaluate the candidate with its own first proposal and replay accepted prefixes sequentially.
@@ -122,8 +124,6 @@ Three-row stage timings attribute about 0.03 ms to attention input prep and 0.02
 
 ## 20261122-INKDECODE-86 · Score draft candidates with a causal target prior
 
-At the retained verifier's measured per-request costs, the earlier privileged target-mode replay models 76.03 tok/s median sampled. The actual four sampled runs require about 2.19–2.37 useful outputs per round for 80 tok/s at unchanged cost. This reprice uses the matched round counts and timings of the retained MXFP8 vector worker.
-
 Use only the already-available target vocabulary row that produced the emitted anchor. In the native INT8 draft ranker, add a signed term of up to one logit unit based on the prior's distance below its maximum, capped at eight score units. Compare reranking the two shortlisted candidates per SIMD group and applying the same term before and after shortlisting. Test the positive and negative terms at both masks, plus positive and negative shortlist terms at mask two only. The unmodified stock ranker supplies the zero arm. The second mask reads the candidate's own first proposal. The original target draw sequence supplies the scoring trajectory.
 
 Use 192 anchors each on four stock 4K prompts and two seeds per prompt. Rotate seven arms per anchor and fit the arm on the six trajectories from the other three prompts. Count nonoverlapping accepted prefixes and verification rounds on both seeds of the held-out prompt. The native worker copies the causal prior into a shared probe buffer outside the timed proposal command. A live implementation would need to bind the resident prior row and preserve its lifetime. The initial patch generator missed the current shortlist declaration and the first Rust build retained the old fixture and arm shapes. The corrected experiment reproduced all eight pinned initial target rows.
@@ -137,6 +137,36 @@ Use 192 anchors each on four stock 4K prompts and two seeds per prompt. Rotate s
 | Total | 769 | 765 |
 
 The best single fixed term on the same eight trajectories uses 763 rounds. Held-out selection saves four rounds in aggregate, about 0.5%, with one held-out prompt regressing. The commonly selected arm adds about 0.005 ms to the median native proposal command. Retain the result as a proposal replay and archive the variant. The exact target and sampler establish the replay reference. The experiment produces no live throughput claim.
+
+## 20261122-INKDECODE-87 · Fuse NVFP4 expert buffer boundaries
+
+At `04fbcca0`, test two changes to the exact half-ingress short verifier with the retained QKV, residual mix and MXFP8 paths selected. First, join the source gate/up epilogue and down-input quantizer in one 256-thread group per sorted route. Preserve the BF16 gate, up and weighted intermediate roundings. Stage the BF16 intermediate within the group and use the source quantizer's order for its row maximum and K16 blocks. Second, scatter the down dot directly to the routed BF16 buffer. Keep the F32 recurrence and apply the same activation maximum, expert maximum and denominator after SIMD reduction.
+
+Measure eight plain and four instrumented comparisons per arm and width, from the same restored state, on the short and two stock 4K captures. The first Metal compile failed with the quantizer's FP pragma placed after the gate loop. Put the quantizer inside its own lexical scope and recompile. All 1,296 checked F32 rows matched serial for the corrected probes.
+
+| Three-row candidate | Dispatches removed | Stock 4K A wall saving | Stock 4K B wall saving |
+| --- | ---: | ---: | ---: |
+| Gate/up epilogue with down quantization | 44 | −0.036 ms | −0.007 ms |
+| Down dot with epilogue | 44 | −0.240 ms | +0.212 ms |
+| Both | 88 | −0.198 ms | +0.017 ms |
+
+Positive values indicate less wall time. The combined arm also adds 0.126 ms on the short three-row fixture. Archive both variants at the native gate.
+
+### NVFP4 zero-scale census
+
+Scan all checkpoint tensors used by the original NVFP4 bank's scale buffers. The 20 gate/up banks contain 849,346,560 K16 scales and the 20 down banks contain 424,673,280. None of the 1,274,019,840 scale bytes encode positive or negative zero. There are no all-zero weight-scale slabs to skip across the 47,185,920 output-column wave segments. This census covers immutable weight scales. Dynamic activation sparsity has its own eligibility and cost.
+
+## 20261122-INKDECODE-88 · Recheck sampled draft depth after verifier cuts
+
+Remeasure widths on the sealed retained MXFP8 vector worker, with QKV and residual batching enabled. The verifier cuts saved more wall time at four rows than at three in native measurements. This may change the cost of adding a third proposal. Rotate one, two and three proposals within each of four pinned cold 4K sampled workloads on one loaded worker. Use the same temperature-one, top-p-one draw stream, context 4,352, 256 emitted and sampled outputs, zero input reuse, resident vision and native INT8 draft head. The exact output hashes matched on all 12 requests, and the observed depth and overlap histograms matched each requested schedule.
+
+| Drafts | Median useful tok/s | Range | Rounds across four workloads | Useful outputs per round | Median paired rate change vs two | Faster pairs vs two |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| One | 58.87 | 57.00–65.21 | 634 | 1.61 | −7.38% | 0/4 |
+| Two | 65.72 | 60.09–69.27 | 530 | 1.92 | Reference | Reference |
+| Three | 61.98 | 57.58–64.81 | 493 | 2.07 | −6.75% | 1/4 |
+
+A third proposal lowered the round count on every prompt. On three prompts the increase in round cost outweighed the added acceptance. Keep two at this sampled setting. This test compares the depths within the new session. The worker accounted for 99.85% of GPU counter increments over 58 intervals, with nominal and fair thermal samples and no additional pageouts or swapouts.
 
 ## Evidence
 
@@ -208,3 +238,13 @@ The original target and DSpark artifact digests are recorded with the [integrate
 | Causal draft prior native executable | `487884e44084dd3d8f84d9a0590eaaf01d017b1c9177b0eb2ad62817b53ff5e5` |
 | Causal draft prior replay harness | `3626d04b8e3d15f52e514b2e9f52498ccf0cf864016e6dc7e43987ca9ee06a60` |
 | Causal draft prior replay receipt | `15d991f30263f1b823c1a79dd03a9a9288dcdfb9e9f24ea34ba0fe423d833d67` |
+| NVFP4 expert boundary two-part fusion patch | `629ce09f0b8332f3f0ae35d7b9248c4d514abb999db2d1e937635d65c4b403bc` |
+| NVFP4 expert boundary native executable | `abc0d41084016a35218e2cf330e49a2391e2849e270b8da9ccd01f96bbbf6be0` |
+| NVFP4 expert boundary short receipt | `afcfbb5f390fbfbf9b01af13a8a237a70cfcde0adf179bd6ee29a14cb67f0c75` |
+| NVFP4 expert boundary stock 4K A receipt | `4d811e115af8b5c390c61950253b5384bcf74605d41eb78f229f7749d990051d` |
+| NVFP4 expert boundary stock 4K B receipt | `52851ae0b334d570d5ee817e7cfe6fc0d23973b4a2b5d71bd9159c4d4f31b7e6` |
+| NVFP4 zero-scale census script | `ec68f2d7b75632415f5cc3a07718c937215f1ff7c53b64ed8ad36e985ef7cddd` |
+| NVFP4 zero-scale census receipt | `7262caa91fe0e6528d9722f995f374b3894d5c50185b26d8e5b5671c46b7b7ad` |
+| Retained sampled depth worker harness | `69b374deba4722b4359de4b9b3ec838bbb8abe20481415842ec1ec272c96a7f1` |
+| Retained sampled depth worker receipt | `5a24492801d59c191df516e259e3605f77132f8f56ddfdd5cd24c1615a6d802f` |
+| Retained sampled depth host observations | `52dfa1a706fc0e4d64f43b9a5b1b4706be437447df48f6a982e04bf498d65f87` |
