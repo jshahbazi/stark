@@ -521,6 +521,39 @@ The final native executable repeats the flags-unset short and stock 4K pinned co
 
 The final worker matches all eight pinned cold 4K output hashes. It repeats lifecycle checks for exact 2,048-token prefix reuse across proposal depths, cancellation and mode changes, admission and accepted-proposal stops. In its separate bench run, median throughput is **82.91 tok/s greedy** (79.14–86.05, three of four at or above 80) and **69.37 tok/s seeded sampled** (67.22–71.48). The worker accounts for 99.87% of observed Metal counter increments across 35 intervals at fair thermals with zero pageout or swapout deltas. At the four sampled requests' measured acceptance, reaching 80 still requires a median **3.77 ms less per round**. Retain the exact three-row geometry under the existing opt-in verifier configuration.
 
+## 20261122-INKDECODE-107 · Reuse DSpark mask rows across verifier rounds
+
+At `789f8efa`, use the retained short verifier, the original target and the bundled DSpark with its INT8 vocabulary projection. MLX-Serve separates the draft block projection from its conditional Markov step. Test retaining seven normalized mask rows, their projected scores and the refresh anchor's feature. Rebuild the Markov state using only emitted IDs when a later round reuses the rows. Submit proposals and the same two-proposal target verifier on the ordinary queue. Refresh when the live masks run out. [MLX-Serve draft implementation](https://github.com/ddalcu/mlx-serve/blob/2fe9be834a601c70ef1a597563026340f0e722fe/src/plugins/inkling2/draft.zig#L195-L282)
+
+Use the short fixture and four stock 4K captures with two temperature-one seeds per 4K prefix. Each 4K arm starts from the same restored state and advances over 128 timed outputs from an exhaustive seeded serial replay. Reverse the policy order for the alternate seed. Measure total queued and commit time including any extra rounds. All four starting F32 rows match the pinned captures. All 4,288 consumed F32 rows and 36 final target and draft state comparisons across short and 4K match serial.
+
+| Refresh policy | 4K rounds | Accepted proposals | Reused rounds | Median relative queued plus commit time | Faster trajectories |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Fresh each round | 541 | 483 | 0 | 1.000× | — |
+| Every two rounds | 651 | 373 | 320 | 1.163× | 0/8 |
+| Every three rounds | 729 | 295 | 475 | 1.274× | 0/8 |
+| Every three rounds or after a rejection | 590 | 434 | 123 | 1.058× | 0/8 |
+
+The two-round policy's reused rounds average 2.62 ms less queued time than its fresh rounds at the median across trajectories. They run at different positions. One short arm improved, and even the rejection-sensitive policy needed 49 extra 4K rounds. Archive the frozen-mask policies at the native gate. The timing excludes seeded sampling and the diagnostic's full-row equality checks.
+
+## 20261122-INKDECODE-108 · Reduce NVFP4 down routes inside one threadgroup
+
+At `789f8efa`, test a three-row verifier layout from MLX-Serve's packed down projection. Keep the original half ingress and its route-weight placement. Scatter the weighted gate/up activation in original route order before down quantization. Assign eight SIMD groups to the eight picks of one output channel for one token. Each group reproduces the source K16 dot, scaled FMA and BF16 rounding for its pick. Sum the eight rounded contributions in order and pass the merged BF16 row to the existing convolution. This removes the per-pick dot and epilogue intermediates and gives up weight sharing across tokens in the down product. [MLX-Serve down layout](https://github.com/ddalcu/mlx-serve/blob/2fe9be834a601c70ef1a597563026340f0e722fe/src/plugins/inkling2/kernels/downs.metal#L20-L46) · [Earlier down epilogue fusion](#20261122-inkdecode-87--fuse-nvfp4-expert-buffer-boundaries)
+
+Use the original checkpoint and retained queued INT8 draft on the short and four stock 4K captures. Compare both arms at 16 restored anchors per capture and rotate one, two and three kept rows. Across three runs, the candidate matches 720 full F32 rows, all proposed IDs and 240 target and draft state pairs. The first verified row also matches singleton decode at every anchor.
+
+The first alternating run appears to save 1.265–2.953 ms at 4K by paired medians. Split by run order, the candidate adds 6.460–7.681 ms with the control first and saves 5.561–6.715 ms with the candidate first. A repeat with four commands per anchor still shows position effects. Run both four-command orders at each anchor against the same snapshot, and take the median of the difference between each arm's four-command mean.
+
+| Fixture | Median queued saving | Mean queued saving | Faster anchors |
+| --- | ---: | ---: | ---: |
+| Short | −0.392 ms | −0.397 ms | 0/16 |
+| Sampled 4K A | −0.665 ms | −0.497 ms | 8/16 |
+| Sampled 4K B | −0.498 ms | −0.443 ms | 8/16 |
+| Greedy 4K A | −0.489 ms | −0.336 ms | 8/16 |
+| Greedy 4K B | −0.712 ms | −0.328 ms | 7/16 |
+
+The layout adds time at every fixture median after both orders run at each anchor. Archive it at the native gate. The timing covers the queued proposal and verifier at depth two, including on the prompts originally captured for greedy use.
+
 ## Evidence
 
 The original target and DSpark artifact digests are recorded with the [integrated QKV run](2026-11-21-inkling-mini-decode-60.md#evidence-identities). The worker and native screen retain aggregate-only private receipts. No prompts, token IDs, logits, targets or fitted tensors are published.
@@ -529,6 +562,12 @@ The first source exports for attempts 97, 99 and 100 used Git's configured exter
 
 | Evidence | SHA-256 |
 | --- | --- |
+| DSpark mask reuse Git source patch, native executable and driver | `1a19f74e23580e70d89b70a3c7456d294eef4ce404dbb0c3840d9616067f3e35`, `ce93b1efde9085ed3e07aa213e916cde8e4f1cf58af2ed062c3a43cbe4330c80`, `ae21abb8dfd59765baddd29e4221a67a97ecde21b8a21592ab0018a8a384eeee` |
+| DSpark mask reuse short and 4K receipts | `5242668592527813e50f7406e0819a39a7b2274788bc57066796941b7e72b562`, `2316ba0f8977edb989dbd0e4a1b49dc3bbbcf1a762acbef6c7e768da8782a0ce`, `d2865d0621678b21d6c41f1d52ad83806414326e2a65c0fa89a2e17d3129379b`, `6a220626b82e480d9a9ec4d8e0f25cfa9807e9ece52aeb6b945e8a32374b5c9b`, `e0e569eb560bc3d73fbf94cec459bb4ca51dd7088c1c9321c06738aa028f4328` |
+| Per-token down initial, four-command, and final Git source patches | `ad09e67106d7f44fb5411efb06282eae3efef35452ebf5b97f8c6732764a8fe7`, `b7c913b8cc709987a681bd9155544528297e69f60c1523cc68e1ff0a4a79b75c`, `9179ce64ab7467a500aa64adee4ad5b17f60d382031d2b3626a2928ef8f6a3bb` |
+| Per-token down initial, four-command, and final native executables | `a2ef68315d416304d8ca785fd9041758be0fb35aab0629af26d6c1e8ea1ede3b`, `a2a7edadf313d9dfcb1cb5d6ac46f2cd1e205aac22520ddb3e398df7307067a5`, `9ba69bbc3f7b4f9d0dae901af32968c4e2dac81390fe31496d4a91ed451690f6` |
+| Per-token down final native driver | `a18ad32e094eeef73986275e7d74f1348b153c14c376926106edc0faa383ca37` |
+| Per-token down final short and 4K receipts | `22651a5c96d843339965f52e673b2d12a15560ca9cb8e285107d676610895a07`, `8100eb578fdb77fd2e1bb23ccab9cb523da9f2ec222f00b02c7e6e9e4280f9d4`, `33fa2279794b6d21fa2785941debb5f237d69fc53cf7872eeb9c59ee1ffc8166`, `aa54d5a8829ccb44e02f646ab153590b308c46e74d5c9c57271893988b228af6`, `7df977113ce7e7db4b434c371c8c2893e42f8f1920a8658414c6b5529028e395` |
 | Sealed integrated worker | `638741dc417d72591a96b3fe5f4bccac64b345950319c09bfcded6d11100b485` |
 | NVFP4 shifts visual source diff | `cf5664ddfac2ff8c2fd0965faadee27eae5a72efdd960e8d6211eb6f33b200d5` |
 | NVFP4 shifts Git source patch | `05fb0bec7032ba589639f8add918e345db9ae0b658774164b15718a8f43726e1` |
