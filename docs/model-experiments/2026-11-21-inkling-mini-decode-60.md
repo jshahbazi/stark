@@ -1075,6 +1075,60 @@ Both methods matched the exhaustive result on all 16 pinned target rows. Across 
 
 Charge the measured 0.389 ms host calculation and credit each fixture's measured 0.86–0.88 ms projection saving. The 16,384-ID replay then moves from **59.05 to 58.93 tok/s** at the median, with three of four modeled wins. The estimate still omits candidate ranking and updates for other emitted rows. Even free candidate construction and ranking give a modeled median of **59.62 tok/s** at the measured projection saving. Defer the CPU-built candidate and archive the component probes.
 
+## 20261122-INKDECODE-67 · Panel NVFP4 weights and test larger coefficient tables
+
+Repack four neighboring output columns into each 32-lane K slab. Place their E4M3 codes beside the packed FP4 weights and omit K-tail padding. Keep the existing byte-pair table and F32 dot as the panel control. Compare an independent four-coefficient table and a scale-indexed byte-pair table. The scaled arm uses the K16 lattice to absorb the weight scale into exact binary16 coefficients before forming the F32 block sum. Codes outside the admitted table keep the source recurrence.
+
+Use original routed weights in the short verifier at three and four live rows. Alternate plain and separately timestamped comparisons on short and both stock 4K prefixes. All arms share the additional immutable panels during the run. Report allocated bytes, exact F32 readouts, and the isolated gate/up and down dot stages. Require a repeatable reduction in both native command time and the dot stage before evaluating the worker.
+
+All 756 F32 vectors matched. Use six plain iterations and three timestamped iterations per arm and live width. The panel preserves the code and scale byte count and allocates 11,466,178,560 bytes alongside the original banks in this diagnostic.
+
+| Candidate | Added wall time at three stock 4K rows | Added wall time at four stock 4K rows | Three-row NVFP4 product GPU time |
+| --- | ---: | ---: | ---: |
+| Current byte-pair table | 0 ms | 0 ms | 5.34–5.58 ms |
+| Four-column K-slab panel | 0.13–0.16 ms | 0.25–0.26 ms | 5.53–5.78 ms |
+| Four-coefficient lookup | 13.63–14.50 ms | 15.25–19.44 ms | 19.09–20.11 ms |
+| Scale-indexed byte-pair lookup | 0.54–0.56 ms | 0.43–0.75 ms | 5.92–6.15 ms |
+
+Archive all three candidates. The larger lookups add time at the real route occupancy. For an upstream comparison, MLX's Metal matrix path expands FP4 coefficients into threadgroup tiles. Its global-scale gather change on a quantized Qwen3.6 model reported a large prompt gain and 81.9 to 81.7 generation tok/s on M5 Max. The MLX result measures a different model and arithmetic path. [MLX FP4 block loader](https://raw.githubusercontent.com/ml-explore/mlx/d9add9d11f3154111a4c85f267ec2fd307ecd18e/mlx/backend/metal/kernels/fp_quantized_nax.h) · [MLX matched benchmark](https://github.com/ml-explore/mlx/pull/4481)
+
+## 20261122-INKDECODE-68 · Look up two-coefficient products from packed FP4 operands
+
+Store each selected K16 activation as eight original FP4 bytes and its shared E4M3 scale. Keep the source error comparison and row maximum. Use a signed integer table indexed by an activation byte and a weight byte to obtain each exact two-coefficient product. Sum eight table values and apply the activation and weight scales in the original outer F32 FMA order. Preserve the native weight storage and SIMD reduction.
+
+Time activation packing and the routed products together and separately. Compare complete F32 logits at three and four live rows on short and both stock 4K inputs. Include any extra table reads in the timed command. A top-level worker follow-up requires a material native gain with exact logits.
+
+All 462 F32 vectors matched in eight plain and three timestamped rotations per width on each input. The candidate halves the K16 activation storage from 32 to 16 bytes and adds a 128 KiB signed product table. At three rows on stock 4K, the product stage rose from **5.60–5.62 ms** to **8.59–8.93 ms**. Activation packing rose from **1.01 ms** to **1.26–1.32 ms**. The three-row paired wall regressions were **3.28–3.65 ms**. The four-row regressions were **4.41–5.77 ms**. Archive the paired-product lookup.
+
+## 20261122-INKDECODE-69 · Queue a single INT8 proposal and retest fixed sampled depth
+
+The current two- and three-proposal path uses the INT8 vocabulary bank and submits the target while the draft runs. The one-proposal path uses a synchronous BF16 draft. Admit one live proposal to the existing queue only when the INT8 bank is ready. The target still verifies the anchor and proposal and consumes the ordinary seeded draw.
+
+Compare native one-proposal costs at the same restored short and stock 4K states. Check each proposal's two exact F32 target rows against serial execution of the same IDs and verify state at both accepted lengths. Then compare fixed depths one and two in the same loaded worker on the four cold sampled 4K workloads, with 256 emitted and sampled tokens, zero reuse and exact reference output hashes.
+
+Eight rotations per fixture verified both target rows and committed state for each arm. The median paired proposal-plus-verifier saving was **2.48 ms** on short and **8.95–9.65 ms** on the two stock 4K fixtures. The queued native 4K commands took **26.21–26.44 ms** at the median through target completion. The control uses the legacy BF16 proposal and a separate target command. This comparison measures the combined precision and queue change.
+
+### Compare one and two queued proposals
+
+All eight cold sampled outputs matched their pinned hashes on one loaded worker. Depth two had a 51.13 tok/s median across four workloads and queued depth one had a 52.83 tok/s median. Depth one won one of four pairs and the median paired change was **−3.94%**. The total round count was **634** at depth one and **530** at depth two. Keep two proposals for this sampled workload. The worker accounted for 99.84% of observed GPU counter increments over 42 intervals. Thermal readings were nominal, with zero added pageouts and swapouts.
+
+### Compare queue modes at a fixed depth of one
+
+Use the sealed implementation build based on `857b25df`. Both workers have vision and the INT8 proposal bank resident. Toggle only `STARK_INKLING_EXPERIMENT_VERIFY_SINGLE_DRAFT`. Use four alternating cold sampled 4K pairs with context 4,352, 256 emitted and sampled tokens, temperature and top-p both 1, and zero prefix reuse. All output hashes matched.
+
+| Fixed one-proposal mode | Useful decode median | Range | Median paired change | Faster pairs |
+| --- | ---: | ---: | ---: | ---: |
+| Synchronous BF16 proposal | 48.51 tok/s | 47.05–50.85 tok/s | — | — |
+| Queued INT8 proposal | **54.22 tok/s** | 51.65–56.49 tok/s | **+11.04%** | **4/4** |
+
+The control and the queued path ran 635 and 634 rounds, respectively. The two workers accounted for 99.84% of observed GPU counter increments over 43 intervals. Thermal readings were nominal. Pageouts increased by 171 and swapouts were unchanged. The candidate still needs 1.68–4.22 ms less per round to reach 60 tok/s on these requests.
+
+The sealed build passed connected short and 4K parity with all experiment flags unset. The full short and four stock 4K fixtures matched the pinned F32 readouts, 768 BF16 visit residuals and four exact snapshots. With the queue option enabled, the short and both stock 4K native controls matched the serial 96-output continuation and committed state at each of the three draft depths. All 45 rejection and wrap controls passed.
+
+The enabled worker reused 2,048 prompt tokens exactly across depths three, two and one. Cancellation during queued one-proposal decode cleared the prompt cache. The worker also passed verification-mode switches, proposal-depth admission, and stop accounting on an accepted proposal.
+
+Retain queued one-proposal decode as an opt-in under `STARK_INKLING_EXPERIMENT_VERIFY_SINGLE_DRAFT=1` on the source verifier with queued submission and the INT8 draft head enabled. The existing INT8 bank accounts for the resident weight memory. The measured speed gain applies to requests using one proposal.
+
 ## Evidence identities
 
 Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1`. Original DSpark SHA-256 `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2`. The current run uses the pinned Ollama capture and host documented in the [default-router record](2026-11-21-inkling-mini-decode-default.md).
@@ -1668,3 +1722,37 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Host causal vocabulary benchmark binary | `71efdca3ed1ad9371b4639d9827ba04152e5c5efa1a3fe8eb7ad2ed5b44b34e7` |
 | Host causal vocabulary benchmark receipt | `54d2377b57b5768e0c38d210b4e0c0e4440552c7821e5f9d667516b4353c1f11` |
 | Host causal vocabulary pinned row offsets | `454b9845f6ab89ff22c44dc7c7606bcaec4ce7e1057b4322d9a531025e695f64` |
+| NVFP4 layout screen native binary | `753843de4fb4a4406a34161087d1d09b79cab0bcac46d76e4e4af0a39638febb` |
+| NVFP4 layout screen source patch | `e01af817c6c528dfdb6d73c3599acd13d82395db71f66d8f84996429b9a91c0f` |
+| NVFP4 layout screen harness | `69fc1398ebb9cc0ef7b3fd321a8195ec72d9407660bbcb08abbb5b530b8501cb` |
+| NVFP4 layout short screen | `7cfed73e0c42d3b8126f95aea54cccea44d4a9a8d21a18e7b77ed2cbb8533c5b` |
+| NVFP4 layout stock-s4096-00 screen | `877808e639e63fcdb22642197436652b5c388c755cc5864d6a12f9d36f917fa2` |
+| NVFP4 layout stock-g4096-01 screen | `c418fcc7c1993f69e2e1ff795a076d3d847b687e9e87045b29e5905c88cafecc` |
+| NVFP4 product table native binary | `c053db5439e3ac157a6b8943143a6fda8082163f33f9a4ecaa0e74892b623dcc` |
+| NVFP4 product table source patch | `ac224d1a98da4786d1aa74c506cf03036f69445f6dca2944c6e13a5515b1c6b6` |
+| NVFP4 product table harness | `89fbeb419ddebfd1fb0902967581e3e8f4ca293df7f285d5486ac24b106ed673` |
+| NVFP4 product table short screen | `c508c741be644a952a02b826f2760ab739e342159ac6d51fbe17c6f6c756be98` |
+| NVFP4 product table stock-s4096-00 screen | `d52ed377d621c4f1b34196df6711e52c17bac9c8c5ed30dff2080aafcbf82e66` |
+| NVFP4 product table stock-g4096-01 screen | `b7e02a9720e732394a19ec3b9ea79d674ee0694fab6beb366f564f661f333d94` |
+| Queued single proposal native binary | `7e07de8dda167f1df7dbc1c1639310358921f27e0b82a2d4cef270af43aa8488` |
+| Queued depth comparison worker | `bf18de7fc61696de619a1acd3ff2a749771e4a1c5920175c38b84eeb20527d71` |
+| Queued single proposal native source patch | `baa31d7599da0fad4e55ffb84a6f93d44978533d6b8d344135a19162ef713d5c` |
+| Queued single proposal native harness | `a05f72a70135f0f6041dd2022a3d7c01a0699d4ebd93c2f18132a028587a71e3` |
+| Queued single proposal short screen | `4f91ab04f6a900b5e92faeaef80d11a834af07e004802641db7ac758d47ee768` |
+| Queued single proposal stock-s4096-00 screen | `ca5d9244c4e6eb3e592ba6d0faab0f30b40fdbccc78d216d3077d8b5c777f31c` |
+| Queued single proposal stock-g4096-01 screen | `e031eb3295494a2c11393b60ad48d15d52f92be56723931d87925b68f1e2043c` |
+| Queued depth comparison harness | `3025858f5a0e15345cd77cd6decebce5441f9543523daafd3d5f7fd92c7aa2a2` |
+| Queued depth comparison worker pairs | `d8ef9f27ede0d6754dae005861f21645ae2c290b56d7a483ba18ec041b9731c1` |
+| Queued depth comparison host observations | `df0d2cba35e7d2045fa4e21d769483203da1103fbdd3d1dd01a38ba5761c0923` |
+| Queued single proposal sealed worker | `507cbeb65d695d73b607698e04cc3174e0d23f693c7dbc85a49852cd49c72c2e` |
+| Queued single proposal sealed native binary | `7df4c16c42e098416a92cb7a214c0f02b1f7c41ffddb3495598c1d6d4fc91fbb` |
+| Queued single proposal sealed source patch | `c3a7c4c918b1ccd696f8f402ccb5cebe79b4b5fffa23869684db78aa8fae80ba` |
+| Queued single proposal fixed-depth worker harness | `873cb662497c4ce1a54f067bdf7b7215cc6f299aa8086edbfb795c39a332809b` |
+| Queued single proposal fixed-depth worker pairs | `99630711e245750dda990bdd326244e931d49705f9eb9492fcf336f59465e717` |
+| Queued single proposal fixed-depth worker host observations | `18fd21c016e4661e4200bd35415555befdb97543f807b530f1ad32738f3c6a06` |
+| Queued single proposal lifecycle harness | `0390dba898ea6708be1f1ae000920b8d84b1b373c1e915cfc220548700248712` |
+| Queued single proposal sealed flags-unset parity | `b8a5b540c43b3942a458316f8d3f2943ed64beadfbb40fe803a93111aac3d011` |
+| Queued single proposal sealed short proof | `e02c19b743b045023a8214e9adb88f2f9219d4b0ddfe63a9c343a370c4e7c08d` |
+| Queued single proposal sealed stock-s4096-00 proof | `7240e6128a1fe532dde716f777627ad31d21497543788ea85ab6f8b89d6f3e0d` |
+| Queued single proposal sealed stock-g4096-01 proof | `913c42659700cb9fc172ce408f0fd57a12455f1d1c0c9e3b6af6178b29997c9c` |
+| Queued single proposal lifecycle receipt | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |

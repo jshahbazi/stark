@@ -431,7 +431,7 @@ fn collect_output(
                         session = Some(target);
                     } else {
                         let stats = speculative.as_mut().unwrap();
-                        let (proposals, transaction) = if depth >= 2 && target.overlaps_verify() {
+                        let (proposals, transaction) = if target.overlaps_verify_for(depth) {
                             let (proposals, transaction, before_verify_ms, verify_wall_ms) = target
                                 .begin_overlapped_verify(anchor, depth)
                                 .map_err(|_| "native_generation_failed")?;

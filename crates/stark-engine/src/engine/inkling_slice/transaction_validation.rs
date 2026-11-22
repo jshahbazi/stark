@@ -516,7 +516,7 @@ pub fn measure_verify_transaction(
                 output.push(greedy(&session.step(anchor)?));
                 continue;
             }
-            let (proposals, txn) = if next_depth >= 2 && session.overlaps_verify() {
+            let (proposals, txn) = if session.overlaps_verify_for(next_depth) {
                 let (proposals, txn, before_verify_ms, verify_wall_ms) =
                     session.begin_overlapped_verify(anchor, next_depth)?;
                 draft_ms += before_verify_ms;

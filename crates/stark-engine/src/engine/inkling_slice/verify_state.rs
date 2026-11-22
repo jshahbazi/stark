@@ -43,6 +43,8 @@ impl VerifyWorkspace {
                 &["ink_embedding_draft_ids"],
             )?;
             runtime.verify_overlap = true;
+            runtime.verify_single_draft =
+                std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_SINGLE_DRAFT").is_some_and(|value| value == "1");
         }
         let shared_attention =
             std::env::var_os("STARK_INKLING_EXPERIMENT_SHARED_LOCAL").as_deref() == Some(std::ffi::OsStr::new("1"));
@@ -508,6 +510,15 @@ impl Session {
         self.source_verifier && self.runtime.verify_overlap
     }
 
+    pub fn overlaps_verify_for(
+        &self,
+        depth: usize,
+    ) -> bool {
+        self.overlaps_verify()
+            && (1..MAX_VERIFY_ROWS).contains(&depth)
+            && (depth > 1 || (self.runtime.verify_single_draft && self.dspark_int8_head_resident_bytes() > 0))
+    }
+
     /// Submit the short verifier while the prior draft command is running.
     /// Report wall time before verifier encoding followed by the verifier's
     /// wall time, which includes any draft work still outstanding.
@@ -516,14 +527,13 @@ impl Session {
         anchor: u32,
         depth: usize,
     ) -> Result<(Vec<u32>, Verification<'_>, f64, f64)> {
-        if !self.overlaps_verify()
+        if !self.overlaps_verify_for(depth)
             || !self.runtime.source_text_active
             || self.active_dspark().is_none()
             || self.position == 0
-            || !(2..MAX_VERIFY_ROWS).contains(&depth)
             || anchor as usize >= VOCABULARY
         {
-            return Err("Inkling overlapped verifier requires source draft mode and two or three proposals");
+            return Err("Inkling overlapped verifier requires a supported source draft depth");
         }
         let rows = depth + 1;
         self.check_append(rows)?;
