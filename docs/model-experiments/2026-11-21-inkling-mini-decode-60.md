@@ -932,6 +932,17 @@ The sealed build passed the flags-unset connected short and 4K checks, including
 
 Retain the fused cache path under `STARK_INKLING_EXPERIMENT_VERIFY_FUSED_CACHE=1` for the shared short verifier. The repeat shows a modest sampled gain with matching outputs. The sampled median is still 2.45 ms per speculative round over the 60 tok/s budget.
 
+### Flags-unset decode rerun
+
+On November 22, run the same sealed worker with every `STARK_INKLING_*` variable cleared and drafting off. Use the same cold 4K requests, context 4,352, 256 outputs and zero prefix reuse. The original checkpoint takes the [default exact one-row router](2026-11-21-inkling-mini-decode-default.md). Four requests per mode matched the recorded reference hashes.
+
+| Sampling | Useful decode median | Range | Prefill median |
+| --- | ---: | ---: | ---: |
+| Greedy | **33.63 tok/s** | 33.34–33.94 tok/s | 999.67 tok/s |
+| Seeded sampled | **32.10 tok/s** | 31.58–32.48 tok/s | 1,015.97 tok/s |
+
+The worker accounted for 99.91% of observed GPU counter increments in 51 intervals. Thermal samples were nominal and pageouts and swapouts were unchanged.
+
 ## 20261122-INKDECODE-56 · Batch relative tables and share attention gate weights
 
 Screen whether the remaining shared attention tail can reuse its relative table launch and stop recalculating shard weights for each four-channel output group. Preserve the per-token 16 + 8 physical query-head tiles, the per-lane shard order, the F32 SIMD sum and FMA order, and the final BF16 conversion. Keep fused cache writes and the FP4 pair table active in each arm.
@@ -947,6 +958,28 @@ Measure three and four live rows on the short control and two stock 4K fixtures.
 | Batch tables and share factors across 16 SIMD groups | 0.41–0.45 ms | 0.67–0.72 ms |
 
 Batching both dispatches removed 192 and 288 dispatches at three and four rows. At three rows, the instrumented relative and cache attention stage fell from 2.76 ms to 2.31–2.32 ms. The gates that share factors use threadgroup memory and a barrier. Their three-row performance trails the batched source gate on both inputs. Archive the factor-sharing gates and carry dispatch batching into a sampled worker comparison.
+
+The sampled worker comparison toggled dispatch batching on one sealed build based on `6ecc32a6`. Both arms used fused cache writes and the other settings from the [fused cache worker follow-up](#cold-4k-worker-follow-up). All eight output hashes matched and both arms processed the same 530 speculative rounds. The control median was 55.20 tok/s and batching reached **55.69 tok/s**, with a **+1.99%** paired median change, two of four faster pairs and a 53.39–65.22 tok/s range. The two workers accounted for 99.87% of observed GPU counter increments in 40 intervals. Thermal samples were nominal, pageouts increased by 95 and swapouts were unchanged.
+
+Keep the dispatch batching prototype archived. The native savings are repeatable across the two fixtures. Worker measurements have two wins and two losses, and three sampled requests remain below the sustained budget.
+
+## 20261122-INKDECODE-57 · Screen an eight-row target vocabulary tile
+
+The exact verifier currently projects 16 hidden rows to the full vocabulary when at most four rows are live. Compare the device TensorOps vocabulary projection with an eight-row tile and identical BF16 inputs, BF16 weights, F32 outputs and soft cap. Add a timestamp boundary before projection to separate the target readout from the terminal hidden mix and residual work.
+
+Use six rotated plain commands and three separately timed commands per arm and width on the short and two stock 4K fixtures. Check every live F32 vocabulary vector against the serial target. Keep the fused K/V path, FP4 lookup and native router fixed. The candidate requires exact logits and a repeatable wall saving on both 4K inputs before a worker screen.
+
+All 189 live F32 vectors matched in each arm. At three rows on stock 4K, the timestamped readout took **2.08–2.09 ms** with the 16-row tile and **2.06–2.07 ms** with the eight-row tile. The plain command saved **0.03–0.08 ms** at three rows and lost **0.04–0.15 ms** at four rows. Both tiles traverse the same approximately 922 MB of BF16 weights. Keep the source tile and archive the eight-row variant at the native gate.
+
+The separated timestamp shows that the prior aggregate also contains about 2.87–2.88 ms of attention-input work, 1.65–1.66 ms of expert-input work, and 0.23 ms of expert finish at three rows on the two 4K cases. These are instrumented stage readings. They support a component screen of input preparation before another vocabulary tile change.
+
+## 20261122-INKDECODE-58 · Share residual-mix barriers across input sources
+
+The four controller slots already batch their RMS stages across live tokens. The residual mix leading into these stages still synchronizes the group four times per source. Collect all independent source RMS partials before a barrier, then collect all query-dot partials before another barrier and normalize the scores in the original scalar order. Preserve the F32 multiplication, additions, SIMD reductions and softmax behavior for every source.
+
+Use six rotated plain comparisons and three timestamped comparisons at widths three and four on the short control and two stock 4K fixtures. Keep fused cache, the native router and the FP4 table fixed. Require exact F32 readouts and repeatable wall savings on both stock fixtures.
+
+All 189 full F32 vectors matched in each arm. At three rows on the two 4K inputs, the paired medians saved **0.03–0.06 ms** of command wall time and the instrumented attention and expert input stages together saved **0.04–0.05 ms**. At four rows, the paired medians saved **0.06–0.07 ms**. Archive this barrier-only candidate at the native gate. Its measured effect leaves nearly all of the input-preparation budget intact.
 
 ## Evidence identities
 
@@ -1464,9 +1497,29 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Fused verifier K/V sealed native short proof | `21dcb1941c3eee8443881120c31e550c6e6cf9765efd29d2eb74102ea33a2c85` |
 | Fused verifier K/V sealed native stock-s4096-00 proof | `360f58052acfb92323178991ee29d26fc9a7165d21303d131e6e3b4a111f60d7` |
 | Fused verifier K/V sealed native stock-g4096-01 proof | `9c008826041639726815bbcf49e381a1e821103a5a67f73d10b48151851fd9c2` |
+| Flags-unset worker rerun harness | `ebaeffd88d885889fa1b27c5b09e3ac9133d46817c5424d3a5748f7654f938c1` |
+| Flags-unset worker rerun requests | `c4d586640b6e05a3ac3ac36a74de6aa8fa3806033dd38286ec7b5639b6187528` |
+| Flags-unset worker rerun host | `76c6ec4a20fe654ca0e05f681f548a5065cc0eb288b77dfca73a5321853923f2` |
 | Verifier attention tail native binary | `54a02436b7143472b28aa6549df970c38997023dedcf9031952c3a0e03d2f0f8` |
 | Verifier attention tail native source patch | `5609a78216e0b6a9af1147429cf8b23f738db2990366d082ba59c15393a75fba` |
 | Verifier attention tail native harness | `27ae7f1d4c58680206ee37ab3d20aac95c2ef7eb4491e9f8812ee1a2a23ca9ff` |
 | Verifier attention tail native short screen | `dbc60ebcaf54175e0e0aa0db89009e5f6ed3348b8c382741c0fb294a71070f63` |
 | Verifier attention tail native stock-s4096-00 screen | `94266857f6ea8f13da7afb8f496bdb1eb8ba705df08938605d9b6cd1846d722d` |
 | Verifier attention tail native stock-g4096-01 screen | `ef71cf67790ed4b2cce66e51e2431f9d8866da662823daa4cb3647a154eb072d` |
+| Verifier attention tail worker binary | `7cceb6b781364d23fd402dc3e30d3a4359994cb8e1268fe9e82579515c39b928` |
+| Verifier attention tail worker source patch | `06b45997cc572a908c002b22e011063518cbb922cad1e9ece2b094d35ffd9e23` |
+| Verifier attention tail worker harness | `307cf3e41049430e3af7bceb4cf4fbf5edfdbb12a37acc81f9436209ba8cfe9c` |
+| Verifier attention tail worker pairs | `ee344b9e17e5190ae2cac96d457fe11df93411301fd4a0224d4ba2f62e5f834f` |
+| Verifier attention tail worker host | `3510fc9a5389275a343380258fda34e9118c1003303669bfd2d94a16c72de883` |
+| Eight-row target vocabulary native binary | `3c41e3df95cc739b53dcd5e0c5ec803ceef38a39d80ee9575b06a66e382a3020` |
+| Eight-row target vocabulary source patch | `a3225465047c1b0977881eea2e5375a64224d558f280447fdf165767699df8ff` |
+| Eight-row target vocabulary harness | `f1669c06dbfec213e84eb0123adbf0c1f2dbe0bdc9bb71a678af72d9e783c7b4` |
+| Eight-row target vocabulary short screen | `c6f41f2c69ca51db6f46899fb17f48f857eb994ffcadb3caa4af27d102f5cce2` |
+| Eight-row target vocabulary stock-s4096-00 screen | `724dbf32f5ca351c3e9ab12b90e995fdead7686ebae6fdb09cd68feed22b6d58` |
+| Eight-row target vocabulary stock-g4096-01 screen | `f8550eb04024b216aad51e3cbdebe6f78c66f9f15350d2ca59c5802c5ea4c337` |
+| Residual mix barrier native binary | `63523d002ef183b581c1908d8f421bcd0026e7007871552bd3a2ab4313d1c071` |
+| Residual mix barrier source patch | `554c656535c0b52c99f01dfc828ed1f0183a99df9210d303c2718527b92491d5` |
+| Residual mix barrier native harness | `2a403094b271ecde0ee700fd289b3cc2c8f430134a98424be05e48d7a616e899` |
+| Residual mix barrier native short screen | `5d3b10109812bbf08e3ce556a26163bc7509a7dfcab3f049eb9f014e78b8ad7b` |
+| Residual mix barrier native stock-s4096-00 screen | `bdc8557dbeef5646d2e833775da1e24f2893415454dc02ac5c0c7a775fb410f8` |
+| Residual mix barrier native stock-g4096-01 screen | `b7d481e15c9903e5af78b467d55fb1acc3c7a43c2e537dda71ce4b3fe9dd19db` |
