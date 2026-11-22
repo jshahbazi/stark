@@ -386,6 +386,7 @@ impl Session {
                 && gpu.runtime.verify_fused_attention
                 && trace.is_none()
                 && !state.capture;
+            let first_norm = batched_mix && !state.later && row_count == MAX_VERIFY_ROWS;
             let mix_bindings = || {
                 (
                     std::array::from_fn(|i| flows.clone().nth(i.min(row_count - 1)).expect("verified flow")),
@@ -411,7 +412,31 @@ impl Session {
             if batched_mix {
                 let (flow, scratch) = mix_bindings();
                 verify_state::VerifyWorkspace::mix_rows(gpu, layer, flow, scratch, state, row_count, false);
-                if controllers.is_none() {
+                if first_norm {
+                    let common = layer.local || state.blocks == 0;
+                    let mut buffers = [binding(&layer.qkv_norm[0]); 19];
+                    buffers[4..7].copy_from_slice(&layer.qkv_norm.each_ref().map(binding));
+                    for (i, (&flow, &scratch)) in flow.iter().zip(scratch.iter()).enumerate() {
+                        buffers[i] = layer.attention_norm_input(&flow.partial, scratch, state, 0);
+                        for slot in 0..3 {
+                            buffers[7 + slot * 4 + i] = binding(&scratch.qkv_input[slot]);
+                        }
+                    }
+                    gpu.dispatch(
+                        "ink_verify_first_qkv_norm",
+                        &buffers,
+                        u32::from(common),
+                        (
+                            if common {
+                                1
+                            } else {
+                                3
+                            },
+                            row_count,
+                        ),
+                        WIDTH / 4,
+                    );
+                } else if controllers.is_none() {
                     for (flow, scratch) in flows.clone().zip(scratches.clone()) {
                         for slot in 0..3 {
                             let input = layer.attention_norm_input(&flow.partial, scratch, state, slot);
@@ -564,13 +589,26 @@ impl Session {
                         layer.prepare_expert_inputs(gpu, flow, &flow.partial, scratch, state);
                     }
                 }
-                if controllers.is_none() {
+                if controllers.is_none() && !first_norm {
                     if direct {
                         gpu.norm(binding(&scratch.mixed), &layer.mlp_norm, lanes.grouped.input_at(row), true);
                     } else {
                         layer.norms(gpu, scratch, binding(&scratch.mixed), &scratch.mlp_input, 3, state.later);
                     }
                 }
+            }
+            if first_norm {
+                let (_, scratch) = mix_bindings();
+                let mut buffers = [binding(&layer.mlp_norm); 9];
+                for (i, s) in scratch.into_iter().enumerate() {
+                    buffers[i] = binding(&s.mixed);
+                    buffers[5 + i] = if direct {
+                        lanes.grouped.input_at(i)
+                    } else {
+                        binding(&s.mlp_input)
+                    };
+                }
+                gpu.dispatch("ink_verify_first_expert_norm", &buffers, (), (row_count, 1), WIDTH / 4);
             }
             if let Some(controllers) = controllers {
                 let rows = scratches.clone().enumerate().map(|(row, scratch)| {

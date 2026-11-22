@@ -398,28 +398,108 @@ Run rotating pairs on the four-token short control and four stock 4K captures. A
 
 Positive paired queued saving indicates lower wall time. The original head uses 2.06–2.13 ms in the profiled three-row 4K commands. The inline cap and group layout change it by at most 0.014 ms, with mixed queued wall changes. Archive this layout at the native gate. The benchmark includes the original full vocabulary projection in every arm.
 
+## 20261122-INKDECODE-101 · Fit a causal reranker from DSpark hidden features
+
+At `94969405`, rerun the eight stock seeded trajectories from attempt 99. Record each native shortlist candidate's BF16 base score and folded Markov correction before their existing addition and soft cap. For the top four, add the previous target row's already-available score, a preceding-token repeat flag and the candidate's source weight RMS. The extended arm adds eight partial dot products between the corresponding normalized DSpark hidden row and the original BF16 vocabulary row. The same preceding target row is used for both masks. The second mask's features use the actual preceding token only on replay rounds where the first proposal would have matched it.
+
+Fit ridge regression to the clipped differences between each of the six top-four candidate pairs' target logits, separately for the two masks. Hold out both seeds of a prompt together. For each fit, choose between stock and three blends of draft and fitted scores on the training prompts. Compare both selecting the highest reranked candidate and passing a copy of the next uniform through the original rank masses after reranking. Use the exact same sampled target trajectory and count disjoint rounds. Candidate features, logits, tokens and fitted weights stay in memory.
+
+| Fit | Held-out rounds | Top-four target winner agreements with the unblended ordering |
+| --- | ---: | ---: |
+| Native DSpark | 769 | 2,284 / 3,072 |
+| Base, Markov, preceding target score, repeat flag and weight RMS | 776 | 2,158 / 3,072 |
+| Above with eight hidden projection groups | 776 | 2,153 / 3,072 |
+
+All eight initial rows match pinned F32. The exported scorer reproduces all 1,536 first-mask native winners and all 1,093 second-mask winners reachable with stock. The prior reordered-target replay remains at 713 rounds. Archive both linear fits. Their held-out round count rises by seven, and target top-choice agreement also falls. The comparison does not time running the additional features in a worker.
+
+## 20261122-INKDECODE-102 · Batch first-pass norms and share query and gate inputs
+
+At `94969405`, batch the ordinary Q/K/V and expert RMS normalizations across verifier rows at visits without a cross-pass controller. For local attention, Q, K and V use the same input, so share the source 18-SIMD FP32 RMS reduction before applying the three separate BF16 weight scales. Global attention uses separate reductions when the three inputs differ. Keep the per-lane sums, inter-SIMD reduction, epsilon, inverse RMS and BF16 cast. The second arm projects query and attention gate in one grid over the same 3,072 output columns. This arm shares BF16 activation loads across both banks and keeps the original independent FP32 block and lane reduction order.
+
+Restore the short snapshot and four original 4K snapshots. All four 4K starting rows match the pinned F32 reference. Four profiled rotations per width match serial F32 logits at two through four rows. Sixteen uninstrumented queued rotations per width and capture use real DSpark proposals at depths two and three. All checked proposals, F32 readouts and committed target and draft states agree.
+
+| Candidate | Dispatches removed at three / four rows | Three-row paired queued saving across 4K | Four-row paired queued saving across 4K |
+| --- | ---: | ---: | ---: |
+| Batched first-pass norms | 240 / 336 | −0.036 to +0.561 ms | +0.515 to +1.314 ms |
+| Paired query and gate | 48 / 48 | −0.310 to +0.032 ms | +0.069 to +0.373 ms |
+| Both | 288 / 384 | +0.153 to +0.600 ms | −0.218 to +1.199 ms |
+
+Positive savings indicate lower wall time. The norm arm reduces the three-row instrumented attention input stage by 0.350–0.364 ms and the expert input stage by 0.069–0.121 ms on the same captures. The live comparison advances both changes at three rows and uses only batched normalization at four and at the two-row tail.
+
+### Same-loaded worker comparison
+
+Alternate the retained path and the width-specific candidate in one loaded M5 Max worker. Vision and the native INT8 DSpark head stay resident. Every request takes 4,096 cold inputs, uses context 4,352, reuses zero inputs and samples and emits 256 tokens. Greedy uses three proposals and seeded temperature-one, top-p-one sampling uses two. All 16 output hashes match the pinned reference. Corresponding proposals, acceptance counts and round histograms match. The sampled arms each use 530 rounds and the greedy arms each use 398.
+
+| Mode | Control median | Candidate median | Candidate range | Median paired change | Faster pairs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Greedy | 82.03 tok/s | 83.12 tok/s | 80.32–86.82 | +2.32% | 4/4 |
+| Seeded sampled | 67.89 tok/s | 67.52 tok/s | 64.50–69.82 | −0.29% | 1/4 |
+
+The greedy paired median saves 0.735 ms per round. The sampled paired median adds 0.085 ms. The worker accounts for 99.90% of observed Metal counter increments across 44 request-interior intervals, with nominal and fair thermal states and unchanged pageout and swapout counts. Greedy verifies four rows in steady state and uses batched norms there. Its short tail can exercise the other layouts.
+
+Reverse each pair and repeat both modes on the same executable in a newly loaded worker. All 16 pinned hashes and paired work counters match again. The greedy control and candidate medians are 83.20 and 83.21 tok/s, a +0.38% paired median with three faster pairs. Every greedy candidate remains above 80, spanning 80.45–85.30 tok/s. Sampled medians are 68.81 and 68.33 tok/s, a +0.47% paired median with two faster pairs. The worker accounts for 99.89% of Metal counter increments across 45 request-interior intervals with fair thermal readings and unchanged pageout and swapout counts.
+
+Across both comparisons, the greedy paired median is +1.12% with seven of eight wins. The sampled paired median is −0.29% with three of eight wins. Advance only four-row first-pass norm batching on the existing batched residual verifier. Keep the existing two- and three-row kernels, including the sampled steady-state path. The paired query and gate projection stays in the native experiment.
+
+### Narrowed verifier
+
+Register the two batched RMS kernels with the existing opt-in residual mixer. The retained source selects them only at four rows on non-controller visits. No diagnostic arm switch or query/gate kernel is present in this build. The flags-unset native build reproduces the connected short and 4K slices, the pinned short full-model F32 row, and all 16 stock F32 rows, 768 BF16 residual comparisons and four snapshot replays. With the fast verifier enabled it repeats all 45 rejection and ring-wrap checks and the 96-token serial continuation and state checks at each proposal depth on short and both stock 4K captures.
+
+The retained worker preserves exact 2,048-token prefix reuse across proposal depths, clears reuse on a source-mode change or cancellation, and passes short and long-context admission and accepted-proposal stop accounting. A separate cold 4K observation uses the same eight pinned requests and matches every output hash. The medians are **84.09 tok/s greedy** (78.68–90.60, three of four at or above 80) and **66.99 tok/s seeded sampled** (62.84–69.29). The worker accounts for 99.85% of Metal counter increments across 35 request-interior intervals with fair thermal readings and unchanged pageout and swapout counts. Use the same-loaded comparisons above for relative speed.
+
 ## Evidence
 
 The original target and DSpark artifact digests are recorded with the [integrated QKV run](2026-11-21-inkling-mini-decode-60.md#evidence-identities). The worker and native screen retain aggregate-only private receipts. No prompts, token IDs, logits, targets or fitted tensors are published.
 
+The first source exports for attempts 97, 99 and 100 used Git's configured external diff renderer. The original visual diff digests and executable identities remain recorded. The evidence table also gives the applyable Git exports of those same private source trees.
+
 | Evidence | SHA-256 |
 | --- | --- |
 | Sealed integrated worker | `638741dc417d72591a96b3fe5f4bccac64b345950319c09bfcded6d11100b485` |
-| NVFP4 shifts source patch | `cf5664ddfac2ff8c2fd0965faadee27eae5a72efdd960e8d6211eb6f33b200d5` |
+| NVFP4 shifts visual source diff | `cf5664ddfac2ff8c2fd0965faadee27eae5a72efdd960e8d6211eb6f33b200d5` |
+| NVFP4 shifts Git source patch | `05fb0bec7032ba589639f8add918e345db9ae0b658774164b15718a8f43726e1` |
 | NVFP4 shifts executable | `75fe9a910100f540ebd0912106d59fc07e6c6b6883d1be615ac7c692a18a712d` |
 | NVFP4 shifts harness | `ebef89e8e0a9aca3c880793e514537a60cfa46476e71e681f3c207df2b79ece6` |
 | Pinned MLX-Serve MIT license | `dfe22e0f100fe7f2c2808f1af6f488e7339cf8deb7504153602b4169ed7d90b4` |
 | NVFP4 shifts short receipt | `7e575cd8d39d30474c7f4c1ffb06b6315639293783b3d4dfb418df78264dc3d8` |
 | NVFP4 shifts stock receipts | `9a1ec887d30e5b7839ad04ee653701b6dee8473e55761fc93960876229460f15`, `508e8835a829e62c06e0715020e3dec3cc0995d33abbd0ac364c73e8c6679890`, `390f0f3b55d770a2d538f8181347f3b97330dc0122b3a9524d40e33f46ea3a09`, `b83355f281acc4895ec984be2c2964a3d42fde241b2610092269caa48b168c4c` |
-| Draft ordering replay source patch | `2f1e3334c77fa1a4fda7f2cb4c6d567e72775ec0f9d9a8dc9c1959541f392124` |
+| Draft ordering replay visual source diff | `2f1e3334c77fa1a4fda7f2cb4c6d567e72775ec0f9d9a8dc9c1959541f392124` |
+| Draft ordering replay Git source patch | `e4a10c511c309eda09cf31a8fb419ef8883cc115f03cadb82aeaabf9bf2a4df8` |
 | Draft ordering replay executable | `d267cad9ce87268ae9da35cc9a7fac1827660ba4e49cf3cd654eaddd57350a60` |
 | Draft ordering replay harness | `b62b17f266eb352813d69405a1cfbb27796ea17fe8dac079b8ac6b03c2d1ec5c` |
 | Draft ordering replay receipt | `1fe0ff9a27792df4b83f3377c840141e4a4bcf81d84e45e5678f9005dea6ff3a` |
-| Fused vocabulary readout source patch | `355517c19b6e538bb19bf3259e9d91eef94e5fe8f2526531fecfb55be193732f` |
+| Fused vocabulary readout visual source diff | `355517c19b6e538bb19bf3259e9d91eef94e5fe8f2526531fecfb55be193732f` |
+| Fused vocabulary readout Git source patch | `7bcbd2fc70301b330c65aa7d111d83c514d53889810386a623d74c83fe9f64fd` |
 | Fused vocabulary readout executable | `ee2187be5d7c85777c789e86b5f80fd55ba142eda15870a814ec81b40eeede23` |
 | Fused vocabulary readout harness | `5d5a34f0fb66c61f15742ed52e686c7538bab8488bce2d200280ae91434a9253` |
 | Fused vocabulary readout short receipt | `7f64491b92fd0263e7354c5f9bdc09bf5463d65b852d6ee607a648a3f85f190a` |
 | Fused vocabulary readout stock receipts | `ee2024e62070d603c8631ae2c5106e2b6739597fa57de9509edc50edddf79e48`, `b2d191e1c897f806f8ffaa52cd390fde022853a8a0a80422e3f9aeca373f980f`, `32ad833396bcc41048033e9f91bb74d94dba365798446dda9380d1b82adec9e1`, `08004219e41dc22e8a1aabad3988a256b5f23686fbb1b3aeddfdffddeb5d51f5` |
+| DSpark hidden feature Git source patch | `f72fc8ddb98c0f11fb1a1b113ee754fcfc2a39fba16b02676ed17a70f3eda8db` |
+| DSpark hidden feature executable | `0a422537f63bf1858e538d4122a3492a285cb52556421a657551ec8eeef40b8a` |
+| DSpark hidden feature harness | `de7192dd664a659af704096561ad501bdefd58febfd9838be8cff9d53dc4fb67` |
+| DSpark hidden feature receipt | `c3d5d12e0bd5bf98a0c2c0c8b6e965361116ed6290173cdb86cac180bdd3c821` |
+| First-pass norm and query/gate native Git source patch | `a48b73a15c3c23c62928e99e06fad02a02c1cb100afe1193b51aa1513ce9b1c2` |
+| First-pass norm and query/gate native executable | `442f89c1d6d96c3fc0759c170b662385fb38a353d7c341870bfb6ef74142bbb1` |
+| First-pass norm and query/gate native harness | `2d58bb3ba8c5198d122d4c4dca1a24c3220ac91c2f7015dace5e00df0cb452cf` |
+| First-pass norm and query/gate short receipt | `95e1a3d08b50a6314cd1959495dcceb056b9cdf66ca52c5400e729dee06d1c69` |
+| First-pass norm and query/gate stock receipts | `892aac61704acc8501ba7aa1ec23be33a5f2bd47bc5d69fe427803933b68262c`, `6cf050c33926a6f22dcd4d445d162d5d06e8ae97602cb96f1ddca6a8493dedf7`, `f6b70172b6231a7a24b71ded150db74d0e3f1903044d1d22d58097c4dc59a5b1`, `b7d6e5754ce4f6e268b2af819d64585d6ef84011b3b3947d822585daeae08ce3` |
+| First-pass norm and query/gate worker Git source patch | `a27dabbd4e6961b9aa315da655432078dcb0b29107dd51e219e67364757817f2` |
+| First-pass norm and query/gate worker executable | `7ec03c9d11a6788ce0be56f0cb5cb9b15f6d56a375376b37465af37fd42828e3` |
+| First-pass norm and query/gate worker driver and scorer | `2dfef7b64c6daca0e73e8a09463e7614015c0172b324ffcdc33adb0c1ab9137f`, `b4b54ed529d64d9a7d74775b367caae9b3f876336e34fc7e2f2c0c8083ad394b` |
+| First-pass norm and query/gate worker pairs | `ecbf8abd4cc49957c9c40ec995e99e64a924c0131771845b952487996c7a3f48` |
+| First-pass norm and query/gate host observations | `c1d8cdb3412279316d58a8681d2bcfec59392ceab8013672ef52197ae43bd87a` |
+| First-pass reverse repeat driver and scorer | `be015ac6f743357076fcf4f745d39913b2167e32d9526bb41be1dabc0442878d`, `ca921ba3218488129b8f67949389bf04d52decdf93a1c10fd034fd498cc6a9a9` |
+| First-pass reverse repeat pairs | `e8388fca6cd179f897178458cec1793ab65ae8aac00a7d0b08540c8f847c919d` |
+| First-pass reverse repeat host observations | `ae1cdc90bd45285d4e9f8cca6d5d889f74a2845cc4685d6d0638cdcca7a689be` |
+| Four-row norm Git source patch | `666c057718c0f878b5a572fd8bbe94eabdba51b289573b8c456b334ea2845af9` |
+| Four-row norm native executable | `1345dad55e285d26fe35dc449b31d8a7890af5a6ef7a39440ae2a6c6d6c05e3e` |
+| Four-row norm worker executable | `e90b71f2740256de3af27db2e707d9831693584ed3a651640da9d31e203ba94e` |
+| Four-row norm qualification driver | `46cc2e6cf6b0b7b268b7233b13da5b0e188d87a70b6d7d38f68992f427c1a9b2` |
+| Four-row norm flags-unset summary | `b8a5b540c43b3942a458316f8d3f2943ed64beadfbb40fe803a93111aac3d011` |
+| Four-row norm enabled proof receipts | `96ffe7905c01610297455fb406e1b19206a6901434ee81b0f3653f3a8ece44ca`, `be40ac1c68778fb924a7ca79984e4a371522764f8dc9bf2bd7c664106a7bba3e`, `d9d3bd833801bed6a74472f2b7425e496da9d55ee869c9fd508362ae62d67a81` |
+| Four-row norm lifecycle receipt | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |
+| Four-row norm stock 4K worker results | `0bccab39fd8a3ce9f564f5c3921c902d2697244114c794db9e0a99350689db43` |
+| Four-row norm worker host observations | `ef78cba7143095c72a893ffd174a9df3af732dbe1a8aeebc5d1d31f08a757eb3` |
 | One-worker harness | `d950570aad9ffa2ae0f0a5e46f4e608096836ea99535ded1ddcf59a47220d7d9` |
 | One-worker receipt | `8bb65ca242a3db7388f64bbbf2d7a2425918847e5380979b98ea1f47475bd261` |
 | One-worker host observations | `da15251353b67f433c9956d4c9a67c7b01fe62afd6233792ce8b04a6961dbf85` |

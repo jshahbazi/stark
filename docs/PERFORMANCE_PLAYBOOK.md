@@ -635,6 +635,10 @@ Separate candidate ordering from confidence calibration in a seeded replay. Corr
 
 Price epilogue fusion alongside the exact readout. Fusing Inkling's original soft cap into its BF16 vocabulary tile and grouping four SIMD tiles per threadgroup preserve raw and capped logits but change the three-row readout by at most 0.014 ms. The full BF16 weight traversal remains. [Fused vocabulary readout](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-100--fuse-the-original-vocabulary-readout-and-logit-cap)
 
+Check a learned reranker on unseen prompts and both seeds before adding the scorer to the draft command. Inkling's pairwise linear fits with Markov, prior-score and hidden-projection features increase the held-out round count from 769 to 776. Both also lower agreement with the target's ordering of the existing shortlist. [Hidden-feature rerank](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-101--fit-a-causal-reranker-from-dspark-hidden-features)
+
+Batch source RMS over verifier rows and share the reduction only when inputs coincide. Inkling eliminates 240 first-pass norm launches at three rows and 336 at four. The candidate with paired query/gate projection at three rows gains 1.12% greedy and loses 0.29% sampled over eight worker pairs per mode. Retain four-row norm batching alone on the opt-in residual verifier. [First-pass input batching](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-102--batch-first-pass-norms-and-share-query-and-gate-inputs)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates

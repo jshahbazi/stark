@@ -99,8 +99,19 @@ impl VerifyWorkspace {
         if mix_rows {
             packed_prefill::register(
                 runtime,
-                concat!(include_str!("serial.metal"), "\n", include_str!("verify_mix_rows.metal")),
-                &["ink_verify_mix_rows", "ink_verify_mix_attention"],
+                concat!(
+                    include_str!("serial.metal"),
+                    "\n",
+                    include_str!("verify_mix_rows.metal"),
+                    "\n",
+                    include_str!("verify_first_norm.metal")
+                ),
+                &[
+                    "ink_verify_mix_rows",
+                    "ink_verify_mix_attention",
+                    "ink_verify_first_qkv_norm",
+                    "ink_verify_first_expert_norm",
+                ],
             )?;
         }
         let draft = DraftBlock::new(runtime)?;
