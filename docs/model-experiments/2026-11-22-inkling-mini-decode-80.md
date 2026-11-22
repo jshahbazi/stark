@@ -295,6 +295,40 @@ The repeat matched all eight pinned hashes and relative work counters. The contr
 
 Archive the separate concurrent encoder at the worker gate. The native snapshot commands benefit from concurrency, and the live sampled schedule regresses in the repeat with the draft and target queued together. The queued measurement includes CPU encoding, competing work and the GPU completion wait. The experiment does not isolate which of these caused the difference.
 
+## 20261122-INKDECODE-94 · Compare concurrent schedules in the queued verifier
+
+At `247342b6`, retain the serial schedule and the earlier separate concurrent projection encoder as controls. The new arm uses one concurrent encoder for the target body. It issues buffer barriers before dependent direct or indirect dispatches, and one barrier on entry to the independent projection group. The next dependent dispatch orders the group's writes. Leave the target preparation, DSpark submission and commit on their existing encoders.
+
+Use eight restored states per depth and both submission paths. The standalone target receives the exact proposal IDs from a serial-encoder queued control. The queued target reads the real INT8 draft output. The first harness used the synchronous BF16 proposer as the one-proposal reference and stopped on the first 4K fixture after its proposals differed. The corrected run uses the queued reference for all depths. Every queued proposal sequence, all 1,644 F32 vocabulary rows and all 540 committed target and draft states matched the corresponding references. The count includes short and two stock 4K fixtures and rejection through the local ring crossings.
+
+| Verifier rows | Separate encoder standalone saving | Single encoder standalone saving | Separate encoder queued saving | Single encoder queued saving |
+| --- | ---: | ---: | ---: | ---: |
+| 2 | +0.106 to +1.500 ms | −1.815 to −0.202 ms | +0.572 to +0.715 ms | +0.143 to +1.014 ms |
+| 3 | +1.112 to +1.877 ms | −0.433 to −0.331 ms | +0.678 to +1.258 ms | −0.478 to +0.218 ms |
+| 4 | +1.196 to +2.174 ms | −0.129 to +0.138 ms | +0.719 to +0.878 ms | +0.054 to +0.226 ms |
+
+Ranges span the paired medians of the two steady 4K inputs. Positive values save time against the serial encoder. Queued timings cover submission of the draft through target completion. The separate encoder saves native time at the sampled width, with five wins out of eight on each stock input. The single encoder wins four of eight on each stock input at that width and fails to produce a consistent saving. Archive the single encoder at the native gate. The previous separate-encoder worker decision stands on its end-to-end evidence.
+
+## 20261122-INKDECODE-95 · Screen an exact vocabulary readout with INT8 bounds
+
+Reuse the resident DSpark INT8 vocabulary weights on the target's exact BF16 hidden row. Apply the same source logit cap. Give each coarse logit a screening interval from the BF16-to-INT8 residual norm and the input's norm. Add a conservative allowance for tensor rounding and the cap. Select the largest upper bounds and use the original BF16 scores at those IDs. An omitted upper bound limits which exact scores can form the initial sorted prefix. Bound the total omitted F64 probability mass below and above, and accept a draw only when both ends use the same exact prefix token. An unresolved draw would take the full original head. This experiment checks the proposed interval empirically against the full head.
+
+Use four stock 4K captures at 128 chronological temperature-one draws per capture. All pinned initial F32 readouts matched. There were zero envelope violations across 102,429,696 score comparisons. The largest individual capped INT8 error was 0.9334. The references replay each prompt with the ordinary seeded target sampler.
+
+| Candidate scores | Exact maximum certified | Seeded draw interval resolved |
+| --- | ---: | ---: |
+| 64 | 511/512 | 475/512 |
+| 256 | 512/512 | 493/512 |
+| 1,024 | 512/512 | 503/512 |
+
+Recapture the distinct original 32-token tiles for the 256 candidates every 16 anchors. Launch one gathered-tile grid with the source 16 × 32 BF16 product and the ordinary cap. All 152,800 checked scores match the full head bit-for-bit. Median tile counts range from 122 to 171 per trace. Isolated phase medians across the traces are 2.187–2.443 ms for the full BF16 readout, 1.024–1.051 ms for the coarse INT8 head, and 0.077–0.176 ms for exact tiles. Charging a complete BF16 readout on every unresolved draw leaves an optimistic 0.966–1.078 ms GPU saving before orchestration and the 1.363–1.579 ms CPU bounds screen. These timings use one live hidden row and the source's padded tensor widths.
+
+### Metal upper mass
+
+Repeat the four trajectories with a Metal pass that bounds omitted probability mass from above and uses zero as the lower bound for omitted mass. Round each upper logit into the next 1/64-logit bin. Use an upward-rounded exponential table, reduce 32 values per SIMD group, and add an allowance before combining group totals on the host. The CPU selects 256 upper candidates, subtracts the selected candidates' contributions from the upper mass, then uses those candidates' exact scores. The 256-candidate interval resolves **489 of 512 draws** with zero observed upper-envelope violations and the same bit-exact selected-tile controls. The CPU procedure still uses the full head as the reference source for the selected logits. The exact tile kernel supplies a separate cross-check and cost measurement.
+
+Metal uses **0.021–0.032 ms** for the upper mass pass, and the remaining host work takes **0.255–0.304 ms**, including host readback, envelope validation, candidate selection and the interval check. A model using the same-session phase medians and a full head at each observed miss leaves **0.475–0.637 ms** per readout before submission overhead. The extra standalone command's measured wall cost is **0.565–0.695 ms**. Charging that boundary moves the modeled savings to **−0.069 through +0.071 ms** across the four traces. Keep the device bound and tile kernel as feasibility evidence. Any live experiment needs the bound and coarse head in the same command, candidate unions across all live verifier rows, an exact fallback, and a source arithmetic bound suitable for use beyond the observed trajectories.
+
 ## Evidence
 
 The original target and DSpark artifact digests are recorded with the [integrated QKV run](2026-11-21-inkling-mini-decode-60.md#evidence-identities). The worker and native screen retain aggregate-only private receipts. No prompts, token IDs, logits, targets or fitted tensors are published.
@@ -402,3 +436,15 @@ The original target and DSpark artifact digests are recorded with the [integrate
 | Concurrent dense paired worker executable | `456fd309c3ddbeb0478b9f3eb483f865c348a50f5581b4cc3e710c8305b36d2c` |
 | Concurrent dense worker proof executable | `9a786ea1cffd604fb7a4b7c95f0dbfac27cbe4c8eecf8b59f907b2feaaf10c25` |
 | Concurrent dense worker and repeat evidence manifest | `6e7b1bb1e4015d8374f2cbaf5bdccae583ea71289357f4de5a3fb1862b678d5e` |
+| Queued schedule comparison patch | `0215d1d603dd8957f5efd88ba1ff1be4a053bc94f877763935ef0fcfa5a9aaed` |
+| Queued schedule comparison executable | `6b04b1a4dfe54aeb05abfd1cacf2f8dad014be394cb71eab4ecf55add1b51fe0` |
+| Queued schedule comparison harness | `2e0b50d8a136c0450ffc5f50159912a7f6ccb4dc1d5750d64d1adfee734cbe11` |
+| Queued schedule comparison aggregate receipt | `50d3f3f9e364819a7d199237a2110c4b0d6d2f3887070f1259c5c95ac652b223` |
+| INT8 head bound and selected tile probe patch | `345fb4c094d1b3ed017e82130c49ef0e7eb5fb1b96dfc03803d4d35326c4c400` |
+| INT8 head bound and selected tile probe executable | `3e91ce30d21769b79d2ba75f6353c9538dedf9aacf69e3d113fbcc4f9cbfeea7` |
+| INT8 head bound and selected tile probe harness | `e613d0e3a6c869dd87fe98e3cc42233381a72276472b0b38e1760dfdc38b4b02` |
+| INT8 head bound and selected tile aggregate receipt | `0898fc1264405331459791db6c40c14f5519d0bdd48ab9fa7046ef4b6d31af17` |
+| Metal upper-mass follow-up patch | `95e393e211f0efdcecf8d84de7205d323947f09cd66af467e41211e288c4c7ab` |
+| Metal upper-mass follow-up executable | `6bf4b48b6d9089dca05a288a24c707ae2cabfe559b1dc0e995ed958692f65a3a` |
+| Metal upper-mass follow-up harness | `77367a595ba5bda001ab48550c51c2be04ecb611fe74da4108d99cbfa62eba50` |
+| Metal upper-mass follow-up aggregate receipt | `d4b6e88f6cf6f70801483d7a6184ae311f0d218534e3de124ef315bc2752cdb1` |
