@@ -45,6 +45,18 @@ inline void ink_verify_nvfp4_route_tile(
     const uint channel = expert * 2304 + out_col;
     const device uchar *weights = codes + channel * (Width / 2);
     const device uchar *gain = scales + channel * (Width / 16);
+#ifdef INK_VERIFY_EXACT_RUN_WIDTH
+    // Dispatch fixed-size tails so a two- or three-route run does not
+    // carry four accumulators and per-route guards into every K16 block.
+    for (; count >= 4; count -= 4, start += 4)
+        ink_verify_nvfp4_route_dot<4, Width>(input, weights, gain, order, output, start, 4, out_col, lane);
+    switch (count) {
+        case 3: ink_verify_nvfp4_route_dot<3, Width>(input, weights, gain, order, output, start, 3, out_col, lane); break;
+        case 2: ink_verify_nvfp4_route_dot<2, Width>(input, weights, gain, order, output, start, 2, out_col, lane); break;
+        case 1: ink_verify_nvfp4_route_dot<1, Width>(input, weights, gain, order, output, start, 1, out_col, lane); break;
+        default: break;
+    }
+#else
     if (count == 1) {
         ink_verify_nvfp4_route_dot<1, Width>(input, weights, gain, order, output, start, 1, out_col, lane);
     } else {
@@ -53,6 +65,7 @@ inline void ink_verify_nvfp4_route_tile(
                 input, weights, gain, order, output, start + offset, min(4u, count - offset), out_col, lane);
         }
     }
+#endif
 }
 
 kernel void ink_verify_nvfp4_group_dot(

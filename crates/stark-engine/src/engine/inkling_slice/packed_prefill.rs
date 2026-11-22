@@ -1027,7 +1027,21 @@ pub(super) fn register_verify_nvfp4_matvec(runtime: &mut Runtime) -> Result<()> 
             include_str!("verify_nvfp4.metal"),
         ),
         &["ink_verify_nvfp4_group_dot"],
-    )
+    )?;
+    if std::env::var_os("STARK_INKLING_EXPERIMENT_EXACT_RUN_WIDTH").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        register(
+            runtime,
+            concat!(
+                "#include <metal_stdlib>\nusing namespace metal;\n#define INK_NVFP4_VECTOR_BLOCK\n",
+                "#define INK_VERIFY_EXACT_RUN_WIDTH\n#define ink_verify_nvfp4_group_dot ink_verify_nvfp4_exact_run_width\n",
+                include_str!("experts.metal"),
+                include_str!("verify_nvfp4.metal"),
+            ),
+            &["ink_verify_nvfp4_exact_run_width"],
+        )?;
+        runtime.verify_nvfp4_kernel = "ink_verify_nvfp4_exact_run_width";
+    }
+    Ok(())
 }
 
 pub(super) fn register(

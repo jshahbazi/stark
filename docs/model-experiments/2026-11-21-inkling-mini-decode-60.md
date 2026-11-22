@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–17 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–19 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -241,7 +241,40 @@ For an exact distribution-preserving rejection sampler, the one-position accepta
 | `s4096-00` | 1.00 | 71.0% / 42.2% / 23.9% | 2.372 | 59 / 31 / 15 of 96 | 17 of 96 at 0.50 |
 | `g4096-01` | 0.75 | 82.4% / 65.0% / 49.5% | 2.969 | 75 / 58 / 42 of 96 | 48 of 96 at 1.00 |
 
-At 60 tok/s, the three-mask estimates leave 39.53 and 49.48 ms total per round. Subtract earlier draft medians of 5.53 and 5.46 ms and compare four-row verifier medians of 41.35 and 38.90 ms on the corresponding stock input. The first budget is already 7.35 ms short. The second leaves about 5.1 ms for correction sampling, rollback and host work. These estimates use 96 consecutive anchors per input and a single restored verifier state per input. They put a bound on where to investigate and do not measure worker speed. Shared-draw counts vary with draft temperature and show little improvement on the harder input.
+At 60 tok/s, the three-mask estimates leave 39.53 and 49.48 ms total per round. Subtract earlier draft medians of 5.53 and 5.46 ms and compare four-row verifier medians of 41.35 and 38.90 ms on the corresponding stock input. The first budget is already 7.35 ms short. The second leaves about 5.1 ms for correction sampling, rollback and host work. These estimates use 96 consecutive anchors per input and a single restored verifier state per input. They estimate the round-time budget for each input. Worker throughput is a separate measurement. Shared-draw counts vary with draft temperature and show little improvement on the harder input.
+
+## 20261121-INKDECODE-18 · Table the exact source NVFP4 nonlinearity
+
+The gate and up projections are rounded to BF16 before nonlinearities. Precompute the F32 gate term and capped up term for all 65,536 input bit patterns on Metal with the same precise functions. The candidate looks up the two terms and retains the source FP32 multiplication order, route weight and BF16 output. The table uses 512 KiB. The singleton vector dot and short grouped verifier used the candidate. Stock prefill continued to use the ordinary epilogue.
+
+Eight alternating same-snapshot comparisons at each width matched all F32 logits on one short and two pinned 4K inputs. All 45 rejected-suffix and wrap controls matched. The two stock 4K inputs saved 0.067–0.160 ms per singleton command and 0.041–0.043 ms per four-row command at the paired median. Retire the shader and initialization. The full-command gain did not justify another runtime path.
+
+## 20261121-INKDECODE-19 · Specialize the short NVFP4 product by expert run width
+
+The grouped verifier previously used a four-route implementation for each run of two to four routes. Compile exact one-, two-, three- and four-route implementations and select by the live run size. Each route keeps the same original K16 dot, per-lane scaled FMA recurrence and final SIMD reduction. Runs beyond four retain four-route tiles plus the matching tail. Prefill and the ordinary singleton do not use this kernel.
+
+In eight alternating same-loaded comparisons per width and input, both 4K fixtures and the short fixture matched every checked F32 readout and the 45 rejection and ring-wrap cases. The full 96-token greedy continuation and committed state matched at all three proposal depths on each fixture.
+
+| Rows | Ordinary 4K median | Exact run width 4K median | Median paired saving |
+| --- | ---: | ---: | ---: |
+| 2 | 30.49–30.50 ms | 29.80–29.96 ms | 0.54–0.65 ms |
+| 3 | 35.26–35.85 ms | 34.58–35.21 ms | 0.65–0.67 ms |
+| 4 | 39.29–42.06 ms | 38.66–41.08 ms | 0.69–0.91 ms |
+
+Retain the specialized kernel within the source verifier under `STARK_INKLING_EXPERIMENT_EXACT_RUN_WIDTH=1`. The native comparison isolated the kernel with shared KV disabled. The worker follow-up uses shared KV on both arms.
+
+Two worker pairs per mode used the same sealed executable, with shared local KV on, 4,096 input tokens, 256 sampled and emitted tokens, zero reuse and both vision and DSpark resident. Greedy used three proposals and sampled used two. All eight output hashes and proposal and acceptance counts agreed within pairs.
+
+| Mode | Ordinary run kernel | Specialized run kernel | Median paired decode change | Median paired prefill change |
+| --- | ---: | ---: | ---: | ---: |
+| Greedy | 49.31 tok/s | 45.95 tok/s | -6.63% | -6.23% |
+| Sampled | 39.26 tok/s | 37.17 tok/s | -5.19% | -10.29% |
+
+The specialized arm was slower in both worker pairs per mode. The first input also had substantially slower prefill in the specialized arm, even though the specialization operates only in verification. The second input had near-flat decode. Treat this as an adverse worker screen with concurrent launch drift. The same-loaded native test qualifies only the measured command boundary.
+
+A follow-up native comparison enabled shared KV in both arms. The run-width specialization still saved 0.71–0.73 ms at four verifier rows across the two 4K states. With both paths enabled the 4K medians were 38.11 and 40.38 ms. Pinned readouts and rollback matched again. Keep that result at the command boundary given the worker screen.
+
+With all Inkling flags unset, the final native executable reproduced the connected short and 4K slice aggregates. The full target matched the pinned short and 16 stock 4K F32 logit vectors, 768 stock visit residual blocks and four exact 4K snapshots. One 4K flags-unset worker pair per mode reproduced the promoted router build's output. The candidate measured 33.39 tok/s greedy and 32.05 tok/s seeded sampled, against 33.45 and 32.33 tok/s on the promoted reference. The eight-pair [default router qualification](2026-11-21-inkling-mini-decode-default.md#worker-results) remains the stronger throughput measurement.
 
 ## Decision and next target
 
@@ -374,3 +407,26 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Shared KV worker executable | `7e828c42c843236b99ba281bc81c65a089c34ddfdd59b2438a8205fd2122f25b` |
 | Shared KV worker harness | `19cc3e7c6d692f44ab6e1227a68c9dd8e3dc373fafcf82a616d054e389cef1ab` |
 | Shared KV worker pairs | `7ce148dbc61ef573e96b73330da18b9ee2880fdc2e8ff0b62fe858ab0010024c` |
+| NVFP4 gate table executable | `c81f8e0da5b870b3b0a12895a6dc6e1f78418bfc3b1823d708fcfec81642308a` |
+| NVFP4 gate table source patch | `2d007eccd9d77a43bcd534b7c993dd1f36d63e97f323eb1a95d99b53e01373d6` |
+| NVFP4 gate table short | `90a12dcc58007a3298f1719a26b5ffeec084672f0d4b6f36bd44815ff5dd7e4a` |
+| NVFP4 gate table stock s4096-00 | `0fe2f6ada86a075368723a8125834618653659bafe4cbe9b42a08af2ed0b8799` |
+| NVFP4 gate table stock g4096-01 | `f2e87e67431a0ea27932e4565b7f8cc1132233031fbeefae5c47c58f8264c572` |
+| Exact NVFP4 run width executable | `908ee728dabb251d11da51d385abc0467e0572a791fbcbce265495d13d0e5488` |
+| Exact NVFP4 run width source patch | `3498b3e734b38329ca082f2d989021454ffa50c9a2726f09245701bf6c8ca574` |
+| Exact NVFP4 run width short | `e9313d9075ac737c42a0dfde5e5a2ef7389d7ea0d19aada9bba4e3e654c598ca` |
+| Exact NVFP4 run width stock s4096-00 | `708bdce09f890bc9b0eb0f308d3beb62aa28905633fb32763330f3a552e1bf1f` |
+| Exact NVFP4 run width stock g4096-01 | `27bea16471d526e4a4650f6bad0218f7690bab17391867d642422635de12ff3c` |
+| Exact NVFP4 run width worker | `46e1ba24b710f97bb836a5410f0e72b6d0fef39be861a923910eefe41edc1089` |
+| Exact NVFP4 run width worker harness | `28c781711df27acd8d18f31cbb86c362ecd204dea8bc4f8c7abfdab03609b2e5` |
+| Exact NVFP4 run width worker pairs | `48e6a8233b248b088012d57747225f9ff14d03da1fc479277d2e289680772876` |
+| Exact NVFP4 run width flags-unset worker pairs | `5e24786a4a83638dda78cc3ae63205675c7ec669b1c68aae8d83554c632d69e7` |
+| Flags-unset connected short | `3ec9bea159f2df8ab1c508329cd2b102cb53e672c740ae3fbddc9ba677cbfa63` |
+| Flags-unset connected 4K | `c4a5cefe72c1633b5a56a7092e2e47479698d79936933e66910289b867c40652` |
+| Flags-unset full target short | `4a5918ea804a28d00b444f2fa38323ec614e78551636b549db72a145476f2fa4` |
+| Flags-unset full target stock 1 | `dd127f200ff7166b8161629ac330c933f81b66b3ab1d71fa8e23564206826e49` |
+| Flags-unset full target stock 2 | `a19c16c494253bf1e80c9aa1b84a6411cdf03d0cf6c58943f04ddf57e6419cb3` |
+| Flags-unset full target stock 3 | `6f9e4c7eba1ece95f4a06dd48424ab2d954c46842ead262b147f45b55de26ca1` |
+| Flags-unset full target stock 4 | `b8258668677b64424f334f19d6341fc2f31f77281752f7019ed9f13175a8b04c` |
+| Combined shared KV and exact run width stock s4096-00 | `78943fdcc69fd9eb3a7f453cd6a1acb0656b29cd0ac30b9b87d9c1f21c83460e` |
+| Combined shared KV and exact run width stock g4096-01 | `36fb6feb61a8d7cb255400492a52cb34d07c838dc940f6ad3e611ad59474f32f` |

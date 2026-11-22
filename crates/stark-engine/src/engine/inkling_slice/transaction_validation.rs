@@ -132,6 +132,42 @@ fn screen_verifier(
     Ok(report)
 }
 
+fn screen_run_width(
+    session: &mut Session,
+    base: &Snapshot,
+    teacher: &[u32],
+) -> Result<Vec<Value>> {
+    const CONTROL: Kernel = "ink_verify_nvfp4_group_dot";
+    let candidate = session.runtime.verify_nvfp4_kernel;
+    if candidate == CONTROL {
+        return Ok(Vec::new());
+    }
+    session.restore(base)?;
+    let expected = teacher[..MAX_VERIFY_ROWS].iter().map(|&id| session.step(id)).collect::<Result<Vec<_>>>()?;
+    let mut report = Vec::new();
+    for width in 2..=MAX_VERIFY_ROWS {
+        let mut timings = [Vec::new(), Vec::new()];
+        for trial in 0..8 {
+            for arm in [trial % 2, 1 - trial % 2] {
+                session.restore(base)?;
+                session.runtime.verify_nvfp4_kernel = [CONTROL, candidate][arm];
+                let start = Instant::now();
+                let txn = session.begin_verify(&teacher[..width])?;
+                timings[arm].push(start.elapsed().as_secs_f64() * 1000.0);
+                for (row, want) in expected.iter().take(width).enumerate() {
+                    if !same_logits(txn.logits(row)?, want) {
+                        return Err("Inkling fixed run width changed verifier logits");
+                    }
+                }
+                txn.commit(1)?;
+            }
+        }
+        report.push(json!({"width":width,"ordinary_ms":timings[0],"fixed_width_ms":timings[1]}));
+    }
+    session.runtime.verify_nvfp4_kernel = candidate;
+    Ok(report)
+}
+
 pub fn measure_verify_transaction(
     checkpoint: &Path,
     draft: &Path,
@@ -188,6 +224,7 @@ pub fn measure_verify_transaction(
     };
 
     let candidate_commands = screen_verifier(&mut session, &base, &teacher)?;
+    let fixed_run_commands = screen_run_width(&mut session, &base, &teacher)?;
     let mut rounds = Vec::new();
     for depth in 1..MAX_VERIFY_ROWS {
         session.restore(&base)?;
@@ -257,6 +294,6 @@ pub fn measure_verify_transaction(
         "prefix": prefix, "output_tokens": OUTPUTS, "additional_metal_bytes": verifier_bytes, "rejection_controls": controls,
         "crossing_controls": crossing_controls, "abandoned_transaction_reset": true, "cross_mode_snapshot_rejected": true,
         "serial_ms": serial_ms, "serial_decode_tok_s": 1000.0 * (OUTPUTS - 1) as f64 / serial_ms,
-        "rounds": rounds, "candidate_commands": candidate_commands,
+        "rounds": rounds, "candidate_commands": candidate_commands, "fixed_run_commands": fixed_run_commands,
     }))
 }

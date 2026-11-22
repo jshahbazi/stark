@@ -564,7 +564,7 @@ impl GroupedExperts {
                 PrefillPhase::Nvfp4DownDot
             });
             gpu.one(
-                "ink_verify_nvfp4_group_dot",
+                gpu.runtime.verify_nvfp4_kernel,
                 &[inner, &bank.codes, &bank.blocks, routing.indices, routing.runs, &self.projected],
                 width as u32,
                 (WIDTH / 4, live_run_limit(rows, run_slots(rows))),

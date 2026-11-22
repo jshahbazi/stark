@@ -479,6 +479,10 @@ Existing packed local attention failed short-verifier F32 parity on Inkling. Sha
 
 Lossless BF16 exponent packing reduced estimated rotating weight reads by 24.1% on Inkling, but GPU time rose from 5.41 to 7.30 ms. Test reconstruction overhead with rotating real banks before adopting compressed storage. [Lossless BF16 screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-15--lossless-bf16-attention-weights-on-metal)
 
+Tabulating the F32 NVFP4 activation terms by exact BF16 input saved about 0.04 ms per four-row Inkling verifier command. The lookup kept exact outputs and rollback. It was retired because the full-command gain was small. [Gate nonlinearity table screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-18--table-the-exact-source-nvfp4-nonlinearity)
+
+Match the NVFP4 short-verifier kernel width to the live expert run. Specializing the two- and three-route cases eliminated idle accumulators and per-route guards, saving 0.69–0.91 ms per four-row command on two original Inkling 4K inputs with exact logits and rollback. The specialization is opt-in. [Exact run width screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-19--specialize-the-short-nvfp4-product-by-expert-run-width)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates
