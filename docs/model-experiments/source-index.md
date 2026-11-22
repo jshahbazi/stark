@@ -251,7 +251,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Tensor MXFP8 with source-order replay and wider-tile NVFP4 scale sharing](2026-11-21-inkling-mini-mxfp8-tensor.md) · Experiment, 2026-11-21
 - [Default fast prefill with flags unset](2026-11-21-inkling-mini-prefill-default.md) · Experiment, 2026-11-21
 - [Default one-row router with flags unset](2026-11-21-inkling-mini-decode-default.md) · Experiment, 2026-11-21
-- [Decode toward 80 tok/s, verifier cuts, sampled proposal headroom and MLX-Serve comparison](2026-11-22-inkling-mini-decode-80.md) · Experiment, 2026-11-22
+- [Decode toward 80 tok/s, verifier cuts, sampled proposal headroom and MLX-Serve comparison](2026-11-22-inkling-mini-decode-80.md) · Experiment, 2026-11-22, through attempts [109](2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-109--expand-the-nvfp4-coefficients-before-verification) and [110](2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-110--shorten-the-dspark-forward)
 - [Decode toward 60 tok/s, exact verifier and sampled acceptance](2026-11-21-inkling-mini-decode-60.md) · Experiment, 2026-11-21–22
 
 ### Protocols and aggregates

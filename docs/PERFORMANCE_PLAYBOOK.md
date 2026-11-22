@@ -651,6 +651,10 @@ Price stale drafts over a complete trajectory. Inkling's reused DSpark mask rows
 
 When restored-state timing depends on arm order, repeat both orders at each anchor. Inkling's per-token NVFP4 down product removes routed intermediates while giving up shared weight reads. The first alternating-pair medians suggest a gain, and the same-anchor reversal adds 0.489–0.712 ms across stock 4K inputs with exact outputs and state. Archive the layout. [NVFP4 down route reduction](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-108--reduce-nvfp4-down-routes-inside-one-threadgroup)
 
+Charge memory traffic before moving coefficient decode out of the hot path. Inkling's byte and binary16 expansions preserve all checked raw F32 products while adding 4.45–4.95 ms and 14.40–14.57 ms to three-row queued 4K verification. Archive both layouts. [Predecoded NVFP4 coefficients](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-109--expand-the-nvfp4-coefficients-before-verification)
+
+Test shorter drafters at equal verification depth before charging their reduced layer count as a saving. Inkling's closest untrained DSpark subset keeps layers one and three and adds 48 verification rounds across eight seeded 4K trajectories. Applying paired queue costs raises its modeled median time by 4.9%. Archive all six untrained subsets. [DSpark layer ablation](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-110--shorten-the-dspark-forward)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates

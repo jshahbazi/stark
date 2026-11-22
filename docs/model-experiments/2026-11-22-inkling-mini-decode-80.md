@@ -554,6 +554,38 @@ The first alternating run appears to save 1.265–2.953 ms at 4K by paired media
 
 The layout adds time at every fixture median after both orders run at each anchor. Archive it at the native gate. The timing covers the queued proposal and verifier at depth two, including on the prompts originally captured for greedy use.
 
+## 20261122-INKDECODE-109 · Expand the NVFP4 coefficients before verification
+
+At `addddcff`, replace the live FP4 byte-pair lookup with loads from one of two lossless layouts on the M5 Max. Store each coefficient as binary16 or store its high byte and shift it into the original binary16 bit pattern on load. Both preserve signed zero, the original E4M3 scale bytes, the per-lane grouped F32 dot and the scaled FMA and SIMD reduction. Expand both expert banks of all 20 physical NVFP4 layers on the GPU after restoring the prompt seed. Select the layout only in the three-row verifier. The extra coefficient buffers use 18.98 GiB for the high byte and 37.97 GiB for binary16 while keeping the reference banks available.
+
+Use the short and two stock sampled 4K captures, the original checkpoint, and the retained INT8 draft. Compare raw up and down products in a separate shadow pass over eight restored anchors per layout and fixture. All 233,570,304 F32 product words, 144 full F32 logit rows, draft IDs and 48 committed state pairs match. Time the plain queued commands in both orders at each anchor. Collect four separate timestamped verifier rounds per layout and its packed control to attribute the dot-stage cost.
+
+| Capture | High-byte queued increase | Binary16 queued increase | High-byte dot time, packed → expanded | Binary16 dot time, packed → expanded |
+| --- | ---: | ---: | ---: | ---: |
+| Short | 4.776 ms | 15.447 ms | 6.106 → 10.608 ms | 6.169 → 19.565 ms |
+| Sampled 4K A | 4.453 ms | 14.398 ms | 6.086 → 10.310 ms | 5.937 → 18.172 ms |
+| Sampled 4K B | 4.952 ms | 14.573 ms | 6.220 → 10.696 ms | 6.466 → 20.385 ms |
+
+The first build needed a corrected allocation-size conversion. Both Metal variants then needed explicit vector casts. An interruption cut the corrected run after the first three receipts, and the remaining cells resumed with the same executable. The short binary16 cell observed 11 pageouts and the first 4K high-byte cell observed 16,416 swapouts between host snapshots. The other four showed neither delta, including both second 4K layout cells. Both layouts regress at the native gate even in those cells. Archive the expansion; it never reached the worker gate.
+
+## 20261122-INKDECODE-110 · Shorten the DSpark forward
+
+At `addddcff`, test all nonempty subsets of the three original DSpark layers on the M5 Max. Run each subset in the original order with all eight input rows, the original final RMS, the same INT8 vocabulary head and the Markov step. Keep all three draft cache updates and the ordinary target verifier. This changes the proposal model while preserving the target's seeded draw.
+
+Use the short control and four stock 4K captures. At each 4K capture, replay two seeds at temperature one for 128 timed outputs. Generate the serial target draws with the full sorted vocabulary. At each anchor, rotate the seven draft layer subsets and record accepted proposal prefixes and native proposal time. Count disjoint rounds with a maximum of two proposals and the ordinary output-limit cap. At every sixteenth anchor of the first seed, replay the seven arms in both orders on one snapshot to measure queued wall time. The initial 4K rows match pinned F32. Every timed queue arm matches its isolated proposal IDs, the other arms' full anchor logits and their state after committing the anchor.
+
+| Executed draft layers | 4K replay rounds | First / two accepted prefixes | Paired queued saving by capture | Modeled 4K time ratio | Faster trajectories |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1, 2, 3 | 541 | 669 / 353 | — | 1.000× | — |
+| 1, 2 | 794 | 243 / 53 | −0.048 to +1.090 ms | 1.331× | 0/8 |
+| 1, 3 | 589 | 570 / 176 | −0.947 to +1.035 ms | 1.049× | 2/8 |
+| 2, 3 | 977 | 48 / 2 | −1.229 to +0.868 ms | 1.905× | 0/8 |
+| 1 | 919 | 109 / 10 | +0.577 to +1.827 ms | 1.600× | 0/8 |
+| 2 | 956 | 69 / 4 | −0.691 to +1.664 ms | 1.744× | 0/8 |
+| 3 | 922 | 101 / 3 | +0.144 to +1.446 ms | 1.726× | 0/8 |
+
+For each fixture, price both seeds with the first seed's median full-draft queue time and the paired queue-time difference. The modeled time omits host sampling and commit time and uses a fixed cost across round depths. The first-and-last-layer subset is closest to the original model. It adds 48 rounds across the eight trajectories, and its median modeled time rises 4.9%. Archive the six untrained subsets at the native gate.
+
 ## Evidence
 
 The original target and DSpark artifact digests are recorded with the [integrated QKV run](2026-11-21-inkling-mini-decode-60.md#evidence-identities). The worker and native screen retain aggregate-only private receipts. No prompts, token IDs, logits, targets or fitted tensors are published.
@@ -562,6 +594,10 @@ The first source exports for attempts 97, 99 and 100 used Git's configured exter
 
 | Evidence | SHA-256 |
 | --- | --- |
+| DSpark layer ablation source patch, executable, driver and summarizer | `82c960bb118d3a15d7bcba757a30c9947170920c8520c8ea51ab16629e896a82`, `9c6030f3cad5da85f7b3302fab2cc04764e18eaf64ad4094d67cc8979cfa16e2`, `8cfa5ef6a3b667cb2eb13612c538d50b8f1c8731169eafde9ae6b4321e168279`, `3701e546069a4dcc02414cd2ae8a839bc07e8268a32a5f22a808e497d52c2df0` |
+| DSpark layer ablation short and 4K receipts | `fcd1db6c45bf3524f26cc5dd0a0bb8599cb05c37d2dcd37760249830a3317516`, `67eff3f71b9a2426d8422820aeeab42d1ddb4dcb3a1d8342bd9e5f97b768a88a`, `8a7ed39c4693cb9b8d396a0f843b4b681eed1af8e9ffec6c38289b44a951f344`, `e8f44944a07b2391aa3cef796a16da98b9f6032530e83a4ed5891d63331a42f9`, `d77183fcff2cdb6cf18dafdc8ca0cc9e7db1a9d750a39d6e2953bbcf13231a1f` |
+| Expanded NVFP4 source patch, executable, driver and resume driver | `6920f48e61a56e45f8912bafbfe47cae8c6454c478677de57c1a9669ba8acf8d`, `3b7e6e7df34f75b716bc55b1a89aea4bb4b5a00d2d6cc966ee76a042be622a77`, `0f02a0f9364561a1722614f920a9a17fc9e615bbdb629674c5bd4378ed7682eb`, `f18f97ac7f5a8d5652bce63ee1c206586622e5596a7e4b05a13e694305356e88` |
+| Expanded NVFP4 short and sampled 4K receipt pairs | `11d15f7f002b7dfebe085a919f92d3db37f4ead96c76ac17c5943488e27cc25a`, `d430ff38a64f370d52af3de33d18e2a1f06906d4c773ab740cfd2b113e545a69`, `55d1902dfb17bee158c2b9400f14a106deb141071d5c34bbd9122f93a548782c`, `2e66b2515e9acbe6dc0982059520a0bac0bb4457e33993dbf5ce4e7223cf3c17`, `47b7dcf3b7f52b5ce8812ab6067080c19c4b9f8d0e8f289cd336515865d87c86`, `fe8770a1201919e73863542898a7c1b8975763a39ffd961a9218c8b2f913cb16` |
 | DSpark mask reuse Git source patch, native executable and driver | `1a19f74e23580e70d89b70a3c7456d294eef4ce404dbb0c3840d9616067f3e35`, `ce93b1efde9085ed3e07aa213e916cde8e4f1cf58af2ed062c3a43cbe4330c80`, `ae21abb8dfd59765baddd29e4221a67a97ecde21b8a21592ab0018a8a384eeee` |
 | DSpark mask reuse short and 4K receipts | `5242668592527813e50f7406e0819a39a7b2274788bc57066796941b7e72b562`, `2316ba0f8977edb989dbd0e4a1b49dc3bbbcf1a762acbef6c7e768da8782a0ce`, `d2865d0621678b21d6c41f1d52ad83806414326e2a65c0fa89a2e17d3129379b`, `6a220626b82e480d9a9ec4d8e0f25cfa9807e9ece52aeb6b945e8a32374b5c9b`, `e0e569eb560bc3d73fbf94cec459bb4ca51dd7088c1c9321c06738aa028f4328` |
 | Per-token down initial, four-command, and final Git source patches | `ad09e67106d7f44fb5411efb06282eae3efef35452ebf5b97f8c6732764a8fe7`, `b7c913b8cc709987a681bd9155544528297e69f60c1523cc68e1ff0a4a79b75c`, `9179ce64ab7467a500aa64adee4ad5b17f60d382031d2b3626a2928ef8f6a3bb` |
