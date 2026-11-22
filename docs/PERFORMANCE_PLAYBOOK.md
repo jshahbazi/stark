@@ -625,6 +625,8 @@ Check indirect dispatch arguments when replacing a serial encoder with a concurr
 
 Price a compact vocabulary readout with the rejected draw rate and the cost of submitting each stage. Inkling's coarse INT8 head and original BF16 tiles resolve 489 of 512 seeded draws in the one-row Metal bounds screen. All 152,800 selected-tile controls match bit-for-bit. The separate bounds command erases its modeled savings. A live trial needs to share the coarse head submission and deduplicate tiles across live rows. [Selected vocabulary readout](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-95--screen-an-exact-vocabulary-readout-with-int8-bounds)
 
+Fuse the coarse head, bounds and compaction into the queued target command and time the exact tile union and any consumed-row fallback. Inkling's native probe gains 8.05% sampled and 5.01% greedy at 4K, with exact outputs, work and state across all short and 4K pairs. The sparse arm still needs a justified source arithmetic bound and worker qualification. [Queued sparse vocabulary readout](model-experiments/2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-96--time-sparse-vocabulary-readout-inside-queued-decoding)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates

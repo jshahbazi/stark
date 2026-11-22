@@ -329,6 +329,23 @@ Repeat the four trajectories with a Metal pass that bounds omitted probability m
 
 Metal uses **0.021–0.032 ms** for the upper mass pass, and the remaining host work takes **0.255–0.304 ms**, including host readback, envelope validation, candidate selection and the interval check. A model using the same-session phase medians and a full head at each observed miss leaves **0.475–0.637 ms** per readout before submission overhead. The extra standalone command's measured wall cost is **0.565–0.695 ms**. Charging that boundary moves the modeled savings to **−0.069 through +0.071 ms** across the four traces. Keep the device bound and tile kernel as feasibility evidence. Any live experiment needs the bound and coarse head in the same command, candidate unions across all live verifier rows, an exact fallback, and a source arithmetic bound suitable for use beyond the observed trajectories.
 
+## 20261122-INKDECODE-96 · Time sparse vocabulary readout inside queued decoding
+
+At `92ea0686`, use the original target and resident DSpark INT8 vocabulary bank. Replace the full BF16 head at the end of the queued three- or four-row verifier command with the coarse INT8 head, hidden norms and upper-mass reduction. Compact every upper logit within nine units of the highest upper logit, retaining up to 256 IDs per row. An overflow takes the top 256 on the host. Select the union of the original 32-token tiles across all live rows and launch one BF16 rescore with the source product and cap. Prove consumed greedy or seeded temperature-one draws using those scores, and submit one full BF16 readout if a consumed draw needs it. The diagnostic still uses the empirical arithmetic allowance from attempt 95.
+
+Run two pairs per mode on one loaded model per fixture, with the arm order reversed across the two trials. Each arm produces 128 tokens from the same snapshot, using two proposals for sampled and three for greedy. Change the sampled seed between trials. Time the 127 useful output intervals including the queued draft and target, candidate selection, exact rescoring, consumed draws, fallback and commit. The four 4K seed readouts matched pinned F32. All 20 short and 4K pairs matched every emitted token, proposal and acceptance total, round count and final committed target and draft state.
+
+| Fixture | Mode | Full head median | Sparse head median | Median paired gain | Faster pairs |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Short | Sampled | 60.61 tok/s | 64.30 tok/s | +6.08% | 2/2 |
+| Short | Greedy | 103.53 tok/s | 110.88 tok/s | +7.15% | 2/2 |
+| Four stock 4K traces | Sampled | 59.83 tok/s | **65.54 tok/s** | **+8.05%** | 7/8 |
+| Four stock 4K traces | Greedy | 58.67 tok/s | **61.91 tok/s** | **+5.01%** | 8/8 |
+
+The sampled 4K arm certified 922 useful outputs in sparse readout and fell back on 79 of 517 sparse rounds. Greedy certified 1,004 and used zero fallbacks across 480 sparse rounds. The median per-run rescore took 0.30 ms per round in both modes. The paired median queued interval saved 1.08 ms sampled and 1.26 ms greedy. Complete timed rounds saved 2.32 and 1.72 ms at the paired medians. One sampled pair regressed 1.27%. Sampled sparse rates across all eight paired reads ranged from 49.33 to 82.05 tok/s.
+
+Advance the probe to an arithmetic and worker gate. The experiment compares native decode from private snapshots. An exact runtime path still needs outward-safe bounds for the source tensor and cap, selected-score and forced-fallback checks at all live widths, and a same-loaded worker comparison with pinned greedy and seeded output hashes. No claim of live worker throughput follows from these measurements.
+
 ## Evidence
 
 The original target and DSpark artifact digests are recorded with the [integrated QKV run](2026-11-21-inkling-mini-decode-60.md#evidence-identities). The worker and native screen retain aggregate-only private receipts. No prompts, token IDs, logits, targets or fitted tensors are published.
@@ -448,3 +465,7 @@ The original target and DSpark artifact digests are recorded with the [integrate
 | Metal upper-mass follow-up executable | `6bf4b48b6d9089dca05a288a24c707ae2cabfe559b1dc0e995ed958692f65a3a` |
 | Metal upper-mass follow-up harness | `77367a595ba5bda001ab48550c51c2be04ecb611fe74da4108d99cbfa62eba50` |
 | Metal upper-mass follow-up aggregate receipt | `d4b6e88f6cf6f70801483d7a6184ae311f0d218534e3de124ef315bc2752cdb1` |
+| Queued sparse vocabulary readout probe patch | `7199ea67fb9b2a578365f47c614dec7da7c72f4ca527a0ea73b1b0e1720a8857` |
+| Queued sparse vocabulary readout executable | `668420e44618ef4d5be5dbbea6f1465866502841702ad50341041b89e143cf84` |
+| Queued sparse vocabulary readout harness | `ebf3ccc442ea46ce5c58f8bab5961e1f9cd9ec15f9d88cd8cf6b38885693c9c6` |
+| Queued sparse vocabulary readout aggregate receipt | `e941eeb5d4aa13ffb15b2f2aa97d676532dd9768c229b0c8489f4510e0c3bf0e` |
