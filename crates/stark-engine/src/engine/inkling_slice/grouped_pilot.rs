@@ -129,6 +129,7 @@ pub(super) struct GroupedExperts {
     weights: Buffer,
     order: Buffer,
     runs: Buffer,
+    verify_dispatch: Option<Buffer>,
     up_inner: Buffer,
     up_max: Buffer,
     down_inner: Buffer,
@@ -193,6 +194,15 @@ impl GroupedExperts {
         index: usize,
     ) -> Binding<'_> {
         row(&self.output.merged, index, WIDTH * 2)
+    }
+
+    pub(super) fn enable_verify_compaction(
+        &mut self,
+        runtime: &mut Runtime,
+    ) -> Result<()> {
+        self.verify_dispatch = Some(zeroed(&runtime.device, 3 * size_of::<u32>())?);
+        runtime.verify_compact_runs = 2;
+        Ok(())
     }
 
     pub(super) fn enable_mxfp8(
@@ -388,6 +398,7 @@ impl GroupedExperts {
             weights: zeroed(device, routes * 4)?,
             order: zeroed(device, routes * 4)?,
             runs: zeroed(device, run_slots(capacity) * 3 * 4)?,
+            verify_dispatch: None,
             up_inner: zeroed(device, capacity * WIDTH * 4)?,
             up_max: zeroed(device, capacity * 4)?,
             down_inner: zeroed(device, routes * MID * 4)?,
@@ -416,6 +427,33 @@ impl GroupedExperts {
     ) {
         assert!(index < self.capacity);
         gpu.dispatch("ink_group_copy_row", &[source, row(&self.input, index, WIDTH * 2)], (), (WIDTH / 128, 1), 128);
+    }
+
+    pub(super) fn finish_verify_rows(
+        &self,
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        visit: &Visit,
+        position: usize,
+        rows: usize,
+        partials: [&Buffer; 4],
+    ) {
+        gpu.one(
+            "ink_verify_finish_experts",
+            &[
+                &self.output.down,
+                &self.output.merged,
+                &layer.mlp_conv,
+                &visit.conv[3],
+                partials[0],
+                partials[1],
+                partials[2],
+                partials[3],
+            ],
+            [position as u32, rows as u32],
+            (WIDTH / 128, 1),
+            128,
+        );
     }
 
     pub(super) fn copy_output(
@@ -460,7 +498,22 @@ impl GroupedExperts {
         } else {
             "ink_group_bucket"
         };
-        self.encode_buckets(gpu, &self.ids, rows, bucket);
+        if matches!(layer.experts, Experts::Nvfp4 { .. })
+            && gpu.runtime.verify_nvfp4_matvec
+            && gpu.runtime.verify_compact_runs != 0
+            && rows <= 4
+            && let Some(args) = &self.verify_dispatch
+        {
+            gpu.one(
+                "ink_verify_bucket_short",
+                &[&self.ids, &self.order, &self.runs, args],
+                [(rows * TOP) as u32, (WIDTH / 4) as u32],
+                (1, 1),
+                32,
+            );
+        } else {
+            self.encode_buckets(gpu, &self.ids, rows, bucket);
+        }
         match &layer.experts {
             Experts::Nvfp4 {
                 up,
@@ -563,17 +616,20 @@ impl GroupedExperts {
             } else {
                 PrefillPhase::Nvfp4DownDot
             });
-            gpu.one(
-                if gpu.runtime.verify_half_act {
-                    "ink_verify_nvfp4_half_dot"
-                } else {
-                    gpu.runtime.verify_nvfp4_kernel
-                },
-                &[inner, &bank.codes, &bank.blocks, routing.indices, routing.runs, &self.projected],
-                width as u32,
-                (WIDTH / 4, live_run_limit(rows, run_slots(rows))),
-                128,
-            );
+            let kernel = if gpu.runtime.verify_half_act {
+                "ink_verify_nvfp4_half_dot"
+            } else {
+                gpu.runtime.verify_nvfp4_kernel
+            };
+            let buffers = [inner, &bank.codes, &bank.blocks, routing.indices, routing.runs, &self.projected];
+            if gpu.runtime.verify_compact_runs == 2
+                && rows <= 4
+                && let Some(args) = &self.verify_dispatch
+            {
+                gpu.indirect(kernel, &buffers, width as u32, args, 128);
+            } else {
+                gpu.one(kernel, &buffers, width as u32, (WIDTH / 4, live_run_limit(rows, run_slots(rows))), 128);
+            }
             return;
         }
         gpu.phase(PrefillPhase::Nvfp4Quant);
@@ -687,7 +743,9 @@ impl GroupedExperts {
             (WIDTH / 128, rows * TOP),
             128,
         );
-        gpu.one("ink_group_combine", &[&out.down, &out.merged], (), (WIDTH / 128, rows), 128);
+        if !gpu.defer_expert_merge {
+            gpu.one("ink_group_combine", &[&out.down, &out.merged], (), (WIDTH / 128, rows), 128);
+        }
     }
 
     fn encode_mxfp8(
@@ -741,7 +799,9 @@ impl GroupedExperts {
             gpu.one(down_kernel, &down_buffers, (), (WIDTH / 4, slots), 128);
         }
         gpu.phase(PrefillPhase::Mxfp8);
-        gpu.one("ink_group_combine", &[&out.down, &out.merged], (), (WIDTH / 128, rows), 128);
+        if !gpu.defer_expert_merge {
+            gpu.one("ink_group_combine", &[&out.down, &out.merged], (), (WIDTH / 128, rows), 128);
+        }
     }
 
     fn encode_mxfp8_tensor(

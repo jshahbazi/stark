@@ -109,8 +109,27 @@ impl PrefillLanes {
         runtime: &mut Runtime,
     ) -> Result<()> {
         self.grouped.enable_source_epilogue(runtime)?;
+        if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_COMPACT_RUNS").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+        {
+            packed_prefill::register(runtime, include_str!("verify_bucket.metal"), &["ink_verify_bucket_short"])?;
+            self.grouped.enable_verify_compaction(runtime)?;
+        }
         self.grouped.enable_source_softmax(runtime)?;
         self.grouped.enable_source_mxfp8(runtime)?;
+        let fused_experts = std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_FUSED_FINISH").as_deref()
+            == Some(std::ffi::OsStr::new("1"));
+        let fused_attention = std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_FUSED_ATTENTION").as_deref()
+            == Some(std::ffi::OsStr::new("1"));
+        if fused_experts || fused_attention {
+            packed_prefill::register(
+                runtime,
+                include_str!("verify_finish.metal"),
+                &["ink_verify_finish_experts", "ink_verify_finish_attention"],
+            )?;
+            runtime.verify_fused_finish = fused_experts;
+            runtime.verify_fused_attention = fused_attention;
+        }
         self.grouped.min_rows = 2;
         Ok(())
     }
@@ -382,25 +401,62 @@ impl Session {
                 && trace.is_none()
                 && lanes.grouped.supports(layer, row_count)
                 && (!state.later || controllers.is_some());
-            for (row, (flow, scratch)) in flows.clone().zip(scratches.clone()).enumerate() {
-                let position = self.position + row;
-                Layer::convolution(
-                    gpu,
-                    binding(&scratch.attn_raw),
-                    &layer.attn_conv,
-                    None,
-                    &visit.conv[2],
-                    &scratch.attention,
-                    WIDTH,
-                    position,
+            let fused_attention = gpu.runtime.verify_fused_attention
+                && undo.is_some()
+                && tap.is_none()
+                && trace.is_none()
+                && !state.capture
+                && row_count <= MAX_VERIFY_ROWS;
+            if fused_attention {
+                let scratch: [&Scratch; MAX_VERIFY_ROWS] =
+                    std::array::from_fn(|i| scratches.clone().nth(i.min(row_count - 1)).expect("verified scratch"));
+                let flow: [&Flow; MAX_VERIFY_ROWS] =
+                    std::array::from_fn(|i| flows.clone().nth(i.min(row_count - 1)).expect("verified flow"));
+                gpu.dispatch(
+                    "ink_verify_finish_attention",
+                    &[
+                        binding(&layer.attn_conv),
+                        binding(&visit.conv[2]),
+                        binding(&scratch[0].attn_raw),
+                        binding(&scratch[1].attn_raw),
+                        binding(&scratch[2].attn_raw),
+                        binding(&scratch[3].attn_raw),
+                        binding(&flow[0].partial),
+                        binding(&flow[1].partial),
+                        binding(&flow[2].partial),
+                        binding(&flow[3].partial),
+                        (&flow[0].blocks, state.blocks.min(3) * WIDTH * 4),
+                        (&flow[1].blocks, state.blocks.min(3) * WIDTH * 4),
+                        (&flow[2].blocks, state.blocks.min(3) * WIDTH * 4),
+                        (&flow[3].blocks, state.blocks.min(3) * WIDTH * 4),
+                    ],
+                    [self.position as u32, row_count as u32, u32::from(state.boundary), 0],
+                    (WIDTH / 128, 1),
+                    128,
                 );
-                if controllers.is_some() || direct {
-                    layer.prepare_expert_inputs(gpu, flow, &flow.partial, scratch, state);
-                    if direct && controllers.is_none() {
-                        gpu.norm(binding(&scratch.mixed), &layer.mlp_norm, lanes.grouped.input_at(row), true);
-                    }
+            }
+            for (row, (flow, scratch)) in flows.clone().zip(scratches.clone()).enumerate() {
+                if fused_attention {
+                    layer.mix_expert_inputs(gpu, flow, &flow.partial, scratch, state);
                 } else {
-                    layer.expert_inputs(gpu, flow, &flow.partial, scratch, state);
+                    Layer::convolution(
+                        gpu,
+                        binding(&scratch.attn_raw),
+                        &layer.attn_conv,
+                        None,
+                        &visit.conv[2],
+                        &scratch.attention,
+                        WIDTH,
+                        self.position + row,
+                    );
+                    layer.prepare_expert_inputs(gpu, flow, &flow.partial, scratch, state);
+                }
+                if controllers.is_none() {
+                    if direct {
+                        gpu.norm(binding(&scratch.mixed), &layer.mlp_norm, lanes.grouped.input_at(row), true);
+                    } else {
+                        layer.norms(gpu, scratch, binding(&scratch.mixed), &scratch.mlp_input, 3, state.later);
+                    }
                 }
             }
             if let Some(controllers) = controllers {
@@ -423,6 +479,13 @@ impl Session {
                     ..
                 } => PrefillPhase::Mxfp8,
             });
+            let fused_finish = gpu.runtime.verify_fused_finish
+                && undo.is_some()
+                && direct
+                && tap.is_none()
+                && !state.capture
+                && row_count <= MAX_VERIFY_ROWS;
+            gpu.defer_expert_merge = fused_finish;
             let expert_rows = lanes.grouped.rows();
             for start in (0..row_count).step_by(expert_rows) {
                 let count = (row_count - start).min(expert_rows);
@@ -455,7 +518,20 @@ impl Session {
                     }
                 }
             }
+            gpu.defer_expert_merge = false;
             gpu.phase(PrefillPhase::ExpertFinish);
+            if fused_finish {
+                let partials =
+                    std::array::from_fn(|i| &flows.clone().nth(i.min(row_count - 1)).expect("verified row").partial);
+                lanes.grouped.finish_verify_rows(gpu, layer, visit, self.position, row_count, partials);
+                if row_count == MAX_VERIFY_ROWS
+                    && let Some(undo) = undo
+                {
+                    let first = scratches.clone().next().expect("verified anchor scratch");
+                    undo.save_anchor(gpu, index, first, lanes.grouped.output_at(0));
+                }
+                continue;
+            }
             for (row, (flow, scratch)) in flows.clone().zip(scratches).enumerate() {
                 let output = if direct {
                     lanes.grouped.output_at(row)

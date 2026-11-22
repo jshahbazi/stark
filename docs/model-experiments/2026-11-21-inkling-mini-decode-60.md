@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–25 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–28 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -361,6 +361,55 @@ Charge 22.8 ms for a serial step and 29.5, 34.6 and 39.2 ms for verifying one, t
 
 The best greedy rule went from -0.84% to +4.55% across the four inputs. The best sampled rule ranged from -0.71% to +2.39%. The replay considers lookup in place of an ordinary token. The existing DSpark worker already runs faster than that ordinary reference. Defer runtime integration based on the small estimated gains and sparse eligibility.
 
+## 20261121-INKDECODE-26 · Compact live NVFP4 runs in the short verifier
+
+Sort at most 32 routes in one SIMD group by expert and original route index. Generate the same stable run records and a Metal indirect grid with one column of workgroups per live run. The control scans all 128 experts and launches one column per route. Compare the original, SIMD sort with the static grid, and SIMD sort with the indirect grid on the same restored state.
+
+| Verified rows | Static control, 4K median | SIMD sort and indirect dispatch, 4K median | Median paired saving |
+| --- | ---: | ---: | ---: |
+| 2 | 29.22–29.47 ms | 29.09–29.27 ms | 0.13–0.29 ms |
+| 3 | 33.73–34.19 ms | 33.47–33.97 ms | 0.23–0.31 ms |
+| 4 | 37.46–39.84 ms | 37.20–39.55 ms | 0.28–0.29 ms |
+
+Eight rotated pairs at each width reproduced the F32 logits on short and both stock 4K captures. All 45 rejection and cache-wrap controls and all 96-token serial continuation and committed-state checks passed with indirect dispatch enabled. The paired saving from the sort alone was 0.11–0.13 ms at four rows. Enable both pieces under `STARK_INKLING_EXPERIMENT_VERIFY_COMPACT_RUNS=1` in the short source verifier.
+
+## 20261121-INKDECODE-27 · Batch convolution and residual finishing across verifier rows
+
+One thread per channel walks provisional rows in causal order. The expert kernel reduces the eight top routes, rounds the merged value to BF16, writes the original three-slot convolution history and updates the residual at the existing BF16 boundary. It also writes the merge needed by the anchor rollback. The attention kernel batches the attention projection’s source convolution and residual update, preserving the old partial when a cross-pass boundary opens. Each kernel preserves the scalar source multiply/add order. The trial uses the reference dispatches for instrumented layer captures.
+
+| Kernel enabled | Four-row control, 4K median | Four-row candidate, 4K median | Median paired saving |
+| --- | ---: | ---: | ---: |
+| Expert finish, with compact runs in both arms | 37.22–39.74 ms | 36.67–39.20 ms | 0.55–0.56 ms |
+| Attention finish, with compact runs and expert finish in both arms | 36.66–39.09 ms | 36.13–38.54 ms | 0.54–0.56 ms |
+
+Eight alternating pairs per width matched every F32 row on all three native fixtures. The complete short and 4K continuations stayed exact with both fusions on, including 45 rejection and cache-wrap cases and exact committed states. The effects are additive at the measured command boundary. The experimental controls are `STARK_INKLING_EXPERIMENT_VERIFY_FUSED_FINISH=1` and `STARK_INKLING_EXPERIMENT_VERIFY_FUSED_ATTENTION=1`.
+
+Four alternating pairs per mode compared the prior worker configuration against compact runs and both finishing fusions. The two arms used one build, the same 4,096 cold input tokens and 4,352 context, zero reused tokens and 256 sampled and emitted tokens. Both arms used the prior half-ingress and draft-shortlist controls. Vision and DSpark were resident. All 16 output hashes and paired acceptance counts matched.
+
+| Mode | Control useful decode | Combined useful decode | Median paired decode change | Faster pairs | Median paired prefill change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Greedy | 54.47 tok/s | 56.32 tok/s | +2.58% | 3/4 | +1.29% |
+| Sampled | 43.87 tok/s | 43.12 tok/s | -1.45% | 1/4 | -0.59% |
+
+The combined arm peaked at 57.18 tok/s greedy and 46.37 tok/s sampled in this window. The sampled worker results varied across pairs and the median was slower. Keep the changes experimental based on the exact same-state command savings and the greedy worker gain. The workers accounted for 99.83% of GPU client counter increments over 103 intervals. Sampled thermal states were nominal and fair. Pageouts changed by +23 and swapouts by +0 pages.
+
+## 20261121-INKDECODE-28 · Screen held-out seeded calibration and sparse rejection
+
+Generate 192 sampled anchors on each of four different pinned stock 4K prompts at temperature 1. Each trace starts with the pinned F32 seed logits. Compute proposals conditioned on the matching teacher prefix. Replay sequential, nonoverlapping rounds using measured favorable costs of 22.8, 34.4, 39.7 and 44.0 ms at proposal depths zero through three. The costs leave out additional calibration, probability and rejection implementation overhead.
+
+For the exact seeded stream, choose between the top two draft tokens using a shifted interval of the ordinary target’s uniform draw. Learn the boundaries by mask position and eight bins of draft top-token confidence on the other three prompts. Fit with at least 48 training observations and a three-hit improvement over always proposing the draft argmax. The held-out draws and tokens do not enter the fit.
+
+| Exact-seeded proposal choice | Best fixed-depth median, estimated tok/s |
+| --- | ---: |
+| Draft argmax | 51.02 |
+| Shared uniform and full draft CDF | 50.45 |
+| Held-out rank calibration | 50.69 |
+| Top-two oracle replay | 59.60 |
+
+The oracle chooses the correct target token whenever it is one of the draft’s two highest ranks. The calibration failed to improve the real choice. Retire the calibration experiment.
+
+For a separate policy that preserves the output distribution, calculate each proposal’s conditional acceptance on teacher token `y` as `min(1, q(y)/p(y))`. The replay branches on that probability and charges the same fixed costs. Compare top-4, top-8, top-16, top-32, top-128 and full-vocabulary draft supports and three draft temperatures. The strongest fixed choice used depth three, temperature 0.75 and top-16. Its estimated median was 56.46 tok/s, versus 56.44 with full support. Both fall short of 60 before extra work to draw, verify and correct proposals. The result supports keeping the probability vector small if the path is revisited. A distribution-preserving worker would have a separate seeded sequence contract. Defer changing the worker sampler.
+
 ## Decision and next target
 
 Keep the vector singleton, transactional verifier, shared KV, binary16 ingress and shortlist opt-in. The measured acceptance and round costs leave the harder sampled input short of the 60 tok/s budget. Prioritize reducing ordinary target and verifier execution time across inputs before changing the production sampler. Distribution-preserving rejection would need separate qualification because it can change the sequence for the same seed. Keep the existing seeded path available for exact replay.
@@ -559,3 +608,26 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Short-context lookup script | `57222c0337f0ec31cbadc41692f33691bce7a048963ce8baaa7e526cdeadcde7` |
 | Short-context lookup aggregate receipt | `b516de695a3540c8a2e05588d861c737a94258608d231dc8df60553d1c67dd83` |
 | Full draft overlap with shortlist worker flag | `2b699f3aa4a6b4c7180575ba4cfcb9d0c03c8c9e346864ac7c5c76587a074b4f` |
+| Compact run screen inkling_slice | `9bf391f5eab8921bfbee37ff48fde0c1b1d123dca908c3f8dbe97c97436ae775` |
+| Compact run screen scored-source.patch | `cc06174fbd3f3a9751763d14e4dc5f4d6cdea60147f934fed2540fe9b818c45a` |
+| Compact run screen stock-s4096-00.json | `60189baee7d353526f8f96828ebd26b5fffd4f6bc4a72b1ddceda63e609c4de6` |
+| Compact run screen stock-g4096-01.json | `faef921b48a090da9de9627d9d3361604c302937146498e73f33e16080ed7993` |
+| Compact run screen short.json | `3c186e3d5b29292dd5c4b1ed55416c2c8f68f452f0821860b58b2caebe78af84` |
+| Expert finish screen inkling_slice | `8aa2b3e147192899d4e07f6b50d421618725210eeb4306520b2eab5f0650ac80` |
+| Expert finish screen scored-source.patch | `a8208d6d1b2ad181c7cb12e4b5648714157daad417c30fb0c0b6620d8c0dff27` |
+| Expert finish screen stock-s4096-00.json | `a9328de8f47ce488d2dbde3dc9e928ba96053f0003796befaa37e947100e1055` |
+| Expert finish screen stock-g4096-01.json | `bf5104e70069af1e2c06c836cd8afc09f9ad101f31f74df044d6340dc39f091b` |
+| Expert finish screen short.json | `4f93872ab817ddb67d3ca3869499c46f5b17bd431fee06537a390a21f6245f58` |
+| Attention finish screen inkling_slice | `f9b653023056e4d63f656b5c11c210373ddc176864a6687b47a5cb873c9e7512` |
+| Attention finish screen scored-source.patch | `d263b40a65f9e90c970b4682f636aafd2d0abbcbc99be6b38289f09c3c456ceb` |
+| Attention finish screen stock-s4096-00.json | `22d0e3d5d39a159a6172453edf4ffa9f1c73a41e5b8529e02e4ec7315cb03115` |
+| Attention finish screen stock-g4096-01.json | `aae77ec6396eb9adec50695d4f41b2668e38db5e723bbd95d0bc4287b94906f2` |
+| Attention finish screen short.json | `eaf7885120fd232dadc7e0f3330306698c2e9c9e4a7e6e00c08f8e493870bd33` |
+| Held-out calibrated sampling and sparse rejection inkling_slice | `8aa2b3e147192899d4e07f6b50d421618725210eeb4306520b2eab5f0650ac80` |
+| Held-out calibrated sampling and sparse rejection scored-source.patch | `a8208d6d1b2ad181c7cb12e4b5648714157daad417c30fb0c0b6620d8c0dff27` |
+| Held-out calibrated sampling and sparse rejection estimate.json | `256fac2014f1314659a0cb631eb7e4dbc945e3797cbbf8972bd72fae822a83a4` |
+| Finishing fusions and compact runs worker | `3e6f69bb62329d6f27024a869d51dee6fce8014388c9444511a084f8d6eaa44e` |
+| Finishing fusions worker source patch | `a4081a6dc60b7dde5f22ddde23957f4232b090f901f5a5cc75f583730d45424e` |
+| Finishing fusions worker harness | `200e4c80262479f88ec53d9c8e2824df1eb7744e80bddbeefc00cfdc6a7c96ea` |
+| Finishing fusions worker pairs | `f50386d0331ab37888050049165c7db30dfc279577173e9bc08a7628609e864d` |
+| Finishing fusions worker host samples | `b6a7f1c88df9e44c717a99a9e1b0288bc4b775b95d527fd9b98f8dc7bed0894d` |

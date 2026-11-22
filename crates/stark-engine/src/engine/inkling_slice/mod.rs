@@ -78,6 +78,9 @@ struct Runtime {
     verify_nvfp4_matvec: bool,
     verify_nvfp4_kernel: Kernel,
     verify_half_act: bool,
+    verify_compact_runs: usize,
+    verify_fused_finish: bool,
+    verify_fused_attention: bool,
     parallel_route: bool,
     nvfp4_vector: bool,
     draft_shortlist: bool,
@@ -172,6 +175,9 @@ impl Runtime {
             verify_nvfp4_matvec: false,
             verify_nvfp4_kernel: "ink_verify_nvfp4_group_dot",
             verify_half_act: false,
+            verify_compact_runs: 0,
+            verify_fused_finish: false,
+            verify_fused_attention: false,
             parallel_route: false,
             nvfp4_vector: false,
             draft_shortlist: false,
@@ -189,6 +195,7 @@ struct Stream<'a> {
     runtime: &'a Runtime,
     dispatches: usize,
     nvfp4_dots: usize,
+    defer_expert_merge: bool,
     mxfp8_dots: usize,
     profile: Option<(&'a ProtocolObject<dyn MTLCommandBuffer>, &'a mut PrefillTiming)>,
 }
@@ -234,6 +241,36 @@ impl Stream<'_> {
                 height: groups.1,
                 depth: 1,
             },
+            MTLSize {
+                width: threads,
+                height: 1,
+                depth: 1,
+            },
+        );
+        self.dispatches += 1;
+    }
+
+    fn indirect<T>(
+        &mut self,
+        kernel: Kernel,
+        buffers: &[&Buffer],
+        params: T,
+        arguments: &Buffer,
+        threads: usize,
+    ) {
+        let Some(encoder) = &self.encoder else {
+            return;
+        };
+        encoder.set_compute_pipeline_state(&self.runtime.pipelines[kernel]);
+        for (index, &buffer) in buffers.iter().enumerate() {
+            encoder.set_buffer(Some(buffer), 0, index);
+        }
+        if size_of::<T>() != 0 {
+            encoder.set_bytes(NonNull::from(&params).cast(), size_of::<T>(), buffers.len());
+        }
+        encoder.dispatch_threadgroups_indirect(
+            arguments,
+            0,
             MTLSize {
                 width: threads,
                 height: 1,
@@ -1053,6 +1090,17 @@ impl Layer {
             gpu.copy(binding(partial), (&flow.blocks, state.blocks * WIDTH * 4));
         }
         gpu.one("ink_after_attention", &[partial, &s.attention], u32::from(state.boundary), (WIDTH / 128, 1), 128);
+        self.mix_expert_inputs(gpu, flow, partial, s, state);
+    }
+
+    fn mix_expert_inputs(
+        &self,
+        gpu: &mut Stream<'_>,
+        flow: &Flow,
+        partial: &Buffer,
+        s: &Scratch,
+        state: VisitInput,
+    ) {
         gpu.mix(&flow.blocks, partial, &self.mlp_query, &s.mixed, state.blocks + usize::from(state.boundary), true, 1);
         s.record(gpu, "mlp_mixed", &s.mixed);
     }
@@ -1280,6 +1328,7 @@ fn execute_prepared(
         runtime,
         dispatches: 0,
         nvfp4_dots: 0,
+        defer_expert_merge: false,
         mxfp8_dots: 0,
         profile: profile.map(|profile| (&*command, profile)),
     };

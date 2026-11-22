@@ -495,6 +495,12 @@ One TensorOps call per exact K16 block kept Inkling’s per-lane recurrence and 
 
 Allowing shorter lookup suffixes with consensus among earlier continuations raised Inkling’s eligibility. With zero charged lookup cost, the strongest replay estimates over serial were +2.23% greedy and +1.20% sampled at cold 4K. That was too small for the throughput goal. [Short-context lookup replay](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-25--replay-short-context-lookup-with-past-continuation-agreement)
 
+For the short Inkling verifier, sort up to 32 routes in one SIMD group and dispatch only live expert runs. This saved 0.28–0.29 ms at four rows with exact output and rollback. [Compact run screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-26--compact-live-nvfp4-runs-in-the-short-verifier)
+
+Batch exact convolution finishing in token order within each channel. Combining the expert reduction, convolution, residual write and anchor export saved 0.55–0.56 ms per four-row Inkling command. The attention-side convolution and residual fusion added another 0.54–0.56 ms on those inputs. [Finishing fusion screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-27--batch-convolution-and-residual-finishing-across-verifier-rows)
+
+On four held-out sampled Inkling trajectories, rank-boundary calibration did not improve on ordinary argmax proposals. Top-16 draft distributions and full vocabulary gave similar exact-rejection estimates around 56.4 tok/s before correction overhead. [Seeded calibration and sparse rejection screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-28--screen-held-out-seeded-calibration-and-sparse-rejection)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates
