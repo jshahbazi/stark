@@ -1050,16 +1050,19 @@ pub(super) fn register_verify_nvfp4_matvec(runtime: &mut Runtime) -> Result<()> 
             include_str!("experts.metal"),
             include_str!("verify_nvfp4.metal"),
         );
-        let lean_source;
-        let source = if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_LEAN_DECODE").as_deref()
+        let decoder = if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_FP4_LOOKUP").as_deref()
             == Some(std::ffi::OsStr::new("1"))
         {
-            lean_source = format!("#define INK_VERIFY_AFFINE_FP4\n{source}");
-            lean_source.as_str()
+            "#define INK_VERIFY_BYTE_COEFFICIENTS\n"
+        } else if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_LEAN_DECODE").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+        {
+            "#define INK_VERIFY_AFFINE_FP4\n"
         } else {
-            source
+            ""
         };
-        register(runtime, source, &["ink_verify_nvfp4_half_dot", "ink_verify_half_activation"])?;
+        let source = format!("{decoder}{source}");
+        register(runtime, &source, &["ink_verify_nvfp4_half_dot", "ink_verify_half_activation"])?;
         runtime.verify_half_act = true;
     }
     Ok(())

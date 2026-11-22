@@ -1,4 +1,4 @@
-# 20261121-INKDECODE-01–51 · Inkling 2 Mini exact decode toward 60 tok/s
+# 20261121-INKDECODE-01–54 · Inkling 2 Mini exact decode toward 60 tok/s
 
 ## Scope and budget
 
@@ -841,6 +841,66 @@ With flags unset, connected short and 4K aggregates matched. The short full-mode
 
 Use the native router as an opt-in with `STARK_INKLING_EXPERIMENT_VERIFY_NATIVE_ROUTER=1` and the source short-verifier router selected. It runs inside the existing 96 MiB source-verifier reserve. The measured additional verifier workspace was 60,473,344 bytes on both stock 4K captures.
 
+## 20261121-INKDECODE-52 · Screen direct BF16 TensorOps for short-verifier dense attention
+
+Gather the separate live BF16 rows in one command, run direct device TensorOps into F32, and cast and scatter in one command. Replace the dense attention projections with at least 384 output columns. This covers the query, key, value, relative, gate and attention output matrices. The smaller sink and dynamic projections keep their source GEMV. Compare M8 × N32, M8 × N64, M8 × N128 and M16 × N64. In a separate shadow pass, compare every materialized BF16 word on the same live inputs to the shared-weight source GEMV. A mode that feeds the candidate to the target measures whole-command cost without the shadow.
+
+The fastest arm was M8 × N32. At three rows on the two stock 4K inputs, gather, product and scatter used **13.32–13.41 ms** for the dense-attention stage against **5.90–5.93 ms** for the control. It added **7.62–7.82 ms** to the plain three-row verifier command. The four-row comparisons also lost. The shadow found 343–344 unequal BF16 words among 1,566,720 checked words per stock input at three rows. All checked live target logit rows differed when the candidate fed the model.
+
+A replay rule covering scores within 4,096 F32 bit steps of a BF16 midpoint would have revisited about 12.5% of projected words and still missed 75–76 mismatches per stock input. The measured stage already exceeds the original GEMV budget before any exact replay. Retire direct TensorOps for these short dense projections.
+
+## 20261121-INKDECODE-53 · Decode packed FP4 coefficient pairs with a constant table
+
+Use the checkpoint's low-then-high nibble order. Build a 1 KiB table from each byte to two exact FP16 coefficient bit patterns, including signed zeros. Load two such entries for a four-coefficient fragment, reinterpret them as FP16, and widen before the original F32 dot. Preserve the exact activation pack, E4M3 scale decoder, F32 grouping, per-lane FMA and final SIMD reduction. No FP16 arithmetic is needed by the selected arm.
+
+Test half-bit arithmetic, a SIMD-shuffled nibble table, a byte-pair table with and without an E4M3 table, and narrower follow-ups with F32 pairs or exact FP16 products. Use eight rotated plain comparisons and three separately timestamped comparisons per width on the short and two stock 4K fixtures. All arms reproduced the checked complete F32 readouts.
+
+| Candidate | Three-row paired verifier change, stock 4K |
+| --- | ---: |
+| F32 affine decoding control | 0 ms |
+| Load FP16 pairs and widen | **−1.44 to −1.50 ms** on repeat |
+| Load F32 pairs | −1.19 to −1.29 ms |
+| Load FP16 pairs and multiply in FP16 | −1.40 to −1.45 ms |
+| Load FP16 pairs plus an E4M3 lookup | −1.33 to −1.41 ms |
+| Use arithmetic FP16 bits and widen | −0.14 to +0.03 ms |
+| Shuffle the nibble value across SIMD lanes | +6.79 to +7.14 ms |
+
+At three rows on stock 4K, the repeated FP16 pair-table arm spent 5.37–5.61 ms in the 88 NVFP4 products. Controls spent 6.81–7.09 ms. Four-row commands saved 1.63–1.84 ms on repeat. The retained shader generates the original table from integer constants at compile time. A separate scalar check compared all 256 entries to the source FP4 encodings independently.
+
+### Cold 4K worker screen
+
+Use the native short router, INT8 draft vocabulary head and queued source verifier in both arms. The FP4 coefficient decoder is the only changed selector. Compare four cold paired requests per mode on M5 Max with the original target and DSpark present, context 4,352, no input reuse and 256 sampled and emitted tokens. Greedy uses three proposals and sampled uses two.
+
+| Mode | Affine control median | Byte lookup median | Median paired gain | Faster pairs |
+| --- | ---: | ---: | ---: | ---: |
+| Seeded sampled | 51.60 tok/s | **56.39 tok/s** | +9.25% | 4/4 |
+| Greedy | 63.48 tok/s | **67.48 tok/s** | +7.32% | 4/4 |
+
+All 16 output hashes and paired round counts matched. Sampled native rates ranged from 55.21 to 57.95 tok/s. The combined proposal and verifier interval fell 3.34 ms per round at the paired median in this run. The workers accounted for 99.83% of observed Metal counter increments in 80 intervals. Thermal samples were nominal and pageouts grew by 344 with zero swapouts.
+
+In a separate sampled repeat, reverse workload order and worker loading order and reverse the paired arms. The control median was 52.96 tok/s and the lookup median was **56.21 tok/s**. The median paired gain was **9.78%**, with three of four pairs faster and a 55.18–63.62 tok/s range. All eight exact output hashes and paired round counts matched. Proposal-plus-verifier time fell 3.18 ms per round at the paired median. Prefill medians were 943.15 and 881.05 tok/s in the control and lookup arms. Both stages ran under fair thermal readings. The two workers accounted for 99.86% of observed Metal counter increments over 40 intervals, with 525 additional pageouts and zero swapouts. Host conditions and paired effects varied between requests. Three sampled requests were below 60 tok/s, with the widest remaining budget gap at 2.71 ms per round.
+
+### Parity and disposition
+
+The sealed byte-table build reproduced serial outputs and committed state through 96 outputs at proposal depths one, two and three on the short and two stock 4K fixtures. It passed all 45 rejection and cache-wrap controls. With flags unset, the connected short and 4K aggregates matched and the full model matched the pinned short logits, 16 stock 4K F32 vectors, 768 BF16 residual blocks and four snapshot replays.
+
+The opt-in worker reused a 2,048-token prefix across proposal depths, cleared it on cancellation and switching verification modes, and matched exact early-stop accounting. Retain the byte-pair table under `STARK_INKLING_EXPERIMENT_VERIFY_FP4_LOOKUP=1` with the binary16 verifier ingress selected.
+
+## 20261121-INKDECODE-54 · Bound and scan the exact sampler tail in chunks
+
+Use the four pinned logit rows from each of four stock 4K fixtures. Compare the existing CPU certificate, a chunked prefix scan, and the same scan with tighter omitted-mass bounds. Use the existing exact maximum and order. For each cutoff, check its representable predecessor in the original F32 subtraction and division. Monotonicity then bounds every lower logit. In the binned arm, bound weights below −22 and −30 by 2 to the powers −31 and −43. Keep the original sorted prefix and F64 accumulation and RNG policy.
+
+All successful certificates reproduced the exhaustive sorted draw and exact RNG state in 768 checks at temperatures 0.75, 1.0 and 1.25. Every unsuccessful certificate preserved the starting RNG state. Time 1,920 calls per arm and temperature after warm-up.
+
+| Temperature and metric | Existing | Chunked | Chunked with tail bins |
+| --- | ---: | ---: | ---: |
+| 1.0, median certificate-attempt time | 160.21 µs | 83.79 µs | 78.96 µs |
+| 1.0, successful certificates | 0 | 0 | 0 |
+| 0.75, median certificate-attempt time | 237.35 µs | 83.56 µs | 123.69 µs |
+| 0.75, successful certificates | 1,506 | 1,506 | 1,816 |
+
+This CPU study covers the pinned initial rows and excludes full fallback time. Defer runtime selection until it is measured on late, temperature-one sampled worker outputs. The first-row attempt savings are smaller than the remaining round budget.
+
 ## Evidence identities
 
 Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1`. Original DSpark SHA-256 `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2`. The current run uses the pinned Ollama capture and host documented in the [default-router record](2026-11-21-inkling-mini-decode-default.md).
@@ -1293,3 +1353,39 @@ Original target SHA-256 `65e60f51aa1284d4fb022584908c315270334d991828bb774af6058
 | Native router sampled repeat confirm.py | `d77931dfd29fe361ef040744d8cd939fe0bb4ba2f5908caa4c8a02de006903ce` |
 | Native router sampled repeat confirm-pairs.jsonl | `f92d53d838089537b0f729e0d3c747ba5f449185efb9adc832e547c61325272f` |
 | Native router sampled repeat confirm-host.jsonl | `0fb5780aaf2232bad8185a439a80722b82f4780afa8a6317040dc0155afdfc90` |
+| Short dense TensorOps inkling_slice | `70107c85a21c105199e0fad6ddb5de9d2e7533a40428c99cac61f1435a8ba887` |
+| Short dense TensorOps scored-source.patch | `c4f02ee862cf1098205ed8bb1f4594a8a6f05b447f3550d99c73373b5e781a8d` |
+| Short dense TensorOps short.json | `6497393d481b0e69b3a0a6888090b77e30554aacc6ebb1d9caf8c9cab1734f96` |
+| Short dense TensorOps stock-s4096-00.json | `c80eca8f9de4eac2f83b27f9efcdc2d55c82cddc3c0372d3ffadc30ce9ff7de4` |
+| Short dense TensorOps stock-g4096-01.json | `7b9464c2dd0e33b1234967c82a41ef42ff1eaaf05e6011eb96fcd96bdfc25c00` |
+| FP4 decode initial inkling_slice | `4ceff893a4859b347955d560beee5c6907a050db95e3e36e0ec3d65e9fcea5d0` |
+| FP4 decode initial scored-source.patch | `7f560f3d410107639de0c555f140899f3cd035ff220d2d7b11fe5e3537c7b9f6` |
+| FP4 decode initial short.json | `fe8ef1018366d77d31827e8bef244a50963dee71ca40d834bbb3c71de64404ea` |
+| FP4 decode initial stock-s4096-00.json | `f128d911f9e134614073705e8050e34913fff953bd59874fd50bf33147d9dbf4` |
+| FP4 decode initial stock-g4096-01.json | `a263e598823578832da2ca2ff3903f5ef048c866fb98cbce8b4a396f8626c522` |
+| FP4 decode repeat inkling_slice | `404b7b04372d2c29030548bd3beee171e7eb88b0b63e6acff82ed9684d0aab90` |
+| FP4 decode repeat scored-source.patch | `ba7fdf514e1401a4a0afc238a0b83641b0c13df40890c98b614b4b54ea13f7f8` |
+| FP4 decode repeat short.json | `e601f4b780db4b0bbb4e24c6e3bc351e0613a63b7b5b2acc7b3460870c7d7e2a` |
+| FP4 decode repeat stock-s4096-00.json | `b65a6266b0ee4eebc9c3ffdcdaed64ee526d1a777b0fd9093e2be2ae7b15472f` |
+| FP4 decode repeat stock-g4096-01.json | `669627bbea5c084774eff70512e3fd5f04e71963f906cc45c664a4be4e0b318a` |
+| FP4 table worker stark-generate-with-telemetry | `28cc828eb0d6ed97c3974d594eba330ee2699900b122d6af8575d12be40874f5` |
+| FP4 table worker sealed-slice | `85a87191a0b0d9da213f3957dc60b328acb416e2cac87182778cbc3f45a8d55a` |
+| FP4 table worker worker-source.patch | `58dd3428ec3b8273ac765de8b57bca714ad3ceab15568f910fbcac38b06010b2` |
+| FP4 table worker confirm.py | `5c32fa32d73104710593d15c96e5aafc546c222c932515f70f1438425cca24a2` |
+| FP4 table worker confirm-pairs.jsonl | `99dcd6a8b3b336f884a93d06247e5d765a582afeabe444d74a98805bfbfa9aa4` |
+| FP4 table worker confirm-host.jsonl | `a87478e5b343fdd75407f76e13f4f5ce9a931f5a23df183bf13ad743813e9557` |
+| CPU sampler bench.rs | `8a196509b66dc82739c4dd56e72f0dd29e85186db5cc1eac102572151971fb42` |
+| CPU sampler bench-temp075.rs | `6cb0b308bcd970f198d93538885a68dc4bfbe878ae929725d9912ba52e04060a` |
+| CPU sampler bench | `7411b2f33a27d08428361c6ff3181837ac3ba4d867413cb4a7bf9d611ca6935f` |
+| CPU sampler bench-temp075 | `48996e9c3c302b2d950fb11d2fdb6fe860bddcae94c486b054fdb99eba895432` |
+| CPU sampler result.json | `5e27becb2dc08f42893587f4d7402ff2d7538f3123bdca889af3d2ac16552b95` |
+| CPU sampler result-temp075.json | `7ef66bf966e9954eaeacdabb7511186cd1ef37ce345cf14a06be22ca94faa58e` |
+| FP4 table sampled repeat harness | `2670b68a6f4a1b5d079a3f8d134b4e3fafa1b5362c957bb6ad38360acea14107` |
+| FP4 table sampled repeat receipt | `3c715ef47d611614dee228fd6e772eed3a5e3b292a42d6be2b5514fe64a9e799` |
+| FP4 table sampled repeat host | `466d1cb7a0c78fe838fc8721b6fcfb80687744254ae1a01591fe038d1b225d21` |
+| FP4 table flags-unset proof | `b8a5b540c43b3942a458316f8d3f2943ed64beadfbb40fe803a93111aac3d011` |
+| FP4 table short native proof | `a07b923b92c872c40f61dc9daed0262f2b7eccae571d966533e40e380aef6f75` |
+| FP4 table stock-s4096-00 native proof | `5583af489e16e190a158e163513f88e331a686e58a47f250deac1b31b1a7b9a2` |
+| FP4 table stock-g4096-01 native proof | `ed99e991e6ac659294f9c9b376235439862c8a47ab1e4bf7c69b27a484bf406a` |
+| FP4 table lifecycle harness | `86bb035efa478e37769250bcfd5cff9f0d1a8dd70f3057eaf65eb81d6170ea7e` |
+| FP4 table lifecycle receipt | `d1b51cd09652bd043eb12d6546e89535af29ed286b5f587400a88200975afc6b` |

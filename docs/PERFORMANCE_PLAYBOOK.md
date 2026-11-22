@@ -547,6 +547,12 @@ Retest polled waits with the target-only fence and a repeated fixture. Inkling's
 
 For small source routers, test direct device BF16 TensorOps while preserving exact accumulation boundaries. Inkling's two native router products retain the 2,048 + 256 split and join separate F32 partials. M16 × N8 saves 1.18–1.45 ms per three-row verifier command with exact routed logits. The sampled repeat gains 2.80% at the paired median and reaches 53.28 tok/s. [Native verifier router](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-51--split-the-exact-verifier-router-into-native-bf16-products)
 
+Measure gathering and scattering when comparing device TensorOps against the short shared-weight GEMV. Three-row Inkling dense attention took 13.32–13.41 ms with the fastest native tile against 5.90–5.93 ms for GEMV. The native arm also changed BF16 projection words. Retire this layout. [Short dense TensorOps screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-52--screen-direct-bf16-tensorops-for-short-verifier-dense-attention)
+
+Time byte-pair coefficient lookup before changing the FP4 reduction. Inkling's exact 1 KiB table saved 1.44–1.50 ms per three-row 4K verifier command on repeat. Keep E4M3 decoding and the F32 dot arithmetic. Sampled worker medians were 56.39 and 56.21 tok/s across two paired screens, with exact seeded outputs. [FP4 pair table](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-53--decode-packed-fp4-coefficient-pairs-with-a-constant-table)
+
+Bound the cutoff predecessor before skipping scalar tail maxima in exact sampling. Inkling's chunked CPU certificate attempt fell from 160 to 84 µs on pinned temperature-one initial rows. All of these rows still fell back to the ordinary sampler. [CPU sampler screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-54--bound-and-scan-the-exact-sampler-tail-in-chunks)
+
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
 ## Correctness gates

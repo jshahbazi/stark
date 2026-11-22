@@ -3,6 +3,48 @@
 // Each output keeps the serial 16-channel blocks, per-lane scaled FMA
 // recurrence and final SIMD reduction. Route order is restored by the
 // existing grouped gate/up and down epilogues.
+#ifdef INK_VERIFY_BYTE_COEFFICIENTS
+// Every byte encodes two FP4 coefficients, low nibble first. Generate a
+// 1 KiB constant table of exact FP16 bit patterns, including signed zero.
+constexpr uint ink_verify_fp4_half_bits(uint code) {
+    const uint magnitude = code & 7u;
+    const uint positive = magnitude == 0 ? 0 : (magnitude + 28u - uint(magnitude == 1u)) << 9;
+    return positive | ((code & 8u) << 12);
+}
+
+constexpr uint ink_verify_fp4_pair_bits(uint low, uint high) {
+    return ink_verify_fp4_half_bits(low) | (ink_verify_fp4_half_bits(high) << 16);
+}
+
+#define INK_FP4_PAIR_ROW(high) \
+    ink_verify_fp4_pair_bits(0, high), ink_verify_fp4_pair_bits(1, high), \
+    ink_verify_fp4_pair_bits(2, high), ink_verify_fp4_pair_bits(3, high), \
+    ink_verify_fp4_pair_bits(4, high), ink_verify_fp4_pair_bits(5, high), \
+    ink_verify_fp4_pair_bits(6, high), ink_verify_fp4_pair_bits(7, high), \
+    ink_verify_fp4_pair_bits(8, high), ink_verify_fp4_pair_bits(9, high), \
+    ink_verify_fp4_pair_bits(10, high), ink_verify_fp4_pair_bits(11, high), \
+    ink_verify_fp4_pair_bits(12, high), ink_verify_fp4_pair_bits(13, high), \
+    ink_verify_fp4_pair_bits(14, high), ink_verify_fp4_pair_bits(15, high)
+
+constant uint ink_verify_fp4_half_pairs[256] = {
+    INK_FP4_PAIR_ROW(0), INK_FP4_PAIR_ROW(1), INK_FP4_PAIR_ROW(2), INK_FP4_PAIR_ROW(3),
+    INK_FP4_PAIR_ROW(4), INK_FP4_PAIR_ROW(5), INK_FP4_PAIR_ROW(6), INK_FP4_PAIR_ROW(7),
+    INK_FP4_PAIR_ROW(8), INK_FP4_PAIR_ROW(9), INK_FP4_PAIR_ROW(10), INK_FP4_PAIR_ROW(11),
+    INK_FP4_PAIR_ROW(12), INK_FP4_PAIR_ROW(13), INK_FP4_PAIR_ROW(14), INK_FP4_PAIR_ROW(15),
+};
+#undef INK_FP4_PAIR_ROW
+
+inline float4 ink_verify_fp4_coefficients(uint word) {
+    const uint2 pairs(
+        ink_verify_fp4_half_pairs[word & 255u], ink_verify_fp4_half_pairs[(word >> 8) & 255u]);
+    return float4(as_type<half4>(pairs));
+}
+#else
+inline float4 ink_verify_fp4_coefficients(uint word) {
+    return ink_nvfp4_nibbles(word);
+}
+#endif
+
 template <uint Batch, uint Width>
 inline void ink_verify_nvfp4_route_dot(
     device const ink_nvfp4_activation_word *input, device const uchar *codes, device const uchar *scales,
@@ -17,8 +59,8 @@ inline void ink_verify_nvfp4_route_dot(
     for (uint block = lane; block < Width / 16; block += 32) {
         const uint2 packed = reinterpret_cast<device const uint2 *>(codes)[block];
         const float scale = ink_e4m3_positive(scales[block]);
-        const float4 w0 = ink_nvfp4_nibbles(packed.x), w1 = ink_nvfp4_nibbles(packed.x >> 16);
-        const float4 w2 = ink_nvfp4_nibbles(packed.y), w3 = ink_nvfp4_nibbles(packed.y >> 16);
+        const float4 w0 = ink_verify_fp4_coefficients(packed.x), w1 = ink_verify_fp4_coefficients(packed.x >> 16);
+        const float4 w2 = ink_verify_fp4_coefficients(packed.y), w3 = ink_verify_fp4_coefficients(packed.y >> 16);
 #pragma clang loop unroll(full)
         for (uint row = 0; row < Batch; ++row) {
             if (row < count) {
