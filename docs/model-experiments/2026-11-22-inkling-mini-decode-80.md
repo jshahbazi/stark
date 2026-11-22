@@ -168,6 +168,39 @@ Remeasure widths on the sealed retained MXFP8 vector worker, with QKV and residu
 
 A third proposal lowered the round count on every prompt. On three prompts the increase in round cost outweighed the added acceptance. Keep two at this sampled setting. This test compares the depths within the new session. The worker accounted for 99.85% of GPU counter increments over 58 intervals, with nominal and fair thermal samples and no additional pageouts or swapouts.
 
+## 20261122-INKDECODE-89 · Replay seed-aware draft ranks
+
+At `ace28b28`, replay two seeds on each of four stock 4K captures for 192 anchors per trajectory, using the original checkpoint and native INT8 DSpark shortlist. Sample all four prompts at temperature one. Retain only aggregate evidence. Capture candidates from both Markov masks and evaluate the second mask with the actual first target token as context. Credit its prediction only when the selected first token equals that target. All eight initial rows matched. All 1,536 first-mask winners and all 1,093 second-mask winners reached by the stock first proposal matched the native ranker.
+
+Compare stock rank one with an oracle that selects the actual target when it appears within the top `k`. Count complete nonoverlapping rounds with the usual accepted prefix and tail cap. Price each trajectory at a fixed 28.421 ms per round from the retained sampled run and take the median across trajectories. Actual verification cost varies with the trajectory and the oracle needs the target token in advance.
+
+| Oracle depth per mask | First-mask hits | Two-mask hits | Rounds | Modeled median tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 1,093 | 660 | 769 | 69.83 |
+| 2 | 1,202 | 786 | 710 | 76.77 |
+| 4 | 1,293 | 954 | 665 | 84.46 |
+| 8 | 1,359 | 1,046 | 635 | 87.79 |
+| 16 | 1,386 | 1,127 | 616 | 90.68 |
+
+Fit a policy on the six trajectories from the other three prompts, holding out both seeds together. Each mask and each draft top-two logit gap bucket (<1 or ≥1) chooses stock rank one or one of 20 combinations of temperature and power transform on a copy of the next seeded uniform draw. Normalize the candidate CDF over the full shortlist and fall back to rank one when the draw passes the first 16 candidates. The selected policies used 204, 186, 165 and 217 rounds on the held-out prompt pairs against stock's 205, 182, 165 and 217. The fitted policy increased total rounds from 769 to 772. Archive the calibration at replay. The oracle rates measure shortlist headroom and the experiment produced no live throughput measurement.
+
+## 20261122-INKDECODE-90 · Compare the MLX-Serve Inkling preview
+
+MLX-Serve `v26.11.4-pre-release.1` at `2fe9be834a601c70ef1a597563026340f0e722fe` loads the original checkpoint and the author's 8-bit pack. The launch benchmark reports a best single-stream decode of 116 tok/s on M4 Max and 200 tok/s on M5 Ultra, using the 8-bit pack and bundled drafter across llmprobe 0.6.18 scenarios with greedy sampling and 192 output tokens. The model card lists a separate M4 Max observation of 84 tok/s serial and up to 96 tok/s drafted. The pack preserves the NVFP4 and MXFP8 experts and quantizes the attention projections, embedding and vocabulary head to group-64 affine 8-bit. [Release](https://github.com/ddalcu/mlx-serve/releases/tag/v26.11.4-pre-release.1) · [Launch benchmark](https://x.com/ddalcu/status/2124377137821925651) · [Model card](https://huggingface.co/ddalcu/Inkling-2-Mini-MLX-8bit)
+
+The pinned plugin proposes up to seven tokens, caps the width by the product of draft confidences against its observed verification cost and commits the accepted prefix from an open forward. The verifier reads packed expert banks directly at two to eight rows and shares KV reads across rows with a split relative-attention path at four to eight. Stark's prior depth gate found an added 1.10–1.26 ms when waiting for draft confidence. Test width and fence costs together before importing the policy. The affine 8-bit path needs its own artifact and validation. [Plugin design](https://github.com/ddalcu/mlx-serve/blob/2fe9be834a601c70ef1a597563026340f0e722fe/src/plugins/inkling2/AGENTS.md#L35-L79) · [Open verification and commit](https://github.com/ddalcu/mlx-serve/blob/2fe9be834a601c70ef1a597563026340f0e722fe/src/plugins/inkling2/plugin.zig#L370-L452) · [Stark confidence-depth screen](2026-11-21-inkling-mini-decode-60.md#20261122-inkdecode-70--price-draft-confidence-depth-selection-after-queued-int8-proposals)
+
+Run the macOS arm64 release, verified against its published archive digest, on the local 128 GiB M5 Max with the original checkpoint. Enable the bundled draft head and leave vision enabled. Use one server on loopback and a discarded warmup. Rotate draft-off and draft-on requests over two greedy and two sampled captures from the retained Stark comparison. Send their exact 4,096 prompt IDs, set context to 4,352 and prefill chunks to 2,048, disable prompt lookup, and confirm zero reused tokens. Each request returned 256 tokens. Sampled requests use temperature and top-p one, no top-k or min-p, and the pinned input seed passed to MLX-Serve's sampler. Calculate useful decode rate as 255 divided by the server's native decode phase. Stark values are the corresponding retained-worker observations from the earlier session.
+
+| Workload | MLX-Serve draft off | MLX-Serve draft requested | Stark retained | MLX-Serve paired completion text match |
+| --- | ---: | ---: | ---: | --- |
+| Greedy A | 69.03 | 73.23 | 87.36 | Yes |
+| Greedy B | 67.71 | 66.14 | 78.69 | No |
+| Sampled A | 68.10 | 78.27 | 68.10 | No |
+| Sampled B | 65.83 | 69.08 | 64.31 | No |
+
+Rates are tok/s. Draft-requested medians are 69.69 greedy and 73.68 sampled. The paired text hashes differ on one greedy and both sampled workloads. The API receipt compares decoded completion text and does not expose an exact token parity or accepted-depth trace. This timing screen used the original weights and leaves the 8-bit launch benchmark unreproduced. It supports measuring verifier cost at wider short widths on Stark while preserving the pinned output checks.
+
 ## Evidence
 
 The original target and DSpark artifact digests are recorded with the [integrated QKV run](2026-11-21-inkling-mini-decode-60.md#evidence-identities). The worker and native screen retain aggregate-only private receipts. No prompts, token IDs, logits, targets or fitted tensors are published.
@@ -248,3 +281,11 @@ The original target and DSpark artifact digests are recorded with the [integrate
 | Retained sampled depth worker harness | `69b374deba4722b4359de4b9b3ec838bbb8abe20481415842ec1ec272c96a7f1` |
 | Retained sampled depth worker receipt | `5a24492801d59c191df516e259e3605f77132f8f56ddfdd5cd24c1615a6d802f` |
 | Retained sampled depth host observations | `52dfa1a706fc0e4d64f43b9a5b1b4706be437447df48f6a982e04bf498d65f87` |
+| Seed-aware rank replay patch | `437dbc2b8611d9ecf75cf458e4b9ee1e19d787125a986c826167d44bc7ef3baf` |
+| Seed-aware rank replay executable | `8de565c03d5d622984abcca1ebe066a7a47ec4715d9e711c7fd2bee9cfef9f2f` |
+| Seed-aware rank replay harness | `15670ab144a0d5026faf7a72e61bb90727ae0048fed586328b7640027d05ed9f` |
+| Seed-aware rank replay receipt | `db840193bd825752d9fed754d336ff452ecb0fdf202d88bcc802a7b945a51a82` |
+| MLX-Serve macOS arm64 release archive | `510de30e3db01786098e7022dddb84158462e2f2333b08dde1a63e0e3ccbc65e` |
+| MLX-Serve executable | `05983e1278d6253d3648ddaa2514ec2a2f73ff3f617d41412d18334759991392` |
+| MLX-Serve original-checkpoint harness | `8820cd5dee67c14c3696ef271defbd57883cfd6a15688bb417853a52d8cc7f37` |
+| MLX-Serve original-checkpoint receipt | `7a8f803677591cb9857f8173d5a9f5d52f203deda0b42a1d75a083ef9bb6454f` |
