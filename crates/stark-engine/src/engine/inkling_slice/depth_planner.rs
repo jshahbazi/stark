@@ -10,13 +10,13 @@
 
 /// Maximum draft depth the verifier supports.
 pub const MAX_DEPTH: usize = 3;
-const ACCEPT_WEIGHT: f64 = 0.03;
+const ACCEPT_WEIGHT: f64 = 0.05;
 const COST_WEIGHT: f64 = 0.1;
 /// A depth change needs this relative gain in expected tokens per millisecond.
 const HYSTERESIS: f64 = 1.03;
 /// Every this many rounds the planner proposes one draft more than its
 /// choice, so the estimates for later positions stay current.
-const PROBE_PERIOD: usize = 16;
+const PROBE_PERIOD: usize = 32;
 
 #[derive(Clone, Debug)]
 pub struct DepthPlanner {
@@ -38,7 +38,7 @@ impl Default for DepthPlanner {
 impl DepthPlanner {
     pub fn new() -> Self {
         Self {
-            accept: [0.7, 0.6, 0.6],
+            accept: [0.8, 0.75, 0.75],
             // Relative starting costs; replaced by measurements within a few
             // rounds of each depth.
             cost: [15.0, 20.0, 23.0, 26.0],
