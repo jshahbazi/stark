@@ -3260,7 +3260,7 @@ class Desktop:
             context = context or self.context
             capability, default_mtp = self.mtp_settings()
             enabled_mtp = (default_mtp and image is None) if mtp is None else mtp
-            drafts = self.resolve_request_mtp(enabled_mtp, capability, image)
+            drafts = self.resolve_request_mtp(enabled_mtp, capability, image, sampling)
             context_capacity_known = self.context_capacity_known
             estimate_key = estimate_key or self.estimate_key(
                 context=context,
@@ -3503,19 +3503,31 @@ class Desktop:
                 self.prefix_reset_pending = True
 
     @staticmethod
-    def resolve_request_mtp(enabled, capability, image):
+    def resolve_request_mtp(enabled, capability, image, sampling=None):
         if type(enabled) is not bool:
             raise APIError(400, "mtp must be a boolean.", "invalid_request")
         if enabled is True and image is not None:
             raise APIError(400, "MTP is not supported for image requests.", "mtp_not_supported")
         try:
-            return resolve_mtp(enabled, capability)
+            return resolve_mtp(enabled, capability, sampling)
         except ValueError:
             raise APIError(400, "MTP is not supported by the loaded model and worker.", "mtp_not_supported") from None
 
     @staticmethod
     def validate_mtp_reply(reply, capability, drafts):
         ack = reply.get("mtp")
+        # A worker may decode serially instead of a slower draft route; it then
+        # acknowledges zero drafts and echoes the requested count.
+        fallback = (
+            isinstance(ack, dict)
+            and drafts > 0
+            and ack.get("enabled") is False
+            and ack.get("drafts") == 0
+            and type(ack.get("requested_drafts")) is int
+            and ack.get("requested_drafts") == drafts
+        )
+        if fallback:
+            drafts = 0
         if (
             not isinstance(ack, dict)
             or ack.get("enabled") is not (drafts > 0)
@@ -3829,7 +3841,7 @@ class Desktop:
                 )
             capability, default_mtp = self.mtp_settings()
             enabled_mtp = (default_mtp and request["image"] is None) if request["mtp"] is None else request["mtp"]
-            drafts = self.resolve_request_mtp(enabled_mtp, capability, request["image"])
+            drafts = self.resolve_request_mtp(enabled_mtp, capability, request["image"], request["sampling"])
             epoch, identifier, worker = self.epoch, self.active_model, self.worker
             self.reserve_api_request(epoch, identifier, cancelled)
             estimate_key = self.estimate_key(

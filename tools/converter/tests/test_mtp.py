@@ -2,7 +2,7 @@
 
 import pytest
 
-from stark_convert.mtp import mtp_capabilities, resolve_mtp
+from stark_convert.mtp import default_mtp_enabled, mtp_capabilities, resolve_mtp
 
 
 def descriptor(**changes):
@@ -50,7 +50,17 @@ def test_inkling_short_verifier_uses_the_separate_three_draft_contract():
         verification="inkling-dspark-short-target-draw-v1",
     )
     assert mtp_capabilities({"mtp": raw}) == raw
-    assert resolve_mtp(True, raw) == 1
+    # The measured best depth: three proposals greedy, two sampled.
+    assert resolve_mtp(True, raw) == 3
+    assert resolve_mtp(True, raw, {"mode": "greedy"}) == 3
+    assert resolve_mtp(True, raw, {"mode": "stochastic", "temperature": 1.0}) == 2
+    assert resolve_mtp(False, raw, {"mode": "greedy"}) == 0
+    assert default_mtp_enabled(raw) is False
+    assert default_mtp_enabled(dict(raw, default_drafts=3)) is True
+    drafting = dict(raw, default_drafts=3)
+    assert mtp_capabilities({"mtp": drafting}) == drafting
+    assert mtp_capabilities({"mtp": dict(raw, default_drafts=2)})["supported"] is False
+    assert mtp_capabilities({"mtp": dict(raw, default_drafts=4)})["supported"] is False
     assert mtp_capabilities({"mtp": dict(raw, max_drafts=4)})["supported"] is False
     assert mtp_capabilities({"mtp": dict(raw, verification="inkling-dspark-target-draw-v1")})["supported"] is False
 
