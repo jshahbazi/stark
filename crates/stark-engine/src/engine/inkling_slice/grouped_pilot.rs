@@ -11,6 +11,7 @@ const TOP: usize = 8;
 const TILE: usize = 32;
 const ROWS64_QMM: Kernel = "ink_group_qmm_reused_guard_rows64";
 const EXPERIMENT_BUCKET: Kernel = "ink_group_bucket_experiment";
+const FAST_QMM: Kernel = "ink_group_qmm_bare_rows64";
 const REPEATS: usize = 5;
 const PHYSICAL: usize = 10;
 const PROBE_FIELDS: usize = 5;
@@ -113,6 +114,24 @@ fn active_rows64(gpu: &Stream<'_>) -> bool {
     gpu.runtime.source_text_active && gpu.runtime.nvfp4_probe.is_none() && gpu.runtime.grouped_qmm == ROWS64_QMM
 }
 
+/// The source prefill default: tensor products without exactness guards.
+/// Only the diagnostic exact reference (`exact_prefill`) and the occupancy
+/// probe select the guarded kernels.
+fn fast_qmm(gpu: &Stream<'_>) -> Option<Kernel> {
+    // Verifier rows keep their own kernels; this is a prefill-only path.
+    gpu.runtime
+        .fast_qmm
+        .filter(|_| active_rows64(gpu) && !gpu.runtime.exact_prefill && !gpu.runtime.verify_nvfp4_matvec)
+}
+
+/// Fused products with BF16 epilogues on the default source prefill.
+fn fused_nvfp4(
+    gpu: &Stream<'_>,
+    source_packed: bool,
+) -> bool {
+    source_packed && gpu.runtime.fast_nvfp4 && fast_qmm(gpu).is_some()
+}
+
 pub(super) struct GroupedExperts {
     capacity: usize,
     pub(super) min_rows: usize,
@@ -140,6 +159,35 @@ pub(super) struct GroupedExperts {
     projected: Buffer,
 }
 
+/// Router selection probe: expert IDs from the reference selection kernel
+/// on the same router logits, and counts of [rows with a different expert
+/// set, rows compared].
+pub(super) struct RouterProbe {
+    ids: Buffer,
+    weights: Buffer,
+    counts: Buffer,
+}
+
+impl RouterProbe {
+    pub(super) fn new(
+        device: &Device,
+        rows: usize,
+    ) -> Result<Self> {
+        Ok(Self {
+            ids: zeroed(device, rows * TOP * 4)?,
+            weights: zeroed(device, rows * TOP * 4)?,
+            counts: zeroed(device, 2 * 4)?,
+        })
+    }
+
+    pub(super) fn take_counts(&self) -> [u32; 2] {
+        let counts = read_shared::<u32>(&self.counts, 2);
+        // The previous command has completed; reset for the next arm.
+        unsafe { self.counts.contents().as_ptr().cast::<u8>().write_bytes(0, 8) };
+        [counts[0], counts[1]]
+    }
+}
+
 struct Mxfp8Tensor {
     input_norms: Buffer,
     masks: Buffer,
@@ -163,8 +211,8 @@ impl GroupedExperts {
         runtime: &mut Runtime,
         capacity: usize,
     ) -> Result<Self> {
-        if !runtime.pinned_m5 || !(64..=2048).contains(&capacity) {
-            return Err("grouped Inkling experts require M5 Max and capacity of 64–2,048 rows");
+        if !runtime.pinned_m5 || !(64..=8192).contains(&capacity) {
+            return Err("grouped Inkling experts require M5 Max and capacity of 64–8,192 rows");
         }
         register_grouped(runtime)?;
         Self::buffers(&runtime.device, capacity)
@@ -265,8 +313,10 @@ impl GroupedExperts {
             "ink_mx_weight_norm",
             "ink_mx_tensor_ingress",
             "ink_mx_tensor_product",
+            "ink_mx_tensor_fast",
             "ink_mx_replay_reset",
             "ink_mx_replay_source",
+            "ink_mx_replay_packed",
             "ink_mx_tensor_finish_up",
             "ink_mx_tensor_finish_down",
         ] {
@@ -437,23 +487,33 @@ impl GroupedExperts {
         position: usize,
         rows: usize,
         partials: [&Buffer; 4],
+        attention: Option<[&Buffer; 4]>,
     ) {
-        gpu.one(
-            "ink_verify_finish_experts",
-            &[
-                &self.output.down,
-                &self.output.merged,
-                &layer.mlp_conv,
-                &visit.conv[3],
-                partials[0],
-                partials[1],
-                partials[2],
-                partials[3],
-            ],
-            [position as u32, rows as u32],
-            (WIDTH / 128, 1),
-            128,
-        );
+        let inputs = attention.unwrap_or(partials);
+        let buffers = [
+            &self.output.down,
+            &self.output.merged,
+            &layer.mlp_conv,
+            &visit.conv[3],
+            partials[0],
+            partials[1],
+            partials[2],
+            partials[3],
+            &visit.conv[2],
+            inputs[0],
+            inputs[1],
+            inputs[2],
+            inputs[3],
+        ]
+        .map(binding);
+        // With attention inputs, the attention mix deferred these history
+        // stores to this launch.
+        let (kernel, count) = if attention.is_some() {
+            ("ink_verify_finish_experts_history", 13)
+        } else {
+            ("ink_verify_finish_experts", 8)
+        };
+        gpu.dispatch(kernel, &buffers[..count], [position as u32, rows as u32], (WIDTH / 128, 1), 128);
     }
 
     pub(super) fn copy_output(
@@ -493,10 +553,10 @@ impl GroupedExperts {
         } else {
             self.encode_router(gpu, &self.input, &layer.router, &layer.bias, rows);
         }
-        if gpu.runtime.verify_nvfp4_matvec {
-            gpu.phase(PrefillPhase::RouteSelect);
-        }
-        let bucket = if matches!(layer.experts, Experts::Nvfp4 { .. }) && active_rows64(gpu) {
+        gpu.phase(PrefillPhase::RouteSelect);
+        let bucket = if matches!(layer.experts, Experts::Nvfp4 { .. }) && fused_nvfp4(gpu, source_packed) {
+            FAST_BUCKET
+        } else if matches!(layer.experts, Experts::Nvfp4 { .. }) && active_rows64(gpu) {
             EXPERIMENT_BUCKET
         } else {
             "ink_group_bucket"
@@ -548,35 +608,62 @@ impl GroupedExperts {
         bias: &Buffer,
         rows: usize,
     ) {
-        if gpu.runtime.verify_nvfp4_matvec {
-            gpu.phase(PrefillPhase::RouterProjection);
-        }
+        gpu.phase(PrefillPhase::RouterProjection);
         let short = gpu.runtime.verify_nvfp4_matvec && gpu.runtime.verify_short_router && rows <= MAX_VERIFY_ROWS;
         if let Some(partials) = gpu.runtime.verify_native_router.as_ref().filter(|_| short) {
             gpu.one("ink_verify_router_native", &[input, router, partials], rows as u32, (EXPERTS / 8, 2), 32);
             gpu.one("ink_verify_router_join", &[partials, &self.logits], (rows * EXPERTS) as u32, (rows, 1), EXPERTS);
         } else {
-            let projection = if short {
-                "ink_verify_router_source"
+            // Default prefill shares each router weight fragment across four
+            // 16-row tiles; the arithmetic per output is the source kernel's.
+            let (projection, tile_rows) = if short {
+                ("ink_verify_router_source", 16)
+            } else if gpu.runtime.router_tiles && !gpu.runtime.exact_prefill {
+                ("ink_prefill_router_tiles", 64)
             } else {
-                "ink_prefill_router_source"
+                ("ink_prefill_router_source", 16)
             };
-            gpu.one(projection, &[input, router, &self.logits], rows as u32, (EXPERTS / 32, rows.div_ceil(16)), 32);
+            gpu.one(
+                projection,
+                &[input, router, &self.logits],
+                rows as u32,
+                (EXPERTS / 32, rows.div_ceil(tile_rows)),
+                32,
+            );
         }
-        if gpu.runtime.verify_nvfp4_matvec {
-            gpu.phase(PrefillPhase::RouteSelect);
-        }
-        if gpu.runtime.verify_nvfp4_matvec && gpu.runtime.parallel_route && self.source_log_weights.is_some() {
-            gpu.one(PARALLEL_ROUTE_KERNEL, &[&self.logits, bias, &self.ids, &self.weights], (), (rows, 1), 32);
-            return;
-        }
+        gpu.phase(PrefillPhase::RouteSelect);
         let select = if self.source_log_weights.is_some() {
             "ink_prefill_select_log_weights"
         } else {
             "ink_prefill_select_source"
         };
-        let route_weights = self.source_log_weights.as_ref().map_or(&self.weights, |(weights, _)| weights);
-        gpu.one(select, &[&self.logits, bias, &self.ids, route_weights], (), (rows, 1), EXPERTS);
+        // The fused selection and weights of the singleton and verifier rows
+        // (same scores, lowest-ID ties, pinned LogAddExp/softmax arithmetic)
+        // also serve default prefill: one SIMD group per row, one dispatch.
+        let fused = self.source_log_weights.is_some()
+            && gpu.runtime.parallel_route
+            && (gpu.runtime.verify_nvfp4_matvec || !gpu.runtime.exact_prefill);
+        if fused {
+            gpu.one(PARALLEL_ROUTE_KERNEL, &[&self.logits, bias, &self.ids, &self.weights], (), (rows, 1), 32);
+        } else {
+            let route_weights = self.source_log_weights.as_ref().map_or(&self.weights, |(weights, _)| weights);
+            gpu.one(select, &[&self.logits, bias, &self.ids, route_weights], (), (rows, 1), EXPERTS);
+        }
+        // Diagnostic: select again with the reference selection kernel on the
+        // same router logits and count rows whose expert set differs.
+        if let Some(probe) = gpu.runtime.router_probe.as_ref().filter(|_| !short && !gpu.runtime.exact_prefill) {
+            gpu.one(select, &[&self.logits, bias, &probe.ids, &probe.weights], (), (rows, 1), EXPERTS);
+            gpu.one(
+                "ink_router_compare",
+                &[&self.ids, &probe.ids, &probe.counts],
+                rows as u32,
+                (rows.div_ceil(128), 1),
+                128,
+            );
+        }
+        if fused {
+            return;
+        }
         if let Some((log_weights, zero)) = &self.source_log_weights {
             gpu.one("vs_LogAddExpfloat32", &[log_weights, zero, log_weights], (rows * TOP) as u32, (rows, 1), TOP);
             gpu.one("ink_prefill_negate_route_weights", &[log_weights], (), (rows, 1), TOP);
@@ -647,6 +734,36 @@ impl GroupedExperts {
             return;
         }
         gpu.phase(PrefillPhase::Nvfp4Quant);
+        if let Some(kernel) = fast_qmm(gpu) {
+            gpu.one(
+                "ink_group_ingress_bare",
+                &[inner, routing.indices, &self.activation],
+                [width as u32, u32::from(gather)],
+                ((width / 4).div_ceil(128), rows * TOP),
+                128,
+            );
+            gpu.phase(if gather {
+                PrefillPhase::Nvfp4UpDot
+            } else {
+                PrefillPhase::Nvfp4DownDot
+            });
+            gpu.one(
+                kernel,
+                &[
+                    &self.activation,
+                    &bank.codes,
+                    &bank.blocks,
+                    routing.runs,
+                    &self.quantum,
+                    &self.maxima,
+                    &self.projected,
+                ],
+                width as u32,
+                (WIDTH / 32, live_run_limit(rows, run_slots_for(rows, 64))),
+                128,
+            );
+            return;
+        }
         gpu.one(
             "ink_group_ingress",
             &[inner, routing.indices, &self.activation, &self.quantum, &self.maxima],
@@ -722,13 +839,13 @@ impl GroupedExperts {
         up_dot_tap: Option<&Buffer>,
     ) {
         let out = &self.output;
-        let activation = if gpu.runtime.verify_nvfp4_matvec && gpu.runtime.verify_half_act {
-            "ink_verify_half_activation"
-        } else {
-            "ink_nvfp4_activation"
-        };
+        let activation = nvfp4_activation(gpu.runtime);
         gpu.phase(PrefillPhase::Nvfp4Quant);
         gpu.one(activation, &[input, &self.up_inner, &self.up_max], WIDTH as u32, (rows, 1), 256);
+        if up_dot_tap.is_none() && fused_nvfp4(gpu, source_packed) {
+            self.encode_fast_projected(gpu, up, down, rows, &routing, activation);
+            return;
+        }
         self.encode_dot(gpu, up, &self.up_inner, &routing, rows, WIDTH, true);
         if let Some(tap) = up_dot_tap {
             let words = rows * TOP * WIDTH;
@@ -762,6 +879,70 @@ impl GroupedExperts {
         }
     }
 
+    /// Default source prefill: gathered BF16 ingress, then fused products that
+    /// store BF16 gate/up activations and scaled down outputs directly.
+    fn encode_fast_projected(
+        &self,
+        gpu: &mut Stream<'_>,
+        up: &Bank,
+        down: &Bank,
+        rows: usize,
+        routing: &ExpertOrder<'_>,
+        activation: Kernel,
+    ) {
+        let out = &self.output;
+        let groups = (WIDTH / FAST_TILE_COLS, live_run_limit(rows, run_slots_for(rows, FAST_RUN_ROWS)));
+        let threads = FAST_THREADS;
+        let capture = gpu.runtime.expert_capture.as_ref().filter(|capture| capture.claim(rows));
+        for gather in [true, false] {
+            let (bank, inner, amax, width, result, kernel) = if gather {
+                (up, &self.up_inner, &self.up_max, WIDTH, &out.middle, FAST_GATE_UP)
+            } else {
+                (down, &self.down_inner, &self.down_max, MID, &out.down, FAST_DOWN)
+            };
+            if !gather {
+                gpu.phase(PrefillPhase::Nvfp4Quant);
+                gpu.one(activation, &[&out.middle, &self.down_inner, &self.down_max], MID as u32, (rows * TOP, 1), 256);
+            }
+            gpu.one(
+                "ink_group_ingress_bare",
+                &[inner, routing.indices, &self.activation],
+                [width as u32, u32::from(gather)],
+                ((width / 4).div_ceil(128), rows * TOP),
+                128,
+            );
+            gpu.phase(if gather {
+                PrefillPhase::Nvfp4UpDot
+            } else {
+                PrefillPhase::Nvfp4DownDot
+            });
+            let buffers = [
+                &self.activation,
+                &bank.codes,
+                &bank.blocks,
+                routing.runs,
+                routing.indices,
+                amax,
+                routing.weights,
+                &bank.maxima,
+                result,
+            ]
+            .map(binding);
+            let params = FastParams {
+                width: width as u32,
+                denominator: bank.denominator,
+            };
+            if let Some(capture) = capture {
+                capture.record(gpu, gather, &self.activation, rows, routing, amax, bank);
+            }
+            gpu.dispatch(kernel, &buffers, params, groups, threads);
+        }
+        gpu.phase(PrefillPhase::Nvfp4Epilogue);
+        if !gpu.defer_expert_merge {
+            gpu.one("ink_group_combine", &[&out.down, &out.merged], (), (WIDTH / 128, rows), 128);
+        }
+    }
+
     fn encode_mxfp8(
         &self,
         gpu: &mut Stream<'_>,
@@ -783,7 +964,10 @@ impl GroupedExperts {
             grouped_mxfp8_names(self.wide_mxfp8, self.source_mxfp8 && source_packed)
         };
         let tensor = self.mxfp8_tensor.as_ref().filter(|_| {
-            source_packed && gpu.runtime.source_text_active && gpu.runtime.mxfp8_tensor_active && rows > 64
+            source_packed
+                && gpu.runtime.source_text_active
+                && gpu.runtime.mxfp8_tensor_active
+                && (rows > 64 || !gpu.runtime.exact_prefill)
         });
         let up_buffers =
             [&self.up_inner, &self.order, &self.runs, &self.weights, &up.codes, &up.exponents, &out.middle];
@@ -836,8 +1020,27 @@ impl GroupedExperts {
         rows: usize,
         width: usize,
     ) {
-        let norms = bank.tensor_norms.as_ref().expect("MXFP8 tensor norms prepared at startup");
         let routes = rows * TOP;
+        // Default source prefill: unguarded tensor MXFP8. The certified
+        // product and source-order replay remain the exact reference.
+        if !gpu.runtime.exact_prefill {
+            gpu.one(
+                "ink_group_ingress_bare",
+                &[inner, &self.order, &self.activation],
+                [width as u32, u32::from(width == WIDTH)],
+                ((width / 4).div_ceil(128), routes),
+                128,
+            );
+            gpu.one(
+                "ink_mx_tensor_fast",
+                &[&self.activation, &self.runs, &bank.codes, &bank.exponents, &self.projected],
+                width as u32,
+                (WIDTH / 64, run_slots(rows)),
+                128,
+            );
+            return;
+        }
+        let norms = bank.tensor_norms.as_ref().expect("MXFP8 tensor norms prepared at startup");
         let phase = gpu.mxfp8_dots;
         assert!(phase < MXFP8_DOTS);
         gpu.mxfp8_dots += 1;
@@ -870,6 +1073,27 @@ impl GroupedExperts {
             128,
         );
         gpu.phase(PrefillPhase::Mxfp8Replay);
+        if !mxfp8_tensor_audit_requested() {
+            // Same source recurrence over the sorted BF16 ingress rows.
+            gpu.one(
+                "ink_mx_replay_packed",
+                &[
+                    inner,
+                    &self.order,
+                    &self.runs,
+                    &bank.codes,
+                    &bank.exponents,
+                    &self.projected,
+                    &tensor.masks,
+                    &self.activation,
+                    &tensor.input_norms,
+                ],
+                width as u32,
+                (WIDTH / 4, run_slots(rows)),
+                128,
+            );
+            return;
+        }
         gpu.one(
             "ink_mx_replay_source",
             &[
@@ -946,6 +1170,9 @@ fn register_grouped_mxfp8(
     Ok(())
 }
 
+// Unused: the 64 x 32 tile route (`enable_rows64`) is the retained default and
+// replaces this kernel selection. Kept for a later cleanup.
+#[allow(dead_code)]
 pub(super) fn enable_shared_scales(runtime: &mut Runtime) -> Result<()> {
     let kernel = "ink_group_qmm_shared_scales";
     let options = MTLCompileOptions::new();
@@ -987,7 +1214,342 @@ pub(super) fn enable_rows64(runtime: &mut Runtime) -> Result<()> {
         runtime.pipelines.insert(name, pipeline);
     }
     runtime.grouped_qmm = ROWS64_QMM;
+    enable_fast_qmm(runtime)
+}
+
+/// Diagnostic: the operands of one default grouped NVFP4 visit (sorted BF16
+/// activations, run table, route order, scales and the layer's banks), copied
+/// during a real prefill command for the expert-product ceiling report.
+pub(super) struct ExpertCapture {
+    visit: usize,
+    seen: std::cell::Cell<usize>,
+    rows: std::cell::Cell<usize>,
+    activations: [Buffer; 2],
+    runs: Buffer,
+    order: Buffer,
+    amax: [Buffer; 2],
+    weights: Buffer,
+    banks: std::cell::RefCell<Vec<(Buffer, Buffer, Buffer, f32)>>,
+    outputs: [Buffer; 2],
+}
+
+impl ExpertCapture {
+    pub(super) fn new(
+        device: &Device,
+        capacity: usize,
+        visit: usize,
+    ) -> Result<Self> {
+        let routes = capacity * TOP;
+        Ok(Self {
+            visit,
+            seen: std::cell::Cell::new(0),
+            rows: std::cell::Cell::new(0),
+            activations: [zeroed(device, routes * WIDTH * 2)?, zeroed(device, routes * MID * 2)?],
+            runs: zeroed(device, run_slots(capacity) * 3 * 4)?,
+            order: zeroed(device, routes * 4)?,
+            amax: [zeroed(device, capacity * 4)?, zeroed(device, routes * 4)?],
+            weights: zeroed(device, routes * 4)?,
+            banks: std::cell::RefCell::new(Vec::new()),
+            outputs: [zeroed(device, routes * MID * 2)?, zeroed(device, routes * WIDTH * 2)?],
+        })
+    }
+
+    fn claim(
+        &self,
+        rows: usize,
+    ) -> bool {
+        let seen = self.seen.get();
+        self.seen.set(seen + 1);
+        if seen == self.visit {
+            self.rows.set(rows);
+        }
+        seen == self.visit
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record(
+        &self,
+        gpu: &mut Stream<'_>,
+        gather: bool,
+        activation: &Buffer,
+        rows: usize,
+        routing: &ExpertOrder<'_>,
+        amax: &Buffer,
+        bank: &Bank,
+    ) {
+        let routes = rows * TOP;
+        let mut copy = |src: &Buffer, dst: &Buffer, words: usize| {
+            gpu.one("ink_trace_copy", &[src, dst], words as u32, (words.div_ceil(128), 1), 128);
+        };
+        let (index, width, amax_words) = if gather {
+            (0, WIDTH, rows)
+        } else {
+            (1, MID, routes)
+        };
+        copy(activation, &self.activations[index], routes * width / 2);
+        copy(amax, &self.amax[index], amax_words);
+        if gather {
+            copy(routing.runs, &self.runs, run_slots_for(rows, FAST_RUN_ROWS) * 3);
+            copy(routing.indices, &self.order, routes);
+            copy(routing.weights, &self.weights, routes);
+        }
+        self.banks.borrow_mut().push((bank.codes.clone(), bank.blocks.clone(), bank.maxima.clone(), bank.denominator));
+    }
+}
+
+/// Time the default grouped NVFP4 products and ceiling variants on a
+/// captured visit: the production kernel; weights pre-decoded to BF16 in
+/// device memory; decode skipped after the first K step with activations
+/// from threadgroup memory (tensor work only); and decode without the
+/// tensor product. Each variant runs `reps` times in one command.
+pub(super) fn expert_ceiling(
+    runtime: &mut Runtime,
+    capture: &ExpertCapture,
+    reps: usize,
+) -> Result<Value> {
+    if FAST_STATIONARY {
+        return Err("Inkling expert ceiling variants are built on the grouped_fast run geometry");
+    }
+    let rows = capture.rows.get();
+    let banks = capture.banks.borrow().clone();
+    if rows == 0 || banks.len() != 2 {
+        return Err("Inkling expert ceiling capture did not record a visit");
+    }
+    let variants: [(&str, &str); 5] = [
+        ("production", ""),
+        ("predecoded_bf16_weights", "#define INK_FAST_CEIL_PREDECODED 1\n"),
+        ("no_decode_after_first_step", "#define INK_FAST_CEIL_NODECODE 1\n"),
+        ("tensor_only", "#define INK_FAST_CEIL_NODECODE 1\n#define INK_FAST_CEIL_TG_ACTIVATION 1\n"),
+        ("decode_only", "#define INK_FAST_CEIL_NOMMA 1\n"),
+    ];
+    let options = MTLCompileOptions::new();
+    options.set_math_mode(MTLMathMode::Safe);
+    options.set_language_version(MTLLanguageVersion::Version4_0);
+    let mut pipelines = Vec::new();
+    for (name, defines) in variants {
+        let source = format!(
+            "#include <metal_stdlib>\nusing namespace metal;\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n#define INK_FAST_BM {FAST_TILE_ROWS}\n#define INK_FAST_BN {FAST_TILE_COLS}\n#define INK_FAST_BK {FAST_TILE_K}\n#define INK_FAST_SG_ROWS {FAST_SG_ROWS}\n#define INK_FAST_DOUBLE {FAST_DOUBLE}\n#define INK_FAST_PAD {FAST_PAD}\n{defines}{}\n{}",
+            include_str!("experts.metal"),
+            include_str!("grouped_fast.metal")
+        );
+        let library = runtime
+            .device
+            .new_library_with_source(&source, Some(&options))
+            .map_err(|_| "Inkling expert ceiling compilation failed")?;
+        let mut pair = Vec::new();
+        for kernel in [FAST_GATE_UP, FAST_DOWN, "ink_ceil_decode_bank"] {
+            let function = library.new_function_with_name(kernel).ok_or(kernel)?;
+            pair.push(runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| kernel)?);
+        }
+        pipelines.push((name, pair));
+    }
+    // BF16 copies of the two banks for the pre-decoded variant.
+    let decoded =
+        [zeroed(&runtime.device, EXPERTS * WIDTH * WIDTH * 2)?, zeroed(&runtime.device, EXPERTS * WIDTH * MID * 2)?];
+    let groups = (WIDTH / FAST_TILE_COLS, live_run_limit(rows, run_slots_for(rows, FAST_TILE_ROWS)));
+    let threads = FAST_TILE_ROWS / FAST_SG_ROWS * FAST_TILE_COLS;
+    let decode_pipeline = &pipelines[0].1[2];
+    execute(runtime, |gpu| {
+        for (side, width) in [(0usize, WIDTH), (1, MID)] {
+            let (codes, blocks, _, _) = &banks[side];
+            if let Some(encoder) = &gpu.encoder {
+                encoder.set_compute_pipeline_state(decode_pipeline);
+                encoder.set_buffer(Some(codes), 0, 0);
+                encoder.set_buffer(Some(blocks), 0, 1);
+                encoder.set_buffer(Some(&decoded[side]), 0, 2);
+                let width = width as u32;
+                encoder.set_bytes(NonNull::from(&width).cast(), 4, 3);
+                encoder.dispatch_threadgroups(
+                    MTLSize {
+                        width: (EXPERTS * WIDTH * width as usize / 8).div_ceil(256),
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 256,
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+            }
+        }
+    })?;
+    let mut report = Vec::new();
+    for (name, pair) in &pipelines {
+        let mut sides = Vec::new();
+        for (side, width) in [(0usize, WIDTH), (1, MID)] {
+            let (codes, blocks, maxima, denominator) = &banks[side];
+            let weights = if *name == "predecoded_bf16_weights" {
+                &decoded[side]
+            } else {
+                codes
+            };
+            let amax = &capture.amax[side];
+            let params = FastParams {
+                width: width as u32,
+                denominator: *denominator,
+            };
+            let timing = execute(runtime, |gpu| {
+                let Some(encoder) = &gpu.encoder else {
+                    return;
+                };
+                encoder.set_compute_pipeline_state(&pair[side]);
+                let buffers = [
+                    &capture.activations[side],
+                    weights,
+                    blocks,
+                    &capture.runs,
+                    &capture.order,
+                    amax,
+                    &capture.weights,
+                    maxima,
+                    &capture.outputs[side],
+                ];
+                for (index, buffer) in buffers.into_iter().enumerate() {
+                    encoder.set_buffer(Some(buffer), 0, index);
+                }
+                encoder.set_bytes(NonNull::from(&params).cast(), size_of::<FastParams>(), 9);
+                for _ in 0..reps {
+                    encoder.dispatch_threadgroups(
+                        MTLSize {
+                            width: groups.0,
+                            height: groups.1,
+                            depth: 1,
+                        },
+                        MTLSize {
+                            width: threads,
+                            height: 1,
+                            depth: 1,
+                        },
+                    );
+                }
+            })?;
+            let ms = timing.gpu_ms / reps as f64;
+            let flops = 2.0 * (rows * TOP) as f64 * WIDTH as f64 * width as f64;
+            sides.push(json!({
+                "projection": if side == 0 { "gate_up" } else { "down" },
+                "gpu_ms_per_visit": ms,
+                "tflops": flops / (ms * 1.0e9),
+            }));
+        }
+        report.push(json!({"variant": name, "projections": sides}));
+    }
+    Ok(json!({"rows": rows, "routes": rows * TOP, "reps": reps, "variants": report}))
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FastParams {
+    width: u32,
+    denominator: f32,
+}
+
+const FAST_GATE_UP: Kernel = "ink_group_fast_gate_up";
+const FAST_DOWN: Kernel = "ink_group_fast_down";
+/// Use grouped_nax.metal (BK 64 double-buffered decode with the next step
+/// fetched before the tensor work, register epilogue, 64-column tiles of
+/// 32 x 32 SIMD-group blocks) instead of grouped_fast.metal.
+const FAST_NAX_DESIGN: bool = false;
+/// Use grouped_stationary.metal: each decoded weight block serves up to 256
+/// routed rows of its expert; same per-output arithmetic as grouped_fast.
+const FAST_STATIONARY: bool = false;
+/// Rows per expert run (bucket tile) of the default grouped NVFP4 product.
+const FAST_RUN_ROWS: usize = if FAST_STATIONARY {
+    256
+} else {
+    FAST_TILE_ROWS
+};
+/// Threads per workgroup of the default grouped NVFP4 product.
+const FAST_THREADS: usize = if FAST_STATIONARY {
+    256
+} else {
+    FAST_TILE_ROWS / FAST_SG_ROWS * FAST_TILE_COLS
+};
+const FAST_BUCKET: Kernel = "ink_group_bucket_fast_nvfp4";
+const FAST_TILE_ROWS: usize = 64;
+const FAST_TILE_COLS: usize = 64;
+/// Rows per SIMD group (16 or 32); the workgroup has one SIMD group per
+/// 32 columns and per `FAST_SG_ROWS` rows.
+const FAST_SG_ROWS: usize = 32;
+const FAST_TILE_K: usize = 32;
+const FAST_DOUBLE: usize = 1;
+const FAST_PAD: usize = 0;
+
+/// Grouped NVFP4 products on 64 x 64 tiles with 32 x 32 SIMD-group
+/// fragments, a vectorized double-buffered weight decode and the BF16
+/// epilogues applied at the store.
+fn enable_fast_nvfp4(runtime: &mut Runtime) -> Result<()> {
+    let options = MTLCompileOptions::new();
+    options.set_math_mode(MTLMathMode::Safe);
+    options.set_language_version(MTLLanguageVersion::Version4_0);
+    let source = if FAST_STATIONARY {
+        format!(
+            "#include <metal_stdlib>\nusing namespace metal;\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n#define ink_group_stationary_gate_up {FAST_GATE_UP}\n#define ink_group_stationary_down {FAST_DOWN}\n{}\n{}",
+            include_str!("experts.metal"),
+            include_str!("grouped_stationary.metal")
+        )
+    } else if FAST_NAX_DESIGN {
+        // Register epilogue and fetch/decode overlap; same kernel names.
+        format!(
+            "#include <metal_stdlib>\nusing namespace metal;\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n#define INK_NAX_BM {FAST_TILE_ROWS}\n#define ink_group_nax_gate_up {FAST_GATE_UP}\n#define ink_group_nax_down {FAST_DOWN}\n{}\n{}",
+            include_str!("experts.metal"),
+            include_str!("grouped_nax.metal")
+        )
+    } else {
+        format!(
+            "#include <metal_stdlib>\nusing namespace metal;\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n#define INK_FAST_BM {FAST_TILE_ROWS}\n#define INK_FAST_BN {FAST_TILE_COLS}\n#define INK_FAST_BK {FAST_TILE_K}\n#define INK_FAST_SG_ROWS {FAST_SG_ROWS}\n#define INK_FAST_DOUBLE {FAST_DOUBLE}\n#define INK_FAST_PAD {FAST_PAD}\n{}\n{}",
+            include_str!("experts.metal"),
+            include_str!("grouped_fast.metal")
+        )
+    };
+    let library = runtime
+        .device
+        .new_library_with_source(&source, Some(&options))
+        .map_err(|_| "Inkling fast grouped NVFP4 compilation failed")?;
+    let mut pipelines = Vec::new();
+    for name in [FAST_GATE_UP, FAST_DOWN] {
+        let function = library.new_function_with_name(name).ok_or(name)?;
+        pipelines.push((name, runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?));
+    }
+    // Run tables sized to the fused tile height.
+    let bucket = format!(
+        "#include <metal_stdlib>\nusing namespace metal;\n#define INK_GROUP_QMM_TILE_ROWS {FAST_RUN_ROWS}\n#define INK_GROUP_QMM_TILE_COLS 32\n#define ink_group_bucket {FAST_BUCKET}\n#define ink_group_qmm ink_group_qmm_unused_fast\n{}\n{}",
+        include_str!("experts.metal"),
+        include_str!("grouped_pilot.metal")
+    );
+    let library = runtime
+        .device
+        .new_library_with_source(&bucket, Some(&options))
+        .map_err(|_| "Inkling fast NVFP4 bucket compilation failed")?;
+    let function = library.new_function_with_name(FAST_BUCKET).ok_or(FAST_BUCKET)?;
+    pipelines.push((
+        FAST_BUCKET,
+        runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| FAST_BUCKET)?,
+    ));
+    runtime.pipelines.extend(pipelines);
+    runtime.fast_nvfp4 = true;
     Ok(())
+}
+
+/// Unguarded tensor NVFP4 product for source prefill: F32 tensor-unit
+/// accumulation with no exactness guard or replay.
+fn enable_fast_qmm(runtime: &mut Runtime) -> Result<()> {
+    let options = MTLCompileOptions::new();
+    options.set_math_mode(MTLMathMode::Safe);
+    options.set_language_version(MTLLanguageVersion::Version4_0);
+    let shader = concat!(include_str!("experts.metal"), "\n", include_str!("grouped_pilot.metal"));
+    let source = format!(
+        "#include <metal_stdlib>\nusing namespace metal;\n#define INK_GROUP_QMM_BARE\n#define INK_GROUP_QMM_TILE_ROWS 64\n#define INK_GROUP_QMM_TILE_COLS 32\n#define ink_group_qmm {FAST_QMM}\n#define ink_group_bucket ink_group_bucket_fast\n#define ink_group_ingress_bare ink_group_ingress_bare_fast\n{shader}"
+    );
+    let library = runtime
+        .device
+        .new_library_with_source(&source, Some(&options))
+        .map_err(|_| "Inkling fast NVFP4 compilation failed")?;
+    let function = library.new_function_with_name(FAST_QMM).ok_or(FAST_QMM)?;
+    let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| FAST_QMM)?;
+    runtime.pipelines.insert(FAST_QMM, pipeline);
+    runtime.fast_qmm = Some(FAST_QMM);
+    enable_fast_nvfp4(runtime)
 }
 
 fn register_grouped(runtime: &mut Runtime) -> Result<()> {
@@ -1014,6 +1576,7 @@ fn register_grouped(runtime: &mut Runtime) -> Result<()> {
         "ink_group_copy_row",
         "ink_group_combine",
         "ink_group_ingress",
+        "ink_group_ingress_bare",
         "ink_group_qmm",
         "ink_group_gate_up",
         "ink_group_down_epilogue",
@@ -1023,7 +1586,60 @@ fn register_grouped(runtime: &mut Runtime) -> Result<()> {
         let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
         runtime.pipelines.insert(name, pipeline);
     }
+    if !QUANTIZE_EXPERT_INPUTS {
+        // The exact prefill reference keeps the publisher's quantized expert inputs.
+        register_source(
+            runtime,
+            concat!(
+                "#include <metal_stdlib>\nusing namespace metal;\n#define INK_EXPERT_INPUTS_QUANTIZED 1\n",
+                "#define ink_nvfp4_activation ink_nvfp4_activation_quantized\n",
+                include_str!("experts.metal"),
+            ),
+            &["ink_nvfp4_activation_quantized"],
+        )?;
+        register_source(
+            runtime,
+            concat!(
+                "#include <metal_stdlib>\nusing namespace metal;\n#define INK_EXPERT_INPUTS_QUANTIZED 1\n",
+                "#define INK_VERIFY_HALF_ACT\n#define ink_nvfp4_activation ink_verify_half_activation_quantized\n",
+                include_str!("experts.metal"),
+            ),
+            &["ink_verify_half_activation_quantized"],
+        )?;
+    }
     Ok(())
+}
+
+fn register_source(
+    runtime: &mut Runtime,
+    source: &str,
+    kernels: &[Kernel],
+) -> Result<()> {
+    let options = MTLCompileOptions::new();
+    options.set_math_mode(MTLMathMode::Safe);
+    options.set_language_version(MTLLanguageVersion::Version4_0);
+    let library = runtime
+        .device
+        .new_library_with_source(source, Some(&options))
+        .map_err(|_| "Inkling quantized expert input compilation failed")?;
+    for &name in kernels {
+        let function = library.new_function_with_name(name).ok_or(name)?;
+        let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
+        runtime.pipelines.insert(name, pipeline);
+    }
+    Ok(())
+}
+
+/// The NVFP4 expert input kernel for grouped prefill. Default prefill follows
+/// QUANTIZE_EXPERT_INPUTS; the exact reference is always quantized.
+fn nvfp4_activation(runtime: &Runtime) -> Kernel {
+    let half = runtime.verify_nvfp4_matvec && runtime.verify_half_act;
+    match (half, QUANTIZE_EXPERT_INPUTS || !runtime.exact_prefill) {
+        (true, true) => "ink_verify_half_activation",
+        (false, true) => "ink_nvfp4_activation",
+        (true, false) => "ink_verify_half_activation_quantized",
+        (false, false) => "ink_nvfp4_activation_quantized",
+    }
 }
 
 fn read<T: bytemuck::Pod>(

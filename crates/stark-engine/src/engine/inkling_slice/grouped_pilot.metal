@@ -197,6 +197,21 @@ kernel void ink_group_ingress(
     maxima[sorted * (width / 32) + position.x] = peak;
 }
 
+// Gather and convert only: the tensor path keeps no exactness guard inputs.
+kernel void ink_group_ingress_bare(
+    device const float *source [[buffer(0)]],
+    device const uint *order [[buffer(1)]],
+    device bfloat *activation [[buffer(2)]],
+    constant uint2 &shape [[buffer(3)]],
+    uint2 position [[thread_position_in_grid]]) {
+    const uint width = shape.x;
+    if (position.x >= width / 4) return;
+    const uint sorted = position.y;
+    const uint row = shape.y != 0 ? order[sorted] / 8 : sorted;
+    const float4 value = reinterpret_cast<device const float4 *>(source + row * width)[position.x];
+    reinterpret_cast<device bfloat4 *>(activation + sorted * width)[position.x] = bfloat4(value);
+}
+
 kernel void ink_group_qmm(
     device const bfloat *activation [[buffer(0)]],
     device const uint *weights [[buffer(1)]],
@@ -287,6 +302,7 @@ kernel void ink_group_qmm(
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (tileRow < rows) {
             int valid = int(min(16u, rows - tileRow));
+#ifndef INK_GROUP_QMM_BARE
             float before[16] = {};
             uint replay = 0;
 #ifdef INK_GROUP_QMM_PROBE
@@ -377,10 +393,12 @@ kernel void ink_group_qmm(
                 if (mode == 1) replay = 0;
             }
 #endif
+#endif
             auto lhs = ActivationTile((device bfloat *)activation + (start + tileRow) * Width + offset,
                                       Shape(BK, valid), Strides{1, int(Width)});
             auto rhs = WeightTile(decodedWeights + tileColumn * BK, Shape(BK, 32), Strides{1, BK});
             product.run(lhs, rhs, accumulator);
+#ifndef INK_GROUP_QMM_BARE
             // Reproduce the native FP32 reduction on the ambiguous outputs.
             while (replay) {
                 uint i = ctz(replay);
@@ -394,6 +412,7 @@ kernel void ink_group_qmm(
                 }
                 accumulator[i] = value;
             }
+#endif
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }

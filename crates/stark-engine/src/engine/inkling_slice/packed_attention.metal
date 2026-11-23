@@ -155,7 +155,7 @@ kernel void ink_packed_heads(
     float scale = is_v ? rsqrt(norm / 128.0f + 1e-6f) : min(1.0f, limit / (sqrt(norm) + 1e-6f));
 #endif
     if ((is_q || is_rel) && p.y == 0 && position >= 8192) {
-        scale *= 1.0f + 0.1f * log(float(position + 1) / 8192.0f);
+        scale *= ink_long_position_gain(position);
     }
     for (uint j = 0; j < width / 32 + uint(is_rel); ++j) {
 #ifdef INK_PACKED_SOURCE_HEADS

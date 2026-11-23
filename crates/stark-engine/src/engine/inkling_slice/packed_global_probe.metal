@@ -52,3 +52,31 @@ kernel void ink_global_probe_gate(
     const float y = 1.0f / (1.0f + precise::exp(abs(g)));
     output[at] = bfloat(input[tid.y * query_width + tid.x] * (g < 0.0f ? y : 1.0f - y));
 }
+
+// Default prefill: BF16 head-major keys and values for the BF16 attention
+// instance; queries are read in place from the packed graph.
+kernel void ink_global_probe_kv_bf16(
+    device const bfloat *ring_k [[buffer(0)]], device const bfloat *ring_v [[buffer(1)]],
+    device const bfloat *current_k [[buffer(2)]], device const bfloat *current_v [[buffer(3)]],
+    device bfloat *keys [[buffer(4)]], device bfloat *values [[buffer(5)]],
+    constant uint2 &p [[buffer(6)]], uint2 tid [[thread_position_in_grid]]) {
+    const uint head = tid.x / head_width, channel = tid.x % head_width;
+    const uint output = (head * p.y + tid.y) * head_width + channel;
+    if (tid.y < p.x) {
+        keys[output] = ring_k[tid.y * key_width + tid.x];
+        values[output] = ring_v[tid.y * key_width + tid.x];
+    } else {
+        keys[output] = current_k[(tid.y - p.x) * key_width + tid.x];
+        values[output] = current_v[(tid.y - p.x) * key_width + tid.x];
+    }
+}
+
+kernel void ink_global_probe_gate_bf16(
+    device const bfloat *input [[buffer(0)]], device const bfloat *gate [[buffer(1)]],
+    device bfloat *output [[buffer(2)]], constant uint2 &p [[buffer(3)]],
+    uint2 tid [[thread_position_in_grid]]) {
+    const uint at = (p.y + tid.y) * query_width + tid.x;
+    const float g = float(gate[at]);
+    const float y = 1.0f / (1.0f + precise::exp(abs(g)));
+    output[at] = bfloat(float(input[tid.y * query_width + tid.x]) * (g < 0.0f ? y : 1.0f - y));
+}

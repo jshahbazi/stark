@@ -397,4 +397,23 @@ kernel void ink_draft_winner(
         }
     }
     if (tid == 0) out[0] = tokens[0];
+    // Confidence: the winner's softmax weight over every group's best
+    // rescored candidate (the candidates that compete for the proposal).
+    // Stored as float bits seven entries after the token.
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float peak = scores[0];
+    float mass = 0.0f;
+    if (isfinite(peak)) {
+        for (uint i = tid; i < count; i += 256) {
+            const float score = as_type<float>(groups[i].x);
+            if (isfinite(score)) mass += fast::exp(score - peak);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    scores[tid] = mass;
+    for (uint step = 128; step > 0; step /= 2) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < step) scores[tid] += scores[tid + step];
+    }
+    if (tid == 0) out[7] = as_type<uint>(scores[0] > 0.0f ? 1.0f / scores[0] : 0.0f);
 }

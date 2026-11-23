@@ -5,6 +5,18 @@ use std::{fs::File, ops::Range, path::Path, sync::Arc};
 
 use metal::MTLBlitCommandEncoder;
 
+#[path = "affine8_validation.rs"]
+mod affine8_validation;
+pub use affine8_validation::{
+    QualitySide, measure_affine8_dense, measure_affine8_quality, measure_affine8_timing, measure_quality_compare,
+};
+#[path = "decode_stages.rs"]
+mod decode_stages;
+pub(super) use decode_stages::{DECODE_EXTRA, DECODE_VARIANTS};
+pub use decode_stages::{
+    measure_decode_experts, measure_decode_stages, measure_depth_policies, measure_draft_trace, measure_paired_control,
+    measure_round_budget,
+};
 #[path = "dspark_validation.rs"]
 mod dspark_validation;
 pub use dspark_validation::{measure_dspark, measure_dspark_depth, measure_source_dspark_depth};
@@ -23,6 +35,8 @@ pub(super) mod prefill_profile;
 mod prefill_relative;
 #[path = "prefill_trace.rs"]
 mod prefill_trace;
+#[path = "schedule_validation.rs"]
+mod schedule_validation;
 #[path = "target_validation.rs"]
 mod target_validation;
 #[path = "transaction_validation.rs"]
@@ -32,8 +46,15 @@ mod verify_state;
 pub use draft_overlap::measure_draft_overlap;
 use packed_prefill::PackedPrefill;
 use prefill::PrefillLanes;
-pub use prefill_profile::{probe_stock_nvfp4, profile_packed_prefill, profile_prefill, profile_stock_4k};
+pub use prefill_profile::{
+    measure_dense_ceiling, measure_expert_ceiling, probe_stock_nvfp4, profile_packed_prefill, profile_prefill,
+    profile_schedule, profile_stock_4k, profile_worker_sequence,
+};
 pub use prefill_trace::{PrefillTraceMode, trace_packed_prefill, trace_prefill};
+pub use schedule_validation::{
+    measure_full_schedule, measure_prefill_tolerance, measure_schedule_replay, measure_source_dspark_depth_schedule,
+    measure_split_consistency, measure_verify_transaction_schedule,
+};
 pub use target_validation::{
     measure_decode_verify, measure_full, measure_full_budget, measure_prefill, measure_prefill_speed,
 };
@@ -97,6 +118,8 @@ pub struct Session {
     capture_visits: bool,
     context: usize,
     position: usize,
+    /// Source prefill command width selected at `set_batched_prefill_width`.
+    source_command_rows: usize,
 }
 
 impl Session {
@@ -117,15 +140,29 @@ impl Session {
         checkpoint: File,
         context: usize,
     ) -> Result<Self> {
-        let runtime = Runtime::new()?;
+        let mut runtime = Runtime::new()?;
         Self::check_context(&runtime, context)?;
         let source = Tensors::from_file(checkpoint)?;
+        let affine = affine8::present(&source);
+        if affine {
+            affine8::register(&mut runtime)?;
+        }
         let device = &runtime.device;
         let layers = (0..24).map(|physical| Layer::load(&source, device, physical)).collect::<Result<Vec<_>>>()?;
         let vision = Vision::load(&source, device)?;
         let visits = Self::new_visits(&runtime, &layers, context)?;
         let bf16 = |name, shape: &[usize]| source.buffer(device, name, "BF16", shape);
-        let embedding = bf16("model.llm.embed.weight", &[STORAGE_VOCABULARY, WIDTH])?;
+        let (affine_weights, affine_embedding, affine_head) = if affine {
+            let (weights, embedding, head) =
+                affine8::Affine8Weights::load(&source, device, &layers, STORAGE_VOCABULARY, PADDED_VOCABULARY)?;
+            (Some(weights), Some(embedding), Some(head))
+        } else {
+            (None, None, None)
+        };
+        let embedding = match affine_embedding {
+            Some(copy) => copy,
+            None => bf16("model.llm.embed.weight", &[STORAGE_VOCABULARY, WIDTH])?,
+        };
         let embed_norm = bf16("model.llm.embed_norm.weight", &[WIDTH])?;
         let output_norm = bf16("model.llm.norm.weight", &[WIDTH])?;
         let output_query = source.buffer(device, "model.llm.attn_res.output_query", "F32", &[WIDTH])?;
@@ -136,16 +173,23 @@ impl Session {
         } else {
             1
         };
-        let unembedding = zeroed(device, PADDED_VOCABULARY * WIDTH * 2)?;
-        source.copy_to(
-            "model.llm.unembed.weight",
-            "BF16",
-            &[STORAGE_VOCABULARY, WIDTH],
-            0,
-            &unembedding,
-            0,
-            PADDED_VOCABULARY * WIDTH * 2,
-        )?;
+        let unembedding = match affine_head {
+            Some(copy) => copy,
+            None => {
+                let unembedding = zeroed(device, PADDED_VOCABULARY * WIDTH * 2)?;
+                source.copy_to(
+                    "model.llm.unembed.weight",
+                    "BF16",
+                    &[STORAGE_VOCABULARY, WIDTH],
+                    0,
+                    &unembedding,
+                    0,
+                    PADDED_VOCABULARY * WIDTH * 2,
+                )?;
+                unembedding
+            },
+        };
+        runtime.affine8 = affine_weights;
         Ok(Self {
             owner: Arc::new(()),
             flow: Flow::new(device)?,
@@ -174,6 +218,7 @@ impl Session {
             capture_visits: false,
             context,
             position: 0,
+            source_command_rows: Self::SOURCE_PREFILL_ROWS,
         })
     }
 
@@ -260,7 +305,32 @@ impl Session {
             self.apply_prefill_scope();
             self.reset();
         }
-        Ok(())
+        self.ensure_source_workspace()
+    }
+
+    /// Size the context-sized source global workspace. A source-scoped
+    /// session gets the current context's capacity; any other request keeps
+    /// the 4,352 keys that the load-time reserve covers, so only admitted
+    /// source requests grow it. Select the scope before the context.
+    ///
+    /// A failed allocation releases the old buffers first, leaves the
+    /// capacity at zero and returns the error, so the worker fails this
+    /// request and clears its prefix cache. The source path then stays
+    /// inactive (`source_text_ready` is false) until a later request
+    /// boundary reallocates successfully; it can never overrun a smaller
+    /// workspace.
+    fn ensure_source_workspace(&mut self) -> Result<()> {
+        let context = if self.source_text_requested {
+            self.context
+        } else {
+            0
+        };
+        let Some(packed) = self.packed_prefill.as_mut().filter(|packed| packed.context_workspace()) else {
+            return Ok(());
+        };
+        let result = packed.set_source_context(&self.runtime.device, context);
+        self.apply_prefill_scope();
+        result
     }
 
     pub fn position(&self) -> usize {
@@ -297,10 +367,55 @@ impl Session {
 
     /// Reserve both the packed and per-row workspaces separately from persistent cache.
     pub fn batched_prefill_memory_bytes(source_allowed: bool) -> usize {
-        if source_allowed && PackedPrefill::source_enabled() {
-            return 1344 * 1024 * 1024;
+        Self::batched_prefill_memory_bytes_at(source_allowed, Self::SOURCE_PREFILL_ROWS)
+    }
+
+    /// Source prefill command widths a worker may select at load. Default
+    /// prefill arithmetic does not depend on command width; prefix snapshots
+    /// stay aligned to `SOURCE_PREFILL_ROWS` at every width.
+    pub const SOURCE_COMMAND_WIDTHS: [usize; 3] = [2048, 4096, 8192];
+
+    /// Reserve for `set_batched_prefill_width` at a source command width.
+    /// Measured additional Metal allocation of batched prefill on the M5 Max
+    /// (1,133, 2,106 and 4,052 MiB at 2,048, 4,096 and 8,192 rows) plus the
+    /// 211 MiB margin of the original 1,344 MiB reserve. Widths outside
+    /// `SOURCE_COMMAND_WIDTHS` return the 2,048-row reserve.
+    pub fn batched_prefill_memory_bytes_at(
+        source_allowed: bool,
+        rows: usize,
+    ) -> usize {
+        const MIB: usize = 1024 * 1024;
+        if !source_allowed {
+            return 384 * MIB;
         }
-        384 * 1024 * 1024
+        match rows {
+            4096 => 2317 * MIB,
+            8192 => 4263 * MIB,
+            _ => 1344 * MIB,
+        }
+    }
+
+    /// `set_batched_prefill` with a source command width from
+    /// `SOURCE_COMMAND_WIDTHS`. Selecting a different width reallocates the
+    /// packed workspace and must happen before ingest.
+    pub fn set_batched_prefill_width(
+        &mut self,
+        enabled: bool,
+        source_allowed: bool,
+        rows: usize,
+    ) -> Result<()> {
+        if !Self::SOURCE_COMMAND_WIDTHS.contains(&rows) {
+            return Err("Inkling source prefill width must be 2,048, 4,096 or 8,192 rows");
+        }
+        if enabled && self.prefill_lanes.is_some() && self.source_command_rows != rows {
+            if self.position != 0 {
+                return Err("Inkling prefill mode must be selected before ingest");
+            }
+            self.packed_prefill = None;
+            self.prefill_lanes = None;
+        }
+        self.source_command_rows = rows;
+        self.set_batched_prefill(enabled, source_allowed)
     }
 
     /// Select M5 Max batched prefill before ingesting
@@ -317,10 +432,15 @@ impl Session {
             return Err("Inkling prefill mode must be selected before ingest");
         }
         let (lanes, packed) = if enabled {
-            (
-                Some(PrefillLanes::for_m5_worker(&mut self.runtime)?),
-                Some(PackedPrefill::for_m5_worker(&mut self.runtime, &mut self.layers, source_allowed)?),
-            )
+            let mut lanes = PrefillLanes::for_m5_worker(&mut self.runtime)?;
+            lanes.enable_fused_decode(&mut self.runtime)?;
+            let packed = PackedPrefill::for_m5_worker(
+                &mut self.runtime,
+                &mut self.layers,
+                source_allowed,
+                self.source_command_rows,
+            )?;
+            (Some(lanes), Some(packed))
         } else {
             (None, None)
         };
@@ -330,15 +450,63 @@ impl Session {
         self.prefill_lanes = lanes;
         self.packed_prefill = packed;
         self.apply_prefill_scope();
-        Ok(())
+        self.ensure_source_workspace()
     }
 
-    /// Whether this loaded worker can run reference-shaped prefill at a request context.
+    /// Whether this loaded worker can run reference-shaped prefill at a request
+    /// context once `set_context` has selected it.
     pub fn supports_source_text_prefill(
         &self,
         context: usize,
     ) -> bool {
         self.packed_prefill.as_ref().is_some_and(|packed| packed.supports_source_context(context))
+    }
+
+    /// Whether the allocated source workspace covers the current context.
+    fn source_text_ready(&self) -> bool {
+        self.packed_prefill.as_ref().is_some_and(|packed| packed.source_ready(self.context))
+    }
+
+    /// Smallest packed command. The default path runs every packed command on
+    /// the source kernels; shorter chunks use the lane or serial kernels.
+    pub const SOURCE_MIN_BULK_ROWS: usize = PackedPrefill::MIN_ROWS;
+
+    /// Largest source-path context with (loaded source global probe) or without the context-sized workspace.
+    pub fn source_context_limit(context_workspace: bool) -> usize {
+        PackedPrefill::source_context_limit(context_workspace)
+    }
+
+    /// Global key capacity the context-sized workspace allocates for a context.
+    pub fn source_global_capacity(context: usize) -> usize {
+        PackedPrefill::source_global_capacity(context)
+    }
+
+    /// Key-extent global workspace bytes of the default path (F32 keys and values).
+    pub fn source_global_workspace_bytes(keys: usize) -> usize {
+        PackedPrefill::source_global_workspace_bytes(keys)
+    }
+
+    /// F32 per-head relative mask bytes at a key capacity.
+    pub fn source_global_mask_bytes(keys: usize) -> usize {
+        PackedPrefill::source_global_mask_bytes(keys)
+    }
+
+    /// Workspace bytes above the load-time source reserve at a context, for a
+    /// session with or without the context-sized workspace.
+    pub fn source_global_extra_bytes(
+        context_workspace: bool,
+        context: usize,
+    ) -> usize {
+        PackedPrefill::source_global_extra_bytes(context_workspace, context)
+    }
+
+    /// Additional resident workspace this loaded session allocates at a
+    /// context on the source path; zero without the source global probe.
+    pub fn source_context_workspace_bytes(
+        &self,
+        context: usize,
+    ) -> usize {
+        self.packed_prefill.as_ref().map_or(0, |packed| packed.source_context_extra_bytes(context))
     }
 
     /// Select the packed text precision policy before ingesting a request.
@@ -352,9 +520,8 @@ impl Session {
     }
 
     fn apply_prefill_scope(&mut self) {
-        let source = self.source_text_requested
-            && (!self.dspark_enabled || self.source_verifier)
-            && self.supports_source_text_prefill(self.context);
+        let source =
+            self.source_text_requested && (!self.dspark_enabled || self.source_verifier) && self.source_text_ready();
         self.runtime.source_text_active = source;
         if let Some(packed) = &mut self.packed_prefill {
             packed.set_source_scope(source);
@@ -623,7 +790,7 @@ impl Session {
         profile: Option<&mut PrefillTiming>,
     ) -> Result<Timing> {
         if let Some(packed) = &self.packed_prefill
-            && tokens.len() >= PackedPrefill::MIN_ROWS
+            && tokens.len() >= packed.min_command_rows(&self.runtime)
             && (self.active_dspark().is_none() || self.runtime.source_text_active && packed.captures_all_draft_taps())
         {
             packed.upload(tokens);
@@ -721,6 +888,20 @@ impl Session {
         for (index, (&physical, visit)) in PHYSICAL.iter().zip(&self.visits).enumerate() {
             let state = self.visit_input(index, physical, &mut blocks);
             gpu.phase(PrefillPhase::AttentionInputs);
+            if let Some(lanes) = self.prefill_lanes.as_ref().filter(|lanes| lanes.fuses_decode(gpu, &visit.scratch)) {
+                let prepared = verify_state::VerifyWorkspace::prepare_rows(
+                    gpu,
+                    [flow; MAX_VERIFY_ROWS],
+                    [features; MAX_VERIFY_ROWS],
+                    index,
+                    1,
+                );
+                if !prepared {
+                    Self::prepare_visit(gpu, flow, index, features);
+                }
+                self.encode_fused_visit(gpu, lanes, &self.layers[physical], visit, state, position);
+                continue;
+            }
             Self::prepare_visit(gpu, flow, index, features);
             self.layers[physical].encode(gpu, visit, flow, &flow.partial, state, position);
         }
@@ -738,6 +919,12 @@ impl Session {
     ) {
         match input {
             TokenInput::Text(token) => {
+                if let Some(weights) = gpu.affine8_vocabulary() {
+                    let buffers = [&weights.embedding.tensor, &self.embed_norm, &flow.partial];
+                    let params = [token, weights.embedding.rows as u32];
+                    gpu.one("ink_a8_embedding", &buffers, params, (1, 1), WIDTH / 4);
+                    return;
+                }
                 gpu.one("ink_embedding", &[&self.embedding, &self.embed_norm, &flow.partial], token, (1, 1), WIDTH / 4)
             },
             TokenInput::Image(embedding) => {
@@ -830,6 +1017,29 @@ impl Session {
     }
 
     fn encode_output(
+        &self,
+        gpu: &mut Stream<'_>,
+    ) {
+        self.encode_output_rows(gpu, 1);
+    }
+
+    /// Readout and logit cap of the first `rows` hidden rows (at most four).
+    fn encode_output_rows(
+        &self,
+        gpu: &mut Stream<'_>,
+        rows: usize,
+    ) {
+        if let Some(weights) = gpu.affine8_vocabulary() {
+            affine8::encode_readout(gpu, weights, &self.hidden, &self.logits, rows, VOCABULARY, PADDED_VOCABULARY);
+            return;
+        }
+        self.encode_bf16_output(gpu);
+        for row in 1..rows {
+            self.cap_logits(gpu, row);
+        }
+    }
+
+    fn encode_bf16_output(
         &self,
         gpu: &mut Stream<'_>,
     ) {

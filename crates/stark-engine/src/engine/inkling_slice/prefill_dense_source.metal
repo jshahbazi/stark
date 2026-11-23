@@ -64,6 +64,53 @@ kernel void ink_prefill_router_source(
     ink_prefill_matrix<float>(input, weight, output, uint4(2304, 128, rows, rows <= 1024 ? 2048 : 2304), tile, lane);
 }
 
+// The same router arithmetic as ink_prefill_router_source: every output
+// sees the identical sequence of 16 x 32 x 16 F32 tensor steps, K order and
+// split, with each weight fragment loaded once for four 16-row tiles.
+kernel void ink_prefill_router_tiles(
+    device const bfloat *input [[buffer(0)]], device const bfloat *weight [[buffer(1)]],
+    device float *output [[buffer(2)]], constant uint &rows [[buffer(3)]],
+    uint2 tile [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint M = 16, N = 32, K = 16, T = 4, width = 2304, columns = 128;
+    const uint split = rows <= 1024 ? 2048 : 2304;
+    const uint column = tile.x * N, first_row = tile.y * M * T;
+    constexpr auto descriptor = mpp::tensor_ops::matmul2d_descriptor(
+        M, N, K, false, true, true, mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    mpp::tensor_ops::matmul2d<descriptor, execution_simdgroup> product;
+    auto a = product.get_left_input_cooperative_tensor<float, float, float>();
+    auto b = product.get_right_input_cooperative_tensor<float, float, float>();
+    auto acc0 = product.get_destination_cooperative_tensor<remove_addrspace_t<decltype(a)>,
+        remove_addrspace_t<decltype(b)>, float>();
+    auto acc1 = product.get_destination_cooperative_tensor<remove_addrspace_t<decltype(a)>,
+        remove_addrspace_t<decltype(b)>, float>();
+    auto acc2 = product.get_destination_cooperative_tensor<remove_addrspace_t<decltype(a)>,
+        remove_addrspace_t<decltype(b)>, float>();
+    auto acc3 = product.get_destination_cooperative_tensor<remove_addrspace_t<decltype(a)>,
+        remove_addrspace_t<decltype(b)>, float>();
+#define INK_ROUTER_TILES(X) X(0, acc0) X(1, acc1) X(2, acc2) X(3, acc3)
+    float total[T][M * N / 32] = {};
+    const uint row_base = ((lane >> 2) & 4) | ((lane >> 1) & 3);
+    const uint k_base = (((lane >> 2) & 2) | (lane & 1)) * 4;
+    for (uint part = 0; part < width; part += split) {
+#define INK_ROUTER_CLEAR(t, acc) for (ushort i = 0; i < acc.get_capacity(); ++i) acc[i] = 0.0f;
+        INK_ROUTER_TILES(INK_ROUTER_CLEAR)
+        for (uint k = part; k < min(part + split, width); k += K) {
+            for (ushort i = 0; i < 8; ++i) {
+                const uint m = row_base + (i >> 2) * 8;
+                const uint d = k + k_base + (i & 3);
+                b[i] = weight[(column + m) * width + d];
+                b[i + 8] = weight[(column + m + 16) * width + d];
+            }
+#define INK_ROUTER_STEP(t, acc)                                                                     if (first_row + t * M < rows) {                                                             const uint row = first_row + t * M;                                                     for (ushort i = 0; i < 8; ++i) {                                                            const uint m = row_base + (i >> 2) * 8;                                                 const uint d = k + k_base + (i & 3);                                                    a[i] = row + m < rows ? input[(row + m) * width + d] : bfloat(0);                   }                                                                                       product.run(a, b, acc);                                                             }
+            INK_ROUTER_TILES(INK_ROUTER_STEP)
+        }
+#define INK_ROUTER_SUM(t, acc) for (ushort i = 0; i < acc.get_capacity(); ++i) total[t][i] += acc[i];
+        INK_ROUTER_TILES(INK_ROUTER_SUM)
+    }
+#define INK_ROUTER_STORE(t, acc)                                                            if (first_row + t * M < rows) {                                                             const uint row = first_row + t * M;                                                     for (ushort i = 0; i < acc.get_capacity(); ++i) {                                           const auto at = acc.get_multidimensional_index(i);                                      if (row + at[1] < rows && column + at[0] < columns)                                         output[(row + at[1]) * columns + column + at[0]] = total[t][i];                 }                                                                                   }
+    INK_ROUTER_TILES(INK_ROUTER_STORE)
+}
+
 
 #if defined(INK_SOURCE_SINGLETON_ROUTER) || defined(INK_SOURCE_VERIFY_ROUTER)
 // Keep the source tensor operation and K order. Only live input rows

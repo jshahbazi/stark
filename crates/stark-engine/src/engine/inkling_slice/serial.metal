@@ -65,6 +65,69 @@ kernel void ink_matvec_source(
     if (k_lane == 0 && row < shape.y) y[row] = bfloat(sum);
 }
 
+// All single-row attention projections of one visit in one launch. Each row
+// runs the ink_matvec_source body unchanged, with the K-lane count that the
+// separate launch chose from its own output count (32 up to 64 outputs, 16
+// above). Segments: q, k, v, relative, gate, sink, and for global layers the
+// key and value dynamic convolution weights. A workgroup of 128 threads holds
+// 128 / lanes rows.
+constant uint ink_projection_rows[8] = {3072, 1024, 1024, 384, 3072, 24, 32, 32};
+constant uint ink_projection_input[8] = {0, 1, 2, 0, 0, 0, 1, 2};
+
+kernel void ink_matvec_source_visit(
+    device const bfloat4 *x0 [[buffer(0)]], device const bfloat4 *x1 [[buffer(1)]],
+    device const bfloat4 *x2 [[buffer(2)]],
+    device const bfloat4 *w0 [[buffer(3)]], device const bfloat4 *w1 [[buffer(4)]],
+    device const bfloat4 *w2 [[buffer(5)]], device const bfloat4 *w3 [[buffer(6)]],
+    device const bfloat4 *w4 [[buffer(7)]], device const bfloat4 *w5 [[buffer(8)]],
+    device const bfloat4 *w6 [[buffer(9)]], device const bfloat4 *w7 [[buffer(10)]],
+    device bfloat *y0 [[buffer(11)]], device bfloat *y1 [[buffer(12)]], device bfloat *y2 [[buffer(13)]],
+    device bfloat *y3 [[buffer(14)]], device bfloat *y4 [[buffer(15)]], device bfloat *y5 [[buffer(16)]],
+    device bfloat *y6 [[buffer(17)]], device bfloat *y7 [[buffer(18)]],
+    constant uint &segments [[buffer(19)]],
+    uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    device const bfloat4 *inputs[] = {x0, x1, x2};
+    device const bfloat4 *weights_by_segment[] = {w0, w1, w2, w3, w4, w5, w6, w7};
+    device bfloat *outputs[] = {y0, y1, y2, y3, y4, y5, y6, y7};
+    uint segment = 0;
+    uint first = 0;
+    for (; segment < segments; ++segment) {
+        const uint rows = ink_projection_rows[segment];
+        const uint groups = rows / (rows <= 64 ? 4 : 8);
+        if (group < first + groups) break;
+        first += groups;
+    }
+    if (segment >= segments) return;
+    const uint rows = ink_projection_rows[segment];
+    device const bfloat4 *x = inputs[ink_projection_input[segment]];
+    const uint lanes = rows <= 64 ? 32 : 16;
+    const uint row = (group - first) * (128 / lanes) + simd * (32 / lanes) + lane / lanes;
+    const uint k_lane = lane % lanes;
+    const uint cols = ink_width / 4;
+    const uint stride = lanes * 8;
+    const uint end = cols - cols % stride;
+    const device bfloat4 *weights = weights_by_segment[segment] + min(row, rows - 1) * cols;
+    float sum = 0.0f;
+    for (uint base = 0; base < end; base += stride) {
+        float block = 0.0f;
+#pragma clang loop unroll(full)
+        for (uint i = 0; i < 8; ++i) {
+            const uint col = base + i * lanes + k_lane;
+            block += dot(float4(weights[col]), float4(x[col]));
+        }
+        sum += block;
+    }
+    for (uint col = end + k_lane; col < cols; col += lanes) {
+        sum += dot(float4(weights[col]), float4(x[col]));
+    }
+    for (uint delta = lanes / 2; delta > 0; delta >>= 1) {
+        sum += simd_shuffle_down(sum, ushort(delta));
+    }
+    if (k_lane == 0 && row < rows) outputs[segment][row] = bfloat(sum);
+}
+
 static inline float4 ink_mix_normalize(
     float4 batch, threadgroup float *sums, threadgroup float &inverse, uint simd, uint lane
 ) {
@@ -270,7 +333,7 @@ kernel void ink_heads_and_cache(
     float limit = is_rel ? 8.0f : 22.62741699797f;
     float scale = is_v ? rsqrt(norm / 128.0f + 1e-6f) : min(1.0f, limit / (sqrt(norm) + 1e-6f));
     if ((is_q || is_rel) && p.z == 0 && p.x >= 8192) {
-        scale *= 1.0f + 0.1f * log(float(p.x + 1) / 8192.0f);
+        scale *= ink_long_position_gain(p.x);
     }
     uint offset = (p.x % p.y) * ink_kv_width;
     for (uint j = 0; j < width / 32 + uint(is_rel); ++j) {

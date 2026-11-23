@@ -25,9 +25,71 @@ pub(crate) const QUANT_SHA: &str = "7c656207d3ce37879c7be209a036b0dde43bf01f7815
 pub(crate) const TARGET_BYTES: usize = 19_526_019_168;
 pub(crate) const DRAFT_BYTES: usize = 635_801_416;
 
+/// Stark's derived affine8 artifact: the original checkpoint with every attention
+/// projection, the global layers' dynamic convolution projections, the token
+/// embedding and the output head replaced by MLX affine 8-bit codes (group 64),
+/// built by `stark_convert.inkling_affine8_artifact` from the pinned original.
+/// Expert banks, router, gates, norms, convolutions, vision tower and the draft
+/// head are unchanged. It is a separate artifact, never the default.
+pub(crate) const AFFINE8_LAYOUT: &str = "inkling2-mini-affine8-dense";
+pub(crate) const AFFINE8_TARGET_SHA: &str = "c9e14848ad017467dc0deb91c6aa67022e181dbcdfe02a1b04024434bf9acddd";
+pub(crate) const AFFINE8_TARGET_BYTES: usize = 18_052_013_648;
+/// Resident bytes above the original artifact: the affine kernel tensors are
+/// kept beside the BF16 effective copies that prefill reads.
+pub(crate) const AFFINE8_EXTRA_RESIDENT_BYTES: usize = 1_670_000_000;
+
 const CONFIG_LIMIT: u64 = 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Layout {
+    Original,
+    Affine8,
+}
+
+impl Layout {
+    pub(crate) fn target_sha256(self) -> &'static str {
+        match self {
+            Self::Original => TARGET_SHA,
+            Self::Affine8 => AFFINE8_TARGET_SHA,
+        }
+    }
+
+    fn target_bytes(self) -> usize {
+        match self {
+            Self::Original => TARGET_BYTES,
+            Self::Affine8 => AFFINE8_TARGET_BYTES,
+        }
+    }
+
+    /// Resident weight bytes above the original artifact.
+    pub(crate) fn extra_resident_bytes(self) -> usize {
+        match self {
+            Self::Original => 0,
+            Self::Affine8 => AFFINE8_EXTRA_RESIDENT_BYTES,
+        }
+    }
+
+    /// The layout an installed config declares; unrecognized values are
+    /// rejected at load.
+    pub(crate) fn of(root: &Path) -> Self {
+        let affine = read(&root.join("config.json"), CONFIG_LIMIT)
+            .ok()
+            .and_then(|data| serde_json::from_slice::<Value>(&data).ok())
+            .is_some_and(|config| config.get("stark_inkling_affine8").is_some());
+        if affine {
+            Self::Affine8
+        } else {
+            Self::Original
+        }
+    }
+}
+
+fn affine8_binding() -> Value {
+    serde_json::json!({"layout": AFFINE8_LAYOUT, "group_size": 64, "bits": 8})
+}
+
 pub(crate) struct Artifact {
+    pub layout: Layout,
     pub target: VerifiedWeights,
     pub draft: VerifiedWeights,
     pub tokenizer: Tokenizer,
@@ -144,10 +206,11 @@ pub(crate) fn recognizes(model: &Path) -> bool {
 
 impl Artifact {
     pub(crate) fn load(root: &Path) -> Result<Self, &'static str> {
+        let layout = Layout::of(root);
         let config = read(&root.join("config.json"), CONFIG_LIMIT)?;
         let config_sha256 = format!("{:x}", Sha256::digest(&config));
         let template = checked_bytes(&root.join("chat_template.jinja"), 256 * 1024, TEMPLATE_SHA)?;
-        if config_sha256 != CONFIG_SHA {
+        if config_sha256 != CONFIG_SHA || layout == Layout::Affine8 {
             let original = checked_bytes(&root.join("source-config.json"), CONFIG_LIMIT, CONFIG_SHA)?;
             let mut installed: Value = serde_json::from_slice(&config).map_err(|_| "invalid_model_config")?;
             let original: Value = serde_json::from_slice(&original).map_err(|_| "invalid_model_config")?;
@@ -157,6 +220,7 @@ impl Artifact {
                 || codec["type"] != "ChatCodecConfig"
                 || codec["prompt_template"].as_str().map(str::as_bytes) != Some(template.as_slice())
                 || extra.remove("stark_inkling") != Some(serde_json::json!({"source": SOURCE, "revision": REVISION}))
+                || (layout == Layout::Affine8 && extra.remove("stark_inkling_affine8") != Some(affine8_binding()))
                 || installed != original
             {
                 return Err("inkling_checkpoint_mismatch");
@@ -166,9 +230,10 @@ impl Artifact {
         checked_bytes(&root.join("hf_quant_config.json"), CONFIG_LIMIT, QUANT_SHA)?;
         let token_bytes = checked_bytes(&root.join("tokenizer.json"), 32 * 1024 * 1024, TOKENIZER_SHA)?;
         let tokenizer = Tokenizer::from_bytes(&token_bytes).map_err(|_| "invalid_model_config")?;
-        let target = check_weights(&root.join(TARGET), TARGET_BYTES, TARGET_SHA)?;
+        let target = check_weights(&root.join(TARGET), layout.target_bytes(), layout.target_sha256())?;
         let draft = check_weights(&root.join("mtp.safetensors"), DRAFT_BYTES, DRAFT_SHA)?;
         Ok(Self {
+            layout,
             target,
             draft,
             tokenizer,

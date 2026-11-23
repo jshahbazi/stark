@@ -22,6 +22,9 @@ pub(super) fn build(out_dir: &Path) -> anyhow::Result<()> {
         ensure!(status.success(), "Metal compiler failed for Inkling {name}");
         objects.push(output);
     }
+    // Stark's mask-free derivative of the pinned global attention kernel is
+    // included by the attention translation unit.
+    println!("cargo::rerun-if-changed=src/engine/inkling_slice/global_relative.metal");
     let status = Command::new("xcrun")
         .args(["-sdk", "macosx", "metallib"])
         .args(objects)

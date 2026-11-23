@@ -591,6 +591,22 @@ pub(crate) trait GenerationBackend {
     fn default_mtp_drafts(&self) -> u32 {
         0
     }
+    /// Default draft count for a request that names neither `mtp` nor
+    /// `mtp_drafts`. It may only lower `default_mtp_drafts`.
+    fn default_mtp_drafts_for(
+        &self,
+        _sampling: &Sampling,
+    ) -> u32 {
+        self.default_mtp_drafts()
+    }
+    /// Draft count for `mtp: true` without a count, when the backend tunes it
+    /// to the sampling mode. `None` keeps `recommended_drafts`.
+    fn recommended_mtp_drafts_for(
+        &self,
+        _sampling: &Sampling,
+    ) -> Option<u32> {
+        None
+    }
     /// Whether requests may select adaptive depth or prompt lookup.
     fn supports_mtp_scheduling(&self) -> bool {
         false
@@ -786,6 +802,26 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             },
             Some(_) => Err("invalid_generation_request"),
         }
+    }
+
+    /// Resolve MTP. When the request names no count, let the backend tune its
+    /// default (no setting) or recommendation (`mtp: true`) to the sampling mode.
+    fn resolve_default_mtp(
+        &self,
+        enabled: Option<bool>,
+        drafts: Option<u32>,
+        sampling: &Sampling,
+    ) -> Result<u32, &'static str> {
+        let resolved = self.resolve_mtp(enabled, drafts)?;
+        Ok(match (enabled, drafts) {
+            (None, None) => resolved.min(self.backend.default_mtp_drafts_for(sampling)),
+            (Some(true), None) => self
+                .backend
+                .recommended_mtp_drafts_for(sampling)
+                .filter(|&count| count > 0 && self.mtp.is_some_and(|caps| count as usize <= caps.max_drafts))
+                .unwrap_or(resolved),
+            _ => resolved,
+        })
     }
 
     fn resolve_mtp(
@@ -1140,12 +1176,13 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 {
                     return Err("invalid_generation_request");
                 }
+                let default_drafts = self.resolve_default_mtp(mtp, mtp_drafts, &sampling)?;
                 let mut options = GenerationOptions {
                     context_tokens: maximum,
                     max_new_tokens: maximum - input_tokens,
                     seed: 0,
                     sampling,
-                    mtp_drafts: self.resolve_mtp(mtp, mtp_drafts)?,
+                    mtp_drafts: default_drafts,
                     mtp_scheduling: MtpScheduling::default(),
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
                     extra_stop_token_ids: Vec::new(),
@@ -1201,7 +1238,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 cache_scope,
             } => {
                 let cache_scope = self.resolve_cache_scope(cache_scope)?;
-                let mut drafts = self.resolve_mtp(mtp, mtp_drafts)?;
+                let mut drafts = self.resolve_default_mtp(mtp, mtp_drafts, &sampling)?;
                 let mtp_scheduling =
                     self.resolve_mtp_scheduling(mtp_policy, mtp_lookup, mtp_drafts.is_some(), &mut drafts)?;
                 let options = GenerationOptions {
@@ -1738,6 +1775,7 @@ mod tests {
         mtp_scheduling: bool,
         scheduling_requests: Vec<MtpScheduling>,
         default_scheduling: MtpScheduling,
+        sampling_tuned_drafts: Option<(u32, u32)>,
     }
 
     struct FakePreparedImage {
@@ -1812,6 +1850,24 @@ mod tests {
         }
         fn default_mtp_drafts(&self) -> u32 {
             self.default_mtp_drafts
+        }
+        fn default_mtp_drafts_for(
+            &self,
+            sampling: &Sampling,
+        ) -> u32 {
+            self.sampling_tuned_drafts.map_or(self.default_mtp_drafts, |(greedy, sampled)| {
+                if matches!(sampling, Sampling::Greedy {}) {
+                    greedy
+                } else {
+                    sampled
+                }
+            })
+        }
+        fn recommended_mtp_drafts_for(
+            &self,
+            sampling: &Sampling,
+        ) -> Option<u32> {
+            self.sampling_tuned_drafts.map(|_| self.default_mtp_drafts_for(sampling))
         }
         fn supports_mtp_scheduling(&self) -> bool {
             self.mtp_scheduling
@@ -2108,6 +2164,7 @@ mod tests {
             mtp_scheduling: false,
             scheduling_requests: Vec::new(),
             default_scheduling: MtpScheduling::default(),
+            sampling_tuned_drafts: None,
         })
         .unwrap()
     }
@@ -2172,6 +2229,37 @@ mod tests {
         let mut request = standard();
         request["mtp_drafts"] = json!(0);
         assert_eq!(post(&mut worker, request)["mtp"]["drafts"], 0);
+    }
+
+    #[test]
+    fn sampling_tuned_backend_resolves_default_and_toggle_by_mode() {
+        let mut backend = worker().backend;
+        backend.mtp = Some(capabilities(3, 1));
+        backend.default_mtp_drafts = 3;
+        backend.sampling_tuned_drafts = Some((3, 2));
+        let mut worker = GenerationWorker::new(backend).unwrap();
+        let sampled = json!({"mode":"stochastic","temperature":1.0});
+        for (mtp, sampling, expected) in [
+            (None, None, 3),
+            (None, Some(sampled.clone()), 2),
+            (Some(true), None, 3),
+            (Some(true), Some(sampled.clone()), 2),
+            (Some(false), None, 0),
+        ] {
+            let mut request = standard();
+            if let Some(mtp) = mtp {
+                request["mtp"] = json!(mtp);
+            }
+            if let Some(sampling) = sampling {
+                request["sampling"] = sampling;
+            }
+            assert_eq!(post(&mut worker, request)["mtp"]["drafts"], expected, "{mtp:?}");
+        }
+        // An explicit count is never retuned.
+        let mut request = standard();
+        request["mtp_drafts"] = json!(1);
+        request["sampling"] = sampled;
+        assert_eq!(post(&mut worker, request)["mtp"]["drafts"], 1);
     }
 
     #[test]

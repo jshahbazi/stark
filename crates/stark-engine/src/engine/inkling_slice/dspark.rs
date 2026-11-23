@@ -203,7 +203,8 @@ impl Scratch {
             rnn_input: zeroed(device, TILE_ROWS * RNN * 2)?,
             latent: private(device, RANK * 2)?,
             groups: private(device, GROUPS * 8)?,
-            winner: zeroed(device, size_of::<u32>())?,
+            // Token, then (at index ROWS - 1) the proposal confidence.
+            winner: zeroed(device, 2 * (ROWS - 1) * size_of::<u32>())?,
         })
     }
 
@@ -248,6 +249,16 @@ impl DraftBlock {
         &self.winners
     }
 
+    /// The draft head's probability for each of the last block's first
+    /// proposals (as many as requested): its softmax weight among the
+    /// rescored candidates.
+    pub(super) fn confidences(
+        &self,
+        count: usize,
+    ) -> Vec<f32> {
+        session::read_shared::<f32>(&self.winners, ROWS - 1 + count)[ROWS - 1..].to_vec()
+    }
+
     pub(super) fn new(runtime: &mut Runtime) -> Result<Self> {
         let options = MTLCompileOptions::new();
         options.set_math_mode(MTLMathMode::Safe);
@@ -268,7 +279,8 @@ impl DraftBlock {
         Ok(Self {
             state: private(device, RANK * 2)?,
             gates: private(device, TILE_ROWS * 3 * RANK * 4)?,
-            winners: zeroed(device, (ROWS - 1) * size_of::<u32>())?,
+            // Proposal tokens, then their confidences from index ROWS - 1.
+            winners: zeroed(device, 2 * (ROWS - 1) * size_of::<u32>())?,
         })
     }
 }
@@ -519,6 +531,65 @@ impl Dspark {
             );
         }
         self.mix(gpu, taps, self.layers.len(), &self.feature_norm, &self.feature);
+    }
+
+    /// Packed prefill commit: the work of `commit_from` for `rows` consecutive
+    /// positions from `start` in a few dispatches per draft layer. Taps hold
+    /// four BF16 rows of WIDTH per token row. `mixed` (F32), `normed` and
+    /// `temp` (BF16) are command scratch of at least `rows` rows of WIDTH,
+    /// WIDTH and KV. Only the newest `capacity` rows of a ring are written.
+    pub(super) fn commit_rows(
+        &self,
+        gpu: &mut Stream<'_>,
+        taps: &Buffer,
+        start: usize,
+        rows: usize,
+        scratch: [&Buffer; 3],
+    ) {
+        let [mixed, normed, temp] = scratch;
+        for (index, (layer, cache)) in self.layers.iter().zip(&self.cache).enumerate() {
+            let first = rows.saturating_sub(cache.capacity);
+            let live = rows - first;
+            gpu.dispatch(
+                "ink_draft_commit_mix",
+                &[(taps, first * 4 * WIDTH * 2), binding(&self.fuse), binding(mixed)],
+                index as u32,
+                (WIDTH / 128, live),
+                128,
+            );
+            gpu.one(
+                "ink_packed_norm",
+                &[mixed, &layer.context_norm, normed],
+                [WIDTH as u32, WIDTH as u32],
+                (live, 1),
+                WIDTH / 4,
+            );
+            // ink_dense_fast tiles 128 rows by 64 columns with 256 threads.
+            let dense = (KV.div_ceil(64), live.div_ceil(128));
+            gpu.one(
+                "ink_dense_fast",
+                &[normed, &layer.context_k, temp],
+                [WIDTH as u32, KV as u32, live as u32, 0],
+                dense,
+                256,
+            );
+            rope(gpu, temp, &layer.context_k_norm, &cache.keys, KV, start + first, cache.capacity, live);
+            gpu.one(
+                "ink_dense_fast",
+                &[normed, &layer.context_v, temp],
+                [WIDTH as u32, KV as u32, live as u32, 0],
+                dense,
+                256,
+            );
+            gpu.one(
+                "ink_draft_commit_values",
+                &[temp, &cache.values],
+                [(start + first) as u32, cache.capacity as u32],
+                (KV / 128, live),
+                128,
+            );
+        }
+        self.mix(gpu, (taps, (rows - 1) * 4 * WIDTH * 2), self.layers.len(), &self.feature_norm, &self.feature);
     }
 
     fn rank_geometry(runtime: &Runtime) -> (Kernel, usize, usize) {
@@ -857,7 +928,7 @@ fn register(runtime: &mut Runtime) -> Result<()> {
         let pipeline = runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
         pipelines.push((name, pipeline));
     }
-    if std::env::var_os("STARK_INKLING_EXPERIMENT_DRAFT_SHORTLIST").as_deref() == Some(std::ffi::OsStr::new("1")) {
+    {
         let library = runtime
             .device
             .new_library_with_source(

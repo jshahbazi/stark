@@ -6,7 +6,16 @@ fn main() {
     use std::path::Path;
 
     fn run() -> Result<i32, &'static str> {
-        let args: Vec<_> = std::env::args_os().skip(1).collect();
+        let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+        // Diagnostic only: run the parity and transaction checks on the
+        // bit-exact reference prefill kernels instead of the default path.
+        let exact_prefill = match args.iter().position(|arg| arg == "--exact-prefill") {
+            Some(index) => {
+                args.remove(index);
+                true
+            },
+            None => false,
+        };
         use stark_engine::engine::inkling_slice::PrefillTraceMode;
         if args.first().is_some_and(|arg| arg == "--profile-stock-4k" || arg == "--probe-stock-nvfp4") {
             if args.len() < 4 {
@@ -71,6 +80,234 @@ fn main() {
                 Path::new(&args[2]),
                 Path::new(&args[3]),
                 prefix,
+                exact_prefill,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        // Affine 8-bit dense and readout kernels against BF16 on restored
+        // real state: alternating GPU times and numeric differences.
+        if args.first().is_some_and(|arg| arg == "--measure-affine8-dense") {
+            if args.len() != 8 {
+                return Err(
+                    "expected --measure-affine8-dense, original and draft SafeTensors, affine tensors, private token directory, prompt, context and pairs",
+                );
+            }
+            let number = |index: usize| {
+                args[index].to_str().and_then(|value| value.parse::<usize>().ok()).ok_or("invalid number")
+            };
+            let report = stark_engine::engine::inkling_slice::measure_affine8_dense(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                number(5)?,
+                number(6)?,
+                number(7)?,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        // Affine8 artifact against the original artifact: teacher-forced
+        // logit quality, and paired step, verify-round and prefill times.
+        if args.first().is_some_and(|arg| arg == "--affine8-quality") {
+            if args.len() != 6 {
+                return Err(
+                    "expected --affine8-quality, original and affine8 SafeTensors, private token directory, prompt and context",
+                );
+            }
+            let number = |index: usize| {
+                args[index].to_str().and_then(|value| value.parse::<usize>().ok()).ok_or("invalid number")
+            };
+            let report = stark_engine::engine::inkling_slice::measure_affine8_quality(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                number(4)?,
+                number(5)?,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        // Teacher-forced quality comparison of two sides, each `default:PATH`
+        // (default prefill) or `exact:PATH` (bit-exact reference prefill).
+        if args.first().is_some_and(|arg| arg == "--quality-compare") {
+            if args.len() != 7 {
+                return Err(
+                    "expected --quality-compare, reference and candidate sides (default:PATH or exact:PATH), private token directory, prompt, context and window",
+                );
+            }
+            let number = |index: usize| {
+                args[index].to_str().and_then(|value| value.parse::<usize>().ok()).ok_or("invalid number")
+            };
+            let side = |index: usize| -> Result<stark_engine::engine::inkling_slice::QualitySide<'_>, &'static str> {
+                let value = args[index].to_str().ok_or("invalid side")?;
+                let (control_off, value) = match value.strip_prefix("off-").and_then(|rest| rest.split_once(':')) {
+                    Some((control, rest)) => (Some(control), rest),
+                    None => (None, value),
+                };
+                let (exact, path) = if let Some(path) = value.strip_prefix("exact:") {
+                    (true, path)
+                } else {
+                    (false, value.strip_prefix("default:").unwrap_or(value))
+                };
+                Ok(stark_engine::engine::inkling_slice::QualitySide {
+                    checkpoint: Path::new(path),
+                    exact_prefill: exact,
+                    control_off,
+                })
+            };
+            let report = stark_engine::engine::inkling_slice::measure_quality_compare(
+                side(1)?,
+                side(2)?,
+                Path::new(&args[3]),
+                number(4)?,
+                number(5)?,
+                number(6)?,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--paired-control") {
+            if args.len() != 8 {
+                return Err(
+                    "expected --paired-control, target and draft SafeTensors, private token directory, prompt, context, pairs and control",
+                );
+            }
+            let number = |index: usize| {
+                args[index].to_str().and_then(|value| value.parse::<usize>().ok()).ok_or("invalid number")
+            };
+            let report = stark_engine::engine::inkling_slice::measure_paired_control(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                number(4)?,
+                number(5)?,
+                number(6)?,
+                args[7].to_str().ok_or("invalid control")?,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--depth-policies") {
+            if args.len() != 8 {
+                return Err(
+                    "expected --depth-policies, target and draft SafeTensors, private token directory, prompt, context, outputs and repeats",
+                );
+            }
+            let number = |index: usize| {
+                args[index].to_str().and_then(|value| value.parse::<usize>().ok()).ok_or("invalid number")
+            };
+            let report = stark_engine::engine::inkling_slice::measure_depth_policies(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                number(4)?,
+                number(5)?,
+                number(6)?,
+                number(7)?,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--draft-trace") {
+            if args.len() != 7 {
+                return Err(
+                    "expected --draft-trace, target and draft SafeTensors, private token directory, prompt, context and outputs",
+                );
+            }
+            let number = |index: usize| {
+                args[index].to_str().and_then(|value| value.parse::<usize>().ok()).ok_or("invalid number")
+            };
+            let report = stark_engine::engine::inkling_slice::measure_draft_trace(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                number(4)?,
+                number(5)?,
+                number(6)?,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--round-budget") {
+            if args.len() != 7 {
+                return Err(
+                    "expected --round-budget, target and draft SafeTensors, private token directory, prompt, context and outputs",
+                );
+            }
+            let number = |index: usize| {
+                args[index].to_str().and_then(|value| value.parse::<usize>().ok()).ok_or("invalid number")
+            };
+            let report = stark_engine::engine::inkling_slice::measure_round_budget(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                number(4)?,
+                number(5)?,
+                number(6)?,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--decode-experts") {
+            if args.len() != 7 {
+                return Err(
+                    "expected --decode-experts, target and draft SafeTensors, private token directory, prompt, context and pairs",
+                );
+            }
+            let number = |index: usize| {
+                args[index].to_str().and_then(|value| value.parse::<usize>().ok()).ok_or("invalid number")
+            };
+            let report = stark_engine::engine::inkling_slice::measure_decode_experts(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                number(4)?,
+                number(5)?,
+                number(6)?,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        // Decode stage table: per-stage GPU time, launches, bytes and read ceilings.
+        if args.first().is_some_and(|arg| arg == "--decode-stages") {
+            if args.len() != 7 {
+                return Err(
+                    "expected --decode-stages, target and draft SafeTensors, private token directory, prompt, context and repeats",
+                );
+            }
+            let number = |index: usize| {
+                args[index].to_str().and_then(|value| value.parse::<usize>().ok()).ok_or("invalid number")
+            };
+            let report = stark_engine::engine::inkling_slice::measure_decode_stages(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                number(4)?,
+                number(5)?,
+                number(6)?,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--affine8-timing") {
+            if args.len() != 8 {
+                return Err(
+                    "expected --affine8-timing, original, affine8 and draft SafeTensors, private token directory, prompt, context and pairs",
+                );
+            }
+            let number = |index: usize| {
+                args[index].to_str().and_then(|value| value.parse::<usize>().ok()).ok_or("invalid number")
+            };
+            let report = stark_engine::engine::inkling_slice::measure_affine8_timing(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                number(5)?,
+                number(6)?,
+                number(7)?,
             )?;
             println!("{report}");
             return Ok(0);
@@ -236,6 +473,205 @@ fn main() {
             println!("{report}");
             return Ok(0);
         }
+        // Caller-chosen prompt length and context under the worker's cold
+        // schedule. These subcommands leave every fixed-shape command above
+        // and below unchanged.
+        let count = |index: usize, label: &'static str| {
+            args.get(index).and_then(|value| value.to_str()).and_then(|value| value.parse::<usize>().ok()).ok_or(label)
+        };
+        if args.first().is_some_and(|arg| arg == "--full-target-schedule") {
+            if args.len() != 4 {
+                return Err(
+                    "expected --full-target-schedule, original SafeTensors, private oracle directory and context",
+                );
+            }
+            let report = stark_engine::engine::inkling_slice::measure_full_schedule(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                count(3, "invalid Inkling context")?,
+                exact_prefill,
+            )?;
+            println!("{report}");
+            return Ok(i32::from(
+                ["all_logits_exact", "exact_snapshot_replay", "exact_boundary_replays"]
+                    .iter()
+                    .any(|key| report[*key] != true),
+            ));
+        }
+        // Tolerance report: default tensor prefill against the pinned
+        // captures and against Stark's bit-exact reference kernels.
+        // The draft variant takes the draft SafeTensors after the
+        // target and profiles prefill with drafting enabled.
+        if args.first().is_some_and(|arg| arg == "--profile-schedule-draft") {
+            if !(7..=8).contains(&args.len()) {
+                return Err(
+                    "expected --profile-schedule-draft, target, draft, token directory, prompt, context, repeats and optional command rows",
+                );
+            }
+            let report = stark_engine::engine::inkling_slice::profile_schedule(
+                Path::new(&args[1]),
+                Path::new(&args[3]),
+                count(4, "invalid Inkling prompt length")?,
+                count(5, "invalid Inkling context")?,
+                count(6, "invalid repeat count")?,
+                Some(Path::new(&args[2])),
+                args.get(7).and_then(|value| value.to_str()?.parse().ok()).unwrap_or(2048),
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--dense-ceiling") {
+            if args.len() != 6 {
+                return Err("expected --dense-ceiling, target, rows, width, columns and repeats");
+            }
+            let report = stark_engine::engine::inkling_slice::measure_dense_ceiling(
+                Path::new(&args[1]),
+                count(2, "invalid rows")?,
+                count(3, "invalid width")?,
+                count(4, "invalid columns")?,
+                count(5, "invalid repeat count")?,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--expert-ceiling") {
+            if args.len() != 7 {
+                return Err("expected --expert-ceiling, target, token directory, prompt, context, visit and repeats");
+            }
+            let report = stark_engine::engine::inkling_slice::measure_expert_ceiling(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                count(3, "invalid Inkling prompt length")?,
+                count(4, "invalid Inkling context")?,
+                count(5, "invalid visit")?,
+                count(6, "invalid repeat count")?,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--profile-worker-sequence") {
+            if args.len() != 9 {
+                return Err(
+                    "expected --profile-worker-sequence, target, draft, token directory, prompt, context, repeats, idle ms and setup",
+                );
+            }
+            let report = stark_engine::engine::inkling_slice::profile_worker_sequence(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                count(4, "invalid Inkling prompt length")?,
+                count(5, "invalid Inkling context")?,
+                count(6, "invalid repeat count")?,
+                count(7, "invalid idle milliseconds")? as u64,
+                args[8].to_str().ok_or("invalid setup")?,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--profile-schedule") {
+            if !(6..=7).contains(&args.len()) {
+                return Err(
+                    "expected --profile-schedule, original SafeTensors, private token directory, prompt length, context and repeats",
+                );
+            }
+            let report = stark_engine::engine::inkling_slice::profile_schedule(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                count(3, "invalid Inkling prompt length")?,
+                count(4, "invalid Inkling context")?,
+                count(5, "invalid repeat count")?,
+                None,
+                args.get(6).and_then(|value| value.to_str()?.parse().ok()).unwrap_or(2048),
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--split-consistency") {
+            if args.len() != 5 {
+                return Err(
+                    "expected --split-consistency, original SafeTensors, private token directory, prompt length and context",
+                );
+            }
+            let report = stark_engine::engine::inkling_slice::measure_split_consistency(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                count(3, "invalid Inkling prompt length")?,
+                count(4, "invalid Inkling context")?,
+            )?;
+            println!("{report}");
+            return Ok(i32::from(report["verdicts"]["default_identical"] != true));
+        }
+        // The default path is judged against a noise-floor control of
+        // one-unit BF16 residual flips on the exact kernels.
+        if args.first().is_some_and(|arg| arg == "--prefill-tolerance") {
+            if args.len() < 5 {
+                return Err(
+                    "expected --prefill-tolerance, original SafeTensors, context, control trials and capture directories",
+                );
+            }
+            let oracles = args[4..].iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+            let report = stark_engine::engine::inkling_slice::measure_prefill_tolerance(
+                Path::new(&args[1]),
+                &oracles,
+                count(2, "invalid Inkling context")?,
+                count(3, "invalid control trial count")?,
+            )?;
+            println!("{report}");
+            return Ok(i32::from(report["noise_floor_pass"] != true));
+        }
+        if args.first().is_some_and(|arg| arg == "--schedule-replay") {
+            if !(5..=6).contains(&args.len()) {
+                return Err(
+                    "expected --schedule-replay, original SafeTensors, private token directory, prompt length, context and optional command rows",
+                );
+            }
+            let report = stark_engine::engine::inkling_slice::measure_schedule_replay(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                count(3, "invalid Inkling prompt length")?,
+                count(4, "invalid Inkling context")?,
+                exact_prefill,
+                args.get(5).and_then(|value| value.to_str()?.parse().ok()).unwrap_or(2048),
+            )?;
+            println!("{report}");
+            return Ok(i32::from(
+                ["exact_snapshot_replay", "exact_boundary_replays"].iter().any(|key| report[*key] != true),
+            ));
+        }
+        if args.first().is_some_and(|arg| {
+            arg == "--measure-verify-transaction-schedule" || arg == "--measure-source-dspark-depth-schedule"
+        }) {
+            if args.len() != 6 {
+                return Err(
+                    "expected the schedule check, original and draft SafeTensors, private directory, prompt length and context",
+                );
+            }
+            let prompt = count(4, "invalid Inkling prompt length")?;
+            let context = count(5, "invalid Inkling context")?;
+            let (target, draft, oracle) = (Path::new(&args[1]), Path::new(&args[2]), Path::new(&args[3]));
+            if args[0] == "--measure-source-dspark-depth-schedule" {
+                let report = stark_engine::engine::inkling_slice::measure_source_dspark_depth_schedule(
+                    target,
+                    draft,
+                    oracle,
+                    prompt,
+                    context,
+                    exact_prefill,
+                )?;
+                println!("{report}");
+                return Ok(0);
+            }
+            let report = stark_engine::engine::inkling_slice::measure_verify_transaction_schedule(
+                target,
+                draft,
+                oracle,
+                prompt,
+                context,
+                exact_prefill,
+            )?;
+            println!("{report}");
+            return Ok(i32::from(report["seed_matches_pinned"] == false || report["exact_boundary_replays"] != true));
+        }
         if args.first().is_some_and(|arg| arg == "--full-target" || arg == "--full-target-batched") {
             if args.len() != 4 {
                 return Err("expected --full-target, original SafeTensors, private oracle directory and context");
@@ -246,6 +682,7 @@ fn main() {
                 Path::new(&args[2]),
                 context,
                 args[0] == "--full-target-batched",
+                exact_prefill,
             )?;
             println!("{report}");
             return Ok(if report["exact_snapshot_replay"] == true {

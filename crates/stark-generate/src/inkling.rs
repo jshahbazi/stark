@@ -13,7 +13,7 @@ use stark_engine::{
         Engine,
         hybrid::activity::InferenceActivity,
         inkling_slice::{
-            INKLING_IMAGE_TOKEN as IMAGE_TOKEN, ImageEmbeddings, MAX_VERIFY_ROWS, Session, Snapshot,
+            DepthPlanner, INKLING_IMAGE_TOKEN as IMAGE_TOKEN, ImageEmbeddings, MAX_VERIFY_ROWS, Session, Snapshot,
             VOCABULARY as VOCAB, Verification,
         },
     },
@@ -24,7 +24,7 @@ use crate::{
     cancel::CancelSignal,
     generation::{
         FinishReason, GeneratedTokens, GenerationBackend, GenerationOptions, GenerationProgress, ImageArtifactIdentity,
-        MtpCapabilities, PreparedImageMetadata, ProgressCallback, TextCallback, admit_request_memory,
+        MtpCapabilities, PreparedImageMetadata, ProgressCallback, Sampling, TextCallback, admit_request_memory,
         collect_tokens_controlled,
     },
     hybrid::{ProbabilityMapper, sample_certified_prefix, sample_with_mapper},
@@ -37,10 +37,16 @@ const EOS: &[u32] = &[200_006];
 const IMAGE_CONTENT: u32 = 200_005;
 const END_MESSAGE: u32 = 200_010;
 const CHUNK: usize = prefix_cache::PREFILL_CHUNK_TOKENS;
-const SOURCE_PREFILL_MIN_INPUT: usize = 512;
+/// Mechanical minimum of the source schedule. Below five tokens the bulk is
+/// empty and the tail shrinks (`saturating_sub`); bulk commands under
+/// `Session::SOURCE_MIN_BULK_ROWS` run the lane or serial kernels inside the
+/// source scope, and every longer command runs the packed source kernels.
+const SOURCE_PREFILL_MIN_INPUT: usize = 1;
 const SOURCE_PROMPT_SUFFIX: usize = 4;
+/// Default proposals through the multi-row source verifier (measured best).
+const GREEDY_DEFAULT_DRAFTS: u32 = 3;
+const SAMPLED_DEFAULT_DRAFTS: u32 = 2;
 const INITIAL_CONTEXT: usize = 4352;
-const MTP_VERIFICATION: &str = "inkling-dspark-target-draw-v1";
 const SHORT_MTP_VERIFICATION: &str = "inkling-dspark-short-target-draw-v1";
 
 #[derive(Default, serde::Serialize)]
@@ -59,6 +65,15 @@ struct SpeculationStats {
     draft_seconds: f64,
     verify_seconds: f64,
     finish_seconds: f64,
+    /// Wall seconds of complete drafting rounds (round start to commit end)
+    /// and their count, by accepted draft count.
+    round_seconds_by_accepted: [f64; MAX_VERIFY_ROWS],
+    rounds_by_accepted: [usize; MAX_VERIFY_ROWS],
+    /// Host time inside rounds between the verifier result and the commit
+    /// (sampling and the consumer's per-token work).
+    in_round_host_seconds: f64,
+    /// Time from a commit to the start of the next round.
+    between_rounds_seconds: f64,
 }
 
 struct PendingDraft<'a> {
@@ -70,6 +85,8 @@ struct PendingDraft<'a> {
 pub(crate) struct InklingBackend {
     tokenizer: Tokenizer,
     config_sha256: String,
+    /// Original or affine8 artifact, as verified at load.
+    layout: inkling_artifact::Layout,
     target: Session,
     cancellation: Option<CancelSignal>,
     sampler: ProbabilityMapper,
@@ -78,6 +95,81 @@ pub(crate) struct InklingBackend {
     source_verifier: bool,
     draft_stats: DraftStats,
     runtime_identity: stark_engine::engine::MetalDeviceIdentity,
+}
+
+/// Default draft count for a request that names no MTP setting.
+fn default_drafts_for(sampling: &Sampling) -> u32 {
+    if matches!(sampling, Sampling::Greedy {}) {
+        GREEDY_DEFAULT_DRAFTS
+    } else {
+        SAMPLED_DEFAULT_DRAFTS
+    }
+}
+
+/// Source prefill command width chosen at load: the widest of
+/// `Session::SOURCE_COMMAND_WIDTHS` the host admits. Default prefill output
+/// does not depend on the width and prefix snapshots stay 2,048-aligned, so
+/// this only trades workspace for fewer, larger commands. The base width keeps
+/// its original admission rule; a wider one must also leave room for the
+/// verifier, the proposal head and a maximum-context request, so it never
+/// costs a request that the base width would have served.
+fn source_command_rows(
+    fixed: usize,
+    available: usize,
+) -> Option<usize> {
+    let limit = Session::source_context_limit(true);
+    let headroom = Session::context_memory_bytes(limit, true).zip(Session::dspark_memory_bytes(limit, true)).map(
+        |(target, draft)| {
+            target
+                + draft
+                + Session::source_global_extra_bytes(true, limit)
+                + Session::SOURCE_VERIFIER_RESERVE_BYTES
+                + Session::DSPARK_INT8_HEAD_BYTES
+        },
+    );
+    Session::SOURCE_COMMAND_WIDTHS.iter().rev().copied().find(|&rows| {
+        let reserve = Session::batched_prefill_memory_bytes_at(true, rows);
+        let needed = if rows == Session::SOURCE_PREFILL_ROWS {
+            Some(fixed + reserve)
+        } else {
+            headroom.map(|headroom| fixed + reserve + headroom)
+        };
+        admit_request_memory(needed, available).is_ok()
+    })
+}
+
+/// Prefix-snapshot boundary. Source prefill keeps its four-token suffix and
+/// 2,048-row bulk alignment; a short input therefore has no boundary.
+fn prefix_boundary(
+    input_len: usize,
+    scoped: bool,
+    source_prefill: bool,
+) -> usize {
+    let (remaining, chunk) = if source_prefill {
+        (SOURCE_PROMPT_SUFFIX, Session::SOURCE_PREFILL_ROWS)
+    } else {
+        (2, CHUNK)
+    };
+    if scoped {
+        input_len.saturating_sub(remaining) / chunk * chunk
+    } else {
+        0
+    }
+}
+
+/// Where the remaining source bulk of a request splits before its final
+/// commands: the snapshot boundary a scoped request would use, when the
+/// request has not already been split there or beyond it.
+fn unscoped_source_split(
+    input_len: usize,
+    start: usize,
+    source_prefill: bool,
+) -> usize {
+    if source_prefill {
+        prefix_boundary(input_len, true, true).max(start)
+    } else {
+        start
+    }
 }
 
 pub(crate) struct PreparedInklingImage {
@@ -161,11 +253,19 @@ impl InklingBackend {
         let runtime_identity = Engine::<Metal>::new().map_err(|_| "inkling_load_failed")?.metal_device_identity();
         let m5_max = runtime_identity.device_name == "Apple M5 Max" && runtime_identity.supports_mxu;
         let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
-        let fixed = inkling_artifact::TARGET_BYTES + inkling_artifact::DRAFT_BYTES + 1024 * 1024 * 1024;
-        let source_allowed = m5_max
-            && admit_request_memory(Some(fixed + Session::batched_prefill_memory_bytes(true)), available).is_ok();
+        let fixed = inkling_artifact::TARGET_BYTES
+            + inkling_artifact::DRAFT_BYTES
+            + 1024 * 1024 * 1024
+            + inkling_artifact::Layout::of(root).extra_resident_bytes();
+        let source_rows = if m5_max {
+            source_command_rows(fixed, available)
+        } else {
+            None
+        };
+        let source_allowed = source_rows.is_some();
+        let command_rows = source_rows.unwrap_or(Session::SOURCE_PREFILL_ROWS);
         let prefill_reserve = if m5_max {
-            Session::batched_prefill_memory_bytes(source_allowed)
+            Session::batched_prefill_memory_bytes_at(source_allowed, command_rows)
         } else {
             128 * 1024 * 1024
         };
@@ -179,25 +279,24 @@ impl InklingBackend {
             artifact.draft.verify_unchanged()?;
         }
         if target.supports_batched_prefill() {
-            target.set_batched_prefill(true, source_allowed).map_err(|_| "inkling_prefill_load_failed")?;
+            target
+                .set_batched_prefill_width(true, source_allowed, command_rows)
+                .map_err(|_| "inkling_prefill_load_failed")?;
         }
         let source_verifier = source_allowed
-            && std::env::var_os("STARK_INKLING_EXPERIMENT_SOURCE_VERIFY").as_deref() == Some(std::ffi::OsStr::new("1"))
             && admit_request_memory(Some(fixed + prefill_reserve + Session::SOURCE_VERIFIER_RESERVE_BYTES), available)
                 .is_ok()
             && target.set_source_verifier(true).is_ok();
         if source_verifier {
-            if std::env::var_os("STARK_INKLING_EXPERIMENT_DRAFT_INT8").as_deref() == Some(std::ffi::OsStr::new("1"))
-                && admit_request_memory(
-                    Some(
-                        fixed
-                            + prefill_reserve
-                            + Session::SOURCE_VERIFIER_RESERVE_BYTES
-                            + Session::DSPARK_INT8_HEAD_BYTES,
-                    ),
-                    available,
-                )
-                .is_ok()
+            // The INT8 proposal head stays resident once prepared; `context_bytes`
+            // counts it through `dspark_int8_head_resident_bytes`.
+            if admit_request_memory(
+                Some(
+                    fixed + prefill_reserve + Session::SOURCE_VERIFIER_RESERVE_BYTES + Session::DSPARK_INT8_HEAD_BYTES,
+                ),
+                available,
+            )
+            .is_ok()
             {
                 target.prepare_dspark_int8_head().map_err(|_| "inkling_draft_load_failed")?;
             }
@@ -206,6 +305,7 @@ impl InklingBackend {
         Ok(Self {
             tokenizer: artifact.tokenizer,
             config_sha256: artifact.config_sha256,
+            layout: artifact.layout,
             target,
             cancellation,
             sampler: ProbabilityMapper::default(),
@@ -232,12 +332,7 @@ impl InklingBackend {
         options: &GenerationOptions,
         source_prefill: bool,
     ) -> usize {
-        let (remaining, chunk) = if source_prefill {
-            (SOURCE_PROMPT_SUFFIX, Session::SOURCE_PREFILL_ROWS)
-        } else {
-            (2, CHUNK)
-        };
-        options.cache_scope.map_or(0, |_| input_len.saturating_sub(remaining) / chunk * chunk)
+        prefix_boundary(input_len, options.cache_scope.is_some(), source_prefill)
     }
 
     fn generate_inner(
@@ -283,13 +378,15 @@ impl InklingBackend {
         };
         let retained = self.retained.take();
         self.pending = None;
-        admit(self.context_bytes(options.context_tokens as usize, boundary > reused))?;
+        admit(self.context_bytes(options.context_tokens as usize, boundary > reused, source_prefill))?;
         let _activity = InferenceActivity::begin().map_err(|_| "inference_activity_unavailable")?;
         let started = Instant::now();
         require_active(&mut self.cancellation, options.request_id)?;
-        self.target.set_context(options.context_tokens as usize).map_err(|_| "native_generation_failed")?;
+        // Select the scope first so `set_context` sizes the source global
+        // workspace only for a request that was admitted with it.
         self.target.reset();
         self.target.set_text_prefill_scope(source_prefill);
+        self.target.set_context(options.context_tokens as usize).map_err(|_| "native_generation_failed")?;
         self.target.set_source_verifier(source_verify).map_err(|_| "mtp_not_supported")?;
         self.target.set_dspark_enabled(use_draft).map_err(|_| "mtp_not_supported")?;
         let mut retained = retained.filter(|_| reused > 0);
@@ -333,7 +430,18 @@ impl InklingBackend {
             } else {
                 last
             };
-            prefill.text(&mut self.target, &input[boundary.max(reused)..bulk_end])?;
+            let mut start = boundary.max(reused);
+            // A request without a cache scope takes no snapshot, but its bulk
+            // still splits where a scoped request's would. The rows after that
+            // split then run in a command of the same width class either way,
+            // so the output does not depend on whether the prefix cache is on,
+            // at any source command width.
+            let split = unscoped_source_split(input.len(), start, source_prefill);
+            if split > start {
+                prefill.text(&mut self.target, &input[start..split])?;
+                start = split;
+            }
+            prefill.text(&mut self.target, &input[start..bulk_end])?;
             if source_prefill {
                 prefill.text(&mut self.target, &input[bulk_end..last])?;
             }
@@ -367,12 +475,29 @@ impl InklingBackend {
         Ok(result)
     }
 
+    /// Automatic planning covers text requests, which take the source path
+    /// whenever the loaded worker supports it at that context.
+    fn plans_source(
+        &self,
+        context: usize,
+    ) -> bool {
+        self.target.supports_source_text_prefill(context)
+    }
+
     fn context_bytes(
         &self,
         context: usize,
         retain: bool,
+        source: bool,
     ) -> Option<usize> {
-        let target = Session::context_memory_bytes(context, retain)?;
+        // Only source-path requests grow the global workspace beyond the
+        // 4,352 keys that the load-time reserve covers.
+        let workspace = if source {
+            self.target.source_context_workspace_bytes(context)
+        } else {
+            0
+        };
+        let target = Session::context_memory_bytes(context, retain)?.checked_add(workspace)?;
         if self.target.has_dspark() {
             target
                 .checked_add(Session::dspark_memory_bytes(context, retain)?)?
@@ -400,10 +525,8 @@ fn collect_output(
 ) -> Result<GeneratedTokens, &'static str> {
     let mut previous = None;
     let mut rng = options.seed;
-    let certified_sampling =
-        std::env::var_os("STARK_INKLING_EXPERIMENT_CERTIFIED_SAMPLE").as_deref() == Some(std::ffi::OsStr::new("1"));
     let mut sample = |scores: &[f32]| {
-        if certified_sampling && let Some(token) = sample_certified_prefix(scores, &options.sampling, &mut rng) {
+        if let Some(token) = sample_certified_prefix(scores, &options.sampling, &mut rng) {
             return Ok(token);
         }
         sample_with_mapper(scores, &options.sampling, &mut rng, Some(mapper))
@@ -413,13 +536,26 @@ fn collect_output(
     let mut session = Some(target);
     let mut pending: Option<PendingDraft<'_>> = None;
     let mut speculative = (verify_depth > 0).then(SpeculationStats::default);
+    let mut round_started: Option<Instant> = None;
+    let mut verified_at: Option<Instant> = None;
+    let mut committed_at: Option<Instant> = None;
+    // Per-round draft depth, up to the requested count, from running
+    // acceptance and measured round costs. Output does not depend on it.
+    let mut planner = DepthPlanner::new();
+    let mut round_depth = 0;
     let tokens = std::iter::from_fn(|| {
         Some((|| {
             let mut legacy_proposal = None;
             if let Some(anchor) = previous {
                 if pending.is_none() {
                     let target = session.take().ok_or("native_generation_failed")?;
-                    let depth = verify_depth.min(budget.saturating_sub(delivered + 1));
+                    let limit = verify_depth.min(budget.saturating_sub(delivered + 1));
+                    let depth = if verify_depth > 0 {
+                        planner.choose(limit)
+                    } else {
+                        0
+                    };
+                    round_depth = depth;
                     if let Some(stats) = speculative.as_mut() {
                         stats.rounds[depth] += 1;
                     }
@@ -427,10 +563,19 @@ fn collect_output(
                         if verify_depth == 0 {
                             legacy_proposal = target.draft_propose(anchor).map_err(|_| "native_generation_failed")?;
                         }
+                        let started = Instant::now();
                         logits = target.step(anchor).map_err(|_| "native_generation_failed")?;
+                        if verify_depth > 0 {
+                            planner.record(0, 0, 1000.0 * started.elapsed().as_secs_f64());
+                        }
                         session = Some(target);
                     } else {
                         let stats = speculative.as_mut().unwrap();
+                        let now = Instant::now();
+                        if let Some(at) = committed_at.take() {
+                            stats.between_rounds_seconds += (now - at).as_secs_f64();
+                        }
+                        round_started = Some(now);
                         let (proposals, transaction) = if target.overlaps_verify_for(depth) {
                             let (proposals, transaction, before_verify_ms, verify_wall_ms) = target
                                 .begin_overlapped_verify(anchor, depth)
@@ -451,6 +596,7 @@ fn collect_output(
                             (proposals, transaction)
                         };
                         draft_stats.proposed += proposals.len();
+                        verified_at = Some(Instant::now());
                         pending = Some(PendingDraft {
                             transaction,
                             proposals,
@@ -469,7 +615,17 @@ fn collect_output(
                 } else {
                     let start = Instant::now();
                     session = Some(draft.transaction.commit(draft.consumed).map_err(|_| "native_generation_failed")?);
-                    speculative.as_mut().unwrap().finish_seconds += start.elapsed().as_secs_f64();
+                    let stats = speculative.as_mut().unwrap();
+                    stats.finish_seconds += start.elapsed().as_secs_f64();
+                    let done = Instant::now();
+                    if let (Some(begun), Some(verified)) = (round_started.take(), verified_at.take()) {
+                        let accepted = (draft.consumed - 1).min(MAX_VERIFY_ROWS - 1);
+                        stats.round_seconds_by_accepted[accepted] += (done - begun).as_secs_f64();
+                        stats.rounds_by_accepted[accepted] += 1;
+                        stats.in_round_host_seconds += (start - verified).as_secs_f64();
+                        planner.record(round_depth, draft.consumed - 1, 1000.0 * (done - begun).as_secs_f64());
+                    }
+                    committed_at = Some(done);
                 }
                 token
             } else {
@@ -558,13 +714,16 @@ impl GenerationBackend for InklingBackend {
     ) -> Option<u32> {
         let minimum = input.checked_add(1)?;
         let mut max = maximum.min(self.max_context_length()?);
-        if minimum > max || self.context_bytes(minimum as usize, true)? > memory {
+        if minimum > max || self.context_bytes(minimum as usize, true, self.plans_source(minimum as usize))? > memory {
             return None;
         }
         let mut min = minimum;
         while min < max {
             let midpoint = min + (max - min).div_ceil(2);
-            if self.context_bytes(midpoint as usize, true).is_some_and(|bytes| bytes <= memory) {
+            if self
+                .context_bytes(midpoint as usize, true, self.plans_source(midpoint as usize))
+                .is_some_and(|bytes| bytes <= memory)
+            {
                 min = midpoint;
             } else {
                 max = midpoint - 1;
@@ -657,21 +816,54 @@ impl GenerationBackend for InklingBackend {
     fn supports_images(&self) -> bool {
         true
     }
+    /// MTP is advertised only with the multi-row source verifier. The legacy
+    /// one-draft route measured slower than serial decoding, so a worker
+    /// without the verifier decodes serially and advertises no MTP.
     fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
-        self.target.has_dspark().then_some(MtpCapabilities {
-            max_drafts: if self.source_verifier {
-                MAX_VERIFY_ROWS - 1
-            } else {
-                1
-            },
-            recommended_drafts: 1,
+        (self.source_verifier && self.target.has_dspark()).then_some(MtpCapabilities {
+            max_drafts: MAX_VERIFY_ROWS - 1,
+            recommended_drafts: GREEDY_DEFAULT_DRAFTS as usize,
             sampling: "native-target-draw-match-v1",
-            verification: if self.source_verifier {
-                SHORT_MTP_VERIFICATION
-            } else {
-                MTP_VERIFICATION
-            },
+            verification: SHORT_MTP_VERIFICATION,
         })
+    }
+    fn recommended_mtp_drafts_for(
+        &self,
+        sampling: &Sampling,
+    ) -> Option<u32> {
+        (self.default_mtp_drafts() > 0).then(|| default_drafts_for(sampling))
+    }
+    /// Text requests that name no MTP setting draft through the multi-row
+    /// source verifier. Image requests are sent with zero drafts.
+    fn default_mtp_drafts(&self) -> u32 {
+        if self.source_verifier && self.target.has_dspark() {
+            GREEDY_DEFAULT_DRAFTS.max(SAMPLED_DEFAULT_DRAFTS)
+        } else {
+            0
+        }
+    }
+    fn default_mtp_drafts_for(
+        &self,
+        sampling: &Sampling,
+    ) -> u32 {
+        self.default_mtp_drafts().min(default_drafts_for(sampling))
+    }
+    /// Every draft depth, including one, runs through the source verifier. If
+    /// it is unavailable at this context, decode serially rather than take
+    /// the slower legacy one-draft route.
+    fn effective_mtp_drafts(
+        &self,
+        options: &GenerationOptions,
+    ) -> Result<u32, &'static str> {
+        Ok(
+            if options.mtp_drafts > 0
+                && !(self.source_verifier && self.target.supports_source_text_prefill(options.context_tokens as usize))
+            {
+                0
+            } else {
+                options.mtp_drafts
+            },
+        )
     }
     fn mtp_metadata(&self) -> Option<Value> {
         self.target.has_dspark().then(|| json!({"stats":self.draft_stats}))
@@ -689,7 +881,7 @@ impl GenerationBackend for InklingBackend {
     fn image_artifact_identity(&self) -> Option<ImageArtifactIdentity<'_>> {
         Some(ImageArtifactIdentity {
             schema_version: 7,
-            artifact_sha256: inkling_artifact::TARGET_SHA,
+            artifact_sha256: self.layout.target_sha256(),
             config_sha256: &self.config_sha256,
             tokenizer_sha256: inkling_artifact::TOKENIZER_SHA,
             processor_sha256: inkling_artifact::PROCESSOR_SHA,
@@ -756,5 +948,149 @@ impl GenerationBackend for InklingBackend {
             self.generate_inner(&prepared.input, Some((&prepared.image, prepared.slot)), options, on_text, on_progress);
         self.target.reset();
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MIB: usize = 1024 * 1024;
+
+    #[test]
+    fn source_prefill_admits_every_nonempty_prompt() {
+        // Empty input is rejected before admission; one token is the seed alone.
+        assert_eq!(SOURCE_PREFILL_MIN_INPUT, 1);
+        assert_eq!(Session::SOURCE_MIN_BULK_ROWS, 16);
+        assert!(SOURCE_PREFILL_MIN_INPUT <= SOURCE_PROMPT_SUFFIX);
+    }
+
+    #[test]
+    fn text_requests_draft_through_the_multi_row_verifier_by_default() {
+        assert_eq!(default_drafts_for(&Sampling::Greedy {}), 3);
+        let sampled = Sampling::Stochastic {
+            temperature: 1.0,
+            top_k: None,
+            top_p: Some(1.0),
+            min_p: None,
+        };
+        assert_eq!(default_drafts_for(&sampled), 2);
+        assert_eq!(GREEDY_DEFAULT_DRAFTS as usize, MAX_VERIFY_ROWS - 1);
+    }
+
+    #[test]
+    fn short_source_inputs_have_no_prefix_boundary() {
+        for input in [0, 1, 3, 4, 5, 68, 69, 73, 511, 512, 2051] {
+            assert_eq!(prefix_boundary(input, true, true), 0, "{input}");
+        }
+        assert_eq!(prefix_boundary(2052, true, true), 2048);
+        assert_eq!(prefix_boundary(4096, true, true), 2048);
+        assert_eq!(prefix_boundary(8800, true, true), 8192);
+        assert_eq!(prefix_boundary(16_388, true, true), 16_384);
+        assert_eq!(prefix_boundary(4096, false, true), 0);
+        assert_eq!(prefix_boundary(73, true, false), 0);
+        assert_eq!(prefix_boundary(CHUNK + 2, true, false), CHUNK);
+    }
+
+    #[test]
+    fn unscoped_source_requests_split_where_scoped_ones_do() {
+        // An unscoped request starts at 0 and splits at the scoped boundary.
+        for input in [2052, 4096, 8800, 18_974, 20_584] {
+            assert_eq!(unscoped_source_split(input, 0, true), prefix_boundary(input, true, true), "{input}");
+        }
+        assert_eq!(unscoped_source_split(18_974, 0, true), 18_432);
+        // A scoped request has already run to its boundary, so nothing more is split.
+        assert_eq!(unscoped_source_split(18_974, 18_432, true), 18_432);
+        // Short inputs and the non-source path are left as one bulk.
+        assert_eq!(unscoped_source_split(73, 0, true), 0);
+        assert_eq!(unscoped_source_split(8800, 0, false), 0);
+        assert_eq!(unscoped_source_split(8800, 1024, false), 1024);
+    }
+
+    #[test]
+    fn source_command_rows_follow_admitted_memory() {
+        const GIB: usize = 1024 * MIB;
+        let fixed = 20 * GIB;
+        // The resource budget keeps this much of the available memory free.
+        let slack = 256 * MIB;
+        let base = Session::batched_prefill_memory_bytes_at(true, Session::SOURCE_PREFILL_ROWS);
+        assert_eq!(base, Session::batched_prefill_memory_bytes(true));
+        // Below the base reserve the source path is not admitted at all.
+        assert_eq!(source_command_rows(fixed, fixed + slack + base - 1), None);
+        // The base width keeps its original rule: its reserve alone.
+        assert_eq!(source_command_rows(fixed, fixed + slack + base), Some(2048));
+        // A wider width must also leave room for the verifier, the proposal
+        // head and a maximum-context request.
+        let limit = Session::source_context_limit(true);
+        let headroom = Session::context_memory_bytes(limit, true).unwrap()
+            + Session::dspark_memory_bytes(limit, true).unwrap()
+            + Session::source_global_extra_bytes(true, limit)
+            + Session::SOURCE_VERIFIER_RESERVE_BYTES
+            + Session::DSPARK_INT8_HEAD_BYTES;
+        for (rows, narrower) in [(4096, 2048), (8192, 4096)] {
+            let needed = fixed + slack + Session::batched_prefill_memory_bytes_at(true, rows) + headroom;
+            assert_eq!(source_command_rows(fixed, needed - 1), Some(narrower), "{rows}");
+            assert_eq!(source_command_rows(fixed, needed), Some(rows), "{rows}");
+        }
+        assert_eq!(source_command_rows(fixed, usize::MAX / 2), Some(8192));
+        assert_eq!(Session::SOURCE_COMMAND_WIDTHS, [2048, 4096, 8192]);
+    }
+
+    #[test]
+    fn source_context_limit_and_capacity() {
+        assert_eq!(Session::source_context_limit(false), INITIAL_CONTEXT);
+        assert_eq!(Session::source_context_limit(true), 32_768);
+        for (context, capacity) in
+            [(1, 4352), (73, 4352), (4352, 4352), (4353, 4353), (9216, 9216), (16_384, 16_384), (32_768, 32_768)]
+        {
+            assert_eq!(Session::source_global_capacity(context), capacity, "{context}");
+        }
+        assert_eq!(Session::source_global_capacity(40_000), 32_768);
+    }
+
+    #[test]
+    fn source_global_workspace_bytes() {
+        for (keys, mask, total) in [
+            (4352, 133_275_648, 35_651_584),
+            (9216, 282_230_784, 75_497_472),
+            (16_384, 501_743_616, 134_217_728),
+            (32_768, 1_003_487_232, 268_435_456),
+        ] {
+            assert_eq!(Session::source_global_mask_bytes(keys), mask, "{keys}");
+            assert_eq!(Session::source_global_workspace_bytes(keys), total, "{keys}");
+        }
+        // The default path computes the relative bias in the attention kernel,
+        // so the workspace is the key and value staging alone. Only the exact
+        // diagnostic reference allocates the explicit mask (127 MiB at 4,352 keys).
+        assert_eq!(Session::source_global_mask_bytes(4352) / MIB, 127);
+        assert_eq!(Session::source_global_workspace_bytes(32_768) / MIB, 256);
+    }
+
+    #[test]
+    fn source_global_extra_bytes_follow_the_context() {
+        for context in [1, 73, 4096, 4352, 9216, 32_768] {
+            assert_eq!(Session::source_global_extra_bytes(false, context), 0, "{context}");
+        }
+        for context in [1, 73, 4096, 4352] {
+            assert_eq!(Session::source_global_extra_bytes(true, context), 0, "{context}");
+        }
+        let base = Session::source_global_workspace_bytes(4352);
+        for keys in [4353, 9216, 16_384, 32_768] {
+            assert_eq!(
+                Session::source_global_extra_bytes(true, keys),
+                Session::source_global_workspace_bytes(keys) - base,
+                "{keys}"
+            );
+        }
+        assert_eq!(Session::source_global_extra_bytes(true, 9216), 39_845_888);
+        assert_eq!(Session::source_global_extra_bytes(true, 32_768), 232_783_872);
+        // Contexts beyond the session maximum are rejected before allocation.
+        assert_eq!(Session::source_global_extra_bytes(true, 32_769), 0);
+        let mut previous = 0;
+        for context in (4352..=32_768).step_by(512) {
+            let extra = Session::source_global_extra_bytes(true, context);
+            assert!(extra >= previous);
+            previous = extra;
+        }
     }
 }

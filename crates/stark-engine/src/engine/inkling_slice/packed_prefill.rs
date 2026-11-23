@@ -24,6 +24,8 @@ pub(super) struct PackedPrefill {
     rows: usize,
     source: Option<SourcePrefill>,
     source_allowed: bool,
+    /// Context-sized global workspace, present with the source global probe.
+    context_workspace: bool,
     draft_taps: Option<Buffer>,
     tokens: Buffer,
     partial: Buffer,
@@ -56,11 +58,70 @@ pub(super) struct PackedPrefill {
     experts: GroupedExperts,
 }
 
+/// Default dense projection kernel and its tile (rows, columns), from
+/// dense_fast.metal. The staged variants (ink_dense_staged*) are under test.
+/// Default local prefill attention: BF16 query operands.
+const LOCAL_ATTENTION: Kernel = "ink_prefill_relative_fast";
+const DENSE_TILE: (Kernel, usize, usize) = ("ink_dense_fast", 128, 64);
+
 impl PackedPrefill {
     pub(super) const MIN_ROWS: usize = 16;
+    /// Smallest command the default source path packs. Lowering it below
+    /// MIN_ROWS would run the worker's three-row tail on the packed source
+    /// kernels instead of serial decode steps (not yet validated; parked at
+    /// MIN_ROWS). The exact reference and other scopes keep MIN_ROWS.
+    pub(super) const SOURCE_TAIL_ROWS: usize = Self::MIN_ROWS;
 
-    pub(super) fn source_enabled() -> bool {
-        std::env::var_os("STARK_INKLING_SOURCE_PREFILL").as_deref() != Some(std::ffi::OsStr::new("0"))
+    pub(super) fn min_command_rows(
+        &self,
+        runtime: &Runtime,
+    ) -> usize {
+        if runtime.source_text_active && !runtime.exact_prefill && self.source.is_some() && self.source_allowed {
+            Self::SOURCE_TAIL_ROWS
+        } else {
+            Self::MIN_ROWS
+        }
+    }
+    /// Smallest packed command that uses the source kernels. Shorter packed
+    /// chunks keep the incumbent exact kernels.
+    pub(super) const SOURCE_MIN_ROWS: usize = 65;
+    /// Largest source command width the packed workspace accepts.
+    pub(super) const SOURCE_COMMAND_ROWS: usize = 8192;
+
+    /// Largest request context the source path admits.
+    pub(super) fn source_context_limit(context_workspace: bool) -> usize {
+        if context_workspace {
+            packed_global_probe::MAX_CONTEXT_KEYS
+        } else {
+            packed_global_probe::MAX_KEYS
+        }
+    }
+
+    /// Global key capacity allocated for a context under the context-sized workspace.
+    pub(super) fn source_global_capacity(context: usize) -> usize {
+        packed_global_probe::capacity_for(context)
+    }
+
+    /// Key-extent global workspace bytes at a capacity.
+    pub(super) fn source_global_workspace_bytes(keys: usize) -> usize {
+        packed_global_probe::workspace_bytes(keys)
+    }
+
+    pub(super) fn source_global_mask_bytes(keys: usize) -> usize {
+        packed_global_probe::mask_bytes(keys)
+    }
+
+    /// Bytes above the default global workspace, which the load-time source
+    /// reserve already covers, needed at a context.
+    pub(super) fn source_global_extra_bytes(
+        context_workspace: bool,
+        context: usize,
+    ) -> usize {
+        if !context_workspace || context > Self::source_context_limit(true) {
+            return 0;
+        }
+        Self::source_global_workspace_bytes(Self::source_global_capacity(context))
+            - Self::source_global_workspace_bytes(packed_global_probe::MAX_KEYS)
     }
 
     pub(super) const EXACT_WORKER_ROWS: usize = M5_PACKED_ROWS;
@@ -69,37 +130,33 @@ impl PackedPrefill {
         runtime: &mut Runtime,
         layers: &mut [Layer],
         source_allowed: bool,
+        source_rows: usize,
     ) -> Result<Self> {
-        if source_allowed
-            && Self::source_enabled()
-            && let Ok(mut packed) = Self::source_for_m5_worker(runtime)
-        {
+        if source_allowed && let Ok(mut packed) = Self::source_for_m5_worker(runtime, source_rows) {
             // Keep the source scheduler and ordinary grouped kernels if an
             // optional fast pipeline or its scratch fails to initialize.
-            if runtime.grouped_qmm == "ink_group_qmm"
-                || std::env::var_os("STARK_INKLING_EXPERIMENT_NVFP4_ROWS64").as_deref()
-                    == Some(std::ffi::OsStr::new("1"))
-            {
-                let _ = grouped_pilot::enable_rows64(runtime);
-            }
+            let _ = grouped_pilot::enable_rows64(runtime);
             let _ = packed.experts.enable_mxfp8_tensor(runtime, layers);
-            if parallel_route_requested() {
-                runtime.parallel_route = register_parallel_route(runtime).is_ok();
-            }
-            if nvfp4_vector_requested() {
-                runtime.nvfp4_vector = register_nvfp4_vector(runtime).is_ok();
-            }
+            runtime.parallel_route = register_parallel_route(runtime).is_ok();
+            runtime.nvfp4_vector = register_nvfp4_vector(runtime).is_ok();
             return Ok(packed);
         }
         Self::new(runtime, M5_PACKED_ROWS, true, None, false, false, false)
     }
 
-    fn source_for_m5_worker(runtime: &mut Runtime) -> Result<Self> {
-        let packed = Self::new(runtime, Session::SOURCE_PREFILL_ROWS, true, Some((true, true)), true, true, true)?;
+    fn source_for_m5_worker(
+        runtime: &mut Runtime,
+        rows: usize,
+    ) -> Result<Self> {
+        if !Session::SOURCE_COMMAND_WIDTHS.contains(&rows) {
+            return Err("Inkling source prefill width must be 2,048, 4,096 or 8,192 rows");
+        }
+        let packed = Self::new(runtime, rows, true, Some((true, true)), true, true, true)?;
         register(
             runtime,
             concat!(
                 "#define INK_SOURCE_SINGLETON_CONV\n#define ink_conv ink_conv_source\n",
+                include_str!("long_position.metal"),
                 include_str!("serial.metal"),
             ),
             &["ink_conv_source"],
@@ -160,8 +217,8 @@ impl PackedPrefill {
         softmax: bool,
         mxsrc: bool,
     ) -> Result<Self> {
-        if !runtime.pinned_m5 || !(128..=2048).contains(&rows) {
-            return Err("packed Inkling prefill requires M5 Max and 128 to 2,048 rows");
+        if !runtime.pinned_m5 || !(128..=Self::SOURCE_COMMAND_ROWS.max(2048)).contains(&rows) {
+            return Err("packed Inkling prefill requires M5 Max and 128 rows up to the source command width");
         }
         register(
             runtime,
@@ -180,11 +237,12 @@ impl PackedPrefill {
                 "ink_packed_controller_expand",
                 "ink_packed_after_attention",
                 "ink_packed_after_experts",
+                "ink_packed_perturb",
             ],
         )?;
         register(
             runtime,
-            include_str!("packed_attention.metal"),
+            concat!(include_str!("long_position.metal"), include_str!("packed_attention.metal")),
             &[
                 "ink_packed_conv",
                 "ink_packed_commit_conv",
@@ -211,21 +269,38 @@ impl PackedPrefill {
                 register(runtime, include_str!("prefill_dense_source.metal"), &source_kernels)?;
                 router
             };
-            if std::env::var_os("STARK_INKLING_EXPERIMENT_NVFP4_SHARED_SCALES").as_deref()
-                == Some(std::ffi::OsStr::new("1"))
-            {
-                grouped_pilot::enable_shared_scales(runtime)?;
-            }
+            register(
+                runtime,
+                include_str!("dense_fast.metal"),
+                &["ink_dense_fast", DENSE_TILE.0, "ink_router_compare"],
+            )?;
+            runtime.router_tiles =
+                register(runtime, include_str!("prefill_dense_source.metal"), &["ink_prefill_router_tiles"]).is_ok();
             register(
                 runtime,
                 include_str!("prefill_relative_source.metal"),
                 &["ink_prefill_relative_table_source", "ink_prefill_relative_source"],
             )?;
-            register(runtime, include_str!("packed_attention.metal"), &["ink_packed_chronological_kv"])?;
+            register(
+                runtime,
+                concat!(
+                    "#define INK_RELATIVE_BF16_QUERY\n#define ink_prefill_relative_source ink_prefill_relative_fast\n",
+                    "#define ink_prefill_relative_table_source ink_prefill_relative_table_fast_unused\n",
+                    "#define ink_prefill_relative_gather ink_prefill_relative_gather_fast_unused\n",
+                    include_str!("prefill_relative_source.metal"),
+                ),
+                &["ink_prefill_relative_fast"],
+            )?;
+            register(
+                runtime,
+                concat!(include_str!("long_position.metal"), include_str!("packed_attention.metal")),
+                &["ink_packed_chronological_kv"],
+            )?;
             register(
                 runtime,
                 concat!(
                     "#define INK_PACKED_SOURCE_CONV\n#define ink_packed_conv ink_packed_conv_source\n",
+                    include_str!("long_position.metal"),
                     include_str!("packed_attention.metal"),
                 ),
                 &["ink_packed_conv_source"],
@@ -234,13 +309,14 @@ impl PackedPrefill {
                 runtime,
                 concat!(
                     "#define INK_PACKED_SOURCE_HEADS\n#define ink_packed_heads ink_packed_heads_source\n",
+                    include_str!("long_position.metal"),
                     include_str!("packed_attention.metal"),
                 ),
                 &["ink_packed_heads_source"],
             )?;
         }
         let mut experts = GroupedExperts::new(runtime, rows)?;
-        experts.min_rows = Self::MIN_ROWS;
+        experts.min_rows = Self::SOURCE_TAIL_ROWS;
         if wide_mxfp8 {
             experts.enable_wide_mxfp8(runtime)?;
         } else {
@@ -260,11 +336,13 @@ impl PackedPrefill {
         } else {
             None
         };
+        let context_workspace = global.is_some();
         let device = &runtime.device;
         let bf16 = |stride| zeroed(device, rows * stride * 2);
         let f32 = |stride| zeroed(device, rows * stride * 4);
         Ok(Self {
             rows,
+            context_workspace,
             source: if let Some((routed, _)) = source {
                 let bytes = (LOCAL + rows + 2 * 128) * KV * 2;
                 Some(SourcePrefill {
@@ -332,14 +410,64 @@ impl PackedPrefill {
         &self,
         context: usize,
     ) -> bool {
-        self.source.is_some() && context <= packed_global_probe::MAX_KEYS
+        self.source.is_some() && context <= Self::source_context_limit(self.context_workspace)
+    }
+
+    /// Whether the allocated global workspace covers a context. Without the
+    /// context-sized workspace this equals `supports_source_context`.
+    pub(super) fn source_ready(
+        &self,
+        context: usize,
+    ) -> bool {
+        self.supports_source_context(context)
+            && self
+                .source
+                .as_ref()
+                .and_then(|source| source.global.as_ref())
+                .is_none_or(|global| context <= global.capacity())
+    }
+
+    pub(super) fn context_workspace(&self) -> bool {
+        self.context_workspace
+    }
+
+    /// Size the context-sized global workspace for a session context. This
+    /// does nothing without the source global probe.
+    pub(super) fn set_source_context(
+        &mut self,
+        device: &Device,
+        context: usize,
+    ) -> Result<()> {
+        if !self.context_workspace || !self.supports_source_context(context) {
+            return Ok(());
+        }
+        match self.source.as_mut().and_then(|source| source.global.as_mut()) {
+            Some(global) => global.resize(device, Self::source_global_capacity(context)),
+            None => Ok(()),
+        }
+    }
+
+    /// Additional global workspace bytes the session allocates at a context.
+    pub(super) fn source_context_extra_bytes(
+        &self,
+        context: usize,
+    ) -> usize {
+        Self::source_global_extra_bytes(self.context_workspace, context)
     }
 
     fn source_for_rows(
         &self,
         rows: usize,
+        exact: bool,
     ) -> Option<&SourcePrefill> {
-        self.source.as_ref().filter(|_| self.source_allowed && rows > 64)
+        // The default path runs every packed command on the same source
+        // kernels; the exact reference keeps the pinned 65-row threshold.
+        let min_rows = if exact {
+            Self::SOURCE_MIN_ROWS
+        } else {
+            Self::SOURCE_TAIL_ROWS
+        };
+        self.source.as_ref().filter(|_| self.source_allowed && rows >= min_rows)
     }
 
     pub(super) fn rows(&self) -> usize {
@@ -367,14 +495,31 @@ impl PackedPrefill {
         columns: usize,
         rows: usize,
     ) {
+        // Default source prefill: one tensor-unit tiling with a single K
+        // order at every command width. The exact reference keeps the
+        // pinned thin tilings and width-dependent K splits below.
+        if self.source_for_rows(rows, gpu.runtime.exact_prefill).is_some() && !gpu.runtime.exact_prefill {
+            // Both operands staged in threadgroup memory per 128 x 64 tile;
+            // same per-output arithmetic as ink_dense_fast.
+            let (kernel, tile_rows, tile_columns) = DENSE_TILE;
+            gpu.one(
+                kernel,
+                &[input, weight, output],
+                [width as u32, columns as u32, rows as u32, 0],
+                (columns.div_ceil(tile_columns), rows.div_ceil(tile_rows)),
+                tile_rows / 32 * (tile_columns / 32) * 32,
+            );
+            return;
+        }
         if rows > 64
             && columns <= 64
-            && let Some(global) = self.source_for_rows(rows).and_then(|source| source.global.as_ref())
+            && let Some(global) =
+                self.source_for_rows(rows, gpu.runtime.exact_prefill).and_then(|source| source.global.as_ref())
         {
             global.project_thin(gpu, input, weight, output, width, columns, rows);
             return;
         }
-        if self.source_for_rows(rows).is_some() && columns > 64 {
+        if self.source_for_rows(rows, gpu.runtime.exact_prefill).is_some() && columns > 64 {
             let largest = columns.max(rows);
             let split = if width >= 3 * largest || (largest <= 1024 && width > 2 * largest) {
                 2048
@@ -496,7 +641,7 @@ impl PackedPrefill {
     ) {
         let args = [width as u32, start as u32, u32::from(dynamic.is_some()), rows as u32];
         gpu.one(
-            if self.source_for_rows(rows).is_some() {
+            if self.source_for_rows(rows, gpu.runtime.exact_prefill).is_some() {
                 "ink_packed_conv_source"
             } else {
                 "ink_packed_conv"
@@ -543,7 +688,7 @@ impl PackedPrefill {
             rows,
         );
         gpu.one(
-            if self.source_for_rows(rows).is_some() {
+            if self.source_for_rows(rows, gpu.runtime.exact_prefill).is_some() {
                 "ink_packed_heads_source"
             } else {
                 "ink_packed_heads"
@@ -553,7 +698,7 @@ impl PackedPrefill {
             (16, rows),
             128,
         );
-        if let Some(source) = self.source_for_rows(rows)
+        if let Some(source) = self.source_for_rows(rows, gpu.runtime.exact_prefill)
             && layer.local
         {
             let first = start.saturating_sub(LOCAL - 1);
@@ -577,14 +722,19 @@ impl PackedPrefill {
             );
             gpu.phase(PrefillPhase::LocalAttention);
             gpu.one(
-                "ink_prefill_relative_source",
+                if gpu.runtime.exact_prefill {
+                    "ink_prefill_relative_source"
+                } else {
+                    LOCAL_ATTENTION
+                },
                 &[&self.q, keys, values, &self.table, &self.sink, &self.gate, &self.attended],
                 [start as u32, rows as u32, aligned as u32, backing as u32],
                 (rows.div_ceil(16), HEADS),
                 128,
             );
-        } else if rows > 64
-            && let Some(global) = self.source_for_rows(rows).and_then(|source| source.global.as_ref())
+        } else if (rows > 64 || !gpu.runtime.exact_prefill)
+            && let Some(global) =
+                self.source_for_rows(rows, gpu.runtime.exact_prefill).and_then(|source| source.global.as_ref())
         {
             gpu.phase(PrefillPhase::RelativeTable);
             gpu.one(
@@ -661,6 +811,10 @@ impl PackedPrefill {
     ) -> Result<()> {
         register(runtime, include_str!("packed_draft.metal"), &["ink_packed_draft_tap", "ink_packed_draft_hidden"])?;
         self.draft_taps = Some(zeroed(&runtime.device, self.rows * 4 * WIDTH * 2)?);
+        runtime.packed_draft_commit =
+            register(runtime, include_str!("draft_commit.metal"), &["ink_draft_commit_mix", "ink_draft_commit_values"])
+                .is_ok()
+                && runtime.pipelines.contains_key("ink_dense_fast");
         Ok(())
     }
 
@@ -893,8 +1047,8 @@ impl PackedPrefill {
                 gpu,
                 layer,
                 rows,
-                self.source_for_rows(rows).is_some_and(|source| source.routed),
-                self.source_for_rows(rows).is_some(),
+                self.source_for_rows(rows, gpu.runtime.exact_prefill).is_some_and(|source| source.routed),
+                self.source_for_rows(rows, gpu.runtime.exact_prefill).is_some(),
             );
             gpu.phase(PrefillPhase::ExpertFinish);
             self.convolution(
@@ -909,6 +1063,13 @@ impl PackedPrefill {
                 rows,
             );
             gpu.one("ink_packed_after_experts", &[&self.partial, &self.mlp], (), (WIDTH / 128, rows), 128);
+            if let Some((visit, position, element)) = gpu.runtime.prefill_perturb
+                && visit == index
+                && (start..start + rows).contains(&position)
+            {
+                let at = [(position - start) as u32, element as u32];
+                gpu.one("ink_packed_perturb", &[&self.partial], at, (1, 1), 1);
+            }
             if let Some(taps) = taps {
                 let [logits, routes, weights] = self.experts.routing(0);
                 taps.packed_stages(
@@ -952,8 +1113,12 @@ impl PackedPrefill {
                 WIDTH / 4,
             );
             gpu.one("ink_packed_draft_hidden", &[&self.mlp, taps], (), (WIDTH / 128, rows), 128);
-            for row in 0..rows {
-                draft.commit_from(gpu, (taps, row * 4 * WIDTH * 2), start + row);
+            if gpu.runtime.packed_draft_commit && !gpu.runtime.exact_prefill {
+                draft.commit_rows(gpu, taps, start, rows, [&self.mixed, &self.mlp, &self.k]);
+            } else {
+                for row in 0..rows {
+                    draft.commit_from(gpu, (taps, row * 4 * WIDTH * 2), start + row);
+                }
             }
         }
         if readout || session.capture_draft_features {
@@ -988,8 +1153,9 @@ impl PackedPrefill {
     }
 }
 
+/// Retained default; kept for the profile diagnostics.
 pub(super) fn parallel_route_requested() -> bool {
-    std::env::var_os("STARK_INKLING_EXPERIMENT_PARALLEL_ROUTE").as_deref() == Some(std::ffi::OsStr::new("1"))
+    true
 }
 
 pub(super) fn register_parallel_route(runtime: &mut Runtime) -> Result<()> {
@@ -1001,8 +1167,9 @@ pub(super) fn register_parallel_route(runtime: &mut Runtime) -> Result<()> {
     Ok(())
 }
 
+/// Retained default; kept for the profile diagnostics.
 pub(super) fn nvfp4_vector_requested() -> bool {
-    std::env::var_os("STARK_INKLING_EXPERIMENT_NVFP4_VECTOR_BLOCK").as_deref() == Some(std::ffi::OsStr::new("1"))
+    true
 }
 
 pub(super) fn register_nvfp4_vector(runtime: &mut Runtime) -> Result<()> {
@@ -1028,7 +1195,7 @@ pub(super) fn register_verify_nvfp4_matvec(runtime: &mut Runtime) -> Result<()> 
         ),
         &["ink_verify_nvfp4_group_dot"],
     )?;
-    if std::env::var_os("STARK_INKLING_EXPERIMENT_EXACT_RUN_WIDTH").as_deref() == Some(std::ffi::OsStr::new("1")) {
+    {
         register(
             runtime,
             concat!(
@@ -1041,7 +1208,7 @@ pub(super) fn register_verify_nvfp4_matvec(runtime: &mut Runtime) -> Result<()> 
         )?;
         runtime.verify_nvfp4_kernel = "ink_verify_nvfp4_exact_run_width";
     }
-    if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_HALF_INGRESS").as_deref() == Some(std::ffi::OsStr::new("1")) {
+    {
         let source = concat!(
             "#include <metal_stdlib>\nusing namespace metal;\n#define INK_NVFP4_VECTOR_BLOCK\n",
             "#define INK_VERIFY_EXACT_RUN_WIDTH\n#define INK_VERIFY_HALF_ACT\n",
@@ -1050,17 +1217,9 @@ pub(super) fn register_verify_nvfp4_matvec(runtime: &mut Runtime) -> Result<()> 
             include_str!("experts.metal"),
             include_str!("verify_nvfp4.metal"),
         );
-        let decoder = if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_FP4_LOOKUP").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-        {
-            "#define INK_VERIFY_BYTE_COEFFICIENTS\n"
-        } else if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_LEAN_DECODE").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-        {
-            "#define INK_VERIFY_AFFINE_FP4\n"
-        } else {
-            ""
-        };
+        // The retained byte-pair coefficient table takes precedence over the
+        // affine decoder (INK_VERIFY_AFFINE_FP4), which is now unused.
+        let decoder = "#define INK_VERIFY_BYTE_COEFFICIENTS\n";
         let source = format!("{decoder}{source}");
         register(runtime, &source, &["ink_verify_nvfp4_half_dot", "ink_verify_half_activation"])?;
         runtime.verify_half_act = true;

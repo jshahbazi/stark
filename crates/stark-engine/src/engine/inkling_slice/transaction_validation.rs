@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::*;
 
-fn state_digest(session: &Session) -> Result<(String, Vec<u8>)> {
+pub(super) fn state_digest(session: &Session) -> Result<(String, Vec<u8>)> {
     let draft = session.active_dspark().ok_or("Inkling transaction proof requires DSpark")?;
     let buffers = draft.state_buffers(session.position);
     let bytes = draft.state_buffers(session.position).map(|(_, length)| length).sum();
@@ -30,14 +30,14 @@ fn state_digest(session: &Session) -> Result<(String, Vec<u8>)> {
     Ok((target_validation::state_digest(session), Sha256::digest(committed).to_vec()))
 }
 
-fn same_logits(
+pub(super) fn same_logits(
     left: &[f32],
     right: &[f32],
 ) -> bool {
     left.len() == right.len() && left.iter().zip(right).all(|(a, b)| a.to_bits() == b.to_bits())
 }
 
-fn greedy(scores: &[f32]) -> u32 {
+pub(super) fn greedy(scores: &[f32]) -> u32 {
     scores
         .iter()
         .enumerate()
@@ -51,7 +51,7 @@ fn greedy(scores: &[f32]) -> u32 {
         .0
 }
 
-fn check_rejections(
+pub(super) fn check_rejections(
     session: &mut Session,
     base: &Snapshot,
     inputs: &[u32],
@@ -428,6 +428,7 @@ pub fn measure_verify_transaction(
     draft: &Path,
     oracle: &Path,
     prefix: usize,
+    exact_prefill: bool,
 ) -> Result<Value> {
     const OUTPUTS: usize = 96;
     let extra = match prefix {
@@ -438,14 +439,13 @@ pub fn measure_verify_transaction(
     let fixture = Tensors::open(&oracle.join("tokens.safetensors"))?;
     let prompt = fixture.values::<u32>("tokens", "U32", &[prefix + extra])?;
     let mut session = Session::load(checkpoint, 4352)?;
+    session.runtime.exact_prefill = exact_prefill;
     session.load_dspark(draft)?;
     session.set_batched_prefill(true, true)?;
     let before_verifier = session.runtime.device.current_allocated_size();
     session.set_source_verifier(true)?;
     let verifier_bytes = session.runtime.device.current_allocated_size().saturating_sub(before_verifier);
-    if std::env::var_os("STARK_INKLING_EXPERIMENT_DRAFT_INT8").as_deref() == Some(std::ffi::OsStr::new("1")) {
-        session.prepare_dspark_int8_head()?;
-    }
+    session.prepare_dspark_int8_head()?;
     session.set_dspark_enabled(true)?;
     let cap_crossing = if prefix == 4096 {
         session.ingest_many(&prompt[..2048])?;

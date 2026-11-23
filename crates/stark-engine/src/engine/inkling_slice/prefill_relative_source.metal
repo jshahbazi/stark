@@ -145,7 +145,14 @@ kernel void ink_prefill_relative_source(
     const int oldest = max(key_start, absolute_query + 1 - window) / head_width;
     const int first_block = key_start / head_width;
 
-    threadgroup float widened_query[query_rows * head_width];
+#ifdef INK_RELATIVE_BF16_QUERY
+    // BF16 queries: every product is exact in F32 as before; only the
+    // tensor unit's accumulation path differs from the F32-operand reference.
+    typedef bfloat query_word;
+#else
+    typedef float query_word;
+#endif
+    threadgroup query_word widened_query[query_rows * head_width];
     threadgroup float tile[query_rows * head_width];
     threadgroup float scale_prior[query_rows], denominator[query_rows], sink_weight[query_rows];
     threadgroup bfloat probabilities[query_rows * head_width];
@@ -154,11 +161,11 @@ kernel void ink_prefill_relative_source(
     for (int i = 0; i < query_rows / groups; ++i) peaks[i] = -INFINITY;
     for (int row = 0; row < query_rows; ++row) {
         const int query_offset = ((first_row + row) * query_heads + head) * head_width;
-        widened_query[row * head_width + tid] = row < live_rows ? float(query[query_offset + tid]) : 0.0f;
+        widened_query[row * head_width + tid] = row < live_rows ? query_word(query[query_offset + tid]) : query_word(0.0f);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    tensor<threadgroup float, dims, tensor_inline> queries(
+    tensor<threadgroup query_word, dims, tensor_inline> queries(
         widened_query, dims(head_width, query_rows), strides{1, head_width});
     tensor<threadgroup float, dims, tensor_inline> output(
         tile + column_start, dims(columns, query_rows), strides{1, head_width});

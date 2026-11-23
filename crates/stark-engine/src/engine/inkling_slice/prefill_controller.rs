@@ -60,6 +60,7 @@ impl PrefillControllers {
             runtime,
             concat!(
                 "#define INK_QKV_NORM\n",
+                include_str!("long_position.metal"),
                 include_str!("serial.metal"),
                 "\n",
                 include_str!("verify_qkv_controller.metal")
@@ -96,6 +97,10 @@ impl PrefillControllers {
         Ok(())
     }
 
+    pub(super) fn has_verify_qkv(&self) -> bool {
+        self.qkv.is_some()
+    }
+
     pub(super) fn try_encode_verify_qkv<'a>(
         &self,
         gpu: &mut Stream<'_>,
@@ -108,7 +113,7 @@ impl PrefillControllers {
         };
         let rows: Vec<_> = rows.collect();
         let count = rows.len();
-        debug_assert!((2..=NORM_BATCH).contains(&count));
+        debug_assert!((1..=NORM_BATCH).contains(&count));
         // Match the single-slot kernels' padded bindings. Only live rows write outputs.
         let at = |index: usize| rows[index.min(count - 1)];
         let inputs: [Binding<'_>; QKV_INPUTS + 2] = std::array::from_fn(|i| match i {
@@ -155,7 +160,12 @@ impl PrefillControllers {
         let library = runtime
             .device
             .new_library_with_source(
-                concat!(include_str!("serial.metal"), "\n", include_str!("prefill_controller_norm.metal")),
+                concat!(
+                    include_str!("long_position.metal"),
+                    include_str!("serial.metal"),
+                    "\n",
+                    include_str!("prefill_controller_norm.metal")
+                ),
                 Some(&options),
             )
             .map_err(|_| "Inkling prefill batch RMS shader compilation failed")?;
@@ -176,6 +186,7 @@ impl PrefillControllers {
         count: usize,
         wide_gemv: bool,
         batched_norm: bool,
+        single_native: bool,
     ) {
         let scale = if slot == 3 {
             &layer.mlp_norm
@@ -206,8 +217,11 @@ impl PrefillControllers {
                     gpu.norm(message, scale, (&scratch.controller_pair, WIDTH * 2), false);
                 }
             }
+            // The single-row source decode takes the verifier's native
+            // rank and expansion products with one live row.
             let native =
-                gpu.runtime.verify_nvfp4_matvec && gpu.runtime.verify_combined_short && (2..=4).contains(&size);
+                (gpu.runtime.verify_nvfp4_matvec && gpu.runtime.verify_combined_short && (2..=4).contains(&size))
+                    || (single_native && size == 1);
             if let Some(staged) = staged.as_ref().filter(|_| native) {
                 let mut bindings = [binding(&gate.down); 9];
                 for row in 0..NORM_BATCH {

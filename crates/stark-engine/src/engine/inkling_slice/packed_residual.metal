@@ -255,6 +255,17 @@ kernel void ink_packed_after_experts(
     partial[i] = float(bfloat(partial[i] + float(ffn[i])));
 }
 
+// Diagnostic noise-floor control: raise one BF16-rounded residual element by
+// one unit in the last place of its BF16 magnitude.
+kernel void ink_packed_perturb(
+    device float *partial [[buffer(0)]], constant uint2 &at [[buffer(1)]],
+    uint lane [[thread_position_in_grid]]
+) {
+    if (lane != 0) return;
+    const uint i = at.x * ink_width + at.y;
+    partial[i] = as_type<float>(as_type<uint>(partial[i]) + 0x10000u);
+}
+
 // At the first core visit remember the prelude. At each later core pass,
 // freeze the prior pass's last block and partial before restoring the prelude.
 kernel void ink_packed_prepare_visit(

@@ -34,7 +34,7 @@ pub(super) fn report(
     })
 }
 
-fn oracle_bf16(
+pub(super) fn oracle_bf16(
     source: &Tensors,
     name: &str,
     shape: &[usize],
@@ -42,11 +42,11 @@ fn oracle_bf16(
     Ok(source.values::<u16>(name, "BF16", shape)?.into_iter().map(|bits| bf16::from_bits(bits).to_f32()).collect())
 }
 
-fn as_float(bits: &[u16]) -> Vec<f32> {
+pub(super) fn as_float(bits: &[u16]) -> Vec<f32> {
     bits.iter().map(|&word| bf16::from_bits(word).to_f32()).collect()
 }
 
-fn native_digest<T: bytemuck::Pod>(values: &[T]) -> String {
+pub(super) fn native_digest<T: bytemuck::Pod>(values: &[T]) -> String {
     format!("{:x}", Sha256::digest(bytemuck::cast_slice(values)))
 }
 
@@ -67,7 +67,7 @@ pub(super) fn state_digest(session: &Session) -> String {
     format!("{:x}", digest.finalize())
 }
 
-fn probe_partials(
+pub(super) fn probe_partials(
     session: &Session,
     source: &Tensors,
 ) -> Result<Vec<Value>> {
@@ -83,7 +83,7 @@ fn probe_partials(
         .collect()
 }
 
-fn probe_history(
+pub(super) fn probe_history(
     session: &Session,
     source: &Tensors,
     physical: usize,
@@ -112,7 +112,7 @@ fn probe_history(
     Ok(Value::Object(values))
 }
 
-fn probe_first_pass(
+pub(super) fn probe_first_pass(
     session: &Session,
     source: &Tensors,
     physical: usize,
@@ -190,7 +190,7 @@ fn probe_first_pass(
     Ok(Value::Object(values))
 }
 
-fn probe_epilogue(
+pub(super) fn probe_epilogue(
     session: &Session,
     source: &Tensors,
 ) -> Result<Vec<Value>> {
@@ -225,6 +225,7 @@ pub fn measure_full(
     oracle: &Path,
     context: usize,
     batched_prefill: bool,
+    exact_prefill: bool,
 ) -> Result<Value> {
     let first = Tensors::open(&oracle.join("row-0.safetensors"))?;
     let prefix = first.values::<u32>("start", "U32", &[1])?[0] as usize;
@@ -234,12 +235,13 @@ pub fn measure_full(
     let tokens = Tensors::open(&oracle.join("tokens.safetensors"))?.values::<u32>("tokens", "U32", &[prefix + 4])?;
     let started = Instant::now();
     let mut session = Session::load(checkpoint, context)?;
+    session.runtime.exact_prefill = exact_prefill;
     let serial_allocated = session.runtime.device.current_allocated_size();
     session.set_batched_prefill(batched_prefill, true)?;
     let prefill_allocated = session.runtime.device.current_allocated_size().saturating_sub(serial_allocated);
     let load_ms = 1000.0 * started.elapsed().as_secs_f64();
     let started = Instant::now();
-    if session.prefill_batch_rows() == Session::SOURCE_PREFILL_ROWS && prefix == 4095 {
+    if session.runtime.source_text_active && prefix == 4095 {
         session.ingest_many(&tokens[..2048])?;
         session.ingest_many(&tokens[2048..4092])?;
         session.ingest_many(&tokens[4092..4095])?;
@@ -327,6 +329,7 @@ pub fn measure_full(
     }
     Ok(json!({
         "load_ms": load_ms,
+        "exact_prefill_reference": exact_prefill,
         "prefill_input_tokens": prefix,
         "prefill_command_rows": session.prefill_batch_rows(),
         "prefill_additional_metal_allocated_bytes": prefill_allocated,
@@ -673,7 +676,7 @@ pub fn measure_decode_verify(
     let prompt = source.values::<u32>("tokens", "U32", &[prefix + appended])?;
     let mut session = Session::load(checkpoint, 4352)?;
     session.set_batched_prefill(true, true)?;
-    if session.prefill_batch_rows() != Session::SOURCE_PREFILL_ROWS {
+    if !session.runtime.source_text_active {
         return Err("Inkling verifier diagnostic requires source prefill");
     }
     let mut logits = if prefix == 4096 {

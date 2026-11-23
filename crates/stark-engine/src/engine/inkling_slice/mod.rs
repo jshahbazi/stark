@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Native target decoder and measurement tools for the original Inkling 2 Mini.
 
+mod affine8;
 mod checkpoint;
+mod depth_planner;
 mod dspark;
 mod grouped_pilot;
 mod session;
@@ -12,6 +14,7 @@ mod vision;
 use std::{collections::HashMap, ptr::NonNull};
 
 use checkpoint::Tensors;
+pub use depth_planner::DepthPlanner;
 pub use grouped_pilot::{measure_grouped_nvfp4, probe_prefill_expert_weights};
 use metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandBufferExt, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
@@ -21,13 +24,45 @@ use metal::{
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use session::prefill_profile::{PrefillPhase, PrefillTiming};
 pub use session::{
-    MAX_VERIFY_ROWS, PrefillTraceMode, Session, Snapshot, VOCABULARY, Verification, measure_decode_verify,
-    measure_draft_overlap, measure_dspark, measure_dspark_depth, measure_full, measure_full_budget, measure_prefill,
-    measure_prefill_speed, measure_source_dspark_depth, measure_verify_transaction, probe_stock_nvfp4,
-    profile_packed_prefill, profile_prefill, profile_stock_4k, trace_packed_prefill, trace_prefill,
+    MAX_VERIFY_ROWS, PrefillTraceMode, QualitySide, Session, Snapshot, VOCABULARY, Verification, measure_affine8_dense,
+    measure_affine8_quality, measure_affine8_timing, measure_decode_experts, measure_decode_stages,
+    measure_decode_verify, measure_dense_ceiling, measure_depth_policies, measure_draft_overlap, measure_draft_trace,
+    measure_dspark, measure_dspark_depth, measure_expert_ceiling, measure_full, measure_full_budget,
+    measure_full_schedule, measure_paired_control, measure_prefill, measure_prefill_speed, measure_prefill_tolerance,
+    measure_quality_compare, measure_round_budget, measure_schedule_replay, measure_source_dspark_depth,
+    measure_source_dspark_depth_schedule, measure_split_consistency, measure_verify_transaction,
+    measure_verify_transaction_schedule, probe_stock_nvfp4, profile_packed_prefill, profile_prefill, profile_schedule,
+    profile_stock_4k, profile_worker_sequence, trace_packed_prefill, trace_prefill,
 };
 pub use validation::measure;
 pub use vision::{INKLING_IMAGE_TOKEN, ImageEmbeddings, measure_vision};
+
+/// NVFP4 expert input policy for every decode and prefill path: true
+/// quantizes expert inputs to FP4 x E4M3 blocks before the expert products,
+/// false passes binary16 inputs with a unit row scale. Defined once, by
+/// INK_EXPERT_INPUTS_QUANTIZED in experts.metal, which every expert kernel
+/// includes; this constant is derived from that line at compile time.
+pub(crate) const QUANTIZE_EXPERT_INPUTS: bool =
+    contains_line(include_str!("experts.metal"), b"#define INK_EXPERT_INPUTS_QUANTIZED 1");
+
+const fn contains_line(
+    source: &str,
+    needle: &[u8],
+) -> bool {
+    let haystack = source.as_bytes();
+    let mut start = 0;
+    while start + needle.len() <= haystack.len() {
+        let mut index = 0;
+        while index < needle.len() && haystack[start + index] == needle[index] {
+            index += 1;
+        }
+        if index == needle.len() {
+            return true;
+        }
+        start += 1;
+    }
+    false
+}
 
 const WIDTH: usize = 2304;
 const EXPERTS: usize = 128;
@@ -97,6 +132,34 @@ struct Runtime {
     mxfp8_tensor_active: bool,
     mxfp8_tensor_available: bool,
     mxfp8_tensor_profile: bool,
+    /// Diagnostic reference only: run the bit-exact source prefill kernels
+    /// instead of the tensor kernels. Set by validation entry points; the
+    /// worker never selects it.
+    exact_prefill: bool,
+    /// Unguarded tensor NVFP4 product registered for source prefill.
+    fast_qmm: Option<Kernel>,
+    /// Fused grouped NVFP4 products with BF16 epilogues registered.
+    fast_nvfp4: bool,
+    /// Diagnostic noise-floor control only: (visit, absolute position,
+    /// element) of one residual element raised by one BF16 unit during
+    /// packed prefill. Set by the tolerance report; never by the worker.
+    prefill_perturb: Option<(usize, usize, usize)>,
+    /// Diagnostic only: run global attention through the explicit mask
+    /// tensor while the rest of prefill keeps the default kernels.
+    global_mask_reference: bool,
+    /// Diagnostic only: compare each prefill router selection with the
+    /// exact source router on the same input.
+    router_probe: Option<grouped_pilot::RouterProbe>,
+    /// Packed draft-cache commit in prefill is registered.
+    packed_draft_commit: bool,
+    /// Prefill router kernel with weight fragments shared across row tiles.
+    router_tiles: bool,
+    /// Diagnostic only: capture one grouped NVFP4 visit for the expert
+    /// ceiling report.
+    expert_capture: Option<grouped_pilot::ExpertCapture>,
+    /// Affine 8-bit dense weights of an affine8 checkpoint; `None` for the
+    /// original checkpoint.
+    affine8: Option<affine8::Affine8Weights>,
 }
 
 impl Runtime {
@@ -107,6 +170,7 @@ impl Runtime {
         options.set_math_mode(MTLMathMode::Safe);
         options.set_language_version(MTLLanguageVersion::Version4_0);
         let source = concat!(
+            include_str!("long_position.metal"),
             include_str!("serial.metal"),
             "\n",
             include_str!("experts.metal"),
@@ -172,6 +236,23 @@ impl Runtime {
                 let pipeline = device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
                 pipelines.insert(name, pipeline);
             }
+            // Single-row NVFP4 expert products with several channels per SIMD
+            // group; outputs equal the vector-block source kernels.
+            let source = concat!(
+                "#include <metal_stdlib>\nusing namespace metal;\n",
+                "#define INK_NVFP4_VECTOR_BLOCK\n#define INK_SOURCE_SINGLETON_EPILOGUE\n",
+                include_str!("experts.metal"),
+                "\n",
+                include_str!("decode_experts.metal"),
+            );
+            let library = device.new_library_with_source(source, Some(&options)).map_err(|_| "decode experts")?;
+            for name in
+                session::DECODE_VARIANTS.iter().flat_map(|variant| [variant.0, variant.1]).chain(session::DECODE_EXTRA)
+            {
+                let function = library.new_function_with_name(name).ok_or(name)?;
+                let pipeline = device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
+                pipelines.insert(name, pipeline);
+            }
         }
         Ok(Self {
             device,
@@ -202,6 +283,16 @@ impl Runtime {
             mxfp8_tensor_active: false,
             mxfp8_tensor_available: false,
             mxfp8_tensor_profile: false,
+            exact_prefill: false,
+            fast_qmm: None,
+            fast_nvfp4: false,
+            prefill_perturb: None,
+            global_mask_reference: false,
+            router_probe: None,
+            packed_draft_commit: false,
+            router_tiles: false,
+            expert_capture: None,
+            affine8: None,
         })
     }
 }
@@ -327,6 +418,10 @@ impl Stream<'_> {
         columns: usize,
         rows: usize,
     ) {
+        if let Some(tensor) = self.affine8(weight) {
+            self.affine8_rows(tensor, &[(input, output)]);
+            return;
+        }
         let (kernel, threads) = if self.runtime.pinned_m5 {
             (
                 "ink_matvec_source",
@@ -531,7 +626,15 @@ impl Layer {
         let local = !matches!(layer, 5 | 11 | 17 | 23);
         let weight = |name: &str, shape: &[usize]| source.buffer(device, &format!("{stem}{name}"), "BF16", shape);
         let norm = |name| weight(name, &[WIDTH]);
-        let projection = |name, rows, cols| weight(name, &[rows, cols]);
+        let affine = affine8::present(source);
+        let projection = |name: &str, rows, cols| {
+            if affine {
+                affine8::Planes::read(source, &format!("{stem}{name}"), [rows, cols])?
+                    .effective_buffer(device, rows, rows)
+            } else {
+                weight(name, &[rows, cols])
+            }
+        };
         let qkv_norm = if local {
             let shared = norm("attn_norm.weight")?;
             [shared.clone(), shared.clone(), shared]
@@ -670,6 +773,17 @@ impl Layer {
         gpu: &mut Stream<'_>,
         s: &Scratch,
     ) {
+        self.expert_products(gpu, s);
+        gpu.phase(PrefillPhase::ExpertCombine);
+        gpu.one("ink_expert_sum", &[&s.down, &s.experts], WIDTH as u32, (WIDTH / 128, 1), 128);
+    }
+
+    /// Route and run the eight weighted expert products into `s.down`.
+    fn expert_products(
+        &self,
+        gpu: &mut Stream<'_>,
+        s: &Scratch,
+    ) {
         if matches!(self.experts, Experts::Mxfp8 { .. }) {
             gpu.phase(PrefillPhase::Mxfp8);
         }
@@ -684,8 +798,6 @@ impl Layer {
                 down,
             } => Self::mxfp8(gpu, s, up, down),
         }
-        gpu.phase(PrefillPhase::ExpertCombine);
-        gpu.one("ink_expert_sum", &[&s.down, &s.experts], WIDTH as u32, (WIDTH / 128, 1), 128);
     }
 
     fn route_experts(
@@ -698,7 +810,19 @@ impl Layer {
             gpu.phase(PrefillPhase::RouterProjection);
         }
         if gpu.runtime.source_text_active {
-            gpu.one(gpu.runtime.singleton_router, &[&s.mlp_input, &self.router, &s.logits], 1u32, (4, 1), 32);
+            if let Some(partials) = &gpu.runtime.verify_native_router {
+                // The verifier's M16 x N8 BF16 tensor product, run for one row.
+                gpu.one(
+                    "ink_verify_router_native",
+                    &[&s.mlp_input, &self.router, partials],
+                    1u32,
+                    (EXPERTS / 8, 2),
+                    32,
+                );
+                gpu.one("ink_verify_router_join", &[partials, &s.logits], EXPERTS as u32, (1, 1), EXPERTS);
+            } else {
+                gpu.one(gpu.runtime.singleton_router, &[&s.mlp_input, &self.router, &s.logits], 1u32, (4, 1), 32);
+            }
             if nvfp4 {
                 gpu.phase(PrefillPhase::RouteSelect);
             }
@@ -723,8 +847,14 @@ impl Layer {
         up: &Bank,
         down: &Bank,
     ) {
+        // The exact prefill reference keeps quantized expert inputs.
+        let activation = if gpu.runtime.exact_prefill && !QUANTIZE_EXPERT_INPUTS {
+            "ink_nvfp4_activation_quantized"
+        } else {
+            "ink_nvfp4_activation"
+        };
         gpu.phase(PrefillPhase::Nvfp4Quant);
-        gpu.one("ink_nvfp4_activation", &[&s.mlp_input, &s.up_inner, &s.up_max], WIDTH as u32, (1, 1), 256);
+        gpu.one(activation, &[&s.mlp_input, &s.up_inner, &s.up_max], WIDTH as u32, (1, 1), 256);
         gpu.phase(PrefillPhase::Nvfp4UpDot);
         gpu.one(
             if gpu.runtime.source_text_active && gpu.runtime.nvfp4_vector {
@@ -740,7 +870,7 @@ impl Layer {
             128,
         );
         gpu.phase(PrefillPhase::Nvfp4Quant);
-        gpu.one("ink_nvfp4_activation", &[&s.mid, &s.down_inner, &s.down_max], MID as u32, (8, 1), 256);
+        gpu.one(activation, &[&s.mid, &s.down_inner, &s.down_max], MID as u32, (8, 1), 256);
         gpu.phase(PrefillPhase::Nvfp4DownDot);
         gpu.one(
             if gpu.runtime.source_text_active && gpu.runtime.nvfp4_vector {
@@ -831,22 +961,33 @@ impl Layer {
         s: &Scratch,
         cache: &Visit,
         position: usize,
+        fused: bool,
+        capture: bool,
     ) {
         gpu.phase(PrefillPhase::AttentionDense);
-        for ((input, weight, out, rows), name) in self.attention_projections(s).into_iter().zip(trace::RAW_PROJECTIONS)
-        {
-            gpu.project(binding(input), weight, out, WIDTH, rows);
-            s.record(gpu, name, out);
-        }
-        if let Some(dynamic) = &self.dynamic {
-            for (i, weight) in dynamic.iter().enumerate() {
-                gpu.project(binding(&s.qkv_input[i + 1]), weight, &s.dynamic[i], WIDTH, 32);
+        if fused {
+            self.project_visit(gpu, s);
+        } else {
+            for ((input, weight, out, rows), name) in
+                self.attention_projections(s).into_iter().zip(trace::RAW_PROJECTIONS)
+            {
+                gpu.project(binding(input), weight, out, WIDTH, rows);
+                s.record(gpu, name, out);
+            }
+            if let Some(dynamic) = &self.dynamic {
+                for (i, weight) in dynamic.iter().enumerate() {
+                    gpu.project(binding(&s.qkv_input[i + 1]), weight, &s.dynamic[i], WIDTH, 32);
+                }
             }
         }
-        self.attention_read_cache(gpu, s, cache, position);
+        self.attention_read_cache_with(gpu, s, cache, position, fused, capture);
         gpu.phase(PrefillPhase::AttentionDense);
         gpu.project(binding(&s.attended), &self.output, &s.attn_raw, 3072, WIDTH);
         s.record(gpu, "attn_raw", &s.attn_raw);
+        if fused {
+            // The fused single-row path convolves inside its attention mix.
+            return;
+        }
         gpu.phase(PrefillPhase::ExpertInputs);
         Self::convolution(
             gpu,
@@ -867,6 +1008,21 @@ impl Layer {
         cache: &Visit,
         position: usize,
     ) {
+        self.attention_read_cache_with(gpu, s, cache, position, false, false);
+    }
+
+    /// With packed heads, the K/V convolutions, normalization and cache
+    /// writes and the Q/R normalization run as the verifier's two packed
+    /// launches for one row instead of three single-row launches.
+    fn attention_read_cache_with(
+        &self,
+        gpu: &mut Stream<'_>,
+        s: &Scratch,
+        cache: &Visit,
+        position: usize,
+        packed_heads: bool,
+        capture: bool,
+    ) {
         let width = cache.capacity as u32;
         let window = if self.local {
             LOCAL as u32
@@ -881,7 +1037,35 @@ impl Layer {
         };
         let args = [position as u32, width, window, shards];
         gpu.phase(PrefillPhase::KeyValue);
-        self.attention_write_cache(gpu, s, cache, args);
+        if packed_heads {
+            if capture {
+                // Diagnostic captures read the K/V convolution outputs that
+                // the packed kernel keeps in registers. Recompute them from
+                // the history before the packed kernel stores the new slot.
+                gpu.dispatch(
+                    "ink_verify_kv_conv_probe",
+                    &[
+                        &s.k,
+                        &s.v,
+                        &s.dynamic[0],
+                        &s.dynamic[1],
+                        &self.key_conv,
+                        &self.value_conv,
+                        &cache.conv[0],
+                        &cache.conv[1],
+                        &s.conv_k,
+                        &s.conv_v,
+                    ]
+                    .map(binding),
+                    [position as u32, u32::from(self.dynamic.is_some())],
+                    (KV / 128, 2),
+                    128,
+                );
+            }
+            self.pack_heads(gpu, cache, position, s, window as usize);
+        } else {
+            self.attention_write_cache(gpu, s, cache, args);
+        }
         gpu.phase(PrefillPhase::RelativeTable);
         if gpu.runtime.source_text_active {
             gpu.one(
@@ -926,6 +1110,87 @@ impl Layer {
         );
         gpu.one(gate_kernel, &[&cache.scratch.parts, &s.attn_gate, &s.attended], shape, gate_groups, 128);
         s.record(gpu, "attended", &s.attended);
+    }
+
+    /// The six single-row attention projections, and the two dynamic
+    /// convolution projections of a global layer, as one launch of the
+    /// unchanged single-row source dot.
+    fn project_visit(
+        &self,
+        gpu: &mut Stream<'_>,
+        s: &Scratch,
+    ) {
+        let [q, k, v, r, gate, sink] = self.attention_projections(s);
+        let mut segments = vec![q, k, v, r, gate, sink].into_iter().map(|(_, w, out, _)| (w, out)).collect::<Vec<_>>();
+        if let Some(dynamic) = &self.dynamic {
+            segments.extend(dynamic.iter().zip(&s.dynamic));
+        }
+        Self::project_visit_segments(gpu, &s.qkv_input, &segments);
+    }
+
+    /// One launch of the single-row visit projections: q, k, v, relative,
+    /// gate, sink and, for global layers, the two dynamic convolution
+    /// projections.
+    fn project_visit_segments(
+        gpu: &mut Stream<'_>,
+        inputs: &[Buffer; 3],
+        segments: &[(&Buffer, &Buffer)],
+    ) {
+        let mut buffers = [binding(&inputs[0]); 19];
+        for (i, input) in inputs.iter().enumerate() {
+            buffers[i] = binding(input);
+        }
+        for (i, &(weight, out)) in segments.iter().enumerate() {
+            buffers[3 + i] = binding(weight);
+            buffers[11 + i] = binding(out);
+        }
+        let groups = if segments.len() == 8 {
+            1094
+        } else {
+            1078
+        };
+        if let Some(tensors) = segments.iter().map(|&(weight, _)| gpu.affine8(weight)).collect::<Option<Vec<_>>>() {
+            for (i, tensor) in tensors.into_iter().enumerate() {
+                buffers[3 + i] = binding(&tensor.tensor);
+            }
+            gpu.dispatch("ink_a8_matvec_visit", &buffers, segments.len() as u32, (groups, 1), 128);
+            return;
+        }
+        gpu.dispatch("ink_matvec_source_visit", &buffers, segments.len() as u32, (groups, 1), 128);
+    }
+
+    /// One row of the verifier K/V pack and Q/R pack kernels, in one launch.
+    fn pack_heads(
+        &self,
+        gpu: &mut Stream<'_>,
+        cache: &Visit,
+        position: usize,
+        s: &Scratch,
+        window: usize,
+    ) {
+        gpu.dispatch(
+            "ink_verify_heads_pack_one",
+            &[
+                &s.k,
+                &s.v,
+                &s.dynamic[0],
+                &s.dynamic[1],
+                &self.key_conv,
+                &self.value_conv,
+                &cache.conv[0],
+                &cache.conv[1],
+                &cache.keys,
+                &cache.values,
+                &s.q,
+                &s.r,
+                &self.q_scale,
+                &self.r_scale,
+            ]
+            .map(binding),
+            [position as u32, cache.capacity as u32, u32::from(self.dynamic.is_some()), window as u32],
+            (16, 1),
+            128,
+        );
     }
 
     fn attention_write_cache(
@@ -996,7 +1261,7 @@ impl Layer {
     ) {
         let s = &cache.scratch;
         self.attention_inputs(gpu, flow, partial, s, state);
-        self.attention(gpu, s, cache, position);
+        self.attention(gpu, s, cache, position, false, false);
         self.finish_visit(gpu, cache, flow, partial, s, state, position);
     }
 

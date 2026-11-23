@@ -26,6 +26,7 @@ pub(super) struct PrefillLanes {
     wide_gemv: bool,
     batched_norm: bool,
     pub(super) direct_experts: bool,
+    fused_decode: bool,
 }
 
 impl PrefillLanes {
@@ -71,6 +72,7 @@ impl PrefillLanes {
             wide_gemv: false,
             batched_norm: false,
             direct_experts: false,
+            fused_decode: false,
         })
     }
 
@@ -109,15 +111,13 @@ impl PrefillLanes {
         runtime: &mut Runtime,
     ) -> Result<()> {
         self.grouped.enable_source_epilogue(runtime)?;
-        if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_COMPACT_RUNS").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
         {
             packed_prefill::register(runtime, include_str!("verify_bucket.metal"), &["ink_verify_bucket_short"])?;
             self.grouped.enable_verify_compaction(runtime)?;
         }
         self.grouped.enable_source_softmax(runtime)?;
         self.grouped.enable_source_mxfp8(runtime)?;
-        if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_MXFP8_VECTOR").is_some_and(|value| value == "1") {
+        {
             packed_prefill::register(
                 runtime,
                 concat!(
@@ -135,21 +135,17 @@ impl PrefillLanes {
             )?;
             runtime.verify_mxfp8_vector = true;
         }
-        let fused_experts = std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_FUSED_FINISH").as_deref()
-            == Some(std::ffi::OsStr::new("1"));
-        let fused_attention = std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_FUSED_ATTENTION").as_deref()
-            == Some(std::ffi::OsStr::new("1"));
+        let fused_experts = true;
+        let fused_attention = true;
         if fused_experts || fused_attention {
             packed_prefill::register(
                 runtime,
                 include_str!("verify_finish.metal"),
-                &["ink_verify_finish_experts", "ink_verify_finish_attention"],
+                &["ink_verify_finish_experts", "ink_verify_finish_experts_history", "ink_verify_finish_attention"],
             )?;
             runtime.verify_fused_finish = fused_experts;
             runtime.verify_fused_attention = fused_attention;
         }
-        if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_SHORT_ROUTER").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
         {
             packed_prefill::register(
                 runtime,
@@ -157,10 +153,7 @@ impl PrefillLanes {
                 &["ink_verify_router_source"],
             )?;
             runtime.verify_short_router = true;
-            if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_NATIVE_ROUTER").as_deref()
-                == Some(std::ffi::OsStr::new("1"))
-                && runtime.verify_native_router.is_none()
-            {
+            if runtime.verify_native_router.is_none() {
                 packed_prefill::register(
                     runtime,
                     include_str!("verify_router_native.metal"),
@@ -186,6 +179,68 @@ impl PrefillLanes {
         runtime: &mut Runtime,
     ) -> Result<()> {
         self.controllers.as_mut().ok_or("Inkling verifier controllers unavailable")?.enable_verify_qkv_batch(runtime)
+    }
+
+    /// Register the stage kernels that the single-row source decode shares
+    /// with the short verifier, and the batched q, k and v controllers.
+    pub(super) fn enable_fused_decode(
+        &mut self,
+        runtime: &mut Runtime,
+    ) -> Result<()> {
+        packed_prefill::register(
+            runtime,
+            concat!(
+                include_str!("long_position.metal"),
+                include_str!("serial.metal"),
+                "\n",
+                include_str!("verify_mix_rows.metal"),
+                "\n",
+                include_str!("verify_first_norm.metal")
+            ),
+            &[
+                "ink_verify_mix_rows",
+                "ink_verify_mix_attention",
+                "ink_verify_first_qkv_norm",
+                "ink_verify_mix_qkv_norm",
+                "ink_verify_attention_mix",
+                "ink_matvec_source_visit",
+            ],
+        )?;
+        packed_prefill::register(
+            runtime,
+            include_str!("verify_finish.metal"),
+            &["ink_verify_finish_experts_history", "ink_verify_conv_probe"],
+        )?;
+        packed_prefill::register(runtime, include_str!("verify_state.metal"), &["ink_verify_prepare_rows"])?;
+        packed_prefill::register(
+            runtime,
+            concat!(include_str!("long_position.metal"), include_str!("verify_cache.metal")),
+            &["ink_verify_heads_pack_one", "ink_verify_kv_conv_probe"],
+        )?;
+        packed_prefill::register(
+            runtime,
+            include_str!("verify_controller.metal"),
+            &["ink_verify_controller_native_m16n16"],
+        )?;
+        packed_prefill::register(
+            runtime,
+            include_str!("verify_router_native.metal"),
+            &["ink_verify_router_native", "ink_verify_router_join"],
+        )?;
+        if runtime.verify_native_router.is_none() {
+            runtime.verify_native_router = Some(
+                runtime
+                    .device
+                    .new_buffer(
+                        2 * MAX_VERIFY_ROWS * EXPERTS * size_of::<f32>(),
+                        MTLResourceOptions::STORAGE_MODE_PRIVATE,
+                    )
+                    .ok_or("Inkling router allocation failed")?,
+            );
+        }
+        self.enable_verify_qkv_batch(runtime)?;
+        self.fused_decode = true;
+        Ok(())
     }
 
     pub(super) fn enable_controllers(
@@ -248,6 +303,12 @@ pub(super) fn project_rows<'a>(
     let lanes = inputs_and_outputs.into_iter().collect::<Vec<_>>();
     if let Some(dense) = dense.filter(|_| lanes.len() > 64 && rows > 64) {
         dense.project(gpu, weight, &lanes, columns, rows);
+        return;
+    }
+    if let Some(tensor) = gpu.affine8(weight).filter(|_| lanes.len() <= 4) {
+        for tile in lanes.chunks(4) {
+            gpu.affine8_rows(tensor, tile);
+        }
         return;
     }
     for tile in lanes.chunks(if wide_gemv {
@@ -356,6 +417,16 @@ impl Session {
             if row > 0
                 && let Some(proposals) = proposals
             {
+                if let Some(weights) = gpu.affine8_vocabulary() {
+                    gpu.one(
+                        affine8::DRAFT_EMBEDDING,
+                        &[&weights.embedding.tensor, &self.embed_norm, &flow.partial, proposals],
+                        [(row - 1) as u32, VOCABULARY as u32, weights.embedding.rows as u32],
+                        (1, 1),
+                        WIDTH / 4,
+                    );
+                    continue;
+                }
                 gpu.one(
                     "ink_embedding_draft_ids",
                     &[&self.embedding, &self.embed_norm, &flow.partial, proposals],
@@ -386,9 +457,7 @@ impl Session {
                 && gpu.runtime.verify_fused_attention
                 && trace.is_none()
                 && !state.capture;
-            let first_norm = batched_mix
-                && !state.later
-                && (row_count == MAX_VERIFY_ROWS || (row_count == 3 && gpu.runtime.verify_fast_three));
+            let first_norm = batched_mix && !state.later && (2..=MAX_VERIFY_ROWS).contains(&row_count);
             let mix_bindings = || {
                 (
                     std::array::from_fn(|i| flows.clone().nth(i.min(row_count - 1)).expect("verified flow")),
@@ -396,9 +465,16 @@ impl Session {
                 )
             };
             gpu.phase(PrefillPhase::AttentionInputs);
+            let prepared = batched_mix && {
+                let (flow, _) = mix_bindings();
+                let taps = std::array::from_fn(|i| tap_rows.clone().nth(i.min(row_count - 1)).flatten());
+                verify_state::VerifyWorkspace::prepare_rows(gpu, flow, taps, index, row_count)
+            };
             for (row, ((flow, taps), scratch)) in flows.clone().zip(tap_rows.clone()).zip(scratches.clone()).enumerate()
             {
-                Self::prepare_visit(gpu, flow, index, taps);
+                if !prepared {
+                    Self::prepare_visit(gpu, flow, index, taps);
+                }
                 if let Some(tap) = tap {
                     tap.input(gpu, row, flow);
                 }
@@ -411,7 +487,10 @@ impl Session {
                     layer.attention_inputs(gpu, flow, &flow.partial, scratch, state);
                 }
             }
-            if batched_mix {
+            if batched_mix && first_norm && state.blocks != 0 {
+                let (flow, scratch) = mix_bindings();
+                verify_state::VerifyWorkspace::mix_qkv_norm(gpu, layer, flow, scratch, state, row_count);
+            } else if batched_mix {
                 let (flow, scratch) = mix_bindings();
                 verify_state::VerifyWorkspace::mix_rows(gpu, layer, flow, scratch, state, row_count, false);
                 if first_norm {
@@ -459,7 +538,7 @@ impl Session {
                             binding(&scratch.qkv_input[slot]),
                         )
                     });
-                    controllers.encode(gpu, layer, slot, rows, row_count, lanes.wide_gemv, lanes.batched_norm);
+                    controllers.encode(gpu, layer, slot, rows, row_count, lanes.wide_gemv, lanes.batched_norm, false);
                 }
             }
 
@@ -479,7 +558,15 @@ impl Session {
                 }
             }
             gpu.phase(PrefillPhase::RelativeCacheAttention);
-            if let Some(shared) = undo.filter(|workspace| workspace.shares_local_attention())
+            if let Some(shared) = undo.filter(|workspace| workspace.shares_short_attention())
+                && self.position + row_count < LOCAL
+                && gpu.runtime.verify_fused_cache
+                && tap.is_none()
+                && trace.is_none()
+            {
+                let rows = scratches.clone().collect::<Vec<_>>();
+                shared.encode_shared_short(gpu, layer, visit, self.position, &rows);
+            } else if let Some(shared) = undo.filter(|workspace| workspace.shares_local_attention())
                 && layer.local
                 && visit.capacity == LOCAL
                 && self.position >= LOCAL
@@ -541,7 +628,42 @@ impl Session {
                 && trace.is_none()
                 && !state.capture
                 && row_count <= MAX_VERIFY_ROWS;
-            if fused_attention {
+            let fused_finish = gpu.runtime.verify_fused_finish
+                && undo.is_some()
+                && direct
+                && tap.is_none()
+                && !state.capture
+                && row_count <= MAX_VERIFY_ROWS;
+            // The attention finish, the expert mix and (first pass) the MLP
+            // norm run as one launch; the finish below stores the deferred
+            // attention history.
+            let fused_post = fused_attention && fused_finish && batched_mix;
+            let attention_inputs: [&Buffer; MAX_VERIFY_ROWS] = std::array::from_fn(|i| {
+                &scratches.clone().nth(i.min(row_count - 1)).expect("verified scratch").attn_raw
+            });
+            if fused_post {
+                let (flow, scratch) = mix_bindings();
+                let outputs = std::array::from_fn(|i| {
+                    if direct {
+                        lanes.grouped.input_at(i.min(row_count - 1))
+                    } else {
+                        binding(&scratch[i].mlp_input)
+                    }
+                });
+                verify_state::VerifyWorkspace::attention_mix(
+                    gpu,
+                    layer,
+                    visit,
+                    attention_inputs,
+                    flow,
+                    scratch,
+                    first_norm.then_some(outputs),
+                    state,
+                    self.position,
+                    row_count,
+                );
+            }
+            if fused_attention && !fused_post {
                 let scratch: [&Scratch; MAX_VERIFY_ROWS] =
                     std::array::from_fn(|i| scratches.clone().nth(i.min(row_count - 1)).expect("verified scratch"));
                 let flow: [&Flow; MAX_VERIFY_ROWS] =
@@ -569,7 +691,19 @@ impl Session {
                     128,
                 );
             }
-            if batched_mix {
+            if fused_post {
+                // Mixed and normalized above.
+            } else if batched_mix && first_norm {
+                let (flow, scratch) = mix_bindings();
+                let outputs = std::array::from_fn(|i| {
+                    if direct {
+                        lanes.grouped.input_at(i.min(row_count - 1))
+                    } else {
+                        binding(&scratch[i].mlp_input)
+                    }
+                });
+                verify_state::VerifyWorkspace::mix_expert_norm(gpu, layer, flow, scratch, outputs, state, row_count);
+            } else if batched_mix {
                 let (flow, scratch) = mix_bindings();
                 verify_state::VerifyWorkspace::mix_rows(gpu, layer, flow, scratch, state, row_count, true);
             }
@@ -599,19 +733,6 @@ impl Session {
                     }
                 }
             }
-            if first_norm {
-                let (_, scratch) = mix_bindings();
-                let mut buffers = [binding(&layer.mlp_norm); 9];
-                for (i, s) in scratch.into_iter().enumerate() {
-                    buffers[i] = binding(&s.mixed);
-                    buffers[5 + i] = if direct {
-                        lanes.grouped.input_at(i)
-                    } else {
-                        binding(&s.mlp_input)
-                    };
-                }
-                gpu.dispatch("ink_verify_first_expert_norm", &buffers, (), (row_count, 1), WIDTH / 4);
-            }
             if let Some(controllers) = controllers {
                 let rows = scratches.clone().enumerate().map(|(row, scratch)| {
                     let output = if direct {
@@ -621,7 +742,7 @@ impl Session {
                     };
                     (scratch, binding(&scratch.mixed), output)
                 });
-                controllers.encode(gpu, layer, 3, rows, row_count, lanes.wide_gemv, lanes.batched_norm);
+                controllers.encode(gpu, layer, 3, rows, row_count, lanes.wide_gemv, lanes.batched_norm, false);
             }
 
             gpu.phase(match layer.experts {
@@ -632,12 +753,6 @@ impl Session {
                     ..
                 } => PrefillPhase::Mxfp8,
             });
-            let fused_finish = gpu.runtime.verify_fused_finish
-                && undo.is_some()
-                && direct
-                && tap.is_none()
-                && !state.capture
-                && row_count <= MAX_VERIFY_ROWS;
             gpu.defer_expert_merge = fused_finish;
             let expert_rows = lanes.grouped.rows();
             for start in (0..row_count).step_by(expert_rows) {
@@ -676,7 +791,15 @@ impl Session {
             if fused_finish {
                 let partials =
                     std::array::from_fn(|i| &flows.clone().nth(i.min(row_count - 1)).expect("verified row").partial);
-                lanes.grouped.finish_verify_rows(gpu, layer, visit, self.position, row_count, partials);
+                lanes.grouped.finish_verify_rows(
+                    gpu,
+                    layer,
+                    visit,
+                    self.position,
+                    row_count,
+                    partials,
+                    fused_post.then_some(attention_inputs),
+                );
                 if row_count == MAX_VERIFY_ROWS
                     && let Some(undo) = undo
                 {
@@ -719,10 +842,126 @@ impl Session {
             }
         }
         if verify.is_some() {
-            self.encode_output(gpu);
-            for row in 1..row_count {
-                self.cap_logits(gpu, row);
+            self.encode_output_rows(gpu, row_count);
+        }
+    }
+}
+
+impl PrefillLanes {
+    /// Whether a single-row decode visit can use the fused stage kernels.
+    pub(super) fn fuses_decode(
+        &self,
+        gpu: &Stream<'_>,
+        scratch: &Scratch,
+    ) -> bool {
+        self.fused_decode
+            && gpu.runtime.source_text_active
+            && scratch.trace.is_none()
+            && self.controllers.as_ref().is_some_and(PrefillControllers::has_verify_qkv)
+    }
+}
+
+impl Session {
+    /// One single-row source decode visit. The verifier's batched stage
+    /// kernels run with one row: the residual mix and the q, k and v input
+    /// norms (or controllers) in one to five launches, the attention finish,
+    /// expert mix and first-pass MLP norm in one, and the expert sum, MLP
+    /// convolution and residual in one that also stores the deferred
+    /// attention history. Projections, attention and experts are unchanged.
+    pub(super) fn encode_fused_visit(
+        &self,
+        gpu: &mut Stream<'_>,
+        lanes: &PrefillLanes,
+        layer: &Layer,
+        visit: &Visit,
+        state: VisitInput,
+        position: usize,
+    ) {
+        let flow = &self.flow;
+        let s = &visit.scratch;
+        let flows = [flow; MAX_VERIFY_ROWS];
+        let scratch = [s; MAX_VERIFY_ROWS];
+        gpu.phase(PrefillPhase::AttentionInputs);
+        if state.later {
+            verify_state::VerifyWorkspace::mix_rows(gpu, layer, flows, scratch, state, 1, false);
+            let controllers = lanes.controllers.as_ref().expect("checked verify controllers");
+            let encoded = controllers.try_encode_verify_qkv(gpu, layer, state, std::iter::once((flow, s)));
+            debug_assert!(encoded);
+        } else if state.blocks != 0 {
+            verify_state::VerifyWorkspace::mix_qkv_norm(gpu, layer, flows, scratch, state, 1);
+        } else {
+            let mut buffers = [binding(&flow.partial); 19];
+            buffers[4..7].copy_from_slice(&layer.qkv_norm.each_ref().map(binding));
+            for slot in 0..3 {
+                for i in 0..MAX_VERIFY_ROWS {
+                    buffers[7 + slot * 4 + i] = binding(&s.qkv_input[slot]);
+                }
             }
+            gpu.dispatch("ink_verify_first_qkv_norm", &buffers, 1u32, (1, 1), WIDTH / 4);
+        }
+        layer.attention(gpu, s, visit, position, true, state.capture);
+        gpu.phase(PrefillPhase::ExpertInputs);
+        let outputs = (!state.later).then_some([binding(&s.mlp_input); MAX_VERIFY_ROWS]);
+        verify_state::VerifyWorkspace::attention_mix(
+            gpu,
+            layer,
+            visit,
+            [&s.attn_raw; MAX_VERIFY_ROWS],
+            flows,
+            scratch,
+            outputs,
+            state,
+            position,
+            1,
+        );
+        if state.later {
+            let controllers = lanes.controllers.as_ref().expect("checked verify controllers");
+            let row = std::iter::once((s, binding(&s.mixed), binding(&s.mlp_input)));
+            controllers.encode(gpu, layer, 3, row, 1, lanes.wide_gemv, true, true);
+        }
+        layer.expert_products(gpu, s);
+        gpu.phase(PrefillPhase::ExpertFinish);
+        if state.capture {
+            // Diagnostic captures read the convolution outputs that this path
+            // keeps in registers. Recompute them before the history changes.
+            for (input, weight, history, output, mode) in [
+                (&s.attn_raw, &layer.attn_conv, &visit.conv[2], &s.attention, 0u32),
+                (&s.down, &layer.mlp_conv, &visit.conv[3], &s.mlp, 1),
+            ] {
+                gpu.one(
+                    "ink_verify_conv_probe",
+                    &[input, weight, history, output],
+                    [position as u32, mode],
+                    (WIDTH / 128, 1),
+                    128,
+                );
+            }
+        }
+        let partial = &flow.partial;
+        gpu.dispatch(
+            "ink_verify_finish_experts_history",
+            &[
+                &s.down,
+                &s.experts,
+                &layer.mlp_conv,
+                &visit.conv[3],
+                partial,
+                partial,
+                partial,
+                partial,
+                &visit.conv[2],
+                &s.attn_raw,
+                &s.attn_raw,
+                &s.attn_raw,
+                &s.attn_raw,
+            ]
+            .map(binding),
+            [position as u32, 1],
+            (WIDTH / 128, 1),
+            128,
+        );
+        if state.capture {
+            gpu.copy(binding(partial), binding(&s.partial_debug));
         }
     }
 }

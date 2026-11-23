@@ -3,6 +3,14 @@
 // format and activation policy. Numerical controls and source revisions:
 // docs/archive/experiments/2026-11-20-inkling-mini/NVFP4_PROBE.md.
 
+// NVFP4 expert input policy. 1: inputs are quantized to FP4 x E4M3 blocks
+// before the expert products (the publisher's policy). 0: inputs pass through
+// as binary16 values with a unit row scale. Every kernel that includes this
+// file follows it; QUANTIZE_EXPERT_INPUTS in mod.rs reads this definition.
+#ifndef INK_EXPERT_INPUTS_QUANTIZED
+#define INK_EXPERT_INPUTS_QUANTIZED 1
+#endif
+
 struct InkExpertShape {
     uint width;
     uint intermediate;
@@ -123,6 +131,19 @@ kernel void ink_nvfp4_activation(
     uint simd_lane [[thread_index_in_simdgroup]],
     uint simd_group [[simdgroup_index_in_threadgroup]]) {
 #pragma clang fp contract(off) reassociate(off)
+#if !INK_EXPERT_INPUTS_QUANTIZED
+    // Unquantized inputs: the binary16 value of each input, the same in the
+    // float and half activation layouts, with a row scale that cancels the
+    // products' 1 / 1536 normalization.
+    {
+        const device bfloat *values = input + row * width;
+        if (lane == 0) amax[row] = 1536.0f;
+        for (uint i = lane; i < width; i += 256) {
+            inner[row * width + i] = ink_nvfp4_activation_word(float(half(float(values[i]))));
+        }
+        return;
+    }
+#endif
     threadgroup float maxima[8];
     const device bfloat *source = input + row * width;
     float local_max = 0.0f;

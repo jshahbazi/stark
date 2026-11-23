@@ -18,9 +18,12 @@ pub(super) struct VerifyWorkspace {
     attention_parts: Option<Buffer>,
     pub(super) local_rows_per_group: usize,
     pub(super) global_share: (usize, usize),
-    lanes: PrefillLanes,
+    pub(super) lanes: PrefillLanes,
     mix_rows: bool,
-    draft: DraftBlock,
+    pub(super) draft: DraftBlock,
+    /// Diagnostic control only: false sends short blocks down the per-row
+    /// attention path. The worker never clears it.
+    pub(super) short_attention: bool,
 }
 
 impl VerifyWorkspace {
@@ -32,12 +35,17 @@ impl VerifyWorkspace {
         lanes.enable_verify_groups(runtime)?;
         packed_prefill::register_verify_nvfp4_matvec(runtime)?;
         packed_prefill::register_parallel_route(runtime)?;
-        packed_prefill::register(runtime, include_str!("verify_state.metal"), &["ink_save_anchor_convolution"])?;
-        if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_OVERLAP").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        packed_prefill::register(
+            runtime,
+            include_str!("verify_state.metal"),
+            &["ink_save_anchor_convolution", "ink_verify_prepare_rows"],
+        )?;
+        {
             packed_prefill::register(
                 runtime,
                 concat!(
                     "#define INK_VERIFY_DRAFT_EMBEDDING\n#define ink_embedding ink_embedding_draft_ids\n",
+                    include_str!("long_position.metal"),
                     include_str!("serial.metal"),
                     "\n",
                     include_str!("session.metal"),
@@ -45,13 +53,10 @@ impl VerifyWorkspace {
                 &["ink_embedding_draft_ids"],
             )?;
             runtime.verify_overlap = true;
-            runtime.verify_single_draft =
-                std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_SINGLE_DRAFT").is_some_and(|value| value == "1");
+            runtime.verify_single_draft = true;
         }
-        let shared_attention =
-            std::env::var_os("STARK_INKLING_EXPERIMENT_SHARED_LOCAL").as_deref() == Some(std::ffi::OsStr::new("1"));
-        let shared_global =
-            std::env::var_os("STARK_INKLING_EXPERIMENT_SHARED_GLOBAL").as_deref() == Some(std::ffi::OsStr::new("1"));
+        let shared_attention = true;
+        let shared_global = true;
         if shared_attention || shared_global {
             packed_prefill::register(
                 runtime,
@@ -59,17 +64,15 @@ impl VerifyWorkspace {
                 &["ink_verify_local_parts", "ink_verify_global_parts"],
             )?;
         }
-        if std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_FUSED_CACHE").as_deref() == Some(std::ffi::OsStr::new("1"))
         {
             packed_prefill::register(
                 runtime,
-                include_str!("verify_cache.metal"),
+                concat!(include_str!("long_position.metal"), include_str!("verify_cache.metal")),
                 &["ink_verify_kv_pack", "ink_verify_qr_pack"],
             )?;
             runtime.verify_fused_cache = true;
         }
-        let combined_short = std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_COMBINED_SHORT").as_deref()
-            == Some(std::ffi::OsStr::new("1"));
+        let combined_short = true;
         let undo_table = if combined_short {
             packed_prefill::register(
                 runtime,
@@ -83,23 +86,27 @@ impl VerifyWorkspace {
             )?;
             packed_prefill::register(runtime, include_str!("verify_relative.metal"), &["ink_verify_relative_tables"])?;
             packed_prefill::register(runtime, include_str!("verify_gate.metal"), &["ink_verify_gate_batched"])?;
+            packed_prefill::register(
+                runtime,
+                include_str!("verify_short.metal"),
+                &["ink_verify_short_parts", "ink_verify_short_gate"],
+            )?;
             packed_prefill::register(runtime, include_str!("verify_undo.metal"), &["ink_verify_undo_all"])?;
             Some(zeroed(&runtime.device, visits * 7 * size_of::<u64>())?)
         } else {
             None
         };
         runtime.verify_combined_short = combined_short;
-        let qkv_batch = std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_QKV_BATCH").is_some_and(|value| value == "1");
+        let qkv_batch = true;
         if combined_short && qkv_batch {
             lanes.enable_verify_qkv_batch(runtime)?;
         }
-        let mix_rows = combined_short
-            && runtime.verify_fused_attention
-            && std::env::var_os("STARK_INKLING_EXPERIMENT_VERIFY_MIX_ROWS").is_some_and(|value| value == "1");
+        let mix_rows = combined_short && runtime.verify_fused_attention;
         if mix_rows {
             packed_prefill::register(
                 runtime,
                 concat!(
+                    include_str!("long_position.metal"),
                     include_str!("serial.metal"),
                     "\n",
                     include_str!("verify_mix_rows.metal"),
@@ -111,6 +118,9 @@ impl VerifyWorkspace {
                     "ink_verify_mix_attention",
                     "ink_verify_first_qkv_norm",
                     "ink_verify_first_expert_norm",
+                    "ink_verify_mix_qkv_norm",
+                    "ink_verify_mix_expert_norm",
+                    "ink_verify_attention_mix",
                 ],
             )?;
         }
@@ -155,6 +165,7 @@ impl VerifyWorkspace {
             lanes,
             mix_rows,
             draft,
+            short_attention: true,
         })
     }
 
@@ -210,6 +221,146 @@ impl VerifyWorkspace {
                 gpu.dispatch("ink_verify_mix_rows", &buffers[..13], state.blocks as u32, (queries, rows), WIDTH / 4);
             }
         }
+    }
+
+    /// Prepare every row for a visit in one launch: the prelude save, the
+    /// later-pass residual copies or the draft tap capture. Returns false
+    /// when the rows need the per-row path (mixed tap presence).
+    pub(super) fn prepare_rows(
+        gpu: &mut Stream<'_>,
+        flows: [&Flow; MAX_VERIFY_ROWS],
+        taps: [Option<&Buffer>; MAX_VERIFY_ROWS],
+        index: usize,
+        rows: usize,
+    ) -> bool {
+        let tap = DRAFT_TAPS.iter().position(|&value| index == value);
+        let (mode, word) = match (index, tap) {
+            (6, _) => (0u32, 0),
+            (18 | 30, _) => (1, 0),
+            (_, Some(tap)) => {
+                let present = taps[..rows].iter().filter(|taps| taps.is_some()).count();
+                if present == 0 {
+                    return true;
+                }
+                if present != rows {
+                    return false;
+                }
+                (2, tap * WIDTH)
+            },
+            _ => return true,
+        };
+        let mut buffers = [binding(&flows[0].partial); 20];
+        for i in 0..MAX_VERIFY_ROWS {
+            buffers[i] = binding(&flows[i].partial);
+            buffers[4 + i] = binding(&flows[i].prelude);
+            buffers[8 + i] = binding(&flows[i].blocks);
+            buffers[12 + i] = binding(&flows[i].previous);
+            buffers[16 + i] = binding(taps[i.min(rows - 1)].unwrap_or(&flows[i].partial));
+        }
+        gpu.dispatch("ink_verify_prepare_rows", &buffers, [mode, word as u32], (WIDTH / 128, rows), 128);
+        true
+    }
+
+    /// First-pass attention residual mix and the q, k and v input norms in
+    /// one launch. Requires live blocks; the mixed F32 rows are still stored.
+    pub(super) fn mix_qkv_norm(
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        flows: [&Flow; MAX_VERIFY_ROWS],
+        scratch: [&Scratch; MAX_VERIFY_ROWS],
+        state: VisitInput,
+        rows: usize,
+    ) {
+        debug_assert!(state.blocks != 0 && !state.later);
+        let mut buffers = [binding(&flows[0].blocks); 28];
+        for i in 0..MAX_VERIFY_ROWS {
+            buffers[i] = binding(&flows[i].blocks);
+            buffers[4 + i] = binding(&flows[i].partial);
+            buffers[8 + i] = binding(&scratch[i].mixed);
+            for slot in 0..3 {
+                buffers[16 + slot * 4 + i] = binding(&scratch[i].qkv_input[slot]);
+            }
+        }
+        buffers[12] = binding(layer.attn_queries.as_ref().unwrap_or(&layer.mlp_query));
+        for slot in 0..3 {
+            buffers[13 + slot] = binding(&layer.qkv_norm[slot]);
+        }
+        let queries = if layer.local {
+            1
+        } else {
+            3
+        };
+        gpu.dispatch(
+            "ink_verify_mix_qkv_norm",
+            &buffers,
+            [state.blocks as u32, u32::from(layer.local)],
+            (queries, rows),
+            WIDTH / 4,
+        );
+    }
+
+    /// Attention convolution, scaled residual and boundary block, the expert
+    /// residual mix and, with outputs, the first-pass MLP norm in one launch.
+    /// The caller must have `finish_verify_rows` store the attention history.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn attention_mix(
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        visit: &Visit,
+        inputs: [&Buffer; MAX_VERIFY_ROWS],
+        flows: [&Flow; MAX_VERIFY_ROWS],
+        scratch: [&Scratch; MAX_VERIFY_ROWS],
+        outputs: Option<[Binding<'_>; MAX_VERIFY_ROWS]>,
+        state: VisitInput,
+        position: usize,
+        rows: usize,
+    ) {
+        let mut buffers = [binding(&layer.attn_conv); 24];
+        buffers[1] = binding(&visit.conv[2]);
+        for i in 0..MAX_VERIFY_ROWS {
+            buffers[2 + i] = binding(inputs[i]);
+            buffers[6 + i] = binding(&flows[i].partial);
+            buffers[10 + i] = binding(&flows[i].blocks);
+            buffers[14 + i] = binding(&scratch[i].mixed);
+            buffers[20 + i] = outputs.map_or(binding(&scratch[i].mixed), |outputs| outputs[i]);
+        }
+        buffers[18] = binding(&layer.mlp_query);
+        buffers[19] = binding(&layer.mlp_norm);
+        gpu.dispatch(
+            "ink_verify_attention_mix",
+            &buffers,
+            [position as u32, state.blocks as u32, u32::from(state.boundary), u32::from(outputs.is_some())],
+            (1, rows),
+            WIDTH / 4,
+        );
+    }
+
+    /// Expert residual mix and the first-pass MLP norm in one launch.
+    pub(super) fn mix_expert_norm(
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        flows: [&Flow; MAX_VERIFY_ROWS],
+        scratch: [&Scratch; MAX_VERIFY_ROWS],
+        outputs: [Binding<'_>; MAX_VERIFY_ROWS],
+        state: VisitInput,
+        rows: usize,
+    ) {
+        let mut buffers = [binding(&flows[0].blocks); 18];
+        for i in 0..MAX_VERIFY_ROWS {
+            buffers[i] = binding(&flows[i].blocks);
+            buffers[4 + i] = binding(&flows[i].partial);
+            buffers[8 + i] = binding(&scratch[i].mixed);
+            buffers[14 + i] = outputs[i];
+        }
+        buffers[12] = binding(&layer.mlp_query);
+        buffers[13] = binding(&layer.mlp_norm);
+        gpu.dispatch(
+            "ink_verify_mix_expert_norm",
+            &buffers,
+            (state.blocks + usize::from(state.boundary)) as u32,
+            (1, rows),
+            WIDTH / 4,
+        );
     }
 
     fn copy_undo(
@@ -269,7 +420,7 @@ impl VerifyWorkspace {
         Ok(())
     }
 
-    fn save(
+    pub(super) fn save(
         &self,
         command: &ProtocolObject<dyn MTLCommandBuffer>,
         session: &Session,
@@ -300,7 +451,7 @@ impl VerifyWorkspace {
         Ok(())
     }
 
-    fn restore_suffix(
+    pub(super) fn restore_suffix(
         &self,
         command: &ProtocolObject<dyn MTLCommandBuffer>,
         session: &Session,
@@ -519,6 +670,75 @@ impl VerifyWorkspace {
         Self::gate_shared_attention(gpu, parts, rows);
     }
 
+    /// All rows of a short block below 1,024 visible keys in one launch
+    /// each for parts and gate, with the single-row 32-shard arithmetic.
+    pub(super) fn shares_short_attention(&self) -> bool {
+        self.short_attention && self.attention_parts.is_some()
+    }
+
+    pub(super) fn encode_shared_short(
+        &self,
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        visit: &Visit,
+        position: usize,
+        rows: &[&Scratch],
+    ) {
+        let parts = self.attention_parts.as_ref().expect("shared short verifier workspace");
+        gpu.phase(PrefillPhase::KeyValue);
+        let window = if layer.local {
+            LOCAL
+        } else {
+            0
+        };
+        Self::batch_attention_heads(gpu, layer, visit, position, rows, window);
+        gpu.phase(PrefillPhase::RelativeTable);
+        Self::relative_tables(gpu, layer, rows);
+        gpu.phase(PrefillPhase::LocalAttention);
+        let [a, b, c, d] = std::array::from_fn(|index| rows[index.min(rows.len() - 1)]);
+        gpu.dispatch(
+            "ink_verify_short_parts",
+            &[
+                binding(&a.q),
+                binding(&b.q),
+                binding(&c.q),
+                binding(&d.q),
+                binding(&a.table),
+                binding(&b.table),
+                binding(&c.table),
+                binding(&d.table),
+                binding(&a.sink),
+                binding(&b.sink),
+                binding(&c.sink),
+                binding(&d.sink),
+                binding(&visit.keys),
+                binding(&visit.values),
+                binding(parts),
+            ],
+            [position as u32, visit.capacity as u32],
+            (8, HEADS * rows.len()),
+            128,
+        );
+        gpu.dispatch(
+            "ink_verify_short_gate",
+            &[
+                parts,
+                &a.attn_gate,
+                &b.attn_gate,
+                &c.attn_gate,
+                &d.attn_gate,
+                &a.attended,
+                &b.attended,
+                &c.attended,
+                &d.attended,
+            ]
+            .map(binding),
+            (),
+            (8, HEADS * rows.len()),
+            128,
+        );
+    }
+
     pub(super) fn shares_global_attention(&self) -> bool {
         self.global_share.0 != 0 && self.attention_parts.is_some()
     }
@@ -675,7 +895,7 @@ impl Session {
             return Err("Inkling verifier mode must be selected before prefill");
         }
         if enabled {
-            if !self.has_dspark() || !self.supports_source_text_prefill(self.context) {
+            if !self.has_dspark() || !self.source_text_ready() {
                 return Err("Inkling source verifier requires the source M5 path and DSpark");
             }
             if self.verifier.is_none() {
@@ -724,6 +944,19 @@ impl Session {
             depth,
             &workspace.draft,
         )
+    }
+
+    /// The draft head's confidence in each of the first count proposals of
+    /// the last multi-row proposal block (two or more drafts), in order.
+    pub fn proposal_confidences(
+        &self,
+        count: usize,
+    ) -> Result<Vec<f32>> {
+        let workspace = self.verifier.as_ref().ok_or("Inkling verifier workspace unavailable")?;
+        if count >= MAX_VERIFY_ROWS {
+            return Err("Inkling draft confidence request exceeds the block");
+        }
+        Ok(workspace.draft.confidences(count))
     }
 
     pub fn overlaps_verify(&self) -> bool {

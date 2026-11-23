@@ -162,6 +162,57 @@ kernel void ink_mx_tensor_product(
     }
 }
 
+// Default source prefill: one F32 tensor accumulation across K with the BF16
+// projection rounding at the store, no certification or replay.
+kernel void ink_mx_tensor_fast(
+    device const bfloat *input [[buffer(0)]], device const uint *runs [[buffer(1)]],
+    device const uchar *codes [[buffer(2)]], device const uchar *exponents [[buffer(3)]],
+    device bfloat *rounded [[buffer(4)]], constant uint &width [[buffer(5)]],
+    uint2 group [[threadgroup_position_in_grid]], uint worker [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint BN = 64, BK = 64, BM = 32, Workers = 128;
+    const uint start = runs[group.y * 3], rows = runs[group.y * 3 + 1];
+    if (rows == 0) return;
+    const uint expert = runs[group.y * 3 + 2];
+    const uint col0 = group.x * BN;
+    const uint tile_row = (sg / 2) * 16, tile_col = (sg % 2) * 32;
+    threadgroup bfloat decoded[BN * BK];
+    threadgroup float final[BM * BN];
+    using Shape = metal::dextents<int32_t, 2>;
+    using Strides = metal::array<int32_t, 2>;
+    using A = metal::tensor<device bfloat, Shape, metal::tensor_inline>;
+    using B = metal::tensor<threadgroup bfloat, Shape, metal::tensor_inline>;
+    using C = metal::tensor<threadgroup float, Shape, metal::tensor_inline>;
+    constexpr auto descriptor = mpp::tensor_ops::matmul2d_descriptor(
+        16, 32, BK, false, true, true, mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    mpp::tensor_ops::matmul2d<descriptor, metal::execution_simdgroup> product;
+    auto partial = product.template get_destination_cooperative_tensor<A, B, float>();
+    for (uint i = 0; i < partial.get_capacity(); ++i) partial[i] = 0.f;
+    const int valid = int(min(16u, rows - min(rows, tile_row)));
+    for (uint offset = 0; offset < width; offset += BK) {
+        for (uint i = worker; i < BN * (BK / 4); i += Workers) {
+            const uint wr = expert * MX_COLS + col0 + i / (BK / 4);
+            const uint k = offset + (i % (BK / 4)) * 4;
+            const float scale = mx_scale(exponents[wr * (width / 32) + k / 32]);
+            const uchar4 packed = reinterpret_cast<device const uchar4 *>(codes)[(wr * width + k) / 4];
+            for (uint j = 0; j < 4; ++j) decoded[i * 4 + j] = bfloat(ink_mx_e4m3(packed[j]) * scale);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (valid > 0) {
+            auto lhs = A((device bfloat *)input + (start + tile_row) * width + offset,
+                         Shape(BK, valid), Strides{1, int(width)});
+            auto rhs = B(decoded + tile_col * BK, Shape(BK, 32), Strides{1, BK});
+            product.run(lhs, rhs, partial);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    partial.store(C(final + tile_row * BN + tile_col, Shape(32, 16), Strides{1, BN}));
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = worker; i < rows * BN; i += Workers) {
+        rounded[(start + i / BN) * MX_COLS + col0 + i % BN] = bfloat(final[i]);
+    }
+}
+
 kernel void ink_mx_replay_reset(device atomic_uint *count [[buffer(0)]]) {
     atomic_store_explicit(count, 0u, memory_order_relaxed);
 }
@@ -207,6 +258,101 @@ inline void mx_replay_column(
         atomic_fetch_add_explicit(false_certificates, false_count, memory_order_relaxed);
     }
 #endif
+}
+
+// The source recurrence of ink_mxfp8_source_dot reading the sorted BF16
+// ingress rows. Admissible rows hold exactly the F32 inputs, so every
+// product and sum is the same; rows without a norm use the F32 kernel.
+constant constexpr uint MX_REPLAY_ROWS = 4;
+
+template <uint Width, uint ValuesPerLane>
+inline void ink_mx_source_dot_bf16(
+    device const bfloat *input, thread const uint *rows, uint count,
+    device const uchar *weights, device const uchar *exponents, uint lane, thread float *result) {
+#pragma clang fp contract(off) reassociate(off)
+    float sum[MX_REPLAY_ROWS] = {};
+    const device bfloat4 *input4 = reinterpret_cast<const device bfloat4 *>(input);
+    const device uchar4 *weight4 = reinterpret_cast<const device uchar4 *>(weights);
+    for (uint start = 0; start < Width; start += ValuesPerLane * 32) {
+        const uint begin = start + lane * ValuesPerLane;
+        const uint exponent = uint(exponents[begin / 32]);
+        const float scale = exponent == 0u ? 0x1p-127f :
+                            exponent == 255u ? NAN : as_type<float>(exponent << 23);
+        float partial[MX_REPLAY_ROWS] = {};
+        for (uint j = 0; j < ValuesPerLane; j += 4) {
+            const uint block = (begin + j) / 4;
+            const uchar4 code = weight4[block];
+            const float4 weight = float4(ink_mx_e4m3(code.x), ink_mx_e4m3(code.y),
+                                         ink_mx_e4m3(code.z), ink_mx_e4m3(code.w));
+            for (uint r = 0; r < MX_REPLAY_ROWS; ++r) {
+                if (r < count)
+                    partial[r] = ink_mxfp8_accumulate_four(
+                        partial[r], float4(input4[rows[r] * (Width / 4) + block]), weight);
+            }
+        }
+        for (uint r = 0; r < MX_REPLAY_ROWS; ++r) sum[r] += scale * partial[r];
+    }
+    for (uint r = 0; r < MX_REPLAY_ROWS; ++r) {
+        if (r < count) result[r] = simd_sum(sum[r]);
+    }
+}
+
+template <uint Width, uint ValuesPerLane>
+inline void mx_replay_column_bf16(
+    device const float *input, device const bfloat *packed, device const float *norms,
+    device const uint *order, device const uchar *weights, device const uchar *scales,
+    device bfloat *rounded, uint col, uint start, uint mask, uint lane) {
+    while (mask != 0) {
+        uint sorted[MX_REPLAY_ROWS] = {};
+        float values[MX_REPLAY_ROWS] = {};
+        uint count = 0;
+        bool admissible = true;
+        for (; count < MX_REPLAY_ROWS && mask != 0; ++count) {
+            sorted[count] = start + ctz(mask);
+            admissible &= norms[sorted[count]] >= 0.f;
+            mask &= mask - 1;
+        }
+        if (admissible) {
+            ink_mx_source_dot_bf16<Width, ValuesPerLane>(packed, sorted, count, weights, scales, lane, values);
+        } else {
+            for (uint first = 0; first < count; first += 4) {
+                const uint chunk = min(4u, count - first);
+                uint4 source = 0;
+                for (uint i = 0; i < chunk; ++i)
+                    source[i] = Width == MX_COLS ? order[sorted[first + i]] / 8 : sorted[first + i];
+                const float4 four =
+                    ink_mxfp8_source_dot<Width, ValuesPerLane, false>(input, source, chunk, weights, scales, lane);
+                for (uint i = 0; i < chunk; ++i) values[first + i] = four[i];
+            }
+        }
+        if (lane == 0) {
+            for (uint i = 0; i < count; ++i) rounded[sorted[i] * MX_COLS + col] = bfloat(values[i]);
+        }
+    }
+}
+
+kernel void ink_mx_replay_packed(
+    device const float *input [[buffer(0)]], device const uint *order [[buffer(1)]],
+    device const uint *runs [[buffer(2)]], device const uchar *codes [[buffer(3)]],
+    device const uchar *exponents [[buffer(4)]], device bfloat *rounded [[buffer(5)]],
+    device const uint *masks [[buffer(6)]], device const bfloat *packed [[buffer(7)]],
+    device const float *norms [[buffer(8)]], constant uint &width [[buffer(9)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint rows = runs[group.y * 3 + 1];
+    if (rows == 0) return;
+    const uint col = group.x * 4 + sg;
+    const uint mask = masks[group.y * MX_COLS + col];
+    if (mask == 0) return;
+    const uint start = runs[group.y * 3];
+    const uint wr = runs[group.y * 3 + 2] * MX_COLS + col;
+    const device uchar *w = codes + wr * width;
+    const device uchar *s = exponents + wr * (width / 32);
+    if (width == MX_COLS) {
+        mx_replay_column_bf16<MX_COLS, 8>(input, packed, norms, order, w, s, rounded, col, start, mask, lane);
+    } else {
+        mx_replay_column_bf16<MX_COLS / 2, 4>(input, packed, norms, order, w, s, rounded, col, start, mask, lane);
+    }
 }
 
 kernel void ink_mx_replay_source(
