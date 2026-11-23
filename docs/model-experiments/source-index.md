@@ -223,6 +223,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Native Metal retrospective](../archive/runs/2026-11-21-inkling-mini-native-retrospective.md) · Archived run, 2026-11-21
 - [Prefill and decode performance follow-up](../INKLING_2_MINI_PERFORMANCE_FOLLOWUP.md) · Proposals, 2026-11-21
 - [Prefill, decode, DSpark and prefix reuse speed history](speed-inkling.md)
+- [Stark against MLX-Serve: every difference, what worked, what did not and what is open](inkling-mlx-serve-differences.md) · Maintained list
 
 ### Benchmarks and experiment records
 
@@ -256,12 +257,16 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Default fast paths, source admission from 1 token to 32K context and default drafting](2026-11-22-inkling-mini-default-fast-paths.md) · Experiment, 2026-11-22, attempt 20261122-INKDEFAULT-01
 - [Verifier long-position gain rounding fix](2026-11-22-inkling-mini-long-position-gain.md) · Experiment, 2026-11-22, attempt 20261122-INKLONGPOS-01
 - [Verifier and single-row launch fusion, two sessions](2026-11-22-inkling-mini-launch-fusion.md) · Experiment, 2026-11-22–23, attempts 20261122-INKFUSE-01 and -02
-- [Engine matrix against MLX-Serve, runs 1 and 2](../benchmarks/2026-11-22-inkling-mini-engine-matrix.md) · Benchmark, 2026-11-22, attempts 20261122-INKENGINE-01 and -02
+- [Engine matrix against MLX-Serve, runs 1 to 4](../benchmarks/2026-11-22-inkling-mini-engine-matrix.md) · Benchmark, 2026-11-22–23, attempts 20261122-INKENGINE-01 to -03 and 20261123-INKENGINE-04
 - [Exact faster prefill: NVFP4 guard removal, fused NVFP4 kernels, faster MXFP8 replay](2026-11-22-inkling-mini-exact-fast-prefill.md) · Experiment, 2026-11-22, attempt 20261122-INKFASTPRE-01
 - [Unguarded MXFP8 prefill default, noise-floor gate and mask-free global attention](2026-11-22-inkling-mini-unguarded-mxfp8-prefill.md) · Experiment, 2026-11-22–23, attempt 20261122-INKFASTPRE-02
 - [Prefill attribution, MLX-Serve against Stark](../benchmarks/2026-11-22-inkling-mini-prefill-attribution.md) · Benchmark, 2026-11-22, attempt 20261122-INKPREATTR-01
 - [8-bit affine dense weights: feasibility, byte-exact pack reproduction and the Stark 8-bit engine artifact](2026-11-22-inkling-mini-affine8.md) · Experiment, 2026-11-22–23, attempts 20261122-INKAFFINE8-01 to -03
 - [Prefill round 3: dense kernel, packed draft commit, mask removal, width independence and two rejected kernels](2026-11-23-inkling-mini-prefill-round3.md) · Experiment, 2026-11-23, attempt 20261122-INKFASTPRE-03
+- [Prefill round 4: routing, drafting overhead, command width, expert ceiling, rejected stationary and staged kernels, BF16 attention and dense decomposition](2026-11-23-inkling-mini-prefill-round4.md) · Experiment, 2026-11-23, attempts 20261122-INKFASTPRE-04 to -06
+- [Decode round: stage table, short-context verifier attention, router, worker loop, depth policy, expert inputs and natural-text quality](2026-11-23-inkling-mini-decode-round.md) · Experiment, 2026-11-23, attempts 20261123-INKROUND-01 to -08
+- [Worker prefill command width and the cache on/off fault](2026-11-23-inkling-mini-wide-prefill-worker.md) · Experiment, 2026-11-23, attempts 20261123-INKWIDTH-01 and -02
+- [MLX-Serve source comparison](../benchmarks/2026-11-23-inkling-mini-mlx-serve-source.md) · Benchmark (source reading), 2026-11-23, attempt 20261123-INKMLXSRC-01
 
 ### Protocols and aggregates
 

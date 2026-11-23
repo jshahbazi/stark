@@ -97,3 +97,9 @@ The pinned captures and oracle prompts are synthetic and nearly uniform. On the 
 - `cargo test --lib` still does not compile on stable in this crate, so the split-pattern unit test does not run.
 - One build failed while another agent was mid-edit; it was retried.
 - The source tree has moved on since this record's builds: at the time of writing it contains a load-time selectable command width (2,048, 4,096 or 8,192 rows with matching reserves). That later change is not part of this attempt and is not evaluated here.
+
+## Follow-up history
+
+- 2026-11-23: the joint-hash item in the identity table is resolved; see "Joint draft-state hash, resolved" and "All four stock captures exact" under Correctness.
+- 2026-11-23: the natural-text comparison of default against exact prefill was measured with `--quality-compare` on ten natural inputs, 258 rows each, pooled over 2,580 rows: next-token accuracy 73.41 percent (default) against 73.64 (exact), 99.28 percent top-1 agreement where the exact reference is at least 50 percent confident. It passes the quality bar of [`docs/BENCHMARK.md`](../BENCHMARK.md). See [INKROUND-08](2026-11-23-inkling-mini-decode-round.md#20261123-inkround-08--natural-text-quality-probe-and-the-synthetic-capture-finding).
+- 2026-11-23: the landed changes are in commit `2a1d72a2`. Later prefill work is [INKFASTPRE-04 to -06](2026-11-23-inkling-mini-prefill-round4.md); the comparison with MLX-Serve is on the [differences page](inkling-mlx-serve-differences.md).

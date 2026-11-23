@@ -31,3 +31,7 @@
 **Fix.** `unscoped_source_split`: an unscoped request splits at the same boundary as a scoped one, without taking a snapshot. Unit tests added. Re-validation of the fixed worker was still queued when last reported.
 
 **Separate mismatches, not yet attributed.** The same validator reported 5 reuse-rule mismatches that are believed to predate wide commands: the worker advertises 1,024-token reuse chunks while source prefill aligns to 2,048 rows with a 4-token suffix, and it reuses a snapshot across a change of drafting mode where the validator's rule expects none. A control run on the 2,048-row worker is queued. If it confirms them, they are a prefix-reuse qualification gap in the Inkling port, open since before this session.
+
+## Follow-up history
+
+- 2026-11-23: both changes (`source_command_rows` and `unscoped_source_split`, with their unit tests) are in commit `2a1d72a2`. The committed tree passed the coordinator's commit-check gates (167 worker tests; drafting on equals off at 73 to 16,000 on both artifacts; worker smoke on both artifacts; receipts in `runtime/commit-check/`). The prefix-reuse re-validation of the fixed worker and the 2,048-row control are not reported in the sources and remain queued.

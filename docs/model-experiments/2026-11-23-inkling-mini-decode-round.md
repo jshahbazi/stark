@@ -125,3 +125,12 @@ Both pass the adopted bar of [`docs/BENCHMARK.md`](../BENCHMARK.md) (pooled accu
 
 - New diagnostic subcommands, all off the inference path: `--decode-stages`, `--round-budget`, `--paired-control` (controls `short_attention`, `router`, `expert_inputs`), `--quality-compare`, `--decode-experts`, `--draft-trace`, `--depth-policies`; files `decode_probe.metal`, `router_mpp_reference.metal`; `span_dispatches` in `PrefillTiming`.
 - A compile error in `decode_stages.rs` (ambiguous integer type) briefly broke shared builds and was fixed.
+
+## Follow-up history
+
+2026-11-23, after the commit of the branch (sources: the coordinator's report and its verification receipts in `runtime/commit-check/`, summary SHA-256 prefix `8cb9cd12821508c4`):
+
+- **INKROUND-03 gates.** The committed tree (`2a1d72a2`) passed drafting on equals off at 73, 4,150, 8,800 and 16,000 tokens on both artifacts, a repeated 8,800-token replay with identical hashes and the worker smoke on both artifacts. The batched short-context verifier attention is adopted with its owed gates closed.
+- **INKROUND-06 landed.** The history depth planner is the committed default in `2a1d72a2` (floor 1, capped by the requested count) and passed those gates. Its tuning for 4K and 8K, where the simulation put it 1.5 to 3 percent below fixed depth 3, is in progress and not final. The confidence cut and the backoff stay rejected on Stark's cost ratios.
+- **INKROUND-07 unchanged.** Unquantized expert inputs: decode about 0.8 ms faster per step and per round on both artifacts (12 ABBA pairs), joint quality passed on the original artifact. The 8-bit quality half, the paired prefill timing and the default flip are still pending; the committed default keeps `INK_EXPERT_INPUTS_QUANTIZED 1`.
+- Owner decisions the same day: the 16-user burst is out of scope; the Stark 8-bit artifact becomes the default (integration starting, not done).

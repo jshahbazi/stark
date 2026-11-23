@@ -50,7 +50,7 @@ Drafting on equals off at 73, 4,150, 8,800 and 16,000; snapshot and boundary rep
 | Tensor work only, activations from threadgroup memory | 3.13 (55) | 1.57 (55) | 4.7 |
 | Decode only, no tensor product | 3.16 | 1.62 | 4.8 |
 
-Production is about tensor work plus decode back to back (4.7 + 4.8 = 9.5 against 9.2): the double-buffered decode does not overlap the tensor work. Reading pre-decoded weights from device is no faster than decoding them, so the lever is overlap and fewer decodes, not a cheaper decode. Activations from device cost about 1.2 ms of the 6.2 ms against threadgroup activations. FLOP-based floors at the measured 55 TFLOPS (estimates, not measured variants): NVFP4 products 2,085 ms measured against about 1,050; dense 687 against about 175; local attention 252 against about 80; global attention 290 against about 70 (the global floor assumes BF16, but the kernel is F32).
+Production is about tensor work plus decode back to back (4.7 + 4.8 = 9.5 against 9.2): the double-buffered decode does not overlap the tensor work. Reading pre-decoded weights from device is no faster than decoding them, so the lever is overlap and fewer decodes, not a cheaper decode. Activations from device cost about 1.2 ms of the 6.2 ms against threadgroup activations. FLOP-based floors at the measured 55 TFLOPS (estimates, not measured variants): NVFP4 products 2,085 ms measured against about 1,050; dense 687 against about 175 (later shown wrong, see INKFASTPRE-06 below); local attention 252 against about 80; global attention 290 against about 70 (the global floor assumes BF16, but the kernel is F32).
 
 ## Rejected kernels
 
@@ -72,8 +72,27 @@ Packed prefill calls the shared `ink_nvfp4_activation` and `ink_verify_half_acti
 
 ## Not final or not started
 
-- In progress: BF16-query local attention (`ink_prefill_relative_fast`; the exact reference keeps F32 queries) and a half-precision global attention instantiation of the same MLX NAX kernel (half Q, K, V and O, F32 accumulation, bias as now). The noise-floor gate and the natural-text bar decide.
+- In progress when this round closed, since landed as INKFASTPRE-05 below: BF16-query local attention (`ink_prefill_relative_fast`; the exact reference keeps F32 queries) and a reduced-precision global attention instantiation of the same MLX NAX kernel.
 - Queued: joined dense projections; elementwise fusion; register-fragment activation loads in `--expert-ceiling`; stationary NVFP4 at 8,192 rows; the MLX-Serve kernel timing harness on the ceiling capture (not run).
 - Parked: the tail fold (`PackedPrefill::SOURCE_TAIL_ROWS = MIN_ROWS`, so it does nothing).
 - Dropped: a `relaxed_precision` test, because Stark's kernels already set it, as MLX-Serve's do.
 - Incidents: a compile error from a private `register` in `grouped_pilot.rs` (fixed with `register_source`); the data volume filling at about 08:25 (a build failed; no source truncated).
+
+## Follow-up history
+
+Sources for both follow-ups: the coordinator's report of 2026-11-23 and its verification receipts in `runtime/commit-check/` (summary SHA-256 prefix `8cb9cd12821508c4`). The prefill workstream's own receipts for these two items are not identified in the sources and are not recorded here.
+
+### 20261122-INKFASTPRE-05 · BF16 prefill attention and a 1,024-row global query tile
+
+Adopted in commit `2a1d72a2` (2026-11-23).
+
+- Local prefill attention takes BF16 query operands; the exact reference keeps F32 queries.
+- Global prefill attention runs in BF16 with F32 scores and accumulation (not half precision as in MLX-Serve's `relattn`).
+- The global query tile is 1,024 rows with the causal skip; hash-identical to the previous tile.
+- Quality: the natural-text gate passed on eight inputs, with a next-token accuracy change of +0.19 points and 99.28 percent top-1 agreement on rows where the reference is confident.
+- Speed: paired 1.018× with a wide range on the engine diagnostic. This is far below the 250 to 400 ms the source comparison estimated for the whole attention gap.
+- The committed tree passed the commit-check gates listed on the [differences page](inkling-mlx-serve-differences.md): exact reference exact on two stock captures, drafting on equals off at 73 to 16,000 on both artifacts, a repeated 8,800-token replay with identical hashes and the worker smoke on both artifacts.
+
+### 20261122-INKFASTPRE-06 · Dense projection decomposition
+
+Measured, no code change. On synthetic operands at 8,192 rows, one dense prefill projection takes about 2.7 ms in production against about 1.8 ms for the tensor work alone and about 2.1 ms for the loads alone. Dense therefore runs at about 1.5 times its tensor floor, and the earlier FLOP-based floor of about 175 ms for the dense stage (about a quarter of the measured 687 ms) was wrong. The lever is overlapping loads with tensor steps, not larger or staged tiles (rejected above). Not started.

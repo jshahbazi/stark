@@ -122,3 +122,43 @@ The 8,800-ID control's input IDs were identical across arms. Stark reused 2,048 
 - The author 8-bit pack is the fastest arm on most decode rows, up to 1.33 times MLX-Serve original at about 4K. Its prefill is level with MLX-Serve original. The published 116 tok/s headline on M4 Max was not reproduced on this M5 Max; the best 8-bit cell here is 113.1 at about 4K, and its sustained coding is 101.3.
 - Stark's prefill moved from 837 to 1,224 tok/s on the repeated-sentence scenario between the two runs, with a different Stark build; the runs are separate sessions, so that change is indicative only. The paired prefill evidence is in the INKFASTPRE records.
 - The worker's 1,194 tok/s at 8,800 tokens sits well below the same tree's engine diagnostic; the [prefill attribution](2026-11-22-inkling-mini-prefill-attribution.md) explains most of that gap.
+
+### 20261122-INKENGINE-03 · Third run, Stark 8-bit arm refused
+
+A single-repeat run (`20261122-232425-both`, started 23:24 local, manifest SHA-256 `c1e1941ecd3c4c9880416bfdce78ecd437bf9ce5b9e506ecf57bcb06e9ca6992`, status `partial`; harness SHA-256 prefix `e52fb0cd7a08750f`; repository `f1666090` with 67 dirty paths). Stark worker `stark-generate` beginning `70316ca5e658`, the merged tree that the INKFASTPRE-03 re-check built. Taken while other agents had been loading the GPU; process thermal state 1 (Fair) at start. The Stark 8-bit arm failed at start with `stark_images_not_loaded`: the worker reported `ready: true, image_loaded: false`, and image-capable models are timed only with images loaded. A Stark-only retry (`20261123-000711-stark`) failed the same way. Both were later fixed by the converter change described in [INKAFFINE8-03](../model-experiments/2026-11-22-inkling-mini-affine8.md#follow-up-history).
+
+| Scenario, tok/s | Stark original | MLX original | MLX 8-bit |
+| --- | ---: | ---: | ---: |
+| Initial coding | 75.4 | 81.8 | 90.8 |
+| Sustained coding | 84.8 | 87.1 | 94.9 |
+| Novel prose | 64.2 | 72.7 | 88.4 |
+| About 512 tokens | 73.1 | 78.9 | 89.9 |
+| About 4K | 108.2 | 85.8 | 102.5 |
+| About 8K | 95.9 | 93.9 | 92.9 |
+| About 16K | 91.0 | 89.0 | 90.9 |
+| Prefill, 8,768 repeated-sentence tokens | 1,693 | 2,137 | 2,012 |
+| Prefill, exact 8,800 IDs | 1,707 | 2,088 | 1,897 |
+
+One invocation per arm; not a standard result. The busy host makes this run the least reliable of the four.
+
+### 20261123-INKENGINE-04 · Fourth run with the Stark 8-bit artifact
+
+A single-repeat run in the legacy layout (`20261123-060520-both`, 06:05 to 06:17 local on 2026-11-23, manifest SHA-256 `72a056bf5f4e91b6a512a2574cb129ce8457e53ca7a534c39e145ab692ca4804`, status `complete`, no arm failures; harness SHA-256 prefix `9634b59b68362b55`; repository `f1666090` with 84 dirty paths). Quiet, cool host with other agents paused: AC power, battery charged, thermal state 0 at start and 1 at the end. Sessions probe and prefill; the burst is out of scope by owner decision.
+
+Stark worker `stark-generate` beginning `0ba839d4d3be` (`morning1-build`, built at 06:05 from the working tree after the overnight pause; its `inkling_slice` begins `229178093f3f`): short-context verifier attention ([INKROUND-03](../model-experiments/2026-11-23-inkling-mini-decode-round.md#20261123-inkround-03--batched-short-context-verifier-attention)), the fused prefill router, 2,048-row commands and fixed depth 3. The same binary served both Stark arms; the harness was allowed to time one build on two model directories. MLX-Serve as in the earlier runs.
+
+| Scenario, tok/s | Stark original | Stark 8-bit | MLX original | MLX 8-bit |
+| --- | ---: | ---: | ---: | ---: |
+| Initial coding | 78.9 | 86.9 | 86.7 | 101.0 |
+| Sustained coding | 89.9 | 88.9 | 82.5 | 97.8 |
+| Novel prose | 58.4 | 67.8 | 73.3 | 91.6 |
+| About 512 tokens | 76.1 | 89.7 | 82.4 | 97.1 |
+| About 4K | 112.0 | 115.4 | 89.2 | 107.6 |
+| About 8K | 100.1 | 110.8 | 100.1 | 99.8 |
+| About 16K | 95.1 | 96.2 | 94.6 | 103.8 |
+| Prefill, 8,768 repeated-sentence tokens | 1,634 | 1,780 | 2,214 | 2,220 |
+| Prefill, exact 8,800 IDs | 1,879 | 1,892 | 2,574 | 2,486 |
+
+Worker-reported round times at depth 3: Stark 8-bit 26.9 ms (coding), 26.6 (sustained), 27.4 (prose), 24.2 (a 27-token prompt); original 29.6, 27.3, 33.4, 27.0. Worker and client rates agreed within 1.5 percent. Natural-text quality results are attached to both Stark arms and pass the bar ([INKROUND-08](../model-experiments/2026-11-23-inkling-mini-decode-round.md#20261123-inkround-08--natural-text-quality-probe-and-the-synthetic-capture-finding)); the standard tool still lists the run as off the standard (one repeat, legacy layout).
+
+Reading it: on matched 8-bit artifacts Stark leads at about 4K (115.4 against 107.6) and 8K (110.8 against 99.8) and trails on initial coding, novel prose, 512, 16K and prefill (0.76 to 0.80 of MLX-Serve's 8-bit prefill rate). MLX-Serve forces 192 decode tokens while Stark stops at end of sequence. The run predates the committed depth planner, wide prefill commands, BF16 prefill attention and any change to expert-input quantization. Every difference and what has been tried is tracked on the [differences page](../model-experiments/inkling-mlx-serve-differences.md).
