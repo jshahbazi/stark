@@ -162,3 +162,28 @@ Stark worker `stark-generate` beginning `0ba839d4d3be` (`morning1-build`, built 
 Worker-reported round times at depth 3: Stark 8-bit 26.9 ms (coding), 26.6 (sustained), 27.4 (prose), 24.2 (a 27-token prompt); original 29.6, 27.3, 33.4, 27.0. Worker and client rates agreed within 1.5 percent. Natural-text quality results are attached to both Stark arms and pass the bar ([INKROUND-08](../model-experiments/2026-11-23-inkling-mini-decode-round.md#20261123-inkround-08--natural-text-quality-probe-and-the-synthetic-capture-finding)); the standard tool still lists the run as off the standard (one repeat, legacy layout).
 
 Reading it: on matched 8-bit artifacts Stark leads at about 4K (115.4 against 107.6) and 8K (110.8 against 99.8) and trails on initial coding, novel prose, 512, 16K and prefill (0.76 to 0.80 of MLX-Serve's 8-bit prefill rate). MLX-Serve forces 192 decode tokens while Stark stops at end of sequence. The run predates the committed depth planner, wide prefill commands, BF16 prefill attention and any change to expert-input quantization. Every difference and what has been tried is tracked on the [differences page](../model-experiments/inkling-mlx-serve-differences.md).
+
+### 20261123-INKENGINE-05 · Fifth run, the committed tree through the standard tool
+
+The first four-arm run through `scripts/benchmark_standard.py` with the `inkling-2-mini` profile (`20261123-150914-inkling-2-mini`, 15:09 to 15:22 local on 2026-11-23, manifest SHA-256 `19ef5dce32f0431adf2e000baaf5db4de0762bdb01f4385f9e165a591ef4578c`, status `complete`, no arm failures; harness SHA-256 prefix `3ed848df648763de`; repository `4314ac51` with no dirty paths at the start). Block layout, one block, sessions probe and prefill, one repeat, so the tool reports it as a diagnostic run off the scoreboard (`fewer than 3 repeats`). No quality result is attached to this run directory; the natural-text results for this build's arithmetic are in the [expert-input default record](../model-experiments/2026-11-23-inkling-mini-expert-inputs-default.md).
+
+Stark worker `stark-generate` beginning `a966b11554ae`, built from `4314ac51`: unquantized expert inputs, the history depth planner with the hold rule, wide prefill commands, BF16 prefill attention and the gathered NVFP4 prefill kernel. The same binary served both Stark arms. MLX-Serve binary beginning `05983e1278d6`, as in the earlier runs. Each engine's default drafting; reasoning `off` requested (both engines still think).
+
+Host: AC power through the 94 W adapter, battery charged, no competing processes at the start or the end, no sleep events. Two coding agents and a documentation agent were reading and editing files during the run under an instruction to run no builds or GPU work until it finished. Process thermal state was 0 before the first arm's probe session (Stark original) and 1 before every other arm and session, so the Stark original decode rows were taken on a cooler host than the three other arms; the matched 8-bit pair ran in the same state.
+
+| Scenario, tok/s | Stark original | Stark 8-bit | MLX original | MLX 8-bit | Stark / MLX, original | Stark / MLX, 8-bit |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Initial coding (median of 3) | 83.3 | 84.9 | 80.6 | 86.7 | 1.03 | 0.98 |
+| Sustained coding (median of 3) | 87.8 | 99.4 | 79.2 | 97.4 | 1.11 | 1.02 |
+| Novel prose (median of 3) | 63.0 | 75.0 | 62.0 | 82.2 | 1.02 | 0.91 |
+| About 512 tokens | 75.3 | 87.7 | 76.3 | 89.2 | 0.99 | 0.98 |
+| About 4K | 99.1 | 108.7 | 95.8 | 109.2 | 1.03 | 0.99 |
+| About 8K | 98.6 | 105.1 | 91.1 | 89.6 | 1.08 | 1.17 |
+| About 16K | 101.8 | 98.4 | 85.0 | 91.2 | 1.20 | 1.08 |
+| Prefill, 8,768 repeated-sentence tokens (median of 3) | 2,010 | 1,912 | 1,985 | 1,909 | 1.01 | 1.00 |
+| Prefill, about 7,550 unseen tokens (supplementary, median of 3) | 2,137 | 1,968 | 2,002 | 1,967 | 1.07 | 1.00 |
+| Prefill, exact 8,800 IDs | 2,040 | 2,138 | 2,088 | 2,160 | 0.98 | 0.99 |
+
+Tokens per step and acceptance from the same run: Stark 8-bit drafted at 2.18 tokens per round on initial coding (acceptance 0.55), 1.90 on novel prose (0.41) and 3.10 at about 4K (0.71); MLX-Serve 8-bit reported 1.43, 1.19 and 2.82 tokens per step on the same rows. On novel prose that is about 25 ms per Stark round for 1.9 tokens against about 14.5 ms per MLX-Serve step for 1.19.
+
+Reading it: on the matched 8-bit pair Stark is within 2 percent of MLX-Serve on initial coding, sustained coding, 512, 4K and all three prefill rows, ahead at 8K and 16K, and behind on novel prose by 9 percent. In run 4 the same pair stood at 0.86 on initial coding, 0.74 on novel prose and 0.76 to 0.80 on prefill. On the original pair Stark is level or ahead on every row, with the thermal caveat above on its decode rows. Absolute rates of both engines moved between runs 4 and 5 (MLX-Serve 8-bit: prefill 2,220 to 1,909, initial coding 101.0 to 86.7), so only ratios within a run compare. One repeat: none of these ratios is a standing, and the ladder rows are single measurements. MLX-Serve forces 192 decode tokens while Stark stops at end of sequence. The private summary is `summary.md` in the run directory (`summary.json` SHA-256 prefix `c337076087c5379d`).

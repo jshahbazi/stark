@@ -19,8 +19,12 @@ original checkpoint, with its vision tower and DSpark head. The original
 checkpoint remains available from the terminal as `inkling2-mini-original`, and an
 existing original installation can be converted in place with `--upgrade-8bit`.
 The terminal preparation command is below. Guided recommendations require a
-separate resident-memory and prompt performance profile. DSpark's one-proposal
-verification is opt-in on the M5 Max. See the [native worker checks](model-experiments/2026-11-21-inkling-mini-worker.md)
+separate resident-memory and prompt performance profile. On the M5 Max, text
+requests draft with DSpark by default through the multi-row source verifier: up to
+three proposals for greedy and two for sampled requests, with the depth chosen each
+round by a history planner. Explicit MTP settings override; image requests run
+without drafting; a worker without the source verifier decodes serially and
+advertises no MTP. See the [native worker checks](model-experiments/2026-11-21-inkling-mini-worker.md)
 and [performance plan](INKLING_2_MINI_PLAN.md).
 
 The worker currently caps context at 32,768 tokens on the tested M5 Max path
