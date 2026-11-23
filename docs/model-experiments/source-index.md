@@ -253,6 +253,15 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Default one-row router with flags unset](2026-11-21-inkling-mini-decode-default.md) · Experiment, 2026-11-21
 - [Decode toward 80 tok/s, verifier cuts, sampled proposal headroom and MLX-Serve comparison](2026-11-22-inkling-mini-decode-80.md) · Experiment, 2026-11-22, through attempts [109](2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-109--expand-the-nvfp4-coefficients-before-verification) and [110](2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-110--shorten-the-dspark-forward)
 - [Decode toward 60 tok/s, exact verifier and sampled acceptance](2026-11-21-inkling-mini-decode-60.md) · Experiment, 2026-11-21–22
+- [Default fast paths, source admission from 1 token to 32K context and default drafting](2026-11-22-inkling-mini-default-fast-paths.md) · Experiment, 2026-11-22, attempt 20261122-INKDEFAULT-01
+- [Verifier long-position gain rounding fix](2026-11-22-inkling-mini-long-position-gain.md) · Experiment, 2026-11-22, attempt 20261122-INKLONGPOS-01
+- [Verifier and single-row launch fusion, two sessions](2026-11-22-inkling-mini-launch-fusion.md) · Experiment, 2026-11-22–23, attempts 20261122-INKFUSE-01 and -02
+- [Engine matrix against MLX-Serve, runs 1 and 2](../benchmarks/2026-11-22-inkling-mini-engine-matrix.md) · Benchmark, 2026-11-22, attempts 20261122-INKENGINE-01 and -02
+- [Exact faster prefill: NVFP4 guard removal, fused NVFP4 kernels, faster MXFP8 replay](2026-11-22-inkling-mini-exact-fast-prefill.md) · Experiment, 2026-11-22, attempt 20261122-INKFASTPRE-01
+- [Unguarded MXFP8 prefill default, noise-floor gate and mask-free global attention](2026-11-22-inkling-mini-unguarded-mxfp8-prefill.md) · Experiment, 2026-11-22–23, attempt 20261122-INKFASTPRE-02
+- [Prefill attribution, MLX-Serve against Stark](../benchmarks/2026-11-22-inkling-mini-prefill-attribution.md) · Benchmark, 2026-11-22, attempt 20261122-INKPREATTR-01
+- [8-bit affine dense weights: feasibility, byte-exact pack reproduction and the Stark 8-bit engine artifact](2026-11-22-inkling-mini-affine8.md) · Experiment, 2026-11-22–23, attempts 20261122-INKAFFINE8-01 to -03
+- [Prefill round 3: dense kernel, packed draft commit, mask removal, width independence and two rejected kernels](2026-11-23-inkling-mini-prefill-round3.md) · Experiment, 2026-11-23, attempt 20261122-INKFASTPRE-03
 
 ### Protocols and aggregates
 
@@ -262,6 +271,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Reference server and component aggregates](../benchmarks/data/inkling-mini-m5-max-2026-11-20.json)
 - [Native slice aggregates](../benchmarks/data/inkling-mini-native-slice-2026-11-21.json)
 - [Pinned oracle aggregates](../benchmarks/data/inkling-mini-pinned-oracle-2026-11-21.json)
+- [Worker-schedule captures and checks at caller-chosen lengths and contexts](../archive/experiments/2026-11-22-inkling-schedule-oracle/README.md)
 
 ## Ripple
 

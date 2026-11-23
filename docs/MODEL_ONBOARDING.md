@@ -226,6 +226,14 @@ choice. Supporting an MTP head does not by itself justify enabling it by
 default. Preserve an explicit user override and keep image support enabled by
 default independently of this choice.
 
+Measure the model's speed against its reference engine with the
+[standard benchmark](BENCHMARK.md). Add a profile for the model under
+`scripts/benchmark_profiles/`, following
+[Adding a model](BENCHMARK.md#adding-a-model), and declare every artifact that
+ships with its quantization and matching class. A new checkpoint, quantization
+or format is a new artifact in the profile; it gets its own standard run and
+its own quality result and inherits neither from another artifact.
+
 Update the current support documentation with one of these dispositions:
 
 | Disposition | Required evidence |

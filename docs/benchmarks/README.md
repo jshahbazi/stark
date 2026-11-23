@@ -17,6 +17,15 @@ Before starting a performance study, read the
 tried by lever, what failed and why, and the measurement rules these reports
 follow. Update it when a study changes what a lever returned.
 
+A model's speed against a reference engine is measured with the
+[Stark standard benchmark](../BENCHMARK.md): one protocol, one tool
+([`scripts/benchmark_standard.py`](../../scripts/benchmark_standard.py)) and a
+profile per model. That page defines the scenarios and metrics, what a matched
+artifact is, the validity rules, and what a record published here must
+contain. A figure measured another way states its level (server, worker or
+engine diagnostic) and is not a standard result. Reports dated before
+2026-11-22 predate the standard and keep their original scope.
+
 ## Current result
 
 **Inkling 2 Mini native worker (2026-11-21).** The source-aligned M5 Max worker reached **683.34 tok/s greedy and 685.31 tok/s seeded sampled** for cold 4K prefill on the original checkpoint, with vision and DSpark resident and drafting off. It won all 16 matched pairs. Useful decode fell from 33.26 to 31.38 tok/s greedy and from 32.09 to 30.31 tok/s sampled, within the original decode ceilings. All 16 pinned stock-schedule F32 logit vectors matched. The final study supersedes the [512-row worker screen](2026-11-21-inkling-mini-native-worker.md#packed-512-row-prefill) for the eligible source-aligned text path. [Final 4K worker results](2026-11-21-inkling-mini-native-worker.md#source-aligned-m5-max-prefill) · [Speed history](../model-experiments/speed-inkling.md)
@@ -28,6 +37,10 @@ follow. Update it when a study changes what a lever returned.
 **Inkling 2 Mini native slice (2026-11-21).** The 44 NVFP4 visits with local/global attention, cross-pass gates and persistent state writes ran in 27.35 ms median wall on one Metal command stream. Exact-ingress expert replay passed. Connected slice parity failed. [M5 Max diagnostic](2026-11-21-inkling-mini-native-slice.md)
 
 **Inkling 2 Mini pinned-runtime follow-up (2026-11-21).** The connected two-visit 4K control passed with bit-identical expert outputs, and the 44-visit diagnostic fit the budget. This build still had one short-prefix global expert mismatch. The short-prefix projection follow-up above resolved it. [Live parity and paired timing](2026-11-21-inkling-mini-pinned-oracle.md)
+
+**Inkling 2 Mini first-look engine matrix (2026-11-22).** One llmprobe invocation per arm compared two uncommitted Stark default builds with MLX-Serve `v26.11.4-pre-release.1` on the original checkpoint, matched rendered inputs and each engine's default drafting. Stark led on all four context-ladder rungs (about 4K: 106.5 against 84.2 tok/s) and trailed on sustained coding (77.0 against 84.2), novel prose (58.6 against 71.8) and prefill (837.4 against 2,065.5 tok/s at 8,768 tokens). The author 8-bit pack, the 8,800-ID prefill control and the burst were not run. Not a speed qualification. [Engine matrix](2026-11-22-inkling-mini-engine-matrix.md)
+
+**Inkling 2 Mini engine matrix, second run (2026-11-22).** A single-repeat run with the exact fast-prefill Stark worker and the restored author 8-bit pack. Stark was level with MLX-Serve on the original checkpoint for initial coding (79.7 against 79.3 tok/s), ahead at about 4K (98.2 against 85.1), behind on novel prose (62.0 against 71.7) and at about half its prefill rate (1,194 against 2,236 tok/s on the exact 8,800-ID control). The 8-bit pack, a different artifact, was fastest on most decode rows (113.1 at about 4K). [Run 2](2026-11-22-inkling-mini-engine-matrix.md#20261122-inkengine-02--second-run-with-the-author-8-bit-pack) · [Prefill attribution](2026-11-22-inkling-mini-prefill-attribution.md)
 
 **Regular Decider v1.3 201-token smoke (2026-11-18).** The exact pinned 27B
 checkpoint loaded on an M5 Max with 128 GB memory and processed one cold text
@@ -398,6 +411,8 @@ engine throughput results remain bound to their original timing windows.
 
 | Study | Date | Status |
 | --- | --- | --- |
+| [Inkling 2 Mini engine matrix](2026-11-22-inkling-mini-engine-matrix.md) | 2026-11-22 | Two single-repeat runs. Run 1: Stark ahead on context-ladder rungs, behind on sustained coding, novel prose and prefill; 8-bit pack not measured. Run 2: exact fast-prefill worker; prefill about half MLX-Serve's; author 8-bit pack fastest on most decode rows |
+| [Inkling 2 Mini prefill attribution](2026-11-22-inkling-mini-prefill-attribution.md) | 2026-11-22 | Diagnostic: MLX-Serve's prefill lead is per-token work (0.640 against 0.382 ms per token); kernel-level MLX attribution unavailable |
 | [Sushi and Stark on Qwen3.8-Flash-Next](2026-11-19-sushi-flashnext-lily-assessment.md) | 2026-11-19 | Source and record reading only, no measurement: Sushi's higher published rate comes from cheaper and deeper speculative rounds under greedy code conditions, not from a faster one-row forward; no matched comparison exists |
 | [Qwen3.8 matched-checkpoint optimization](QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md) | 2026-10-30 | Current: same files and quantization, no speculation; maximum 66.81 vs 61.17 tok/s (+9.21%); numerical equivalence unestablished |
 | [Qwen3.8 same-checkpoint maximum throughput baseline](QWEN38_SAME_CHECKPOINT_STARK_MLX_SERVE_2026_10_30.md) | 2026-10-30 | Historical baseline before the matched-checkpoint optimization: maximum 58.13 vs 60.95 tok/s; source-bound evidence retained |

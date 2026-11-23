@@ -1,6 +1,6 @@
 # Performance playbook
 
-What to try when making a model family faster on Stark, in roughly the order to try it, with what each idea returned on Qwen3.8-Flash-Next ("Lily"). Compiled 2026-11-19 and updated 2026-11-22 from the records listed at the end.
+What to try when making a model family faster on Stark, in roughly the order to try it, with what each idea returned on Qwen3.8-Flash-Next ("Lily"). Compiled 2026-11-19 and updated 2026-11-23 from the records listed at the end.
 
 This page summarizes records; it is not one. Every number was measured on a named artifact, build, workload and host, and keeps that scope. Nothing here qualifies another artifact, and where this page and a dated record differ, the record is right. A technique that paid on Lily has to be measured again on the next family. One that failed on Lily failed for a stated reason, and the reason is the thing to check before trying it again.
 
@@ -405,6 +405,7 @@ Much less has been tried here than on decode, and the kernel candidates tried on
 - On a dense model, prefill time fit about 0.22 s per chunk plus 17 ms per 1,024 tokens of existing prefix, with matrix products 55 to 60 percent and attention about 40. Host encoding was 21 to 26 ms in total, so pipelining chunk submission has nothing to win ([prefix reuse][prefix1]).
 - A grouped attention kernel gained 3 to 4 percent of prefill and was not shipped: the scorer shares that kernel, and its bit-exact parity would break. Check who else uses a kernel before changing it.
 - No stage profile of ordinary Lily prefill exists yet.
+- On Inkling 2 Mini, prefill has had more work than on Lily; see the Inkling paragraphs under the source call geometry section below. In short: removing an exactness guard that never fired and fusing the expert epilogues gave about 1.5 times while staying bit-exact, dropping MXFP8 certification under the noise-floor gate gave about 1.17 times more, a dense projection kernel and a packed draft commit about 1.11 times more, and MLX-Serve's remaining lead is per-token work ([exact fast prefill][inkfast1], [unguarded MXFP8][inkfast2], [prefill round 3][inkfast3], [prefill attribution][inkattr]).
 
 ### 8. Startup and memory
 
@@ -433,6 +434,8 @@ Lower decode rate and lower wall time can occur together, for instance when the 
 
 ### 10. Benchmark conditions and other engines
 
+The findings below are encoded as rules and checks in the [standard benchmark](BENCHMARK.md); use it for any new engine comparison.
+
 Published rates are not comparable until the conditions match. The 2026-11-19 comparison found Sushi slower at serial decode (about 62 against 73 tok/s) and faster in its headline number (146.2 on code), because of cheaper and deeper speculative rounds measured greedy on a regular synthetic code corpus ([Sushi assessment][sushi]).
 
 - Greedy against sampled, and code against prose, each move the result more than most optimizations. Sushi's own figures at one context size are 146.2 on code and 79.5 on prose. Stark's merged build records 113 to 123 on code and 86 to 87 on prose at its best settings.
@@ -440,6 +443,9 @@ Published rates are not comparable until the conditions match. The 2026-11-19 co
 - A benchmark's second and third samples may reuse a cached prefix by design. Record reused input tokens.
 - Hardware and speculation settings in a published figure have to be read from the source. One pack's advertised 157 tok/s was on different hardware with speculation on.
 - [`scripts/benchmark_lily_fixed_corpus.py`](../scripts/benchmark_lily_fixed_corpus.py) reproduces Sushi's corpus generator and request ladder, so the conditions can be matched ([fixed-corpus benchmark][bench]). Even then it is not a matched comparison: the packs differ.
+- Match the reasoning mode and check that both engines rendered the same input. A morning Inkling 2 Mini comparison on 2026-11-22 had Stark at 34.76 against 97.58 tok/s on short coding, but the client's `reasoning_effort: "medium"` was rejected by Stark and accepted by MLX-Serve, MLX-Serve was forced to full length while Stark stopped at end of sequence, and Stark's fast paths were not admitted at those lengths. None of it compared engines. With the mode matched (on Inkling, "off" renders effort level 0 and the model may still think), every arm received identical input token counts, which is the check to make ([engine matrix][inkengine]).
+- Read what the other engine actually loads. MLX-Serve skips Inkling's draft head because the index does not name it, so it does no draft work in prefill while Stark does ([prefill attribution][inkattr]). Its headline Inkling figure is on the author's 8-bit pack, a different artifact from the original checkpoint ([engine matrix run 2][inkengine2]).
+- Make the harness refuse a broken arm before timing and keep the other arms running when one fails. An 8-bit arm once failed only at server start because another session had deleted its weight shards; the matrix harness now checks every shard named in the index and records a failed arm instead of aborting ([engine matrix run 2][inkengine2]).
 
 ### Match the source call geometry before promoting a precision change
 
@@ -657,6 +663,20 @@ Test shorter drafters at equal verification depth before charging their reduced 
 
 Measure teacher-forced probability overlap and conditional acceptance before building stochastic rejection. On two original Inkling 4K sample trajectories, three masks estimated 2.37 and 2.97 useful outputs per round. Only one trajectory’s current verifier could fit 60 tok/s after subtracting measured draft cost. [Stochastic feasibility screen](model-experiments/2026-11-21-inkling-mini-decode-60.md#20261121-inkdecode-17--measure-stochastic-dspark-acceptance-before-changing-decode)
 
+Check whether an exactness guard ever changes a result before paying for it. On Inkling's prefill the NVFP4 guard and replay never changed an output on nine pinned captures; removing them gave 1.33 times at 4K on the engine diagnostic, still bit-exact. Fusing the gate/up and down epilogues into 64 × 64 kernels with a vectorized, double-buffered weight decode gave 1.08 times more, and reading BF16 rows in the MXFP8 replay 1.05 times. Together 1,085 → 1,634 tok/s at 4K (1.506×, 8/8 ABBA pairs) and 1.476× at 8,800 tokens. BK 64, 128-row tiles, and eight-row and row-major MXFP8 replays were slower. Keep verifier commands off a prefill fast path unless the rollback proof covers it: the first build broke it. [Exact fast prefill][inkfast1]
+
+Decide an inexact change against a noise-floor control, not against zero. Once Inkling's prefill was bit-exact, one BF16 ulp raised in one residual element at one visit moved logits by a median 10.3 percent mean row L2 across trials, up to 87 percent on a row and up to 31 percent top-1 flips, so the old relative gate rejected any inexact change by chance. Unguarded MXFP8 (one F32 accumulation, no certificate or replay) measured 2.38 percent mean, 16 percent worst and 5.6 percent flips, inside the control span, and gave 1.169× at 4K and 1.174× at 8,800 over the exact build. It is the default; the exact kernels stay reachable through `--exact-prefill`. A mask-free global attention kernel derived from the pinned MLX kernel is bit-identical and removed 87 ms of instrumented time at 8,800 tokens. [Unguarded MXFP8 and the noise-floor gate][inkfast2]
+
+Check row independence across command widths before relying on prefix snapshots. Inkling's source arithmetic switches split-K routing and the dense reduction at 1,024 rows and the thin projection tiling at 2,048, so a row's bits depend on its command width class; prefix reuse stays exact because snapshots sit on 2,048-row boundaries and replay the same schedule. [Split consistency][inkfast2]
+
+Launch count is not the cost driver of Inkling's verifier. Fusions that removed 120 to 250 launches per verifier round left two-, three- and four-row commands at 0.989 to 1.002 of the pre-fusion time over six ABBA pairs; a four-row round spends 11.8 ms in experts, 5.8 ms in attention projections and 2.8 ms in attention of 27 ms GPU. The same kind of fusion on the single-row step (1,907 → 992 launches) made it 15.6 percent faster. Measure before fusing for launch count on multi-row commands. [Second fusion session][inkfuse2]
+
+Separate draft work and clock state before comparing a worker with its engine diagnostic. Inkling's worker was 19 percent slower than its diagnostic at 8,800 tokens: about 0.6 s was per-row draft-tap commits inside prefill (+11.5 percent GPU time on a 2,044-row command) and about 0.6 s was GPU clock state, because the diagnostic's first pass runs right after an idle model load. Snapshot, resizing and host gaps added about 0.1 s. Against MLX-Serve the gap is per-token work: 0.640 against 0.382 ms per token, with attention growth worth about 0.15 s at 8,800. MLX-Serve's larger 8,192-row chunks are worth about 0.3 s to it. [Prefill attribution][inkattr]
+
+Byte-count a weight-format change before building it. Inkling's dense projections and readout read about 3.5 GB per token in BF16 and are bound by weight reads at one to four rows, so 8-bit affine weights would save an estimated 2.5 to 3.7 ms per round. The built Stark 8-bit artifact then measured 3.3 ms per single-row step (18.44 → 15.14 ms) and 2.9 to 3.4 ms per verify round in the engine, inside the estimate, with exact self-consistency and no prefill regression. Its memory did not fall, because the BF16 copies stay resident for prefill and the draft head. It is a different artifact from the original checkpoint, is not the default, and is not qualified for installation. [8-bit dense weights][inkaffine8]
+
+Inkling prefill round 3: a dense projection kernel with BF16 tensor operands, one F32 accumulation over full K and 128 × 64 tiles took the instrumented dense stage at 8,800 tokens from about 1,290 to 687 ms and passed the noise-floor gate; a packed draft-cache commit took drafting-on prefill from 5,722 to 4,679 ms; freeing the explicit global mask cut the extra admission at 32K from 1.10 GB to 0.23 GB. Together about 1.11 times over the previous default on the engine diagnostic. Rejected: an NVFP4 kernel modelled on MLX-Serve's `gather_qmm_nax` (gate/up 1,514 to 1,796 ms against 1,477 to 1,611 for the incumbent, cause unexplained) and a width-independent fixed-split router, which changed 2 of 1,768,704 expert selections and failed the gate (worst row 104.6 percent against an 87.3 percent control maximum). Measured, not adopted: 8,192-row commands gain 1.033× for about 2.9 GiB more workspace. A change of 2 routing decisions in 1.8 million can still fail the gate, because routing differences propagate like any other bit change. [Prefill round 3][inkfast3]
+
 ## Correctness gates
 
 A speed change that is meant to leave output alone has to pass all of these, in this order of cost:
@@ -667,12 +687,16 @@ A speed change that is meant to leave output alone has to pass all of these, in 
 4. For a new request option: a greedy request reproduces the greedy baseline hash, and a sampled request gives one hash across repeats.
 5. For a change of default: on the same inputs and seeds, the new default path equals the previous build with the option requested explicitly, hash for hash and counter for counter; the opt-out and the kill switch equal the old default; and the frozen baseline arms reproduce with the kill switch set ([schedule default][sched]).
 6. For anything that touches state: prefix restoration, image-loaded parity, image transitions, cancellation and reset, per [model onboarding](MODEL_ONBOARDING.md).
+7. For a deliberate precision change measured against an exact incumbent: a noise-floor control. Perturb the exact path by one ulp at one element per trial, over several visits and positions on every reference input, and require the candidate's mean error, worst error and top-1 flip rate to lie inside the control span, with its mean at most twice the control median. Keep the exact path reachable as a diagnostic reference, and keep the self-consistency checks (drafting against serial, snapshot replay, determinism) exact. Introduced on Inkling 2 Mini prefill, calibrated on nine 4K captures ([noise-floor gate][inkfast2]). The gate is a sensitivity comparison: on synthetic captures its flip rates do not measure quality (see gate 8).
+8. For any claim about output quality, including a precision change or a new quantized artifact: teacher-forced comparison on natural text. Synthetic or padded capture prompts can be nearly uniform; on Inkling's 4,150-token capture the model's top-1 matched the actual next token 0 times in 34, so agreement and flip rates there say nothing about real quality, although those captures stay valid for exactness and self-consistency. On ten natural inputs of 300 to 8,000 tokens (350 rows), the Inkling 8-bit artifact agreed with the original on 94.9 percent of top-1 choices and predicted the actual next token 256 of 340 times against 252 for the original ([8-bit artifact][inkaffine8]). Report agreement, next-token accuracy against the text and logit distance, and, once available, KL divergence and confidence-stratified agreement; the generalized probe for this is pending, and the natural-text comparison of Inkling's default against exact prefill has not been measured.
 
 Step 1 is necessary and not sufficient. Kernels are compiled with fast math, and the GPU compiler schedules identical per-row source differently depending on the surrounding code. Recorded cases: a kernel whose intermediate representation matched the one-row body per row and still differed in up to 300 of 2,560 outputs on subnormal streams; a variant that passed one random draw and failed the next; and a variant that passed 288 synthetic cases and failed the real model.
 
 Equal hashes show the change is inert, not that it is faster. A precision change needs matching-reference numerics instead, and hash equality is not a quality qualification.
 
 ## Measuring
+
+These rules are for optimization work on one engine. To compare engines, or to state how fast a model is, use the [standard benchmark](BENCHMARK.md): it fixes the scenarios, the metric definitions, the matched-artifact and matched-rendering rules, the host checks and the paired comparison, and it requires a quality result beside every speed result. State the level of every figure taken outside it (server, worker or engine diagnostic).
 
 - Use one loaded worker and alternate arms, or alternate sessions in the order base, candidate, candidate, base. Report the median of per-pair ratios, not the ratio of medians. Never subtract medians from different sessions.
 - Carry an arm the change cannot affect. MTP-off arms moved by 2 to 16 percent in several screening runs with no code change, which showed the other arms' movement was noise.
@@ -692,6 +716,9 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 - Keep every invalid setup in the record as invalid: a wrong request type, a missing tool on the path, a concurrent build, a contended host.
 - Give each experiment its own build target directory. A shared one once carried an experimental core into a supposedly clean worker.
 - Only one process can hold a 100 GB model. Serialize model loads through one lock, and never stop a process the experiment did not start.
+- When several agents share the host, put every build and every GPU job behind one lock, and time only in base, candidate, candidate, base process pairs inside it. On 2026-11-22 the M5 Max's 140 W adapter negotiated 94 W, the battery drained while "charging", the thermal state sat at Fair and the GPU moved between performance states. Identical requests varied by 10 to 15 percent, one ten-minute window ran 1.4 times slower, absolute times drifted 20 to 30 percent over long sessions, and the first request after idle was consistently faster. Ratios from paired runs stayed stable across pairs and launch orders; absolute numbers from separate sessions did not ([exact fast prefill][inkfast1], [prefill attribution][inkattr]).
+- Treat a single pair that is slower on every stage, including stages the change does not touch, as host state. Inkling's fused build once measured 58.6 against 65.3 tok/s in a single-invocation benchmark and 5 to 17 percent slower on all stages in one pair; every later pair was level ([second fusion session][inkfuse2]).
+- Check that the inputs used for a quality figure are text the model can predict. Count how often the reference model's top-1 equals the actual next token; if that is near zero, the inputs measure exactness only. Use natural text for agreement and accuracy figures ([8-bit artifact][inkaffine8], [prefill round 3][inkfast3]).
 - Diff tools configured for display produce patches that do not apply. Export with `git diff --no-ext-diff`.
 
 ## Checklist for a new family
@@ -733,6 +760,14 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 | A stage profile of ordinary prefill | Prefill is most of a long request and has no attribution |
 | The cause of the sustained-run slowdown | Needs privileged power metrics; clocks alone do not explain every slow request |
 | The cause of the polled-wait gain | About 2 ms per round against a documented 0.09 ms wake latency |
+| Inkling: larger prefill commands than 2,048 rows | Measured 1.033× for 8,192-row commands at 8,800 tokens with identical state; needs about 4.3 GiB of batched prefill reserve instead of 1,344 MiB. Default left at 2,048 ([prefill round 3][inkfast3]) |
+| Inkling: why MLX-Serve's NVFP4 expert cost per row is lower | A structural copy of its `gather_qmm_nax` design was not faster. Untested: register-operand fragments with explicit vector loads, half-precision scale decode, its tile planner ([prefill round 3][inkfast3]) |
+| Inkling: the 14 to 15 ms host gap between prefill commands with drafting on | Seen in the attribution trace; the packed draft commit did not remove it and it was not isolated ([prefill round 3][inkfast3]) |
+| Inkling: overlap NVFP4 weight decode with the tensor work | Decode and tensor work are each about half of the fused kernel and do not overlap ([exact fast prefill][inkfast1]) |
+| Inkling: the routing chain (split-K router plus LogAddExp and softmax over 44 visits) | 0.39 s of instrumented prefill at 8,800 tokens ([unguarded MXFP8][inkfast2]) |
+| Inkling: free the explicit global mask buffer | Up to 957 MiB at 32K, still held for the exact reference; needs a change to worker admission ([unguarded MXFP8][inkfast2]) |
+| Inkling: qualify the Stark 8-bit affine dense artifact | Built and 3.3 ms faster per step in the engine; worker throughput, images, prefix-reuse validation, KL divergence on natural text and app integration not done. A four-row dense kernel (4.2 ms against 2.6 ms at one row) and dropping the resident BF16 copies are open ([8-bit dense weights][inkaffine8]) |
+| Inkling: natural-text quality probe for default against exact prefill | Being built; the default's quality on natural text is unmeasured ([prefill round 3][inkfast3]) |
 
 ## Records
 
@@ -764,6 +799,11 @@ Equal hashes show the change is inert, not that it is faster. A precision change
 | 2026-11-21 | [Inkling 2 Mini default one-row router](model-experiments/2026-11-21-inkling-mini-decode-default.md) | Flags-unset router selection, restored-cache projection and useful-decode timing |
 | 2026-11-21 | [Inkling 2 Mini decode toward 60](model-experiments/2026-11-21-inkling-mini-decode-60.md) | Exact short verifier and rollback, NVFP4 sharing, shared local KV reads, certified sampling and stochastic draft overlap |
 | 2026-11-22 | [Inkling 2 Mini decode toward 80](model-experiments/2026-11-22-inkling-mini-decode-80.md) | Exact residual and projection batching, MLX-Serve comparison, local KV sharing and wider verifier budget |
+| 2026-11-22 to 11-23 | [Exact fast prefill][inkfast1], [unguarded MXFP8 and the noise-floor gate][inkfast2] | NVFP4 guard removal and fused epilogues, faster exact MXFP8 replay, unguarded MXFP8 default under a perturbation-calibrated gate, mask-free global attention |
+| 2026-11-22 to 11-23 | [Launch fusion, both sessions][inkfuse2] | Verifier and single-row fusions, paired timing showing launch count does not set verifier cost |
+| 2026-11-22 | [Engine matrix runs 1 and 2][inkengine], [prefill attribution][inkattr] | Matched-mode engine comparisons with MLX-Serve and the 8-bit pack, per-token prefill fits, draft work and clock state in prefill |
+| 2026-11-22 to 11-23 | [8-bit dense weights][inkaffine8] | Bandwidth estimate, byte-exact reproduction of the published 8-bit pack, the Stark 8-bit engine artifact and natural-text agreement |
+| 2026-11-23 | [Prefill round 3][inkfast3] | Dense projection kernel, packed draft commit, mask-free workspace, width independence, rejected NVFP4 and router designs, command-width measurement |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 
@@ -810,3 +850,11 @@ Performance work on other families is indexed in the [benchmark index](benchmark
 [gate]: model-experiments/2026-11-19-lily-mtp-schedule-default-gate.md
 [selprefix]: model-experiments/2026-11-19-lily-mtp-selector-prefix-reuse.md
 [sched]: model-experiments/2026-11-20-lily-mtp-schedule-default.md
+[inkfast1]: model-experiments/2026-11-22-inkling-mini-exact-fast-prefill.md
+[inkfast2]: model-experiments/2026-11-22-inkling-mini-unguarded-mxfp8-prefill.md
+[inkfuse2]: model-experiments/2026-11-22-inkling-mini-launch-fusion.md#20261122-inkfuse-02--second-session-paired-timing-and-single-row-fusions
+[inkengine]: benchmarks/2026-11-22-inkling-mini-engine-matrix.md
+[inkengine2]: benchmarks/2026-11-22-inkling-mini-engine-matrix.md#20261122-inkengine-02--second-run-with-the-author-8-bit-pack
+[inkattr]: benchmarks/2026-11-22-inkling-mini-prefill-attribution.md
+[inkaffine8]: model-experiments/2026-11-22-inkling-mini-affine8.md
+[inkfast3]: model-experiments/2026-11-23-inkling-mini-prefill-round3.md
