@@ -1033,6 +1033,12 @@ class Profile:
     notes: dict
     path: Path | None = None
     sha256: str | None = None
+    # The Stark artifact a run uses when none is named; the first when unset.
+    default_artifact: str = ""
+
+    def default_stark_artifacts(self) -> list[Artifact]:
+        key = self.default_artifact or self.artifacts[0].key
+        return [item for item in self.artifacts if item.key == key]
 
     def reference(self, engine: str) -> Reference:
         for reference in self.references:
@@ -1054,6 +1060,7 @@ class Profile:
             "chat_adapter": self.chat_adapter,
             "image_capable": self.image_capable,
             "drafting": self.drafting,
+            "default_artifact": self.default_artifact or self.artifacts[0].key,
             "context": {
                 "minimum": self.min_context,
                 "maximum": self.max_context,
@@ -1099,6 +1106,7 @@ PROFILE_TABLES = {
         "template_sha256",
         "image_capable",
         "drafting",
+        "default_artifact",
         "context",
         "artifacts",
     },
@@ -1225,6 +1233,13 @@ def parse_profile(data: dict, *, key: str | None = None) -> Profile:
     if vocab <= 0:
         raise BenchError("invalid_profile:stark.vocab_size")
     artifacts = _artifacts(stark.get("artifacts"), "stark")
+    default_artifact = _field(
+        stark, "default_artifact", "stark", str, required=False, pattern=ARTIFACT_KEY
+    )
+    if default_artifact is not None and default_artifact not in {
+        item.key for item in artifacts
+    }:
+        raise BenchError("invalid_profile:stark.default_artifact")
     references = []
     raw_references = root.get("reference", [])
     if not isinstance(raw_references, list):
@@ -1344,6 +1359,7 @@ def parse_profile(data: dict, *, key: str | None = None) -> Profile:
         references=tuple(references),
         quality=quality,
         notes=dict(notes),
+        default_artifact=default_artifact or "",
     )
 
 
@@ -1599,7 +1615,7 @@ def profile_arms(profile: Profile, args) -> list[Arm]:
         chosen = artifact_choices(
             profile.artifacts,
             args.stark_artifact,
-            default=list(profile.artifacts[:1]),
+            default=profile.default_stark_artifacts(),
             code="invalid_stark_artifact",
         )
         for build, binary in builds:
@@ -5393,7 +5409,7 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         action="append",
         metavar="NAME[=PATH]",
         help="Stark artifact to run, by its profile name, optionally at PATH instead of the "
-        "profile's default (repeatable; default: the profile's first artifact)",
+        "profile's default (repeatable; default: the profile's default artifact)",
     )
     parser.add_argument(
         "--reference-binary",
@@ -5663,7 +5679,8 @@ def print_profiles(out=sys.stdout, directory: Path | None = None) -> int:
             "  Stark artifacts: "
             + ", ".join(
                 f"{item.key} (match {item.match})" for item in profile.artifacts
-            ),
+            )
+            + f"; default {profile.default_stark_artifacts()[0].key}",
             file=out,
         )
         for reference in profile.references:

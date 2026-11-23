@@ -1,4 +1,11 @@
-"""Prepare the published Inkling Mini without changing its packed tensors."""
+"""Prepare the published Inkling Mini without changing its packed tensors.
+
+Two catalog choices share this pinned source. ``inkling2-mini`` (the default)
+downloads and verifies the original checkpoint, then publishes Stark's 8-bit
+dense artifact derived from it (``inkling_affine8_artifact``).
+``inkling2-mini-original`` publishes the original checkpoint unchanged, for
+reference and qualification work. They are separate artifacts.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +19,8 @@ from .streaming import open_regular
 REPO = "thinkingmachines/Inkling-2-Mini"
 REVISION = "6e7c8248f75265bdd4fbab5273304243b5d8c2cb"
 CHOICE = "inkling2-mini"
+ORIGINAL_CHOICE = "inkling2-mini-original"
+CHOICES = (CHOICE, ORIGINAL_CHOICE)
 FAMILY = "inkling2_loop"
 VISION_PROFILE = "inkling2-mini-native-v1"
 LAYOUT = "inkling2-mini-original"
@@ -26,6 +35,13 @@ WEIGHTS = {
 AFFINE8_LAYOUT = "inkling2-mini-affine8-dense"
 AFFINE8_TARGET_SHA = "c9e14848ad017467dc0deb91c6aa67022e181dbcdfe02a1b04024434bf9acddd"
 AFFINE8_TARGET_BYTES = 18_052_013_648
+AFFINE8_QUANTIZATION = (
+    "Original NVFP4 / MXFP8 experts; MLX affine 8-bit (group 64) dense projections, embedding and head"
+)
+# Resident bytes above the original artifact while the 8-bit artifact is loaded:
+# the affine tensors stay beside the BF16 copies that prefill reads. Mirrors
+# AFFINE8_EXTRA_RESIDENT_BYTES in crates/stark-generate/src/inkling_artifact.rs.
+AFFINE8_EXTRA_RESIDENT_BYTES = 1_670_000_000
 # Target hashes that carry the native Inkling image profile.
 IMAGE_TARGET_SHAS = (WEIGHTS[TARGET][1], AFFINE8_TARGET_SHA)
 CONFIG_SHA = "8216dd43157f5474cfff88f486a1e433fef703c674f694e485a86a761c412b1e"
@@ -60,7 +76,21 @@ SOURCE = {
     "required_files": METADATA,
     "quantization": "Original NVFP4 / MXFP8",
 }
+# The default choice: downloads exactly SOURCE, then publishes the derived
+# artifact. weight_bytes and quantization describe the published folder.
+AFFINE8_SOURCE = {
+    **SOURCE,
+    "weight_bytes": AFFINE8_TARGET_BYTES + WEIGHTS[DRAFT][0],
+    "quantization": AFFINE8_QUANTIZATION,
+    "derived_from": ORIGINAL_CHOICE,
+}
 _BINDING = {"source": REPO, "revision": REVISION}
+
+
+def resident_weight_bytes(config: dict) -> int:
+    """Weight bytes the worker keeps resident for this prepared layout."""
+    affine8 = isinstance(config, dict) and config.get("stark_inkling_affine8") is not None
+    return SOURCE["weight_bytes"] + (AFFINE8_EXTRA_RESIDENT_BYTES if affine8 else 0)
 
 
 def _digest(data: bytes) -> str:

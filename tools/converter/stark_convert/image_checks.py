@@ -70,7 +70,8 @@ def preflight_family_memory(model: Path, config: dict) -> None:
     The native loader and operation-specific allocation guards remain authoritative.
     """
     if config.get("model_type") == inkling_prepare.FAMILY:
-        required = inkling_prepare.SOURCE["weight_bytes"] + 1152 * 1024**2
+        # The 8-bit layout keeps its affine tensors beside the BF16 copies.
+        required = inkling_prepare.resident_weight_bytes(config) + 1152 * 1024**2
         try:
             available = psutil.virtual_memory().available
         except (OSError, ValueError, psutil.Error):

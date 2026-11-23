@@ -30,7 +30,8 @@ pub(crate) const DRAFT_BYTES: usize = 635_801_416;
 /// embedding and the output head replaced by MLX affine 8-bit codes (group 64),
 /// built by `stark_convert.inkling_affine8_artifact` from the pinned original.
 /// Expert banks, router, gates, norms, convolutions, vision tower and the draft
-/// head are unchanged. It is a separate artifact, never the default.
+/// head are unchanged. It is the artifact the default `inkling2-mini` choice
+/// prepares; a prepared original still loads as a separate artifact.
 pub(crate) const AFFINE8_LAYOUT: &str = "inkling2-mini-affine8-dense";
 pub(crate) const AFFINE8_TARGET_SHA: &str = "c9e14848ad017467dc0deb91c6aa67022e181dbcdfe02a1b04024434bf9acddd";
 pub(crate) const AFFINE8_TARGET_BYTES: usize = 18_052_013_648;

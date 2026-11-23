@@ -279,6 +279,62 @@ def test_inkling_profile_is_complete_and_declares_matched_pairs():
         profile.reference("other-engine")
 
 
+def test_inkling_default_stark_artifact_is_affine8_and_the_original_stays_an_arm():
+    profile = bench.load_profile("inkling-2-mini")
+    assert profile.default_artifact == "affine8"
+    assert [item.key for item in profile.default_stark_artifacts()] == ["affine8"]
+    assert profile.facts()["default_artifact"] == "affine8"
+    assert profile.quality["reference_artifact"] == "original"
+    args = SimpleNamespace(
+        engines="stark",
+        stark_binary="target/release/stark-generate",
+        stark_build=None,
+        stark_artifact=None,
+        reference_binary=None,
+        reference_artifact=None,
+    )
+    [default] = bench.profile_arms(profile, args)
+    assert (default.name, default.artifact, default.match) == (
+        "stark-affine8",
+        "affine8",
+        "affine8",
+    )
+    assert default.model == bench.resolve_path("runtime/inkling-affine8/artifact")
+    args.stark_artifact = ["original", "affine8"]
+    args.engines = None
+    args.reference_artifact = ["original", "author-8bit=/models/author-8bit"]
+    arms = bench.profile_arms(profile, args)
+    assert bench.matched_counterparts(arms) == {
+        "stark-original": "mlx-original",
+        "stark-affine8": "mlx-author-8bit",
+    }
+
+
+def test_default_artifact_falls_back_to_the_first_and_is_recorded(tmp_path):
+    profile = bench.load_profile(str(write_profile(tmp_path)))
+    assert profile.default_artifact == ""
+    assert [item.key for item in profile.default_stark_artifacts()] == ["base"]
+    assert profile.facts()["default_artifact"] == "base"
+    path = write_profile(tmp_path)
+    path.write_text(
+        path.read_text().replace(
+            'drafting = "engine-default"',
+            'drafting = "engine-default"\ndefault_artifact = "q8"',
+            1,
+        )
+    )
+    chosen = bench.load_profile(str(path))
+    assert [item.key for item in chosen.default_stark_artifacts()] == ["q8"]
+    # q8 declares no path, so a run that relies on the default must name one.
+    with pytest.raises(bench.BenchError, match="artifact_path_required:q8"):
+        bench.artifact_choices(
+            chosen.artifacts,
+            None,
+            default=chosen.default_stark_artifacts(),
+            code="invalid_stark_artifact",
+        )
+
+
 def test_every_checked_in_profile_loads():
     listed = bench.available_profiles()
     assert listed and all(isinstance(profile, bench.Profile) for _, profile in listed)
@@ -310,6 +366,11 @@ def test_every_checked_in_profile_loads():
             "profile.reference_arm",
         ),
         ('drafting = "engine-default"', 'drafting = "always-on"', "stark.drafting"),
+        (
+            'drafting = "engine-default"',
+            'drafting = "engine-default"\ndefault_artifact = "absent"',
+            "stark.default_artifact",
+        ),
         ('match = "base"\npath', "path", "artifacts.base.match"),
         ("[notes]\ndecode", "[notes]\nnot_a_scenario", "notes"),
         ('reasoning = "off"', 'reasoning = "off"\ntypo_key = 1', "client.typo_key"),

@@ -20,6 +20,9 @@ _NATIVE_CHOICES = {
     QWEN_FAMILY_ID: (QWEN_CHOICE, "qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"),
     FLINT_FAMILY_ID: (FLINT_CHOICE,),
     RIPPLE_FAMILY_ID: ("ripple-q8", "ripple-q4-k-m"),
+    # The 8-bit default only. The original (inkling_prepare.ORIGINAL_CHOICE) is a
+    # preparation choice for reference work: it shares this item's repository and
+    # revision, which the app's installed-model matching cannot tell apart.
     INKLING_FAMILY_ID: (INKLING_CHOICE,),
 }
 
@@ -76,7 +79,7 @@ def family_definition(family: str = FAMILY_ID) -> dict:
             },
             "vision-language": {
                 "status": "conditional" if family == INKLING_FAMILY_ID else "unsupported",
-                "message": "The original Inkling 2 Mini includes its image tower."
+                "message": "Inkling 2 Mini includes its image tower."
                 if family == INKLING_FAMILY_ID
                 else "Image input is not supported for this model family.",
                 "caveats": ["local_image_checks_required"] if family == INKLING_FAMILY_ID else [],

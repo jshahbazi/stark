@@ -47,9 +47,9 @@ from .inkling_affine8 import GROUP_SIZE, quantized_mapping
 from .mlx_affine import iter_quantized_bf16
 from .streaming import DTYPE_BYTES, TensorInfo, _open_tensor, read_safetensors_header
 
-LAYOUT = "inkling2-mini-affine8-dense"
-CHOICE = "inkling2-mini-affine8"
-QUANTIZATION = "Original NVFP4 / MXFP8 experts; MLX affine 8-bit (group 64) dense projections, embedding and head"
+# Published by the default catalog choice, inkling_prepare.CHOICE.
+LAYOUT = inkling_prepare.AFFINE8_LAYOUT
+QUANTIZATION = inkling_prepare.AFFINE8_QUANTIZATION
 SUFFIXES = ("affine8_codes", "affine8_scales", "affine8_biases")
 QUANTIZED_TENSORS = 178
 PROVENANCE = "affine8-provenance.json"
@@ -238,7 +238,9 @@ def build(original_dir: Path, output_dir: Path, tensors_only: bool = False) -> d
     for item in COPIED_METADATA:
         if (original_dir / item).is_file():
             shutil.copyfile(original_dir / item, output_dir / item)
-    raw = (original_dir / "config.json").read_bytes()
+    # A folder prepared from the original keeps the upstream config beside the installed one.
+    source_config = inkling_prepare.CONFIG if (original_dir / inkling_prepare.CONFIG).is_file() else "config.json"
+    raw = (original_dir / source_config).read_bytes()
     if hashlib.sha256(raw).hexdigest() != inkling_prepare.CONFIG_SHA:
         raise ValueError("Inkling original config identity changed")
     template = (output_dir / "chat_template.jinja").read_bytes()

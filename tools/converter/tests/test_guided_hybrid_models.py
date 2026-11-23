@@ -44,9 +44,10 @@ def test_fixed_native_sources_have_a_bound_plan_or_explicit_exclusion():
     # Ripple's manual text imports do not establish the source-bound memory
     # and tool-workflow profiles required by Guided setup. BF16 is preparation
     # only; the two quantized catalog choices are also deliberately excluded.
-    # Inkling's original artifact is selected in Model Catalog while its
-    # prompt performance and resident-memory profile are being qualified.
-    unprofiled = {"ripple-q8", "ripple-q4-k-m", "ripple-bf16", native_catalog.INKLING_CHOICE}
+    # Inkling's 8-bit default is selected in Model Catalog while its prompt
+    # performance and resident-memory profile are being qualified; the original
+    # is a preparation choice for reference work.
+    unprofiled = {"ripple-q8", "ripple-q4-k-m", "ripple-bf16", native_catalog.INKLING_CHOICE, "inkling2-mini-original"}
     assert unprofiled <= set(hybrid.SOURCES)
     assert {recipe.native_choice for recipe in recipes} == set(hybrid.SOURCES) - unprofiled
     assert len({recipe.id for recipe in recipes}) == len(recipes)

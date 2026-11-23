@@ -14,7 +14,10 @@ preparation, precision policy and artifact-specific qualification are described
 in [Ripple setup and limits](RIPPLE.md).
 
 Inkling 2 Mini uses a separate native Rust/Metal path. Choose **Inkling 2 Mini**
-in Model Catalog to prepare the original target, vision tower and DSpark head.
+in Model Catalog to prepare Stark's 8-bit dense artifact, derived from the pinned
+original checkpoint, with its vision tower and DSpark head. The original
+checkpoint remains available from the terminal as `inkling2-mini-original`, and an
+existing original installation can be converted in place with `--upgrade-8bit`.
 The terminal preparation command is below. Guided recommendations require a
 separate resident-memory and prompt performance profile. DSpark's one-proposal
 verification is opt-in on the M5 Max. See the [native worker checks](model-experiments/2026-11-21-inkling-mini-worker.md)
@@ -26,6 +29,13 @@ and 4,352 on the other Metal path. Context still depends on available memory.
 ```sh
 uv run --project tools/converter --locked python -m stark_convert.hybrid_prepare inkling2-mini \
   --artifact-mode vision-language --output models/inkling2-mini
+```
+
+To convert an existing prepared original in place:
+
+```sh
+uv run --project tools/converter --locked python -m stark_convert.hybrid_prepare inkling2-mini \
+  --upgrade-8bit --output models/inkling2-mini
 ```
 
 The optional [GLM EXL3/FP8 backend](validation/GLM_EXL3_BACKEND.md) links a
@@ -44,7 +54,8 @@ The preparation command pins these sources:
 | `flint-int4` | `RecursiveSI/flint-int4`, revision `3b93f9053b530488405ae9fca51d4900d6ce21f0` | 22,568,912,600 bytes, 21.02 GiB |
 | `ripple-q8` | `AtomicChat/Ripple-65B-Preview-GGUF`, Q8_0, revision `57066fdb2348a53f2261f096e0a793b9554b4106` | 68,840,113,568 bytes, 64.11 GiB |
 | `ripple-q4-k-m` | `AtomicChat/Ripple-65B-Preview-GGUF`, standard Q4_K_M, revision `df550a7178a87bbfb6ee2bdbd37603c553d536ee` | 38,798,820,576 bytes, 36.13 GiB |
-| `inkling2-mini` | `thinkingmachines/Inkling-2-Mini`, source NVFP4/MXFP8, revision `6e7c8248f75265bdd4fbab5273304243b5d8c2cb` | 20,161,820,584 bytes, 18.78 GiB, including the separate DSpark head |
+| `inkling2-mini` (default) | Stark 8-bit dense artifact derived from `thinkingmachines/Inkling-2-Mini` at `6e7c8248f75265bdd4fbab5273304243b5d8c2cb`; target SHA-256 `c9e14848ad017467dc0deb91c6aa67022e181dbcdfe02a1b04024434bf9acddd` | 18,687,815,064 bytes, 17.40 GiB, including the DSpark head; preparation downloads the 20,161,820,584-byte original and needs about 43.1 GB free while both exist |
+| `inkling2-mini-original` | `thinkingmachines/Inkling-2-Mini`, source NVFP4/MXFP8, revision `6e7c8248f75265bdd4fbab5273304243b5d8c2cb` | 20,161,820,584 bytes, 18.78 GiB, including the separate DSpark head |
 
 See [Recursive Flint](FLINT.md) for its architecture, installation command,
 precision policy and validation. The GLM/Qwen-specific execution details below

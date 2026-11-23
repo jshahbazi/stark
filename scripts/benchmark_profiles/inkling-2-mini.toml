@@ -50,6 +50,11 @@ image_capable = true
 # Drafting is the worker's own default (three proposals for greedy requests,
 # two for sampled: tools/converter/stark_convert/mtp.py).
 drafting = "engine-default"
+# The artifact a run uses when none is named: Stark's default, which the
+# catalog choice inkling2-mini prepares (tools/converter/stark_convert/
+# inkling_prepare.py, CHOICE; 20261123-INKAFFINE8-04). The original stays a
+# declared artifact and arm (preparation choice inkling2-mini-original).
+default_artifact = "affine8"
 
 [stark.context]
 # Worker context planning: requests up to `minimum` are planned at `minimum`,

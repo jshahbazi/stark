@@ -197,7 +197,7 @@ uv run --project tools/converter --locked --python 3.13.13 \
   --output runtime/benchmark/inkling-2-mini
 ```
 
-The arms are `stark-original`, `mlx-original`, `stark-affine8` and `mlx-author-8bit`, matched in pairs, and `mlx-original` is the reference arm. Replace `run` with `plan` to check it first. An artifact named without a path uses the profile's default path. Useful options: `--repeats N`, `--sessions probe,prefill,burst`, `--engines stark`, `--arms NAME` to run one arm into a new run directory, `--stark-build baseline=PATH` to add an earlier build. The options under "diagnostic overrides" in `--help` each take a run off the scoreboard.
+The arms are `stark-original`, `mlx-original`, `stark-affine8` and `mlx-author-8bit`, matched in pairs, and `mlx-original` is the reference arm. Replace `run` with `plan` to check it first. Without `--stark-artifact` the run uses the profile's default artifact (`affine8` for Inkling 2 Mini). An artifact named without a path uses the profile's default path. Useful options: `--repeats N`, `--sessions probe,prefill,burst`, `--engines stark`, `--arms NAME` to run one arm into a new run directory, `--stark-build baseline=PATH` to add an earlier build. The options under "diagnostic overrides" in `--help` each take a run off the scoreboard.
 
 Exit status: 0 complete, 2 configuration problems, 3 a failed arm, 1 a refusal or error.
 
@@ -240,6 +240,7 @@ A profile is one TOML file, `scripts/benchmark_profiles/<key>.toml`, read with t
 | `[stark]` `chat_adapter` | How replies are split into content and reasoning: `inkling2-json-v1` or `think-tags-v1`. It is checked against the artifact's template |
 | `[stark]` `image_capable` | When true, the worker must report images loaded in every session, so text speed is measured with images resident |
 | `[stark]` `drafting` | `engine-default` |
+| `[stark]` `default_artifact` | The Stark artifact a run uses when none is named; the first declared artifact when absent. Inkling 2 Mini: `affine8` |
 | `[stark.context]` `minimum`, `maximum`, `burst` | Worker context planning: the smallest planned context, the limit, and the per-stream context of the burst |
 | `[stark.artifacts.NAME]` | `description`, `quantization`, `match`, and optionally `path`, `repo`, `revision`, `record` |
 | `[[reference]]` | `engine`, `label`, `arm_prefix`, `binary`, `version`, launch `flags`, `draft_off_flags`, `draft_force_flags`, optional `[[reference.log_event]]` console lines to keep as fixed events, and `[reference.artifacts.NAME]` |
