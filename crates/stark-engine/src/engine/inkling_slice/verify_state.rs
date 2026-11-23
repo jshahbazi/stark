@@ -91,6 +91,19 @@ impl VerifyWorkspace {
                 include_str!("verify_short.metal"),
                 &["ink_verify_short_parts", "ink_verify_short_gate"],
             )?;
+            // The verifier's NVFP4 half dot reading unquantized BF16 expert
+            // inputs directly, without the activation pass.
+            packed_prefill::register(
+                runtime,
+                concat!(
+                    "#define INK_VERIFY_BYTE_COEFFICIENTS\n#include <metal_stdlib>\nusing namespace metal;\n",
+                    "#define INK_NVFP4_VECTOR_BLOCK\n#define INK_VERIFY_EXACT_RUN_WIDTH\n#define INK_VERIFY_HALF_ACT\n",
+                    "#define INK_VERIFY_BF16_INPUT\n#define ink_verify_nvfp4_group_dot ink_verify_nvfp4_bf_dot\n",
+                    include_str!("experts.metal"),
+                    include_str!("verify_nvfp4.metal"),
+                ),
+                &[super::VERIFY_DIRECT_DOT],
+            )?;
             packed_prefill::register(runtime, include_str!("verify_undo.metal"), &["ink_verify_undo_all"])?;
             Some(zeroed(&runtime.device, visits * 7 * size_of::<u64>())?)
         } else {

@@ -17,6 +17,12 @@ const HYSTERESIS: f64 = 1.03;
 /// Every this many rounds the planner proposes one draft more than its
 /// choice, so the estimates for later positions stay current.
 const PROBE_PERIOD: usize = 32;
+/// While every per-position acceptance estimate is at least this, the planner
+/// holds full depth. Measured round walls are noisy, and in the trace replay
+/// with 10% wall noise that noise alone talked the planner down from full
+/// depth at 4K and 8K prompts; holding there removes those losses on both
+/// artifacts without changing the prose or explanation rates.
+const HOLD_ACCEPTANCE: f64 = 0.70;
 
 #[derive(Clone, Debug)]
 pub struct DepthPlanner {
@@ -87,6 +93,9 @@ impl DepthPlanner {
         if rate(best) > HYSTERESIS * rate(current) {
             self.current = best;
         }
+        if self.accept.iter().all(|&p| p >= HOLD_ACCEPTANCE) {
+            self.current = MAX_DEPTH;
+        }
         let chosen = self.current.clamp(floor, limit);
         if self.rounds % PROBE_PERIOD == 0 {
             return (chosen + 1).min(limit);
@@ -134,6 +143,29 @@ mod tests {
         }
         assert_eq!(planner.choose(3), 1);
         assert_eq!(planner.choose(0), 0);
+    }
+
+    #[test]
+    fn high_acceptance_holds_full_depth_despite_noisy_costs() {
+        let mut planner = DepthPlanner::new();
+        for _ in 0..40 {
+            planner.record(3, 3, 26.0);
+        }
+        // Full-depth rounds measured as very slow and a short round as very
+        // cheap would otherwise favour depth 1; high acceptance holds depth 3.
+        for _ in 0..40 {
+            planner.record(3, 3, 60.0);
+            planner.record(1, 1, 10.0);
+        }
+        assert!(planner.accept.iter().all(|&p| p >= HOLD_ACCEPTANCE));
+        assert_eq!(planner.choose(3), 3);
+        // Below the hold the cost comparison decides again.
+        for _ in 0..60 {
+            planner.record(3, 0, 60.0);
+        }
+        assert_eq!(planner.choose(3), 1);
+        // The cap still applies.
+        assert_eq!(planner.choose(2), 1);
     }
 
     #[test]

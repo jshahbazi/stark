@@ -1175,6 +1175,8 @@ pub fn measure_expert_ceiling(
     context: usize,
     visit: usize,
     reps: usize,
+    command_rows: usize,
+    third_party: Option<&Path>,
 ) -> Result<Value> {
     let tokens = Tensors::open(&oracle.join("tokens.safetensors"))?.values::<u32>(
         "tokens",
@@ -1182,7 +1184,7 @@ pub fn measure_expert_ceiling(
         &[prompt.checked_add(3).ok_or("Inkling prompt length overflow")?],
     )?;
     let mut session = Session::load(checkpoint, context)?;
-    session.set_batched_prefill(true, true)?;
+    session.set_batched_prefill_width(true, true, command_rows)?;
     session.set_text_prefill_scope(true);
     if !session.runtime.source_text_active {
         return Err("Inkling expert ceiling requires the active source path");
@@ -1195,6 +1197,9 @@ pub fn measure_expert_ceiling(
     ingested?;
     let capture = capture.ok_or("Inkling expert ceiling capture missing")?;
     let mut report = super::grouped_pilot::expert_ceiling(&mut session.runtime, &capture, reps)?;
+    if let Some(directory) = third_party {
+        report["mlx_serve"] = super::grouped_pilot::mlx_serve_ceiling(&mut session.runtime, &capture, reps, directory)?;
+    }
     report["command_rows"] = json!(rows);
     report["visit"] = json!(visit);
     Ok(report)

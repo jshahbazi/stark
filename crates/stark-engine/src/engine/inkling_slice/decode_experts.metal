@@ -223,6 +223,82 @@ kernel void ink_dx_down_hb(
     }
 }
 
+// Unquantized expert inputs read directly from the BF16 rows. Each value is
+// widened through binary16 exactly as ink_nvfp4_activation stores it, and the
+// row scale is the activation's constant 1536, so every output equals
+// ink_nvfp4_vector_up / ink_nvfp4_vector_down after that activation pass,
+// which these kernels replace. Buffer 1 keeps the incumbent binding layout
+// and is not read.
+inline float ink_dx_bf16_lane_dot(
+    device const bfloat *input, device const uchar *codes, device const uchar *scales, uint width, uint lane) {
+    float sum = 0.0f;
+    for (uint block = lane; block < width / 16; block += 32) {
+        const uint2 packed = reinterpret_cast<device const uint2 *>(codes)[block];
+        const float scale = ink_e4m3_positive(scales[block]);
+        const device bfloat4 *v = reinterpret_cast<device const bfloat4 *>(input + block * 16);
+        const float4 v0 = float4(half4(float4(v[0]))), v1 = float4(half4(float4(v[1])));
+        const float4 v2 = float4(half4(float4(v[2]))), v3 = float4(half4(float4(v[3])));
+        const float block_dot = (dot(ink_nvfp4_nibbles(packed.x), v0) + dot(ink_nvfp4_nibbles(packed.x >> 16), v1)) +
+            (dot(ink_nvfp4_nibbles(packed.y), v2) + dot(ink_nvfp4_nibbles(packed.y >> 16), v3));
+        sum = fma(block_dot, scale, sum);
+    }
+    return sum;
+}
+
+kernel void ink_dx_up_bf(
+    device const bfloat *input [[buffer(0)]], device const float *unused [[buffer(1)]],
+    device const uint *ids [[buffer(2)]], device const float *route_weights [[buffer(3)]],
+    device const uchar *codes [[buffer(4)]], device const uchar *scales [[buffer(5)]],
+    device const float *expert_max [[buffer(6)]], device bfloat *middle [[buffer(7)]],
+    constant InkExpertShape &shape [[buffer(8)]], uint2 group [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]], uint simd_group [[simdgroup_index_in_threadgroup]]) {
+    const uint column = group.x * 4 + simd_group;
+    const uint route = group.y;
+    if (column >= shape.intermediate) return;
+    const uint expert = ids[route];
+    const uint row = (expert * shape.intermediate + column) * 2;
+    const uint code_stride = shape.width / 2;
+    const uint scale_stride = shape.width / 16;
+    const float gate_dot = simd_sum(ink_dx_bf16_lane_dot(
+        input, codes + row * code_stride, scales + row * scale_stride, shape.width, lane));
+    const float up_dot = simd_sum(ink_dx_bf16_lane_dot(
+        input, codes + (row + 1) * code_stride, scales + (row + 1) * scale_stride, shape.width, lane));
+    if (lane == 0) {
+        const float outer = (1536.0f * expert_max[expert]) / (1536.0f * shape.denominator);
+        const float gate = float(bfloat(gate_dot * outer));
+        const float up = float(bfloat(up_dot * outer));
+        const float lo = 1.0f / (1.0f + metal::precise::exp(abs(gate)));
+        const float sigmoid = gate < 0.0f ? lo : 1.0f - lo;
+        const float cap_gate = 4.0f * metal::precise::tanh(gate * 0.25f);
+        const float cap_up = 25.0f * metal::precise::tanh(up / 25.0f);
+        const float act = (cap_gate * sigmoid) * cap_up;
+        middle[route * shape.intermediate + column] = bfloat(act * route_weights[route]);
+    }
+}
+
+kernel void ink_dx_down_bf(
+    device const bfloat *input [[buffer(0)]], device const float *unused [[buffer(1)]],
+    device const uint *ids [[buffer(2)]], device const uchar *codes [[buffer(3)]],
+    device const uchar *scales [[buffer(4)]], device const float *expert_max [[buffer(5)]],
+    device bfloat *down [[buffer(6)]], constant InkExpertShape &shape [[buffer(7)]],
+    uint2 group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]) {
+    const uint column = group.x * 4 + simd_group;
+    const uint route = group.y;
+    if (column >= shape.width) return;
+    const uint expert = ids[route];
+    const uint row = expert * shape.width + column;
+    const uint code_stride = shape.intermediate / 2;
+    const uint scale_stride = shape.intermediate / 16;
+    const float dot = simd_sum(ink_dx_bf16_lane_dot(
+        input + route * shape.intermediate, codes + row * code_stride, scales + row * scale_stride,
+        shape.intermediate, lane));
+    if (lane == 0) {
+        const float outer = (1536.0f * expert_max[expert]) / (1536.0f * shape.denominator);
+        down[route * shape.width + column] = bfloat(dot * outer);
+    }
+}
+
 kernel void ink_dx_to_half(
     device const float *input [[buffer(0)]], device half *output [[buffer(1)]], constant uint &count [[buffer(2)]],
     uint i [[thread_position_in_grid]]) {

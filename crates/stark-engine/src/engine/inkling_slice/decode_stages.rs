@@ -408,6 +408,17 @@ pub fn measure_decode_experts(
     }
     ingest(&mut session, &tokens, prompt)?;
     session.step(tokens[prompt - 1])?;
+    // The direct default path skips the activation buffers; fill them from
+    // the step's expert inputs so the incumbent kernels read real state.
+    execute(&session.runtime, |gpu| {
+        for (&physical, visit) in PHYSICAL.iter().zip(&session.visits) {
+            if matches!(session.layers[physical].experts, Experts::Nvfp4 { .. }) {
+                let s = &visit.scratch;
+                gpu.one("ink_nvfp4_activation", &[&s.mlp_input, &s.up_inner, &s.up_max], WIDTH as u32, (1, 1), 256);
+                gpu.one("ink_nvfp4_activation", &[&s.mid, &s.down_inner, &s.down_max], MID as u32, (8, 1), 256);
+            }
+        }
+    })?;
     let read = |session: &Session, stage: bool| {
         session
             .visits
@@ -536,6 +547,124 @@ pub fn measure_decode_experts(
         "up_unequal": half_unequal[0], "down_unequal": half_unequal[1],
         "incumbent_vs_variant_ms": super::affine8_validation::timing_summary(&half_timing),
     }));
+    // Direct BF16-input products against the activation passes plus the
+    // incumbent products (both launches counted).
+    if !QUANTIZE_EXPERT_INPUTS && super::DIRECT_PRODUCTS.iter().all(|name| session.runtime.pipelines.contains_key(name))
+    {
+        let encode_direct = |gpu: &mut Stream<'_>, session: &Session, stage: Option<bool>| {
+            for (&physical, visit) in PHYSICAL.iter().zip(&session.visits) {
+                let Experts::Nvfp4 {
+                    up,
+                    down,
+                } = &session.layers[physical].experts
+                else {
+                    continue;
+                };
+                let s = &visit.scratch;
+                if stage != Some(false) {
+                    gpu.one(
+                        super::DIRECT_PRODUCTS[0],
+                        &[
+                            &s.mlp_input,
+                            &s.up_max,
+                            &s.routes,
+                            &s.route_weights,
+                            &up.codes,
+                            &up.blocks,
+                            &up.maxima,
+                            &s.mid,
+                        ],
+                        up.args(),
+                        (MID / 4, 8),
+                        128,
+                    );
+                }
+                if stage != Some(true) {
+                    gpu.one(
+                        super::DIRECT_PRODUCTS[1],
+                        &[&s.mid, &s.down_max, &s.routes, &down.codes, &down.blocks, &down.maxima, &s.down],
+                        down.args(),
+                        (WIDTH / 4, 8),
+                        128,
+                    );
+                }
+            }
+        };
+        let encode_incumbent = |gpu: &mut Stream<'_>, session: &Session, stage: Option<bool>| {
+            for (&physical, visit) in PHYSICAL.iter().zip(&session.visits) {
+                let Experts::Nvfp4 {
+                    up,
+                    down,
+                } = &session.layers[physical].experts
+                else {
+                    continue;
+                };
+                let s = &visit.scratch;
+                if stage != Some(false) {
+                    gpu.one("ink_nvfp4_activation", &[&s.mlp_input, &s.up_inner, &s.up_max], WIDTH as u32, (1, 1), 256);
+                    gpu.one(
+                        "ink_nvfp4_vector_up",
+                        &[
+                            &s.up_inner,
+                            &s.up_max,
+                            &s.routes,
+                            &s.route_weights,
+                            &up.codes,
+                            &up.blocks,
+                            &up.maxima,
+                            &s.mid,
+                        ],
+                        up.args(),
+                        (MID / 4, 8),
+                        128,
+                    );
+                }
+                if stage != Some(true) {
+                    gpu.one("ink_nvfp4_activation", &[&s.mid, &s.down_inner, &s.down_max], MID as u32, (8, 1), 256);
+                    gpu.one(
+                        "ink_nvfp4_vector_down",
+                        &[&s.down_inner, &s.down_max, &s.routes, &down.codes, &down.blocks, &down.maxima, &s.down],
+                        down.args(),
+                        (WIDTH / 4, 8),
+                        128,
+                    );
+                }
+            }
+        };
+        let mut direct_unequal = [0usize; 2];
+        for stage in [true, false] {
+            execute(&session.runtime, |gpu| encode_incumbent(gpu, &session, Some(stage)))?;
+            let want = read(&session, stage);
+            execute(&session.runtime, |gpu| encode_direct(gpu, &session, Some(stage)))?;
+            let got = read(&session, stage);
+            for (a, b) in want.iter().zip(&got) {
+                direct_unequal[usize::from(!stage)] += a.iter().zip(b).filter(|(x, y)| x != y).count();
+            }
+        }
+        let mut direct_timing = Vec::new();
+        for pair in 0..pairs {
+            let order = if pair % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            let mut ms = [0.0; 2];
+            for candidate in order {
+                ms[usize::from(candidate)] = if candidate {
+                    execute(&session.runtime, |gpu| encode_direct(gpu, &session, None))?.gpu_ms
+                } else {
+                    execute(&session.runtime, |gpu| encode_incumbent(gpu, &session, None))?.gpu_ms
+                };
+            }
+            direct_timing.push((ms[0], ms[1]));
+        }
+        reports.push(json!({
+            "up": super::DIRECT_PRODUCTS[0], "down": super::DIRECT_PRODUCTS[1], "channels": 1,
+            "incumbent_includes_activation": true,
+            "up_unequal": direct_unequal[0], "down_unequal": direct_unequal[1],
+            "incumbent_vs_variant_ms": super::affine8_validation::timing_summary(&direct_timing),
+        }));
+    }
     Ok(json!({
         "prompt_tokens": prompt,
         "nvfp4_visits": PHYSICAL.iter().filter(|&&p| matches!(session.layers[p].experts, Experts::Nvfp4 { .. })).count(),
@@ -886,6 +1015,17 @@ pub(super) fn set_control(
                 let verify = pipelines[verify].clone();
                 pipelines.insert(VERIFY, verify);
             }
+            // The direct products assume unquantized inputs.
+            if !enabled {
+                session.runtime.direct_expert_inputs = false;
+            }
+        },
+        "direct_expert_inputs" => {
+            // On skips the activation passes before the single-row and
+            // verifier products (diagnostic; off is the default).
+            let available = !QUANTIZE_EXPERT_INPUTS
+                && super::DIRECT_PRODUCTS.iter().all(|name| session.runtime.pipelines.contains_key(name));
+            session.runtime.direct_expert_inputs = enabled && available;
         },
         _ => return Err("unknown Inkling decode control"),
     }
@@ -910,6 +1050,32 @@ pub fn measure_paired_control(
     ingest(&mut session, &tokens, prompt)?;
     let anchor = transaction_validation::greedy(&session.step(tokens[prompt - 1])?);
     let base = session.snapshot()?;
+    // Logit agreement with the control on and off: the single step and every
+    // row of a full-depth verifier round from the same state.
+    let mut sides = Vec::new();
+    for enabled in [false, true] {
+        set_control(&mut session, control, enabled)?;
+        session.restore(&base)?;
+        let mut logits = vec![session.step(anchor)?];
+        session.restore(&base)?;
+        overlapped_round(&mut session, anchor, MAX_VERIFY_ROWS - 1)?;
+        logits.extend((0..MAX_VERIFY_ROWS).map(|row| row_logits(&session, row).to_vec()));
+        session.reset();
+        sides.push(logits);
+    }
+    let agreement = sides[0]
+        .iter()
+        .zip(&sides[1])
+        .enumerate()
+        .map(|(index, (off, on))| {
+            let unequal = off.iter().zip(on).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            let max_abs = off.iter().zip(on).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            json!({
+                "row": if index == 0 { "step".to_string() } else { format!("verify{}", index - 1) },
+                "values": off.len(), "unequal": unequal, "max_abs": max_abs,
+            })
+        })
+        .collect::<Vec<_>>();
     let mut verify_gpu = vec![Vec::new(); MAX_VERIFY_ROWS];
     let mut round_wall = vec![Vec::new(); MAX_VERIFY_ROWS];
     let mut step_gpu = Vec::new();
@@ -951,6 +1117,7 @@ pub fn measure_paired_control(
         "prompt_tokens": prompt,
         "control": control,
         "note": "base = control off, candidate = control on (labels bf16/affine8 in each summary mean base/candidate)",
+        "logit_agreement": agreement,
         "single_step_gpu_ms": summary(&step_gpu),
         "verify_gpu_ms": (1..MAX_VERIFY_ROWS).map(|d| json!({"rows": d + 1, "timing": summary(&verify_gpu[d])})).collect::<Vec<_>>(),
         "draft_plus_verify_wall_ms": (1..MAX_VERIFY_ROWS).map(|d| json!({"rows": d + 1, "timing": summary(&round_wall[d])})).collect::<Vec<_>>(),

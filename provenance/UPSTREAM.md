@@ -277,6 +277,33 @@ is built, run or linked, and the prose text is supplied at run time rather than
 stored in this repository. See attempt `20261119-LILYBENCH-01` in
 [the experiment record](../docs/model-experiments/2026-11-19-lily-fixed-corpus-benchmark.md).
 
+The Inkling 2 Mini path carries three adaptations beyond the pinned MLX
+kernels recorded in
+[its upstream note](../crates/stark-engine/src/engine/inkling_slice/metal_reference/UPSTREAM.md).
+`global_relative.metal` derives from MLX `attention_nax` at
+`fc344c986c4169d99f76b5d95ae6b4a58a359a63` (Apple Inc., MIT, retained in
+`LICENSE.mlx-reference`) and computes the relative bias in the kernel.
+`grouped_nax.metal`, the gathered NVFP4 prefill product for wide commands,
+derives from `src/src/kernels/moe/gather_qmm_nax_header.metal` in
+`ddalcu/mlx-serve` at `2fe9be834a601c70ef1a597563026340f0e722fe`, which is
+itself ported from `jundot/omlx` `omlx/patches/m5_gather_qmm_nax.py` at
+`d6b2b92` (oMLX contributors, Apache-2.0, retained in `LICENSE.omlx-reference`)
+and adapted from MLX `steel/gemm/nax.h` (Apple Inc., MIT). Stark took the tile
+shape, the loader and fragment layout, the double-buffered weight schedule and
+the tile order from it, and kept its own weight decode, run table and fused
+epilogues; the file header lists both. The MLX-Serve source was read and timed
+locally and is not stored in this repository.
+`tools/converter/stark_convert/mlx_affine.py` reproduces the arithmetic of
+MLX's affine quantization (`mlx/ops.cpp` and
+`mlx/backend/metal/kernels/quantized.h` at
+`58d91ee81a86dd9710123ec42e7ff91f6d1d21b1`, Apple Inc., MIT) so that the
+8-bit Inkling artifact matches the published pack byte for byte, and the
+quantized-tensor selection follows `tests/convert_inkling2.py` in
+`ddalcu/mlx-serve` at the revision above. See
+[the differences page](../docs/model-experiments/inkling-mlx-serve-differences.md)
+and attempts `20261122-INKAFFINE8-02` and `20261122-INKFASTPRE-04` in the
+experiment ledger.
+
 Model weights, private fixtures, runtime executables, and host application archives are excluded. The original pinned upstream README is stored verbatim as [UPSTREAM_README.md](UPSTREAM_README.md); its relative links refer to the upstream tree and are not expected to resolve here. The current build and validation receipts identify the complete standalone source and executable hashes.
 
 ## Naming and compatibility

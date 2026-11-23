@@ -45,9 +45,23 @@ inline float4 ink_verify_fp4_coefficients(uint word) {
 }
 #endif
 
+#ifdef INK_VERIFY_BF16_INPUT
+// Unquantized expert inputs read from the BF16 rows, each value widened
+// through binary16 exactly as the unquantized half activation pass stores it.
+typedef bfloat ink_verify_input_word;
+inline float4 ink_verify_widen(vec<bfloat, 4> x) {
+    return float4(half4(float4(x)));
+}
+#else
+typedef ink_nvfp4_activation_word ink_verify_input_word;
+inline float4 ink_verify_widen(vec<ink_nvfp4_activation_word, 4> x) {
+    return float4(x);
+}
+#endif
+
 template <uint Batch, uint Width>
 inline void ink_verify_nvfp4_route_dot(
-    device const ink_nvfp4_activation_word *input, device const uchar *codes, device const uchar *scales,
+    device const ink_verify_input_word *input, device const uchar *codes, device const uchar *scales,
     device const uint *order, device float *output,
     uint start, uint count, uint out_col, uint lane) {
     constexpr bool up = Width == 2304;
@@ -66,10 +80,10 @@ inline void ink_verify_nvfp4_route_dot(
             if (row < count) {
                 // The half ingress stores exactly the same decoded FP4 ×
                 // E4M3 coefficients. Widen before the unchanged F32 dot.
-                const device auto *v = reinterpret_cast<device const vec<ink_nvfp4_activation_word, 4> *>(
+                const device auto *v = reinterpret_cast<device const vec<ink_verify_input_word, 4> *>(
                     input + offsets[row]) + block * 4;
-                const float dot16 = (dot(w0, float4(v[0])) + dot(w1, float4(v[1]))) +
-                    (dot(w2, float4(v[2])) + dot(w3, float4(v[3])));
+                const float dot16 = (dot(w0, ink_verify_widen(v[0])) + dot(w1, ink_verify_widen(v[1]))) +
+                    (dot(w2, ink_verify_widen(v[2])) + dot(w3, ink_verify_widen(v[3])));
                 sums[row] = fma(dot16, scale, sums[row]);
             }
         }
@@ -85,7 +99,7 @@ inline void ink_verify_nvfp4_route_dot(
 
 template <uint Width>
 inline void ink_verify_nvfp4_route_tile(
-    device const ink_nvfp4_activation_word *input, device const uchar *codes, device const uchar *scales,
+    device const ink_verify_input_word *input, device const uchar *codes, device const uchar *scales,
     device const uint *order, device float *output,
     uint start, uint count, uint expert, uint out_col, uint lane) {
     const uint channel = expert * 2304 + out_col;
@@ -115,15 +129,28 @@ inline void ink_verify_nvfp4_route_tile(
 }
 
 kernel void ink_verify_nvfp4_group_dot(
-    device const ink_nvfp4_activation_word *input [[buffer(0)]],
+    device const ink_verify_input_word *input [[buffer(0)]],
     device const uchar *codes [[buffer(1)]],
     device const uchar *scales [[buffer(2)]],
     device const uint *order [[buffer(3)]],
     device const uint *runs [[buffer(4)]],
     device float *output [[buffer(5)]],
+#ifdef INK_VERIFY_BF16_INPUT
+    // The epilogues' row scales: the unquantized activation's constant 1536
+    // for each of shape.y rows, stored in place of the skipped pass.
+    device float *amax [[buffer(6)]],
+    constant uint2 &shape [[buffer(7)]],
+#else
     constant uint &width [[buffer(6)]],
+#endif
     uint2 tile [[threadgroup_position_in_grid]], uint group [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
+#ifdef INK_VERIFY_BF16_INPUT
+    const uint width = shape.x;
+    if (tile.x == 0 && tile.y == 0 && group == 0) {
+        for (uint i = lane; i < shape.y; i += 32) amax[i] = 1536.0f;
+    }
+#endif
     const uint count = runs[tile.y * 3 + 1];
     if (count == 0) return;
     const uint start = runs[tile.y * 3], expert = runs[tile.y * 3 + 2];

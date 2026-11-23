@@ -535,8 +535,10 @@ fn main() {
             return Ok(0);
         }
         if args.first().is_some_and(|arg| arg == "--expert-ceiling") {
-            if args.len() != 7 {
-                return Err("expected --expert-ceiling, target, token directory, prompt, context, visit and repeats");
+            if !(7..=9).contains(&args.len()) {
+                return Err(
+                    "expected --expert-ceiling, target, token directory, prompt, context, visit, repeats, optional command rows and optional MLX-Serve kernel directory",
+                );
             }
             let report = stark_engine::engine::inkling_slice::measure_expert_ceiling(
                 Path::new(&args[1]),
@@ -545,6 +547,8 @@ fn main() {
                 count(4, "invalid Inkling context")?,
                 count(5, "invalid visit")?,
                 count(6, "invalid repeat count")?,
+                args.get(7).and_then(|value| value.to_str()?.parse().ok()).unwrap_or(2048),
+                args.get(8).map(Path::new),
             )?;
             println!("{report}");
             return Ok(0);

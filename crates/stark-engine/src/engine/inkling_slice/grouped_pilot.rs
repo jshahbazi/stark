@@ -555,7 +555,11 @@ impl GroupedExperts {
         }
         gpu.phase(PrefillPhase::RouteSelect);
         let bucket = if matches!(layer.experts, Experts::Nvfp4 { .. }) && fused_nvfp4(gpu, source_packed) {
-            FAST_BUCKET
+            if nax_nvfp4(gpu, rows) {
+                NAX_BUCKET
+            } else {
+                FAST_BUCKET
+            }
         } else if matches!(layer.experts, Experts::Nvfp4 { .. }) && active_rows64(gpu) {
             EXPERIMENT_BUCKET
         } else {
@@ -700,6 +704,54 @@ impl GroupedExperts {
         gpu.one(kernel, &[ids, &self.order, &self.runs], (rows * TOP) as u32, (1, 1), EXPERTS);
     }
 
+    /// Whether the verifier's NVFP4 products read unquantized BF16 inputs
+    /// directly (`encode_direct_dot`) instead of after the activation pass.
+    fn direct_inputs(
+        gpu: &Stream<'_>,
+        source_packed: bool,
+        up_dot_tap: Option<&Buffer>,
+    ) -> bool {
+        gpu.runtime.direct_expert_inputs
+            && gpu.runtime.verify_nvfp4_matvec
+            && gpu.runtime.verify_half_act
+            && !gpu.runtime.exact_prefill
+            && up_dot_tap.is_none()
+            && !fused_nvfp4(gpu, source_packed)
+            && gpu.runtime.pipelines.contains_key(super::VERIFY_DIRECT_DOT)
+    }
+
+    /// The verifier's half dot on BF16 inputs; it also stores the constant
+    /// row scales the epilogues read for the `scales` rows of `amax`.
+    fn encode_direct_dot(
+        &self,
+        gpu: &mut Stream<'_>,
+        bank: &Bank,
+        input: &Buffer,
+        amax: &Buffer,
+        scales: usize,
+        routing: &ExpertOrder<'_>,
+        rows: usize,
+        width: usize,
+        gather: bool,
+    ) {
+        gpu.phase(if gather {
+            PrefillPhase::Nvfp4UpDot
+        } else {
+            PrefillPhase::Nvfp4DownDot
+        });
+        let kernel = super::VERIFY_DIRECT_DOT;
+        let buffers = [input, &bank.codes, &bank.blocks, routing.indices, routing.runs, &self.projected, amax];
+        let shape = [width as u32, scales as u32];
+        if gpu.runtime.verify_compact_runs == 2
+            && rows <= 4
+            && let Some(args) = &self.verify_dispatch
+        {
+            gpu.indirect(kernel, &buffers, shape, args, 128);
+        } else {
+            gpu.one(kernel, &buffers, shape, (WIDTH / 4, live_run_limit(rows, run_slots(rows))), 128);
+        }
+    }
+
     fn encode_dot(
         &self,
         gpu: &mut Stream<'_>,
@@ -839,14 +891,19 @@ impl GroupedExperts {
         up_dot_tap: Option<&Buffer>,
     ) {
         let out = &self.output;
+        let direct = Self::direct_inputs(gpu, source_packed, up_dot_tap);
         let activation = nvfp4_activation(gpu.runtime);
-        gpu.phase(PrefillPhase::Nvfp4Quant);
-        gpu.one(activation, &[input, &self.up_inner, &self.up_max], WIDTH as u32, (rows, 1), 256);
-        if up_dot_tap.is_none() && fused_nvfp4(gpu, source_packed) {
-            self.encode_fast_projected(gpu, up, down, rows, &routing, activation);
-            return;
+        if direct {
+            self.encode_direct_dot(gpu, up, input, &self.up_max, rows, &routing, rows, WIDTH, true);
+        } else {
+            gpu.phase(PrefillPhase::Nvfp4Quant);
+            gpu.one(activation, &[input, &self.up_inner, &self.up_max], WIDTH as u32, (rows, 1), 256);
+            if up_dot_tap.is_none() && fused_nvfp4(gpu, source_packed) {
+                self.encode_fast_projected(gpu, up, down, rows, &routing, activation);
+                return;
+            }
+            self.encode_dot(gpu, up, &self.up_inner, &routing, rows, WIDTH, true);
         }
-        self.encode_dot(gpu, up, &self.up_inner, &routing, rows, WIDTH, true);
         if let Some(tap) = up_dot_tap {
             let words = rows * TOP * WIDTH;
             gpu.one("ink_trace_copy", &[&self.projected, tap], words as u32, (words.div_ceil(128), 1), 128);
@@ -863,9 +920,13 @@ impl GroupedExperts {
             (MID / 128, rows * TOP),
             128,
         );
-        gpu.phase(PrefillPhase::Nvfp4Quant);
-        gpu.one(activation, &[&out.middle, &self.down_inner, &self.down_max], MID as u32, (rows * TOP, 1), 256);
-        self.encode_dot(gpu, down, &self.down_inner, &routing, rows, MID, false);
+        if direct {
+            self.encode_direct_dot(gpu, down, &out.middle, &self.down_max, rows * TOP, &routing, rows, MID, false);
+        } else {
+            gpu.phase(PrefillPhase::Nvfp4Quant);
+            gpu.one(activation, &[&out.middle, &self.down_inner, &self.down_max], MID as u32, (rows * TOP, 1), 256);
+            self.encode_dot(gpu, down, &self.down_inner, &routing, rows, MID, false);
+        }
         gpu.phase(PrefillPhase::Nvfp4Epilogue);
         gpu.one(
             "ink_group_down_epilogue",
@@ -891,8 +952,13 @@ impl GroupedExperts {
         activation: Kernel,
     ) {
         let out = &self.output;
-        let groups = (WIDTH / FAST_TILE_COLS, live_run_limit(rows, run_slots_for(rows, FAST_RUN_ROWS)));
-        let threads = FAST_THREADS;
+        let nax = nax_nvfp4(gpu, rows);
+        let nax_tiles = live_run_limit(rows, run_slots_for(rows, NAX_RUN_ROWS));
+        let (groups, threads) = if nax {
+            ((NAX_GX, nax_tiles.div_ceil(NAX_GX) * (WIDTH / 64)), NAX_THREADS)
+        } else {
+            ((WIDTH / FAST_TILE_COLS, live_run_limit(rows, run_slots_for(rows, FAST_RUN_ROWS))), FAST_THREADS)
+        };
         let capture = gpu.runtime.expert_capture.as_ref().filter(|capture| capture.claim(rows));
         for gather in [true, false] {
             let (bank, inner, amax, width, result, kernel) = if gather {
@@ -935,7 +1001,26 @@ impl GroupedExperts {
             if let Some(capture) = capture {
                 capture.record(gpu, gather, &self.activation, rows, routing, amax, bank);
             }
-            gpu.dispatch(kernel, &buffers, params, groups, threads);
+            if nax {
+                let params = NaxParams {
+                    width: width as u32,
+                    denominator: bank.denominator,
+                    tiles: nax_tiles as u32,
+                };
+                gpu.dispatch(
+                    if gather {
+                        NAX_GATE_UP
+                    } else {
+                        NAX_DOWN
+                    },
+                    &buffers,
+                    params,
+                    groups,
+                    threads,
+                );
+            } else {
+                gpu.dispatch(kernel, &buffers, params, groups, threads);
+            }
         }
         gpu.phase(PrefillPhase::Nvfp4Epilogue);
         if !gpu.defer_expert_merge {
@@ -1437,6 +1522,332 @@ pub(super) fn expert_ceiling(
     Ok(json!({"rows": rows, "routes": rows * TOP, "reps": reps, "variants": report}))
 }
 
+/// Diagnostic timing of MLX-Serve's sorted gathered NVFP4 matmul (revision
+/// 2fe9be834a601c70ef1a597563026340f0e722fe, kernels/moe/gather_qmm_nax*.metal)
+/// on the captured visit. The kernel sources are read from `directory` at run
+/// time and compiled with a Stark-written entry point; nothing is copied into
+/// the tree. Product only: no SwiGLU, route weights or reduction. Timing only.
+pub(super) fn mlx_serve_ceiling(
+    runtime: &mut Runtime,
+    capture: &ExpertCapture,
+    reps: usize,
+    directory: &std::path::Path,
+) -> Result<Value> {
+    let rows = capture.rows.get();
+    let banks = capture.banks.borrow().clone();
+    if rows == 0 || banks.len() != 2 {
+        return Err("Inkling MLX-Serve ceiling capture did not record a visit");
+    }
+    register_nax(runtime)?;
+    let runtime = &*runtime;
+    let read_source = |name: &str| -> Result<String> {
+        std::fs::read_to_string(directory.join(name)).map_err(|_| "cannot read an MLX-Serve kernel source")
+    };
+    let header = read_source("gather_qmm_nax_header.metal")?;
+    let body = read_source("gather_qmm_nax.metal")?;
+    let scan = read_source("gather_qmm_nax_scan.metal")?;
+    // Plans from MLX-Serve's planner for N = 2304 at these row counts.
+    let plans: [(&str, i32, i32); 3] = [("bm96_gx32", 96, 32), ("bm64_gx32", 64, 32), ("bm64_gx0", 64, 0)];
+    let mut source = format!(
+        "#include <metal_stdlib>\nusing namespace metal;\n{header}\n\
+         template <typename T, int GS, int BITS, int MX, int SCHED, bool ALIGN_N, bool ALIGN_K, int BM, int BK, int GX, int PAD>\n\
+         [[kernel]] void stark_mlx_serve_gqmm(const device T* x [[buffer(0)]], const device uint32_t* w [[buffer(1)]],\n\
+         const device uint8_t* scales [[buffer(2)]], const device T* biases [[buffer(3)]],\n\
+         const device uint32_t* tiles [[buffer(4)]], const device uint32_t* tile_count [[buffer(5)]],\n\
+         const constant int* params [[buffer(6)]], device T* y [[buffer(7)]],\n\
+         uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]],\n\
+         uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]],\n\
+         uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]) {{\n{body}\n}}\n\
+         template <int BM, int MAXE>\n\
+         [[kernel]] void stark_mlx_serve_scan(const device uint32_t* idx [[buffer(0)]], const constant int* params [[buffer(1)]],\n\
+         device uint32_t* tiles [[buffer(2)]], device uint32_t* tile_count [[buffer(3)]],\n\
+         uint thread_index_in_threadgroup [[thread_index_in_threadgroup]],\n\
+         uint3 threads_per_threadgroup [[threads_per_threadgroup]],\n\
+         uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]],\n\
+         uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]) {{\n{scan}\n}}\n"
+    );
+    for (name, bm, gx) in plans {
+        source.push_str(&format!(
+            "template [[host_name(\"gqmm_{name}\")]] [[kernel]] decltype(stark_mlx_serve_gqmm<bfloat, 16, 4, 1, 1, true, true, {bm}, 64, {gx}, 0>) stark_mlx_serve_gqmm<bfloat, 16, 4, 1, 1, true, true, {bm}, 64, {gx}, 0>;\n"
+        ));
+    }
+    for bm in [64, 96] {
+        source.push_str(&format!(
+            "template [[host_name(\"scan_bm{bm}\")]] [[kernel]] decltype(stark_mlx_serve_scan<{bm}, 2048>) stark_mlx_serve_scan<{bm}, 2048>;\n"
+        ));
+    }
+    let options = MTLCompileOptions::new();
+    options.set_math_mode(MTLMathMode::Safe);
+    options.set_language_version(MTLLanguageVersion::Version4_0);
+    let library = runtime
+        .device
+        .new_library_with_source(&source, Some(&options))
+        .map_err(|_| "MLX-Serve gathered matmul compilation failed")?;
+    let pipeline = |name: &str| -> Result<Pipeline> {
+        let function = library.new_function_with_name(name).ok_or("missing MLX-Serve kernel")?;
+        runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| "MLX-Serve pipeline failed")
+    };
+    // Sorted expert id per sorted route, from the captured runs.
+    let routes = rows * TOP;
+    let slots = run_slots_for(rows, FAST_RUN_ROWS);
+    let runs = read::<u32>(&capture.runs, slots * 3);
+    let mut ids = vec![u32::MAX; routes];
+    for run in runs.chunks_exact(3) {
+        let (start, count, expert) = (run[0] as usize, run[1] as usize, run[2]);
+        if count > 0 && start + count <= routes {
+            ids[start..start + count].fill(expert);
+        }
+    }
+    if ids.contains(&u32::MAX) {
+        return Err("Inkling MLX-Serve ceiling runs do not cover every route");
+    }
+    let ids = upload(&runtime.device, &ids)?;
+    let output = zeroed(&runtime.device, routes * WIDTH * 2)?;
+    let dummy = zeroed(&runtime.device, 64)?;
+    let mut report = Vec::new();
+    for (name, bm, gx) in plans {
+        let max_tiles = routes.div_ceil(bm as usize) + EXPERTS.min(routes);
+        let tiles = zeroed(&runtime.device, max_tiles * 16)?;
+        let count = zeroed(&runtime.device, 16)?;
+        let scan = pipeline(&format!("scan_bm{bm}"))?;
+        let scan_params = [routes as i32, EXPERTS as i32, max_tiles as i32, 0];
+        let scan_timing = execute(runtime, |gpu| {
+            let Some(encoder) = &gpu.encoder else {
+                return;
+            };
+            encoder.set_compute_pipeline_state(&scan);
+            encoder.set_buffer(Some(&ids), 0, 0);
+            encoder.set_bytes(NonNull::from(&scan_params).cast(), size_of_val(&scan_params), 1);
+            encoder.set_buffer(Some(&tiles), 0, 2);
+            encoder.set_buffer(Some(&count), 0, 3);
+            encoder.dispatch_threadgroups(
+                MTLSize {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 1024,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        })?;
+        let live_tiles = read::<u32>(&count, 1)[0] as usize;
+        let matmul = pipeline(&format!("gqmm_{name}"))?;
+        let mut sides = Vec::new();
+        for (side, width) in [(0usize, WIDTH), (1, MID)] {
+            let (codes, blocks, _, _) = &banks[side];
+            let n = WIDTH;
+            let params = [n as i32, width as i32, 0, 0];
+            let columns = n.div_ceil(64);
+            let grid = if gx > 0 {
+                (gx as usize, max_tiles.div_ceil(gx as usize) * columns)
+            } else {
+                (columns, max_tiles)
+            };
+            let timing = execute(runtime, |gpu| {
+                let Some(encoder) = &gpu.encoder else {
+                    return;
+                };
+                encoder.set_compute_pipeline_state(&matmul);
+                for (index, buffer) in
+                    [&capture.activations[side], codes, blocks, &dummy, &tiles, &count].into_iter().enumerate()
+                {
+                    encoder.set_buffer(Some(buffer), 0, index);
+                }
+                encoder.set_bytes(NonNull::from(&params).cast(), size_of_val(&params), 6);
+                encoder.set_buffer(Some(&output), 0, 7);
+                for _ in 0..reps {
+                    encoder.dispatch_threadgroups(
+                        MTLSize {
+                            width: grid.0,
+                            height: grid.1,
+                            depth: 1,
+                        },
+                        MTLSize {
+                            width: 32,
+                            height: 2,
+                            depth: bm as usize / 32,
+                        },
+                    );
+                }
+            })?;
+            let ms = timing.gpu_ms / reps as f64;
+            let flops = 2.0 * routes as f64 * n as f64 * width as f64;
+            sides.push(json!({
+                "projection": if side == 0 { "gate_up" } else { "down" },
+                "gpu_ms_per_visit": ms,
+                "tflops": flops / (ms * 1.0e9),
+            }));
+        }
+        report.push(json!({
+            "plan": name,
+            "tiles": live_tiles,
+            "scan_gpu_ms": scan_timing.gpu_ms,
+            "projections": sides,
+        }));
+    }
+    let stark = nax_ceiling(runtime, capture, &banks, rows, reps)?;
+    Ok(json!({"source_revision": "2fe9be834a601c70ef1a597563026340f0e722fe", "plans": report, "stark_nax": stark}))
+}
+
+/// Time grouped_nax.metal on the captured visit with 96-row runs and compare
+/// its BF16 outputs with grouped_fast production on the same inputs.
+fn nax_ceiling(
+    runtime: &Runtime,
+    capture: &ExpertCapture,
+    banks: &[(Buffer, Buffer, Buffer, f32)],
+    rows: usize,
+    reps: usize,
+) -> Result<Value> {
+    let routes = rows * TOP;
+    let fast_slots = run_slots_for(rows, FAST_RUN_ROWS);
+    let fast_runs = read::<u32>(&capture.runs, fast_slots * 3).to_vec();
+    // Expert-major 96-row runs over the same sorted rows.
+    let mut spans: Vec<(u32, u32, u32)> = Vec::new();
+    for run in fast_runs.chunks_exact(3) {
+        if run[1] == 0 {
+            continue;
+        }
+        match spans.last_mut() {
+            Some(last) if last.2 == run[2] && last.0 + last.1 == run[0] => last.1 += run[1],
+            _ => spans.push((run[0], run[1], run[2])),
+        }
+    }
+    let mut nax_runs = Vec::new();
+    for (start, count, expert) in spans {
+        let mut offset = 0;
+        while offset < count {
+            let take = (count - offset).min(NAX_RUN_ROWS as u32);
+            nax_runs.extend_from_slice(&[start + offset, take, expert]);
+            offset += take;
+        }
+    }
+    let tiles = nax_runs.len() / 3;
+    let nax_runs = upload(&runtime.device, &nax_runs)?;
+    let pipeline = |name: Kernel| runtime.pipelines.get(name).ok_or(name);
+    let mut sides = Vec::new();
+    for (side, width) in [(0usize, WIDTH), (1, MID)] {
+        let (codes, blocks, maxima, denominator) = &banks[side];
+        let words = if side == 0 {
+            routes * MID
+        } else {
+            routes * WIDTH
+        };
+        let reference = zeroed(&runtime.device, words * 2)?;
+        let candidate = zeroed(&runtime.device, words * 2)?;
+        let fast = pipeline(if side == 0 {
+            FAST_GATE_UP
+        } else {
+            FAST_DOWN
+        })?;
+        let nax = pipeline(if side == 0 {
+            NAX_GATE_UP
+        } else {
+            NAX_DOWN
+        })?;
+        let fast_params = FastParams {
+            width: width as u32,
+            denominator: *denominator,
+        };
+        let nax_params = [width as u32, denominator.to_bits(), tiles as u32];
+        let columns = WIDTH / 64;
+        let encode = |gpu: &mut Stream<'_>, kernel: &Pipeline, runs: &Buffer, output: &Buffer, count: usize| {
+            let Some(encoder) = &gpu.encoder else {
+                return;
+            };
+            encoder.set_compute_pipeline_state(kernel);
+            let buffers = [
+                &capture.activations[side],
+                codes,
+                blocks,
+                runs,
+                &capture.order,
+                &capture.amax[side],
+                &capture.weights,
+                maxima,
+                output,
+            ];
+            for (index, buffer) in buffers.into_iter().enumerate() {
+                encoder.set_buffer(Some(buffer), 0, index);
+            }
+            let is_nax = std::ptr::eq(runs, &nax_runs);
+            if is_nax {
+                encoder.set_bytes(NonNull::from(&nax_params).cast(), size_of_val(&nax_params), 9);
+            } else {
+                encoder.set_bytes(NonNull::from(&fast_params).cast(), size_of::<FastParams>(), 9);
+            }
+            for _ in 0..count {
+                if is_nax {
+                    encoder.dispatch_threadgroups(
+                        MTLSize {
+                            width: NAX_GX,
+                            height: tiles.div_ceil(NAX_GX) * columns,
+                            depth: 1,
+                        },
+                        MTLSize {
+                            width: NAX_THREADS,
+                            height: 1,
+                            depth: 1,
+                        },
+                    );
+                } else {
+                    encoder.dispatch_threadgroups(
+                        MTLSize {
+                            width: WIDTH / FAST_TILE_COLS,
+                            height: live_run_limit(rows, fast_slots),
+                            depth: 1,
+                        },
+                        MTLSize {
+                            width: FAST_THREADS,
+                            height: 1,
+                            depth: 1,
+                        },
+                    );
+                }
+            }
+        };
+        execute(runtime, |gpu| {
+            encode(gpu, fast, &capture.runs, &reference, 1);
+            encode(gpu, nax, &nax_runs, &candidate, 1);
+        })?;
+        let expected = read::<u16>(&reference, words);
+        let got = read::<u16>(&candidate, words);
+        let (mut worst, mut sum_abs, mut sum_ref, mut identical) = (0.0f64, 0.0f64, 0.0f64, 0usize);
+        for (a, b) in expected.iter().zip(got) {
+            let (a, b) = (f64::from(bf16::from_bits(*a).to_f32()), f64::from(bf16::from_bits(*b).to_f32()));
+            identical += usize::from(a.to_bits() == b.to_bits());
+            sum_abs += (a - b).abs();
+            sum_ref += a.abs();
+            if a.abs() > 1e-3 {
+                worst = worst.max(((a - b) / a).abs());
+            }
+        }
+        let mut times = Vec::new();
+        for (kernel, runs, output) in [
+            (fast, &capture.runs, &reference),
+            (nax, &nax_runs, &candidate),
+            (fast, &capture.runs, &reference),
+            (nax, &nax_runs, &candidate),
+        ] {
+            let timing = execute(runtime, |gpu| encode(gpu, kernel, runs, output, reps))?;
+            times.push(timing.gpu_ms / reps as f64);
+        }
+        let flops = 2.0 * routes as f64 * WIDTH as f64 * width as f64;
+        sides.push(json!({
+            "projection": if side == 0 { "gate_up" } else { "down" },
+            "grouped_fast_ms": [times[0], times[2]],
+            "nax_ms": [times[1], times[3]],
+            "nax_tflops": flops / (times[1].min(times[3]) * 1.0e9),
+            "identical_fraction": identical as f64 / words as f64,
+            "relative_l1": sum_abs / sum_ref.max(f64::MIN_POSITIVE),
+            "worst_relative_above_1e-3": worst,
+        }));
+    }
+    Ok(json!({"tiles": tiles, "projections": sides}))
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct FastParams {
@@ -1446,10 +1857,34 @@ struct FastParams {
 
 const FAST_GATE_UP: Kernel = "ink_group_fast_gate_up";
 const FAST_DOWN: Kernel = "ink_group_fast_down";
-/// Use grouped_nax.metal (BK 64 double-buffered decode with the next step
-/// fetched before the tensor work, register epilogue, 64-column tiles of
-/// 32 x 32 SIMD-group blocks) instead of grouped_fast.metal.
-const FAST_NAX_DESIGN: bool = false;
+/// grouped_nax.metal: 96-row runs, 192 threads, register-fragment tensor
+/// operations with the next K step fetched before the tensor work.
+const NAX_GATE_UP: Kernel = "ink_group_nax_gate_up";
+const NAX_DOWN: Kernel = "ink_group_nax_down";
+const NAX_RUN_ROWS: usize = 96;
+const NAX_THREADS: usize = 192;
+const NAX_GX: usize = 32;
+const NAX_BUCKET: Kernel = "ink_group_bucket_nax_nvfp4";
+/// MLX-Serve's planner rule for 96-row tiles at K >= 1024: at least 48
+/// routed rows per expert on average (rows x 8 / 128 experts).
+const NAX_MIN_ROWS: usize = 48 * EXPERTS / TOP;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NaxParams {
+    width: u32,
+    denominator: f32,
+    tiles: u32,
+}
+
+/// Wide default prefill commands use the 96-row register-fragment product.
+/// The expert ceiling capture keeps the 64-row geometry its variants assume.
+fn nax_nvfp4(
+    gpu: &Stream<'_>,
+    rows: usize,
+) -> bool {
+    rows >= NAX_MIN_ROWS && gpu.runtime.expert_capture.is_none() && gpu.runtime.pipelines.contains_key(NAX_GATE_UP)
+}
 /// Use grouped_stationary.metal: each decoded weight block serves up to 256
 /// routed rows of its expert; same per-output arithmetic as grouped_fast.
 const FAST_STATIONARY: bool = false;
@@ -1475,6 +1910,26 @@ const FAST_TILE_K: usize = 32;
 const FAST_DOUBLE: usize = 1;
 const FAST_PAD: usize = 0;
 
+/// Compile the 96-row register-fragment products of grouped_nax.metal.
+fn register_nax(runtime: &mut Runtime) -> Result<()> {
+    if runtime.pipelines.contains_key(NAX_GATE_UP) {
+        return Ok(());
+    }
+    let source = format!(
+        "#include <metal_stdlib>\nusing namespace metal;\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n#define INK_FAST_BM {FAST_TILE_ROWS}\n#define INK_FAST_BN {FAST_TILE_COLS}\n#define INK_FAST_BK {FAST_TILE_K}\n#define INK_FAST_SG_ROWS {FAST_SG_ROWS}\n#define INK_FAST_DOUBLE {FAST_DOUBLE}\n#define INK_FAST_PAD {FAST_PAD}\n{}\n{}\n{}",
+        include_str!("experts.metal"),
+        include_str!("grouped_fast.metal"),
+        include_str!("grouped_nax.metal")
+    );
+    register_source(runtime, &source, &[NAX_GATE_UP, NAX_DOWN])?;
+    let bucket = format!(
+        "#include <metal_stdlib>\nusing namespace metal;\n#define INK_GROUP_QMM_TILE_ROWS {NAX_RUN_ROWS}\n#define INK_GROUP_QMM_TILE_COLS 32\n#define ink_group_bucket {NAX_BUCKET}\n#define ink_group_qmm ink_group_qmm_unused_nax\n{}\n{}",
+        include_str!("experts.metal"),
+        include_str!("grouped_pilot.metal")
+    );
+    register_source(runtime, &bucket, &[NAX_BUCKET])
+}
+
 /// Grouped NVFP4 products on 64 x 64 tiles with 32 x 32 SIMD-group
 /// fragments, a vectorized double-buffered weight decode and the BF16
 /// epilogues applied at the store.
@@ -1487,13 +1942,6 @@ fn enable_fast_nvfp4(runtime: &mut Runtime) -> Result<()> {
             "#include <metal_stdlib>\nusing namespace metal;\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n#define ink_group_stationary_gate_up {FAST_GATE_UP}\n#define ink_group_stationary_down {FAST_DOWN}\n{}\n{}",
             include_str!("experts.metal"),
             include_str!("grouped_stationary.metal")
-        )
-    } else if FAST_NAX_DESIGN {
-        // Register epilogue and fetch/decode overlap; same kernel names.
-        format!(
-            "#include <metal_stdlib>\nusing namespace metal;\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n#define INK_NAX_BM {FAST_TILE_ROWS}\n#define ink_group_nax_gate_up {FAST_GATE_UP}\n#define ink_group_nax_down {FAST_DOWN}\n{}\n{}",
-            include_str!("experts.metal"),
-            include_str!("grouped_nax.metal")
         )
     } else {
         format!(
@@ -1527,6 +1975,9 @@ fn enable_fast_nvfp4(runtime: &mut Runtime) -> Result<()> {
         runtime.device.new_compute_pipeline_state_with_function(&function).map_err(|_| FAST_BUCKET)?,
     ));
     runtime.pipelines.extend(pipelines);
+    if !FAST_STATIONARY {
+        register_nax(runtime)?;
+    }
     runtime.fast_nvfp4 = true;
     Ok(())
 }

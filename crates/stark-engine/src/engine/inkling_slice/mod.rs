@@ -45,6 +45,13 @@ pub use vision::{INKLING_IMAGE_TOKEN, ImageEmbeddings, measure_vision};
 pub(crate) const QUANTIZE_EXPERT_INPUTS: bool =
     contains_line(include_str!("experts.metal"), b"#define INK_EXPERT_INPUTS_QUANTIZED 1");
 
+/// Single-row NVFP4 up and down products that read unquantized BF16 expert
+/// inputs directly (decode_experts.metal).
+const DIRECT_PRODUCTS: [Kernel; 2] = ["ink_dx_up_bf", "ink_dx_down_bf"];
+/// The verifier's NVFP4 half dot reading unquantized BF16 expert inputs
+/// directly (verify_nvfp4.metal with INK_VERIFY_BF16_INPUT).
+const VERIFY_DIRECT_DOT: Kernel = "ink_verify_nvfp4_bf_dot";
+
 const fn contains_line(
     source: &str,
     needle: &[u8],
@@ -157,6 +164,13 @@ struct Runtime {
     /// Diagnostic only: capture one grouped NVFP4 visit for the expert
     /// ceiling report.
     expert_capture: Option<grouped_pilot::ExpertCapture>,
+    /// Diagnostic only: the single-row and verifier NVFP4 products read the
+    /// unquantized BF16 expert inputs directly, without the activation pass.
+    /// Bit-identical, but widening inside the products costs more than the
+    /// removed launches save (paired s73: step +0.15 ms, 4-row verifier
+    /// +1.2 ms on both artifacts), so it stays off; set only by the
+    /// `direct_expert_inputs` paired control.
+    direct_expert_inputs: bool,
     /// Affine 8-bit dense weights of an affine8 checkpoint; `None` for the
     /// original checkpoint.
     affine8: Option<affine8::Affine8Weights>,
@@ -246,8 +260,11 @@ impl Runtime {
                 include_str!("decode_experts.metal"),
             );
             let library = device.new_library_with_source(source, Some(&options)).map_err(|_| "decode experts")?;
-            for name in
-                session::DECODE_VARIANTS.iter().flat_map(|variant| [variant.0, variant.1]).chain(session::DECODE_EXTRA)
+            for name in session::DECODE_VARIANTS
+                .iter()
+                .flat_map(|variant| [variant.0, variant.1])
+                .chain(session::DECODE_EXTRA)
+                .chain(DIRECT_PRODUCTS)
             {
                 let function = library.new_function_with_name(name).ok_or(name)?;
                 let pipeline = device.new_compute_pipeline_state_with_function(&function).map_err(|_| name)?;
@@ -292,6 +309,7 @@ impl Runtime {
             packed_draft_commit: false,
             router_tiles: false,
             expert_capture: None,
+            direct_expert_inputs: false,
             affine8: None,
         })
     }
@@ -847,6 +865,31 @@ impl Layer {
         up: &Bank,
         down: &Bank,
     ) {
+        if gpu.runtime.direct_expert_inputs
+            && gpu.runtime.source_text_active
+            && gpu.runtime.nvfp4_vector
+            && !gpu.runtime.exact_prefill
+        {
+            // Unquantized inputs: the products read the BF16 rows and the
+            // activation passes are not needed.
+            gpu.phase(PrefillPhase::Nvfp4UpDot);
+            gpu.one(
+                DIRECT_PRODUCTS[0],
+                &[&s.mlp_input, &s.up_max, &s.routes, &s.route_weights, &up.codes, &up.blocks, &up.maxima, &s.mid],
+                up.args(),
+                (MID / 4, 8),
+                128,
+            );
+            gpu.phase(PrefillPhase::Nvfp4DownDot);
+            gpu.one(
+                DIRECT_PRODUCTS[1],
+                &[&s.mid, &s.down_max, &s.routes, &down.codes, &down.blocks, &down.maxima, &s.down],
+                down.args(),
+                (WIDTH / 4, 8),
+                128,
+            );
+            return;
+        }
         // The exact prefill reference keeps quantized expert inputs.
         let activation = if gpu.runtime.exact_prefill && !QUANTIZE_EXPERT_INPUTS {
             "ink_nvfp4_activation_quantized"
