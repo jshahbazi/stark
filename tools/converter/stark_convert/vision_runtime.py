@@ -172,7 +172,7 @@ def family_image_input_contract(value: object) -> bool:
     if inkling and (
         value.get("artifact_schema_version") != 7
         or (source, revision) != (inkling_prepare.REPO, inkling_prepare.REVISION)
-        or value.get("artifact_sha256") != inkling_prepare.WEIGHTS[inkling_prepare.TARGET][1]
+        or value.get("artifact_sha256") not in inkling_prepare.IMAGE_TARGET_SHAS
         or value.get("processor_sha256") != inkling_prepare.PROCESSOR_SHA
         or value.get("tokenizer_sha256") != inkling_prepare.TOKENIZER_SHA
         or value.get("template_sha256") != inkling_prepare.TEMPLATE_SHA

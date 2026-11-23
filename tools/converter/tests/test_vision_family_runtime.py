@@ -58,6 +58,33 @@ def test_family_contract_requires_typed_native_runtime_identity(change):
     assert vision_runtime.image_input_contract(value) is None
 
 
+def test_inkling_profile_is_bound_to_its_pinned_target_artifacts():
+    from stark_convert import inkling_prepare
+
+    def contract(artifact):
+        return family_contract(
+            family_profile=inkling_prepare.VISION_PROFILE,
+            artifact_schema_version=7,
+            model_source=inkling_prepare.REPO,
+            model_revision=inkling_prepare.REVISION,
+            artifact_sha256=artifact,
+            processor_sha256=inkling_prepare.PROCESSOR_SHA,
+            tokenizer_sha256=inkling_prepare.TOKENIZER_SHA,
+            template_sha256=inkling_prepare.TEMPLATE_SHA,
+            max_source_pixels=1_638_400,
+            max_processed_pixels=1_638_400,
+        )
+
+    original = inkling_prepare.WEIGHTS[inkling_prepare.TARGET][1]
+    assert inkling_prepare.IMAGE_TARGET_SHAS == (original, inkling_prepare.AFFINE8_TARGET_SHA)
+    for artifact in inkling_prepare.IMAGE_TARGET_SHAS:
+        assert vision_runtime.family_image_input_contract(contract(artifact)) is True
+    # Recognition is an implementation profile only; any other artifact fails closed.
+    assert vision_runtime.family_image_input_contract(contract("0" * 64)) is False
+    draft = inkling_prepare.WEIGHTS[inkling_prepare.DRAFT][1]
+    assert vision_runtime.family_image_input_contract(contract(draft)) is False
+
+
 def test_schema2_checkpoint_identity_remains_pinned():
     value = family_contract(artifact_schema_version=2)
     assert vision_runtime.image_input_contract(value) is None

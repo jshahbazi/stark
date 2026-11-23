@@ -21,6 +21,13 @@ WEIGHTS = {
     TARGET: (19_526_019_168, "65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1"),
     DRAFT: (635_801_416, "7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2"),
 }
+# Stark's group-64 affine 8-bit dense artifact of the same checkpoint, built by
+# inkling_affine8_artifact.py. The worker pins the same target hash.
+AFFINE8_LAYOUT = "inkling2-mini-affine8-dense"
+AFFINE8_TARGET_SHA = "c9e14848ad017467dc0deb91c6aa67022e181dbcdfe02a1b04024434bf9acddd"
+AFFINE8_TARGET_BYTES = 18_052_013_648
+# Target hashes that carry the native Inkling image profile.
+IMAGE_TARGET_SHAS = (WEIGHTS[TARGET][1], AFFINE8_TARGET_SHA)
 CONFIG_SHA = "8216dd43157f5474cfff88f486a1e433fef703c674f694e485a86a761c412b1e"
 CONFIG = "source-config.json"
 TEMPLATE_SHA = "53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc"
@@ -121,7 +128,14 @@ def stage(root: Path) -> dict:
 
 
 def prepared_identity(root: Path, config: dict, receipt: dict) -> dict | None:
-    if config.get("stark_inkling") != _BINDING or receipt.get("layout") != LAYOUT:
+    if config.get("stark_inkling") != _BINDING:
+        return None
+    if receipt.get("layout") == AFFINE8_LAYOUT:
+        # The derived 8-bit artifact has its own config binding, receipt and target size.
+        from . import inkling_affine8_artifact
+
+        return inkling_affine8_artifact.prepared_identity(root, config, receipt)
+    if receipt.get("layout") != LAYOUT:
         return None
     raw = _read(root, CONFIG, 1024 * 1024, CONFIG_SHA)
     template = _read(root, "chat_template.jinja", 256 * 1024, TEMPLATE_SHA)
