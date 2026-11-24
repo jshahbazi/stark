@@ -287,8 +287,7 @@ def test_catalog_offers_the_8bit_default_with_its_own_facts():
     assert source is inkling_prepare.AFFINE8_SOURCE and source["derived_from"] == inkling_prepare.ORIGINAL_CHOICE
     assert hybrid.SOURCES[inkling_prepare.ORIGINAL_CHOICE] is inkling_prepare.SOURCE
     assert item["weight_bytes"] == 18_052_013_648 + 635_801_416
-    assert item["quantization"] == "NVFP4/MXFP8 experts + MLX affine 8-bit dense"
-    assert source["quantization"] == inkling_affine8_artifact.QUANTIZATION
+    assert item["quantization"] == inkling_prepare.AFFINE8_QUANTIZATION == inkling_affine8_artifact.QUANTIZATION
     assert item["artifact_modes"] == ["vision-language"] and item["default_artifact_mode"] == "vision-language"
     # The item keeps the identifier existing installations were matched by.
     revision = inkling_prepare.REPO + "@" + inkling_prepare.REVISION

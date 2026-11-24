@@ -1983,6 +1983,16 @@ extension EngineController {
                 var item = catalogItem(); item[key] = value
                 guard FamilyModelCatalog(catalogReport("qwen3", items: [item])) == nil else { return false }
             }
+            var item = catalogItem()
+            var installed = modelDisplay(name: "Inkling 2 Mini")
+            installed["family_id"] = "inkling2_loop"
+            let label = String(repeating: "é", count: 128)
+            item["quantization"] = label; installed["quantization"] = label
+            guard FamilyModelCatalog(catalogReport("inkling2_loop", items: [item]))?.items.first?.quantization == label,
+                  InstalledModelDisplay(installed)?.quantization == label else { return false }
+            item["quantization"] = label + "a"; installed["quantization"] = label + "a"
+            guard FamilyModelCatalog(catalogReport("inkling2_loop", items: [item])) == nil,
+                  InstalledModelDisplay(installed) == nil else { return false }
             engine.requestModelCatalog(familyID: "qwen3")
             let request = command()
             var future = catalogReply(request)

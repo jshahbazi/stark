@@ -238,7 +238,8 @@ struct InstalledModelDisplay: Equatable {
         let familyID = value["family_id"] as? String
         if let familyID = familyID, ModelFamily.displayName(for: familyID) == nil { return nil }
         let quantization = value["quantization"] as? String
-        if let quantization = quantization, Self.text(quantization, maximum: 64) == nil { return nil }
+        if let quantization = quantization,
+           Self.text(quantization, maximum: SupportMetadata.quantizationLabelMaxBytes) == nil { return nil }
         let revision = value["source_revision"] as? String
         if let revision = revision, revision.utf8.count != 40 || !revision.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) { return nil }
         let upstream = value["upstream_repo"] as? String
@@ -423,6 +424,8 @@ enum ModelModeSupport: String {
 }
 
 private enum SupportMetadata {
+    static let quantizationLabelMaxBytes = 256
+
     static func schemaOne(_ value: [String: Any]) -> Bool {
         guard let number = value["schema_version"] as? NSNumber else { return false }
         return CFGetTypeID(number) != CFBooleanGetTypeID() && number.doubleValue == 1
@@ -527,6 +530,7 @@ struct ModelFamily: Identifiable {
         case "qwen4_exp": return "Qwen3.8 Flash Next"
         case "glm5_next": return "GLM-5.3 Flash"
         case "ricursive": return "Ripple-65B Preview"
+        case "inkling2_loop": return "Inkling 2 Mini"
         case "llama": return "Llama"
         case "mistral": return "Mistral"
         case "gemma2": return "Gemma 2"
@@ -768,7 +772,7 @@ struct FamilyModelCatalog {
                   let repo = SupportMetadata.string(raw["repo"], maximum: 256),
                   let revision = SupportMetadata.revision(raw["revision"]),
                   let name = SupportMetadata.string(raw["name"], maximum: 256),
-                  let quantization = SupportMetadata.string(raw["quantization"], maximum: 64),
+                  let quantization = SupportMetadata.string(raw["quantization"], maximum: SupportMetadata.quantizationLabelMaxBytes),
                   let modes = raw["artifact_modes"] as? [String], !modes.isEmpty, modes.count <= 2,
                   Set(modes).count == modes.count,
                   let defaultMode = (raw["default_artifact_mode"] as? String).flatMap(ModelArtifactMode.init(rawValue:)),

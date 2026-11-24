@@ -176,6 +176,17 @@ def test_catalogue_accepts_optional_model_group_descriptor(host):
     assert host.catalog_report(value, "qwen3")["items"][0]["model_group"] == value["items"][0]["model_group"]
 
 
+def test_catalogue_quantization_label_limit_is_measured_in_utf8_bytes(host):
+    value = report()
+    label = "é" * 128
+    value["items"][0]["quantization"] = label
+    assert host.catalog_report(value, "qwen3")["items"][0]["quantization"] == label
+
+    value["items"][0]["quantization"] += "a"
+    with pytest.raises(ValueError):
+        host.catalog_report(value, "qwen3")
+
+
 def test_legacy_catalogue_more_flag_without_offset_is_not_pageable(host):
     value = report()
     value["has_more"] = True
