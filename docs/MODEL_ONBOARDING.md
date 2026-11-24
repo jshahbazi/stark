@@ -172,6 +172,11 @@ uv run --project tools/converter --locked --python 3.13.13 python \
 
 Use `--reuse rewind` for a backend that can rewind to any eligible full chunk.
 Use `--reuse boundary` for a backend that can restore only its retained snapshot.
+The validator checks every reuse count against the rule the worker advertises:
+`prefix_cache.chunk_tokens`, `prefix_cache.tail_tokens` (a backend whose boundary
+keeps more than the final token advertises its tail and gets the edge cases at
+that tail) and `mtp.default_drafts` (a request naming no MTP setting is keyed as
+drafted when the default is nonzero, and explicit `mtp_drafts: 0` cases are added).
 Choose prompts long enough to cross the advertised chunk boundary, and a context
 large enough for the synthetic follow-ups and output budget. `--first-tokens`
 sets the first-turn target; `--tools`, `--instruction-paragraphs` and

@@ -93,6 +93,8 @@ pub(crate) struct InklingBackend {
     retained: Option<BoundaryEntry<((bool, bool), Snapshot)>>,
     pending: Option<BoundaryEntry<((bool, bool), Snapshot)>>,
     source_verifier: bool,
+    /// The packed source prefill is loaded, so reuse boundaries sit on its grid.
+    source_grid: bool,
     draft_stats: DraftStats,
     runtime_identity: stark_engine::engine::MetalDeviceIdentity,
 }
@@ -138,20 +140,28 @@ fn source_command_rows(
     })
 }
 
-/// Prefix-snapshot boundary. Source prefill keeps its four-token suffix and
-/// 2,048-row bulk alignment; a short input therefore has no boundary.
+/// The worker's reuse grid and the prompt tail a request always prefills, as
+/// readiness advertises them. With the packed source prefill loaded that is
+/// its 2,048-row bulk alignment and four-token suffix.
+fn reuse_grid(source_grid: bool) -> (usize, usize) {
+    if source_grid {
+        (Session::SOURCE_PREFILL_ROWS, SOURCE_PROMPT_SUFFIX)
+    } else {
+        (CHUNK, 2)
+    }
+}
+
+/// Prefix-snapshot boundary on the worker's reuse grid. Every request of a
+/// worker uses the one grid, whichever prefill path it takes, so reuse counts
+/// are multiples of the advertised chunk; a short input has no boundary.
 fn prefix_boundary(
     input_len: usize,
     scoped: bool,
-    source_prefill: bool,
+    source_grid: bool,
 ) -> usize {
-    let (remaining, chunk) = if source_prefill {
-        (SOURCE_PROMPT_SUFFIX, Session::SOURCE_PREFILL_ROWS)
-    } else {
-        (2, CHUNK)
-    };
+    let (chunk, tail) = reuse_grid(source_grid);
     if scoped {
-        input_len.saturating_sub(remaining) / chunk * chunk
+        input_len.saturating_sub(tail) / chunk * chunk
     } else {
         0
     }
@@ -302,6 +312,7 @@ impl InklingBackend {
             }
             target.set_source_verifier(false).map_err(|_| "inkling_prefill_load_failed")?;
         }
+        let source_grid = target.supports_source_text_prefill(INITIAL_CONTEXT);
         Ok(Self {
             tokenizer: artifact.tokenizer,
             config_sha256: artifact.config_sha256,
@@ -312,6 +323,7 @@ impl InklingBackend {
             retained: None,
             pending: None,
             source_verifier,
+            source_grid,
             draft_stats: DraftStats::default(),
             runtime_identity,
         })
@@ -328,11 +340,11 @@ impl InklingBackend {
     }
 
     fn boundary(
+        &self,
         input_len: usize,
         options: &GenerationOptions,
-        source_prefill: bool,
     ) -> usize {
-        prefix_boundary(input_len, options.cache_scope.is_some(), source_prefill)
+        prefix_boundary(input_len, options.cache_scope.is_some(), self.source_grid)
     }
 
     fn generate_inner(
@@ -367,7 +379,7 @@ impl InklingBackend {
             0
         };
         let boundary = if image.is_none() {
-            Self::boundary(input.len(), options, source_prefill)
+            self.boundary(input.len(), options)
         } else {
             0
         };
@@ -777,6 +789,12 @@ impl GenerationBackend for InklingBackend {
     fn prefix_cache_supported(&self) -> bool {
         true
     }
+    fn prefix_cache_chunk_tokens(&self) -> usize {
+        reuse_grid(self.source_grid).0
+    }
+    fn prefix_cache_tail_tokens(&self) -> usize {
+        reuse_grid(self.source_grid).1
+    }
     fn prefix_cache_key(&self) -> &'static str {
         if self.source_verifier {
             "model-instance+context-tokens+cache-scope+mtp-enabled+source-precision"
@@ -790,7 +808,7 @@ impl GenerationBackend for InklingBackend {
         options: &GenerationOptions,
     ) -> usize {
         let source_prefill = self.source_text_prefill(input.len(), options);
-        let boundary = Self::boundary(input.len(), options, source_prefill);
+        let boundary = self.boundary(input.len(), options);
         let reused = self
             .retained
             .as_ref()
@@ -990,6 +1008,25 @@ mod tests {
         assert_eq!(prefix_boundary(4096, false, true), 0);
         assert_eq!(prefix_boundary(73, true, false), 0);
         assert_eq!(prefix_boundary(CHUNK + 2, true, false), CHUNK);
+    }
+
+    #[test]
+    fn reuse_boundaries_stay_on_the_advertised_grid() {
+        assert_eq!(reuse_grid(true), (2048, 4));
+        assert_eq!(reuse_grid(false), (CHUNK, 2));
+        for source_grid in [false, true] {
+            let (chunk, tail) = reuse_grid(source_grid);
+            assert!(chunk.is_multiple_of(CHUNK) && tail >= 1);
+            for input in [0, 1, tail, chunk, chunk + tail - 1, chunk + tail, 3 * chunk + 1, 9 * chunk + tail + 7] {
+                let boundary = prefix_boundary(input, true, source_grid);
+                assert!(boundary.is_multiple_of(chunk), "{input}");
+                assert_eq!(boundary, input.saturating_sub(tail) / chunk * chunk, "{input}");
+                assert_eq!(prefix_boundary(input, false, source_grid), 0, "{input}");
+            }
+            // A snapshot is reusable from `tail` remaining prompt tokens.
+            assert_eq!(prefix_boundary(chunk + tail - 1, true, source_grid), 0);
+            assert_eq!(prefix_boundary(chunk + tail, true, source_grid), chunk);
+        }
     }
 
     #[test]

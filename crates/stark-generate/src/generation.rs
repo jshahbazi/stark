@@ -679,6 +679,12 @@ pub(crate) trait GenerationBackend {
     fn prefix_cache_chunk_tokens(&self) -> usize {
         prefix_cache::PREFILL_CHUNK_TOKENS
     }
+    /// Prompt tokens a request always prefills after a reuse boundary: its own
+    /// boundary is the largest chunk multiple at or below its input length
+    /// less this tail. At least one.
+    fn prefix_cache_tail_tokens(&self) -> usize {
+        1
+    }
     /// What a retained state must match, as reported in readiness.
     fn prefix_cache_key(&self) -> &'static str {
         prefix_cache::KEY
@@ -774,6 +780,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             backend.prefix_cache_supported()
                 && chunk >= prefix_cache::PREFILL_CHUNK_TOKENS
                 && chunk.is_multiple_of(prefix_cache::PREFILL_CHUNK_TOKENS)
+                && (1..chunk).contains(&backend.prefix_cache_tail_tokens())
         });
         Ok(Self {
             backend,
@@ -1579,7 +1586,8 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         "stop_sequences":true,"cancellation":"pipe-v1"});
     if let Some(enabled) = worker.prefix_cache {
         readiness["prefix_cache"] = json!({"supported":enabled,"enabled":enabled,
-            "chunk_tokens":worker.backend.prefix_cache_chunk_tokens(),"idle_seconds":prefix_cache::IDLE_SECONDS,
+            "chunk_tokens":worker.backend.prefix_cache_chunk_tokens(),
+            "tail_tokens":worker.backend.prefix_cache_tail_tokens(),"idle_seconds":prefix_cache::IDLE_SECONDS,
             "key":worker.backend.prefix_cache_key()});
         if enabled {
             readiness["state_policy"] = json!(prefix_cache::POLICY);
@@ -4028,7 +4036,7 @@ mod tests {
         assert_eq!(enabled["state_policy"], "consecutive-prefix-v1");
         assert_eq!(
             enabled["prefix_cache"],
-            json!({"supported":true,"enabled":true,"chunk_tokens":1024,"idle_seconds":600,
+            json!({"supported":true,"enabled":true,"chunk_tokens":1024,"tail_tokens":1,"idle_seconds":600,
                 "key":"model-instance+context-tokens+cache-scope"})
         );
         assert_eq!(enabled["operations"], json!(["tokenize", "decode", "generate", "reset_cache"]));

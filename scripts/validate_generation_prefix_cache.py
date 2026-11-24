@@ -600,13 +600,42 @@ def build_turns(
     return session, turns
 
 
-class Expectation:
-    """The documented reuse rule, simulated over the cached worker's requests."""
+def reuse_boundary(length, chunk, tail=1):
+    """A request's own reuse boundary: the largest chunk multiple at or below its length less the tail."""
+    return max(length - tail, 0) // chunk * chunk
 
-    def __init__(self, chunk, boundary_only):
+
+def advertised_tail(settings, chunk):
+    """The readiness ``tail_tokens``; 1 for a worker that predates the field."""
+    tail = settings.get("tail_tokens", 1)
+    if type(tail) is not int or not 1 <= tail < chunk:
+        raise SystemExit("candidate readiness advertises an invalid reuse tail")
+    return tail
+
+
+def default_mtp_drafts(ready):
+    """Drafts a request naming no MTP setting runs with: the readiness default, else none."""
+    drafts = (ready.get("mtp") or {}).get("default_drafts")
+    return drafts if type(drafts) is int and drafts > 0 else 0
+
+
+class Expectation:
+    """The documented reuse rule, simulated over the cached worker's requests.
+
+    ``tail`` is the worker's advertised ``tail_tokens``: the prompt tokens a
+    request always prefills after a boundary (1 when readiness omits it). A
+    boundary snapshot is reusable from two remaining tokens, or the tail when
+    that is longer.
+    """
+
+    def __init__(self, chunk, boundary_only, tail=1):
         self.chunk = chunk
         self.boundary_only = boundary_only
+        self.tail = tail
         self.entry = None
+
+    def boundary(self, length):
+        return reuse_boundary(length, self.chunk, self.tail)
 
     def predict(self, ids, key):
         if self.entry is None or key[0] is None or key != self.entry[0]:
@@ -615,21 +644,17 @@ class Expectation:
         if self.boundary_only:
             return (
                 len(prefix)
-                if len(ids) >= len(prefix) + 2 and ids[: len(prefix)] == prefix
+                if len(ids) >= len(prefix) + max(2, self.tail) and ids[: len(prefix)] == prefix
                 else 0
             )
         common = next(
             (i for i, (a, b) in enumerate(zip(prefix, ids, strict=False)) if a != b),
             min(len(prefix), len(ids)),
         )
-        return (
-            min(common, (len(ids) - 1) // self.chunk * self.chunk)
-            // self.chunk
-            * self.chunk
-        )
+        return min(common, self.boundary(len(ids))) // self.chunk * self.chunk
 
     def record(self, ids, key, reply):
-        boundary = (len(ids) - 1) // self.chunk * self.chunk
+        boundary = self.boundary(len(ids))
         if "error" in reply or key[0] is None or boundary == 0:
             self.entry = None
         else:
@@ -797,10 +822,13 @@ def selector_readiness(ready, mtp_drafts, selectors):
         raise SystemExit("candidate readiness does not list MTP prompt lookup")
 
 
-def plan(turns, chunk, context, mtp_drafts, *, mtp_selection_key=False, selectors=(), default_schedule=None):
+def plan(turns, chunk, context, mtp_drafts, *, mtp_selection_key=False, selectors=(), default_schedule=None,
+         tail=1, default_drafts=0):
     """The cached worker's request sequence: comparison cases and invalidating actions.
 
     ``default_schedule`` is the candidate's non-fixed readiness default, or None.
+    ``tail`` is its advertised reuse tail and ``default_drafts`` the drafts a
+    request naming no MTP setting runs with; both add cases only when set.
     """
     steps = []
 
@@ -822,15 +850,29 @@ def plan(turns, chunk, context, mtp_drafts, *, mtp_selection_key=False, selector
     late = diverge(turns[-1], len(turns[-1]) - 2)
     case("diverge_in_final_chunk", late)
     case("restore_final_chunk", turns[-1])
-    boundary = (len(turns[-1]) - 1) // chunk * chunk
+    boundary = reuse_boundary(len(turns[-1]), chunk, tail)
     case("snapshot_plus_one", turns[-1][:boundary] + turns[-1][-1:])
     case("snapshot_plus_two", turns[-1][:boundary] + turns[-1][-2:])
+    if tail > 2:
+        # A longer advertised tail: the snapshot is reusable from exactly
+        # `tail` remaining prompt tokens, and not from one fewer.
+        case("restore_before_tail_edges", turns[-1])
+        case("snapshot_plus_tail_less_one", turns[-1][:boundary] + turns[-1][-(tail - 1):])
+        case("restore_between_tail_edges", turns[-1])
+        case("snapshot_plus_tail", turns[-1][:boundary] + turns[-1][-tail:])
     case("restore_after_boundary_edges", turns[-1])
     case("context_change", turns[-1], context=context - 1)
     case("context_restored", turns[-1])
     case("scope_change", turns[-1], scope="other")
     case("scope_restored", turns[-1])
     case("warm_again", turns[-1])
+    if default_drafts:
+        # Default drafting: a request naming no MTP setting drafts, so the MTP
+        # part of the key changes only on an explicit zero.
+        case("explicit_plain_after_default", turns[-1], mtp_drafts=0)
+        case("explicit_plain_warm", turns[-1], mtp_drafts=0)
+        case("default_after_explicit_plain", turns[-1])
+        case("default_warm", turns[-1])
     if mtp_drafts:
         case("mtp_after_plain", turns[-1], mtp_drafts=mtp_drafts)
         case("mtp_warm", turns[-1], mtp_drafts=mtp_drafts)
@@ -927,8 +969,11 @@ def comparison_key(ids, options):
 
 
 def mtp_cache_value(worker, drafts):
+    """The MTP part of a request's reuse key. A request naming no drafts takes the worker default."""
+    if drafts is None:
+        drafts = default_mtp_drafts(worker.ready)
     key = (worker.ready.get("prefix_cache") or {}).get("key", "")
-    return (drafts or 0) if "mtp-selection" in key else bool(drafts)
+    return drafts if "mtp-selection" in key else bool(drafts)
 
 
 def selected_mtp_drafts(ready, requested):
@@ -973,7 +1018,7 @@ def run_cases(worker, steps, args, tools, parser, *, scopes=None, expectation=No
             observed[label] = reply.get("error", "ok")
             if label == "cancellation" and "error" not in reply:
                 # Finished before the signal arrived: an ordinary scoped request.
-                expectation.record(ids, (scopes["main"], args.context, False), reply)
+                expectation.record(ids, (scopes["main"], args.context, mtp_cache_value(worker, None)), reply)
             elif not keeps:
                 expectation.entry = None
             continue
@@ -1076,6 +1121,8 @@ def run_exactness(args, template, codec, parser):
         if settings.get("enabled") is not True:
             raise SystemExit("candidate did not enable prefix reuse for this model")
         chunk = settings["chunk_tokens"]
+        tail = advertised_tail(settings, chunk)
+        default_drafts = default_mtp_drafts(cached.ready)
         mtp_drafts = selected_mtp_drafts(cached.ready, args.mtp_drafts)
         session, turns = build_turns(
             cached,
@@ -1087,15 +1134,15 @@ def run_exactness(args, template, codec, parser):
         )
         if len(turns[-1]) + args.max_new >= args.context:
             raise SystemExit("synthetic session exceeds the requested context")
-        if (len(turns[0]) - 1) // chunk == 0:
+        if reuse_boundary(len(turns[0]), chunk, tail) == 0:
             raise SystemExit("first prompt must exceed one backend reuse chunk")
         selectors = selector_combinations(getattr(args, "mtp_policy", None), getattr(args, "mtp_lookup", False))
         selector_readiness(cached.ready, mtp_drafts, selectors)
         default = default_schedule(cached.ready)
         steps = plan(turns, chunk, args.context, mtp_drafts,
                      mtp_selection_key="mtp-selection" in settings.get("key", ""), selectors=selectors,
-                     default_schedule=default)
-        expectation = Expectation(chunk, args.reuse == "boundary")
+                     default_schedule=default, tail=tail, default_drafts=default_drafts)
+        expectation = Expectation(chunk, args.reuse == "boundary", tail)
         scopes = {"main": secrets.token_hex(16), "other": secrets.token_hex(16)}
         _, observed = run_cases(
             cached,
@@ -1222,6 +1269,11 @@ def run_exactness(args, template, codec, parser):
     if default is not None:
         # Recorded only for a candidate whose readiness default is not fixed.
         result["mtp_default_schedule"] = {"policy": default[0], "lookup": default[1]}
+    # Recorded only when set, so other backends' records are unchanged.
+    if tail != 1:
+        result["tail_tokens"] = tail
+    if default_drafts:
+        result["mtp_default_drafts"] = default_drafts
     return result
 
 
