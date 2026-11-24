@@ -118,7 +118,10 @@ def catalog_item(choice: str = CHOICE) -> dict:
         "size_label": "65B" if source["architecture"] == RIPPLE_FAMILY_ID else None,
         "parameter_count": 64_782_689_360 if source["architecture"] == RIPPLE_FAMILY_ID else None,
         "weight_bytes": source["weight_bytes"],
-        "quantization": source["quantization"],
+        # The desktop catalog accepts labels up to 64 bytes.
+        "quantization": "NVFP4/MXFP8 experts + MLX affine 8-bit dense"
+        if choice == INKLING_CHOICE
+        else source["quantization"],
         "artifact_modes": ["text", "vision-language"]
         if choice in {"qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"}
         else ["vision-language"]
