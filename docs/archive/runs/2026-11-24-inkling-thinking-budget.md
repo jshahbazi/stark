@@ -126,3 +126,37 @@ The budget bounds reasoning and preserves output slots. The model still
 chooses its next message and when to stop. Broader task quality, exhaustive
 sampling parity, live cancellation with the new option and performance were
 outside this run.
+
+## Follow-up history
+
+### 20261124-INKBUDGET-03 · Default 1,024-token budget for Playground
+
+On 2026-11-24, the owner selected a default of 1,024 tokens for Inkling
+Playground chat. Commit `d8d075aa2cd4` applies it on model load, restores it
+from Advanced Options, and preserves an explicit Off choice per model in the
+app session. The default uses the native sampler and answer reserve validated
+in `20261124-INKBUDGET-02`. The local HTTP API accepts request-scoped generation
+parameters and inherits the saved per-model MTP preference when a call omits
+`mtp`.
+
+The live follow-up used the same image-loaded 8-bit artifact and worker as
+`20261124-INKBUDGET-02`. It checked an arithmetic reply through the fresh
+Desktop model load and a matching API completion, then replayed the synthetic
+code review via the Playground command path with zero drafts and the model's
+recommended DSpark depth. Replay settings were greedy, 8,192 context tokens,
+2,048 output slots and a 1,024-token thinking budget. Each run used a temporary
+model registry and processed replies in memory. This is a functional check
+of the default and request path. No throughput or general quality was measured.
+
+Fresh Playground chat sent the 1,024-token budget and answered the arithmetic
+control correctly. The API answered the same control correctly with the
+budget field absent from its native request. The code-review arms matched
+exactly in emitted token IDs, visible text and finish reason. Both reached EOS
+after 1,613 sampled tokens, including 1,002 reasoning tokens. DSpark proposed
+1,497 tokens in the enabled arm. Aggregate receipt SHA-256
+`28dc2c0da68e451bb6ab3ae347370387a4aafa7fb9b915a5d9626ebe6749cd03`.
+
+Swift controller and native window tests passed 173 and 17 checks. Python
+desktop and image transport tests passed 441 with one skip. The signed
+development app build `20261124183319858409` passed deep strict verification
+and its bundled Desktop module reported the 1,024-token default.
