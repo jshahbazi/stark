@@ -9,7 +9,7 @@ These attempts concern a different artifact from the original checkpoint that th
 | Attempt ID / registered date / executed date | `20261122-INKAFFINE8-01` / 2026-11-22 / 2026-11-22 |
 | Kind | Compatibility and performance feasibility (source and file reading, arithmetic estimates) |
 | Attempt state | Completed as an assessment. No files edited, no cargo or GPU work. |
-| Result | Planned/untested: a 12 to 17 percent decode gain is estimated, not measured |
+| Result | Planned/untested: a 10 to 17 percent decode gain is estimated, not measured (the feasibility report's headline said 12 to 17; its body and the analysis below say 10 to 17) |
 | Evidence scope | Structural (pack file inspection and two dequantization error checks), source review of MLX-Serve, byte-count arithmetic |
 | Promotion decision | Deferred; recommends Stark quantizing the original itself (option b below) |
 | Disposition | Experiment only |

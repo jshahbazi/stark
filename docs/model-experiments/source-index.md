@@ -268,6 +268,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Draft-depth planner tuning and the hold rule](2026-11-23-inkling-mini-planner-tuning.md) · Experiment, 2026-11-23, attempts 20261123-INKROUND-11 and -12
 - [Gathered NVFP4 prefill kernel for wide commands](2026-11-23-inkling-mini-gathered-nvfp4.md) · Experiment, 2026-11-23, attempt 20261122-INKFASTPRE-07
 - [Optimization wind-down: reverted unmeasured attempts, the paired-control hang and lock incidents](2026-11-23-inkling-mini-wind-down.md) · Experiment, 2026-11-23, attempts 20261123-INKROUND-13 and -14 and 20261122-INKFASTPRE-08
+- [Session audit: attempts, intermediate figures and incidents the records lacked, and corrections](2026-11-23-inkling-mini-session-audit.md) · Documentation audit, 2026-11-23, attempt 20261123-INKAUDIT-01
 - [Prefill round 3: dense kernel, packed draft commit, mask removal, width independence and two rejected kernels](2026-11-23-inkling-mini-prefill-round3.md) · Experiment, 2026-11-23, attempt 20261122-INKFASTPRE-03
 - [Prefill round 4: routing, drafting overhead, command width, expert ceiling, rejected stationary and staged kernels, BF16 attention and dense decomposition](2026-11-23-inkling-mini-prefill-round4.md) · Experiment, 2026-11-23, attempts 20261122-INKFASTPRE-04 to -06
 - [Decode round: stage table, short-context verifier attention, router, worker loop, depth policy, expert inputs and natural-text quality](2026-11-23-inkling-mini-decode-round.md) · Experiment, 2026-11-23, attempts 20261123-INKROUND-01 to -08

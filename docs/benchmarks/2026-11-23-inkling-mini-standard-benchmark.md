@@ -16,7 +16,7 @@ Attempt `20261123-INKENGINE-06`, 2026-11-23, 19:10:52 to 19:50:35 local. The fir
 | Repository | `b2a5a88f` with 12 modified paths at the start: the then-uncommitted prefix-reuse grid change, committed unchanged as `7e73e180`, and documentation drafts |
 | Command | The coordinator's private `runtime/session-tools/timed.sh`: `benchmark_standard.py run --profile inkling-2-mini --repeats 3 --sessions probe,prefill` with the two Stark artifacts and the two MLX-Serve packs named below, inside one lock hold that also ran the image-parity timing of [INKAFFINE8-04](../model-experiments/2026-11-23-inkling-mini-affine8-default.md) |
 | Layout, repeats, sessions | Block layout, 3 blocks with arm order reversed on odd blocks, sessions probe and prefill, one warmup per probe |
-| Burst | Not run: out of scope by owner decision (one user is the goal) |
+| Burst | Not run: out of scope by owner decision (one user is the goal). `docs/BENCHMARK.md` says the burst runs in every standard run; the tool does not check it and reported this run eligible, so this is a departure from the page's text that the tool does not flag |
 | Deviations | None; the tool reports the run eligible and every arm as a standard result |
 | Status | `complete`, no arm failures |
 
@@ -86,3 +86,7 @@ These final-build figures differ slightly on every input from the earlier quanti
 ## Reading and supersession
 
 Five of the nine standard rows on the default pair are unresolved: one or more blocks disagreed. The one standing gap is novel prose, about 14 percent behind, which the owner set aside when optimization stopped; on that row Stark drafts 1.85 tokens per round at about 0.39 acceptance against MLX-Serve's mostly plain steps. MLX-Serve 8-bit's repeated-sentence prefill median (1,664.7 tok/s) was lower here than in the earlier single-repeat runs (1,909 to 2,220), so the 1.13 standing on that row depends on this run's MLX-Serve rate; the exact 8,800-ID prefill row, unresolved at 0.96, is the matched prefill cell. This record is the current Inkling 2 Mini comparison and supersedes the single-repeat engine-matrix runs 1 to 5 ([engine matrix](2026-11-22-inkling-mini-engine-matrix.md)) as the standing; their measurements are unchanged.
+
+## Follow-up, 2026-11-23
+
+The branch was merged into `main` as `2bab5129` with one further commit, `76638e3f` (lint and format fixes in the engine module and the worker), made by another session after this run. This result, its gates and its quality result belong to the build from `7e73e180`; they were not re-run on the merged tree ([session audit](../model-experiments/2026-11-23-inkling-mini-session-audit.md#13-after-the-session-merge-and-a-lint-commit-that-the-gates-did-not-cover)).
