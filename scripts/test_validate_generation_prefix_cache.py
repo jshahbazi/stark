@@ -42,6 +42,11 @@ class FakeWorker:
     faults = frozenset()
     # The candidate's model default (policy, lookup); None is the fixed default.
     default = None
+    # Prompt tokens always prefilled after a boundary, and the drafts a request
+    # naming no MTP setting runs with. Readiness advertises both unless a fault
+    # hides them.
+    tail = 1
+    default_drafts = 0
 
     def __init__(self, binary, model, *, prefix_cache=False, progress=False, vision=False):
         self.binary = binary
@@ -49,12 +54,16 @@ class FakeWorker:
         self.vision = vision
         self.entry = None
         mtp = {"supported": True, "max_drafts": 3, "recommended_drafts": 2}
+        if self.default_drafts and "default_drafts_not_advertised" not in self.faults:
+            mtp["default_drafts"] = self.default_drafts
         if binary == "candidate":
             mtp.update(policies=["fixed", "adaptive"], default_policy="fixed", lookup=True)
             if self.default is not None:
                 mtp.update(default_policy=self.default[0], default_lookup=self.default[1])
         self.ready = {"ready": True, "mtp": mtp, "prefix_cache": {
             "enabled": prefix_cache, "chunk_tokens": self.chunk, "key": HYBRID_KEY}}
+        if self.tail != 1 and "tail_not_advertised" not in self.faults:
+            self.ready["prefix_cache"]["tail_tokens"] = self.tail
 
     def __enter__(self):
         return self
@@ -77,7 +86,9 @@ class FakeWorker:
         if selector and self.binary != "candidate":
             return {"error": "invalid_request", "_progress": []}
         ids, scope = payload["input_token_ids"], payload.get("cache_scope")
-        drafts = payload.get("mtp_drafts") or 0
+        drafts = payload.get("mtp_drafts")
+        if drafts is None:
+            drafts = self.default_drafts
         if cancel_after_first_progress or len(ids) + payload["max_new_tokens"] > payload["context_tokens"]:
             self.entry = None
             return {"error": "generation_cancelled" if cancel_after_first_progress else "context_overflow",
@@ -88,9 +99,9 @@ class FakeWorker:
         reused = 0
         if self.prefix_cache and scope is not None and self.entry is not None and self.entry[0] == key:
             prefix = self.entry[1]
-            if len(ids) >= len(prefix) + 2 and ids[: len(prefix)] == prefix:
+            if len(ids) >= len(prefix) + max(2, self.tail) and ids[: len(prefix)] == prefix:
                 reused = len(prefix)
-        boundary = (len(ids) - 1) // self.chunk * self.chunk
+        boundary = max(len(ids) - self.tail, 0) // self.chunk * self.chunk
         self.entry = (key, ids[:boundary]) if self.prefix_cache and scope is not None and boundary else None
         sampling = payload["sampling"]
         default = self.default if self.binary == "candidate" else None
@@ -634,6 +645,88 @@ class PrefixQualificationTests(unittest.TestCase):
         self.assertEqual(expected.predict(ids, (key[0], 4096, True)), 0)
         ids[512] += 1
         self.assertEqual(expected.predict(ids, key), 0)
+
+    def test_advertised_tail_moves_the_boundary_and_the_reuse_edge(self):
+        expected = harness.Expectation(2048, boundary_only=True, tail=4)
+        ids = list(range(9096))
+        key = ("synthetic-scope", 16384, True)
+        expected.record(ids, key, {})
+        self.assertEqual(len(expected.entry[1]), 8192)
+        self.assertEqual(expected.predict(ids[:8195], key), 0)
+        self.assertEqual(expected.predict(ids[:8196], key), 8192)
+        # One to three tokens past a chunk multiple keeps the earlier boundary.
+        expected.record(ids[:8195], key, {})
+        self.assertEqual(len(expected.entry[1]), 6144)
+        self.assertEqual(harness.reuse_boundary(2051, 2048, 4), 0)
+        self.assertEqual(harness.reuse_boundary(2052, 2048, 4), 2048)
+        self.assertEqual(harness.reuse_boundary(1025, 1024), 1024)
+        self.assertEqual(harness.reuse_boundary(0, 1024), 0)
+        self.assertEqual(harness.advertised_tail({}, 1024), 1)
+        self.assertEqual(harness.advertised_tail({"tail_tokens": 4}, 2048), 4)
+        for invalid in (0, 2048, True, "4"):
+            with self.subTest(invalid=invalid), self.assertRaises(SystemExit):
+                harness.advertised_tail({"tail_tokens": invalid}, 2048)
+
+    def test_tail_and_default_draft_cases_are_added_only_when_advertised(self):
+        def cases(steps):
+            return {label: (ids, options) for kind, label, ids, options in steps if kind == "case"}
+
+        turns = [[1, 2] * 550] * 4
+        default = harness.plan(turns, 1024, 4096, 2)
+        self.assertEqual(default, harness.plan(turns, 1024, 4096, 2, tail=1, default_drafts=0))
+        self.assertEqual(default, harness.plan(turns, 1024, 4096, 2, tail=2))
+        tailed = cases(harness.plan(turns, 1024, 4096, 2, tail=4))
+        self.assertEqual([label for label in tailed if label not in cases(default)],
+                         ["restore_before_tail_edges", "snapshot_plus_tail_less_one",
+                          "restore_between_tail_edges", "snapshot_plus_tail"])
+        self.assertEqual(len(tailed["snapshot_plus_tail_less_one"][0]), 1024 + 3)
+        self.assertEqual(len(tailed["snapshot_plus_tail"][0]), 1024 + 4)
+        drafted = cases(harness.plan(turns, 1024, 4096, 2, default_drafts=3))
+        self.assertEqual([label for label in drafted if label not in cases(default)],
+                         ["explicit_plain_after_default", "explicit_plain_warm",
+                          "default_after_explicit_plain", "default_warm"])
+        self.assertEqual(drafted["explicit_plain_after_default"][1]["mtp_drafts"], 0)
+        self.assertNotIn("mtp_drafts", drafted["default_after_explicit_plain"][1])
+
+    def test_default_drafting_keys_a_plain_request_as_drafted(self):
+        def worker(default_drafts, key=HYBRID_KEY):
+            return SimpleNamespace(ready={"mtp": {"default_drafts": default_drafts}, "prefix_cache": {"key": key}})
+
+        self.assertIs(harness.mtp_cache_value(worker(3), None), True)
+        self.assertIs(harness.mtp_cache_value(worker(3), 0), False)
+        self.assertIs(harness.mtp_cache_value(worker(3), 2), True)
+        self.assertIs(harness.mtp_cache_value(worker(0), None), False)
+        self.assertIs(harness.mtp_cache_value(SimpleNamespace(ready={}), None), False)
+        self.assertEqual(harness.mtp_cache_value(worker(3, HYBRID_KEY + "+mtp-selection"), None), 3)
+        self.assertEqual(harness.mtp_cache_value(worker(0, HYBRID_KEY + "+mtp-selection"), None), 0)
+
+    def test_synthetic_run_with_a_long_tail_and_default_drafting_passes(self):
+        with patch.object(FakeWorker, "tail", 4), patch.object(FakeWorker, "default_drafts", 3):
+            result = self.run_synthetic(mtp_policy=None, mtp_lookup=False, mtp_drafts=None)
+        self.assertTrue(harness.exactness_passed(result))
+        self.assertEqual((result["tail_tokens"], result["mtp_default_drafts"]), (4, 3))
+        rows = {check["case"]: check for check in result["checks"]}
+        self.assertEqual(rows["snapshot_plus_tail_less_one"]["reused_input_tokens"], 0)
+        self.assertGreater(rows["snapshot_plus_tail"]["reused_input_tokens"], 0)
+        # A plain request drafts by default, so naming the drafts keeps the entry
+        # and only an explicit zero drops it.
+        self.assertGreater(rows["mtp_after_plain"]["reused_input_tokens"], 0)
+        self.assertGreater(rows["plain_after_mtp"]["reused_input_tokens"], 0)
+        self.assertEqual(rows["explicit_plain_after_default"]["reused_input_tokens"], 0)
+        self.assertGreater(rows["explicit_plain_warm"]["reused_input_tokens"], 0)
+        self.assertEqual(rows["default_after_explicit_plain"]["reused_input_tokens"], 0)
+        self.assertGreater(rows["default_warm"]["reused_input_tokens"], 0)
+        self.assertTrue(all(check["reused_input_tokens"] % FakeWorker.chunk == 0 for check in result["checks"]))
+
+    def test_an_unadvertised_tail_or_default_drafting_fails_the_reuse_rule(self):
+        for fault, attribute, value in (("tail_not_advertised", "tail", 4),
+                                        ("default_drafts_not_advertised", "default_drafts", 3)):
+            with self.subTest(fault=fault), patch.object(FakeWorker, attribute, value):
+                result = self.run_synthetic(faults=frozenset({fault}), mtp_policy=None, mtp_lookup=False,
+                                            mtp_drafts=None)
+                self.assertFalse(harness.exactness_passed(result))
+                self.assertTrue(all(check["identical_to_fresh"] for check in result["checks"]))
+                self.assertFalse(all(check["reuse_matches_rule"] for check in result["checks"]))
 
     def test_timing_mismatch_or_missing_warm_reuse_fails_qualification(self):
         def turn(reused):

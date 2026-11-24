@@ -789,8 +789,8 @@ def test_cli_rejects_image_mtp_before_reading_image_file_or_input(model):
     assert worker.requests == []
 
 
-@pytest.mark.parametrize("flags, enabled", [([], False), (["--mtp"], True), (["--no-mtp"], False)])
-def test_main_parses_explicit_mtp_toggle_without_enabling_it_by_default(model, flags, enabled):
+@pytest.mark.parametrize("flags, enabled", [([], None), (["--mtp"], True), (["--no-mtp"], False)])
+def test_main_parses_explicit_mtp_toggle_and_leaves_the_default_to_the_worker(model, flags, enabled):
     worker = FakeWorker()
     worker.close = lambda: None
     with (
@@ -799,6 +799,38 @@ def test_main_parses_explicit_mtp_toggle_without_enabling_it_by_default(model, f
     ):
         assert main(["--model-path", str(model), *flags]) == 0
     assert run.call_args.args[0].mtp is enabled
+
+
+class InklingWorker(FakeWorker):
+    def read(self):
+        return {
+            **super().read(),
+            "mtp": mtp_descriptor(
+                max_drafts=3,
+                recommended_drafts=3,
+                default_drafts=3,
+                sampling="native-target-draw-match-v1",
+                verification="inkling-dspark-short-target-draw-v1",
+            ),
+        }
+
+
+@pytest.mark.parametrize("enabled, expected", [(None, 3), (True, 3), (False, 0)])
+def test_cli_drafts_by_default_through_the_inkling_verifier_and_respects_opt_out(model, enabled, expected):
+    worker = InklingWorker()
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, mtp=enabled), worker) == 0
+    generated = [r for r in worker.requests if r["operation"] == "generate"]
+    assert len(generated) == 1
+    assert generated[0]["mtp_drafts"] == expected
+
+
+def test_cli_default_keeps_mtp_off_for_workers_without_a_draft_default(model):
+    worker = MtpWorker()
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, mtp=None), worker) == 0
+    generated = [r for r in worker.requests if r["operation"] == "generate"]
+    assert generated[0]["mtp_drafts"] == 0
 
 
 def test_main_rejects_conflicting_mtp_flags_before_launch(model):

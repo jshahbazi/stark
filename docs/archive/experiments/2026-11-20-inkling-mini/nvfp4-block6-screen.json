@@ -1,0 +1,273 @@
+{
+  "protocol": "Eight contiguous experts (0 through 7) from physical block 6 in the original and Q4_K_XL, 65 evenly spaced output rows in each expert, all input dimensions, seed 324, rotating selected order within those eight experts, two warmups and six timed runs. Compare earlier and delayed activation outer scales and one graph containing 32 independent single-row products. Timings include projection command submission and synchronization. Activation and cross-library transfer are separate.",
+  "original_revision": "6e7c8248f75265bdd4fbab5273304243b5d8c2cb",
+  "gguf_revision": "a98a3457c896cd784094c733e38ace2ac129ab74",
+  "source_slice_sha256": {
+    "w13gg_scale": {
+      "bytes": 32,
+      "sha256": "716222a62074657611ef532f7f06285bc8fabdcd7503193d56a1fe8845d3f343"
+    },
+    "w13gg_weight": {
+      "bytes": 23887872,
+      "sha256": "2e4bda26268a3232aa7cc682c6a716ecd8df62060ac662d6bc18eac32d76edfd"
+    },
+    "w13hf": {
+      "bytes": 21233664,
+      "sha256": "ff0838200d96f57d739368b92922e564e3c4d371e627e0787db7ddaef013d0e6"
+    },
+    "w13hf_amax": {
+      "bytes": 32,
+      "sha256": "9a8a6f979e69fcdb873bd14f892c69fe21de0f1b1f1f90d54e7d2666b30f6d5c"
+    },
+    "w13hf_outer_scale_denominator": {
+      "bytes": 4,
+      "sha256": "0e01e67b0bf055fde977279fdce52ba668a272747f16a688b8603eac9a049daa"
+    },
+    "w13hf_scale": {
+      "bytes": 2654208,
+      "sha256": "8e9dc42cb0eab4ff704a24c63b9fcaca8b4bb8f7c93a6d9417daa8aecfae72e7"
+    },
+    "w2gg_scale": {
+      "bytes": 32,
+      "sha256": "15f8dc16f75e88bfcbf4ccb8555e060a03fb52d6e3b87d98cbbb343fab45f8ff"
+    },
+    "w2gg_weight": {
+      "bytes": 11943936,
+      "sha256": "f4f130b08bb0cfd31308c1b38c79ee1c35080aa718900b9986c8dcfc826e8c78"
+    },
+    "w2hf": {
+      "bytes": 10616832,
+      "sha256": "131c4ce2804757575a2d4f5136c1562c43aafa88d402580910eae0caee758d51"
+    },
+    "w2hf_amax": {
+      "bytes": 32,
+      "sha256": "a3c5841b54404cbff2d973b30b1aaf474107da5d144f41db906e1b1eb33acd67"
+    },
+    "w2hf_outer_scale_denominator": {
+      "bytes": 4,
+      "sha256": "0e01e67b0bf055fde977279fdce52ba668a272747f16a688b8603eac9a049daa"
+    },
+    "w2hf_scale": {
+      "bytes": 1327104,
+      "sha256": "fc3e30cd9d1097e4232e5c5a9fe117200a2c7bc6b7deb551b9997c303864a15d"
+    }
+  },
+  "samples": [
+    {
+      "projection": "w13",
+      "t": 1,
+      "activation": {
+        "max_mismatches": 0,
+        "inner_mismatches": 0,
+        "checked": 2304,
+        "wall": {
+          "p10_ms": 0.1669375,
+          "median_ms": 0.1834165,
+          "p90_ms": 0.18843749999999998
+        },
+        "gpu": {
+          "p10_ms": 0.027291651349514723,
+          "median_ms": 0.027520814910531044,
+          "p90_ms": 0.028208422008901834
+        }
+      },
+      "raw": {
+        "relative_l2": 1.0917589523865881e-07,
+        "max_abs_over_ref_max": 1.5017551278604423e-07,
+        "ms": {
+          "p10_ms": 0.396167,
+          "median_ms": 0.4395625,
+          "p90_ms": 0.646
+        },
+        "compared": 520
+      },
+      "qdq_early": {
+        "relative_l2": 8.913470267209002e-08,
+        "max_abs_over_ref_max": 1.13155417419848e-07,
+        "ms": {
+          "p10_ms": 0.36972900000000003,
+          "median_ms": 0.405979,
+          "p90_ms": 0.429708
+        },
+        "compared": 520
+      },
+      "qdq_late": {
+        "relative_l2": 4.5696829465314675e-08,
+        "max_abs_over_ref_max": 7.28870704610124e-08,
+        "ms": {
+          "p10_ms": 0.40372949999999996,
+          "median_ms": 0.5838545,
+          "p90_ms": 0.8522709999999999
+        },
+        "compared": 520
+      }
+    },
+    {
+      "projection": "w13",
+      "t": 32,
+      "activation": {
+        "max_mismatches": 0,
+        "inner_mismatches": 0,
+        "checked": 73728,
+        "wall": {
+          "p10_ms": 0.175896,
+          "median_ms": 0.1924585,
+          "p90_ms": 0.2231875
+        },
+        "gpu": {
+          "p10_ms": 0.026416615583002567,
+          "median_ms": 0.026541645638644695,
+          "p90_ms": 0.026645837351679802
+        }
+      },
+      "raw": {
+        "relative_l2": 0.00020959415710203325,
+        "max_abs_over_ref_max": 0.00019198527099958127,
+        "ms": {
+          "p10_ms": 0.45118800000000003,
+          "median_ms": 0.48358349999999994,
+          "p90_ms": 0.5331455
+        },
+        "compared": 16640
+      },
+      "qdq_early": {
+        "relative_l2": 0.00016556341021015718,
+        "max_abs_over_ref_max": 0.00022353092719255873,
+        "ms": {
+          "p10_ms": 0.4590835,
+          "median_ms": 0.5196255,
+          "p90_ms": 0.610396
+        },
+        "compared": 16640
+      },
+      "qdq_late": {
+        "relative_l2": 4.7944023304894327e-08,
+        "max_abs_over_ref_max": 6.840993769636198e-08,
+        "ms": {
+          "p10_ms": 0.277104,
+          "median_ms": 0.30464649999999993,
+          "p90_ms": 0.3108955
+        },
+        "compared": 16640
+      },
+      "serial": {
+        "relative_l2": 4.7944023304894327e-08,
+        "max_abs_over_ref_max": 6.840993769636198e-08,
+        "ms": {
+          "p10_ms": 1.7638544999999999,
+          "median_ms": 1.7999794999999998,
+          "p90_ms": 2.742312
+        },
+        "compared": 16640
+      }
+    },
+    {
+      "projection": "w2",
+      "t": 1,
+      "activation": {
+        "max_mismatches": 0,
+        "inner_mismatches": 0,
+        "checked": 9216,
+        "wall": {
+          "p10_ms": 0.125771,
+          "median_ms": 0.15293800000000002,
+          "p90_ms": 0.1730215
+        },
+        "gpu": {
+          "p10_ms": 0.007916649337857962,
+          "median_ms": 0.008000002708286047,
+          "p90_ms": 0.008124974556267262
+        }
+      },
+      "raw": {
+        "relative_l2": 1.0827120718538424e-07,
+        "max_abs_over_ref_max": 8.665895030808947e-08,
+        "ms": {
+          "p10_ms": 0.174208,
+          "median_ms": 0.2070835,
+          "p90_ms": 0.23399999999999999
+        },
+        "compared": 520
+      },
+      "qdq_early": {
+        "relative_l2": 7.208530116315437e-08,
+        "max_abs_over_ref_max": 6.9720288762077e-08,
+        "ms": {
+          "p10_ms": 0.172792,
+          "median_ms": 0.18083300000000002,
+          "p90_ms": 0.2092915
+        },
+        "compared": 520
+      },
+      "qdq_late": {
+        "relative_l2": 5.469992703749959e-08,
+        "max_abs_over_ref_max": 8.174855566790403e-08,
+        "ms": {
+          "p10_ms": 0.1661245,
+          "median_ms": 0.171313,
+          "p90_ms": 0.1807915
+        },
+        "compared": 520
+      }
+    },
+    {
+      "projection": "w2",
+      "t": 32,
+      "activation": {
+        "max_mismatches": 0,
+        "inner_mismatches": 0,
+        "checked": 294912,
+        "wall": {
+          "p10_ms": 0.1370625,
+          "median_ms": 0.1685205,
+          "p90_ms": 0.19027049999999998
+        },
+        "gpu": {
+          "p10_ms": 0.008187489584088326,
+          "median_ms": 0.008458271622657776,
+          "p90_ms": 0.008729170076549053
+        }
+      },
+      "raw": {
+        "relative_l2": 0.0002085970489143918,
+        "max_abs_over_ref_max": 0.00023077687169819553,
+        "ms": {
+          "p10_ms": 0.23537500000000003,
+          "median_ms": 0.2411875,
+          "p90_ms": 0.2458335
+        },
+        "compared": 16640
+      },
+      "qdq_early": {
+        "relative_l2": 0.00015709116599943115,
+        "max_abs_over_ref_max": 0.00020548790281261275,
+        "ms": {
+          "p10_ms": 0.202625,
+          "median_ms": 0.2147295,
+          "p90_ms": 0.233875
+        },
+        "compared": 16640
+      },
+      "qdq_late": {
+        "relative_l2": 5.127468643768643e-08,
+        "max_abs_over_ref_max": 6.91794257403988e-08,
+        "ms": {
+          "p10_ms": 0.206417,
+          "median_ms": 0.23658300000000002,
+          "p90_ms": 0.244229
+        },
+        "compared": 16640
+      },
+      "serial": {
+        "relative_l2": 5.127468643768643e-08,
+        "max_abs_over_ref_max": 6.91794257403988e-08,
+        "ms": {
+          "p10_ms": 1.3778335,
+          "median_ms": 1.399479,
+          "p90_ms": 1.4115
+        },
+        "compared": 16640
+      }
+    }
+  ]
+}

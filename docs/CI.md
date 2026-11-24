@@ -118,6 +118,24 @@ These checks use synthetic worker replies. The opt-in
 `scripts/qualify_flashnext_images.py` command still requires a private, actual
 model run for artifact-specific image, MTP and prefix lifecycle evidence.
 
+The [standard benchmark](BENCHMARK.md) tool and its legacy entry point have
+model-free tests: a synthetic profile, a fake worker, fake servers and a fake
+client stand in for a model, `stark-generate`, a reference engine and llmprobe.
+They cover profile validation, arm construction, the plan, the block layout,
+paired comparison and standing, the quality bar, and that the legacy command
+line still behaves as it did. Run them when changing the tool, a profile or the
+entry point:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 pytest -q scripts/test_benchmark_standard.py scripts/test_benchmark_inkling_engine_matrix.py
+uv run --project tools/converter --locked --python 3.13.13 ruff check scripts/benchmark_standard.py scripts/benchmark_inkling_engine_matrix.py scripts/test_benchmark_standard.py scripts/test_benchmark_inkling_engine_matrix.py
+uv run --project tools/converter --locked --python 3.13.13 ruff format --check scripts/benchmark_standard.py scripts/benchmark_inkling_engine_matrix.py scripts/test_benchmark_standard.py scripts/test_benchmark_inkling_engine_matrix.py
+```
+
+These are local checks: the CI workflow's benchmark and qualification step does
+not run them yet. A timing run needs models and the GPU and is never part of
+CI.
+
 Installer, app and release scripts (shell syntax plus every unit test CI runs):
 
 ```sh

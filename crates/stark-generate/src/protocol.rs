@@ -95,6 +95,19 @@ pub fn main() {
             // write FD is transferred exclusively to the sampler.
             _gpu_memory_sampler = unsafe { stark_engine::backends::metal::memory_usage::start_from_environment() };
             let media = staging.as_deref().map(crate::media::MediaStore::open).transpose()?;
+            #[cfg(target_os = "macos")]
+            if crate::inkling_artifact::recognizes(&path) {
+                if validation_gemma_text_only {
+                    return Err("validation_family_not_supported");
+                }
+                let backend = crate::inkling::InklingBackend::load(&path, cancellation)?;
+                let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
+                return crate::generation::run_lines(
+                    &mut worker,
+                    &mut crate::prefix_cache::StandardInput::reader(),
+                    &mut output,
+                );
+            }
             let hybrid = {
                 match stark_engine::engine::hybrid::recognizes(&path) {
                     Ok(hybrid) => hybrid,

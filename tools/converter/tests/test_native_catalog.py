@@ -17,6 +17,20 @@ def test_legacy_glm_catalog_api_remains_compatible():
     assert native_catalog.allowed_choice(native_catalog.CHOICE)
 
 
+def test_inkling_catalog_binds_original_target_and_draft_to_default_vision_mode():
+    family = native_catalog.INKLING_FAMILY_ID
+    choice = native_catalog.INKLING_CHOICE
+    [item] = native_catalog.catalog_items(family)
+    assert item["artifact_modes"] == ["vision-language"]
+    assert item["default_artifact_mode"] == "vision-language"
+    assert item["repo"] == "thinkingmachines/Inkling-2-Mini"
+    assert hybrid_prepare.SOURCES[choice]["required_weight_files"] == [
+        "model-00001-of-00001.safetensors",
+        "mtp.safetensors",
+    ]
+    assert native_catalog.source_choice(family, item) == choice
+
+
 def test_qwen_native_catalog_preserves_text_source_and_adds_retained_image_choices():
     items = native_catalog.catalog_items(native_catalog.QWEN_FAMILY_ID)
     assert len(items) == 3

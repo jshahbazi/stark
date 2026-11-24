@@ -217,7 +217,7 @@ pub(crate) struct ImageArtifactIdentity<'a> {
 
 impl ImageArtifactIdentity<'_> {
     fn valid(&self) -> bool {
-        matches!(self.schema_version, 2..=6)
+        matches!(self.schema_version, 2..=7)
             && [
                 self.artifact_sha256,
                 self.config_sha256,
@@ -257,6 +257,7 @@ fn image_family_limits(
             4,
         ) => ((16, 3), 2520, 280),
         ("gemma3-siglip-bf16-v1", 1, 5) => ((14, 4), 4096, 256),
+        ("inkling2-mini-native-v1", 1, 7) => ((20, 2), 4096, 1024),
         _ => return None,
     };
     (geometry == expected_geometry).then_some((patches, tokens, patches * geometry.0 * geometry.0))
@@ -280,6 +281,7 @@ mod image_family_tests {
             ("gemma4-12b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
             ("gemma4-26b-a4b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
             ("gemma3-siglip-bf16-v1", 1, 5, (14, 4), (4096, 256, 802816)),
+            ("inkling2-mini-native-v1", 1, 7, (20, 2), (4096, 1024, 1638400)),
         ] {
             assert_eq!(image_family_limits(profile, version, schema, geometry), Some(expected));
             assert_eq!(image_family_limits(profile, version + 1, schema, geometry), None);
@@ -306,6 +308,7 @@ fn valid_image_metadata(
     let (max_patches, max_image_tokens) = match geometry {
         (16, 2) => (65_536, 16_384),
         (16, 3) => (2520, 280),
+        (20, 2) => (4096, 1024),
         (14, 4) if metadata.grid == [1, 64, 64] && metadata.processed_dimensions == [896, 896] => (4096, 256),
         _ => return false,
     };
@@ -588,6 +591,22 @@ pub(crate) trait GenerationBackend {
     fn default_mtp_drafts(&self) -> u32 {
         0
     }
+    /// Default draft count for a request that names neither `mtp` nor
+    /// `mtp_drafts`. It may only lower `default_mtp_drafts`.
+    fn default_mtp_drafts_for(
+        &self,
+        _sampling: &Sampling,
+    ) -> u32 {
+        self.default_mtp_drafts()
+    }
+    /// Draft count for `mtp: true` without a count, when the backend tunes it
+    /// to the sampling mode. `None` keeps `recommended_drafts`.
+    fn recommended_mtp_drafts_for(
+        &self,
+        _sampling: &Sampling,
+    ) -> Option<u32> {
+        None
+    }
     /// Whether requests may select adaptive depth or prompt lookup.
     fn supports_mtp_scheduling(&self) -> bool {
         false
@@ -659,6 +678,12 @@ pub(crate) trait GenerationBackend {
     /// a multiple of `PREFILL_CHUNK_TOKENS`.
     fn prefix_cache_chunk_tokens(&self) -> usize {
         prefix_cache::PREFILL_CHUNK_TOKENS
+    }
+    /// Prompt tokens a request always prefills after a reuse boundary: its own
+    /// boundary is the largest chunk multiple at or below its input length
+    /// less this tail. At least one.
+    fn prefix_cache_tail_tokens(&self) -> usize {
+        1
     }
     /// What a retained state must match, as reported in readiness.
     fn prefix_cache_key(&self) -> &'static str {
@@ -755,6 +780,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             backend.prefix_cache_supported()
                 && chunk >= prefix_cache::PREFILL_CHUNK_TOKENS
                 && chunk.is_multiple_of(prefix_cache::PREFILL_CHUNK_TOKENS)
+                && (1..chunk).contains(&backend.prefix_cache_tail_tokens())
         });
         Ok(Self {
             backend,
@@ -783,6 +809,26 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             },
             Some(_) => Err("invalid_generation_request"),
         }
+    }
+
+    /// Resolve MTP. When the request names no count, let the backend tune its
+    /// default (no setting) or recommendation (`mtp: true`) to the sampling mode.
+    fn resolve_default_mtp(
+        &self,
+        enabled: Option<bool>,
+        drafts: Option<u32>,
+        sampling: &Sampling,
+    ) -> Result<u32, &'static str> {
+        let resolved = self.resolve_mtp(enabled, drafts)?;
+        Ok(match (enabled, drafts) {
+            (None, None) => resolved.min(self.backend.default_mtp_drafts_for(sampling)),
+            (Some(true), None) => self
+                .backend
+                .recommended_mtp_drafts_for(sampling)
+                .filter(|&count| count > 0 && self.mtp.is_some_and(|caps| count as usize <= caps.max_drafts))
+                .unwrap_or(resolved),
+            _ => resolved,
+        })
     }
 
     fn resolve_mtp(
@@ -1137,12 +1183,13 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 {
                     return Err("invalid_generation_request");
                 }
+                let default_drafts = self.resolve_default_mtp(mtp, mtp_drafts, &sampling)?;
                 let mut options = GenerationOptions {
                     context_tokens: maximum,
                     max_new_tokens: maximum - input_tokens,
                     seed: 0,
                     sampling,
-                    mtp_drafts: self.resolve_mtp(mtp, mtp_drafts)?,
+                    mtp_drafts: default_drafts,
                     mtp_scheduling: MtpScheduling::default(),
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
                     extra_stop_token_ids: Vec::new(),
@@ -1198,7 +1245,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 cache_scope,
             } => {
                 let cache_scope = self.resolve_cache_scope(cache_scope)?;
-                let mut drafts = self.resolve_mtp(mtp, mtp_drafts)?;
+                let mut drafts = self.resolve_default_mtp(mtp, mtp_drafts, &sampling)?;
                 let mtp_scheduling =
                     self.resolve_mtp_scheduling(mtp_policy, mtp_lookup, mtp_drafts.is_some(), &mut drafts)?;
                 let options = GenerationOptions {
@@ -1539,7 +1586,8 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         "stop_sequences":true,"cancellation":"pipe-v1"});
     if let Some(enabled) = worker.prefix_cache {
         readiness["prefix_cache"] = json!({"supported":enabled,"enabled":enabled,
-            "chunk_tokens":worker.backend.prefix_cache_chunk_tokens(),"idle_seconds":prefix_cache::IDLE_SECONDS,
+            "chunk_tokens":worker.backend.prefix_cache_chunk_tokens(),
+            "tail_tokens":worker.backend.prefix_cache_tail_tokens(),"idle_seconds":prefix_cache::IDLE_SECONDS,
             "key":worker.backend.prefix_cache_key()});
         if enabled {
             readiness["state_policy"] = json!(prefix_cache::POLICY);
@@ -1589,11 +1637,16 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             worker.backend.image_geometry(),
         )
         .ok_or("invalid_model_config")?;
+        let max_source_pixels = if identity.schema_version == 7 {
+            max_processed_pixels
+        } else {
+            32_000_000
+        };
         readiness["image_input"] = json!({
             "version":"mediaref-v1","transport":"owner-private-file-v1","qualified":false,"qualification":"unverified",
             "operations":["prepare_image","generate_image","discard_image"],
             "formats":["image/jpeg","image/png"],"max_images":1,
-            "max_compressed_bytes":crate::media::MAX_COMPRESSED_BYTES,"max_source_pixels":32_000_000,
+            "max_compressed_bytes":crate::media::MAX_COMPRESSED_BYTES,"max_source_pixels":max_source_pixels,
             "max_source_dimension":16_384,
             "max_processed_pixels":max_processed_pixels,"max_patches":max_patches,"max_image_tokens":max_image_tokens,
             "artifact_schema_version":identity.schema_version,"model_source":model_source,
@@ -1730,6 +1783,7 @@ mod tests {
         mtp_scheduling: bool,
         scheduling_requests: Vec<MtpScheduling>,
         default_scheduling: MtpScheduling,
+        sampling_tuned_drafts: Option<(u32, u32)>,
     }
 
     struct FakePreparedImage {
@@ -1804,6 +1858,24 @@ mod tests {
         }
         fn default_mtp_drafts(&self) -> u32 {
             self.default_mtp_drafts
+        }
+        fn default_mtp_drafts_for(
+            &self,
+            sampling: &Sampling,
+        ) -> u32 {
+            self.sampling_tuned_drafts.map_or(self.default_mtp_drafts, |(greedy, sampled)| {
+                if matches!(sampling, Sampling::Greedy {}) {
+                    greedy
+                } else {
+                    sampled
+                }
+            })
+        }
+        fn recommended_mtp_drafts_for(
+            &self,
+            sampling: &Sampling,
+        ) -> Option<u32> {
+            self.sampling_tuned_drafts.map(|_| self.default_mtp_drafts_for(sampling))
         }
         fn supports_mtp_scheduling(&self) -> bool {
             self.mtp_scheduling
@@ -2100,6 +2172,7 @@ mod tests {
             mtp_scheduling: false,
             scheduling_requests: Vec::new(),
             default_scheduling: MtpScheduling::default(),
+            sampling_tuned_drafts: None,
         })
         .unwrap()
     }
@@ -2164,6 +2237,37 @@ mod tests {
         let mut request = standard();
         request["mtp_drafts"] = json!(0);
         assert_eq!(post(&mut worker, request)["mtp"]["drafts"], 0);
+    }
+
+    #[test]
+    fn sampling_tuned_backend_resolves_default_and_toggle_by_mode() {
+        let mut backend = worker().backend;
+        backend.mtp = Some(capabilities(3, 1));
+        backend.default_mtp_drafts = 3;
+        backend.sampling_tuned_drafts = Some((3, 2));
+        let mut worker = GenerationWorker::new(backend).unwrap();
+        let sampled = json!({"mode":"stochastic","temperature":1.0});
+        for (mtp, sampling, expected) in [
+            (None, None, 3),
+            (None, Some(sampled.clone()), 2),
+            (Some(true), None, 3),
+            (Some(true), Some(sampled.clone()), 2),
+            (Some(false), None, 0),
+        ] {
+            let mut request = standard();
+            if let Some(mtp) = mtp {
+                request["mtp"] = json!(mtp);
+            }
+            if let Some(sampling) = sampling {
+                request["sampling"] = sampling;
+            }
+            assert_eq!(post(&mut worker, request)["mtp"]["drafts"], expected, "{mtp:?}");
+        }
+        // An explicit count is never retuned.
+        let mut request = standard();
+        request["mtp_drafts"] = json!(1);
+        request["sampling"] = sampled;
+        assert_eq!(post(&mut worker, request)["mtp"]["drafts"], 1);
     }
 
     #[test]
@@ -3932,7 +4036,7 @@ mod tests {
         assert_eq!(enabled["state_policy"], "consecutive-prefix-v1");
         assert_eq!(
             enabled["prefix_cache"],
-            json!({"supported":true,"enabled":true,"chunk_tokens":1024,"idle_seconds":600,
+            json!({"supported":true,"enabled":true,"chunk_tokens":1024,"tail_tokens":1,"idle_seconds":600,
                 "key":"model-instance+context-tokens+cache-scope"})
         );
         assert_eq!(enabled["operations"], json!(["tokenize", "decode", "generate", "reset_cache"]));

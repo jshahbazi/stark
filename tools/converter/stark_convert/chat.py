@@ -16,10 +16,14 @@ from pathlib import Path
 
 from jinja2.exceptions import TemplateError
 
+from . import inkling_prepare
 from ._build_metadata import ConversionError, file_hash, open_regular
+from .api_tools import tool_parser_for
 from .generation_eta import progress_frame
+from .inkling_chat import PARSER as INKLING_PARSER
+from .inkling_chat import parse_response as parse_inkling_response
 from .media import MAX_IMAGE_BYTES, ImageData, MediaError, PrivateMediaStore
-from .mtp import mtp_capabilities, resolve_mtp
+from .mtp import default_mtp_enabled, mtp_capabilities, resolve_mtp
 from .reasoning import assistant_message, prompt_opens_reasoning, reasoning_options
 from .resource_budget import REQUEST_BUDGET_MIB, WIRE_BYTES
 from .template_runtime import (
@@ -295,6 +299,8 @@ def load_template(model, *, expected_hashes=None):
                 from . import qwen38_retained
 
                 template_hashes = qwen38_retained.SUPPORTED_TEMPLATE_HASHES
+            elif image_family == {"profile": inkling_prepare.VISION_PROFILE, "version": 1}:
+                template_hashes = {inkling_prepare.TEMPLATE_SHA}
             contract = config.get("artifact_contract")
             family = contract.get("family") if isinstance(contract, dict) else None
             if (
@@ -996,10 +1002,14 @@ def run_chat(args, worker):
     if ready.get("ready") is not True or ready.get("mode") != "text-generation-v1":
         raise ChatError("Generation worker could not load this model.")
     image_path = getattr(args, "image", None)
-    mtp_enabled = getattr(args, "mtp", False)
+    mtp_enabled = getattr(args, "mtp", None)
     if mtp_enabled and image_path is not None:
         raise ChatError("MTP is unavailable for image requests.")
     capabilities = mtp_capabilities(ready)
+    if mtp_enabled is None:
+        # Draft by default when the loaded worker does so (Inkling's multi-row
+        # verifier); image requests and older workers stay off.
+        mtp_enabled = image_path is None and default_mtp_enabled(capabilities)
     try:
         drafts = resolve_mtp(mtp_enabled, capabilities)
     except ValueError as error:
@@ -1124,8 +1134,14 @@ def run_chat(args, worker):
                 print(str(error))
                 continue
             raise
-        print("Stark> " + terminal_text(reply["text"]) + "\n")
-        messages = [*candidate, assistant_message(reply["text"], initial_thinking=prompt_opens_reasoning(prompt))]
+        if tool_parser_for(codec) == INKLING_PARSER:
+            assistant, _, _ = parse_inkling_response(reply["text"])
+            displayed = assistant["content"]
+        else:
+            assistant = assistant_message(reply["text"], initial_thinking=prompt_opens_reasoning(prompt))
+            displayed = reply["text"]
+        print("Stark> " + terminal_text(displayed) + "\n")
+        messages = [*candidate, assistant]
         if image is not None:
             image_attached = True
 
@@ -1143,10 +1159,10 @@ def main(argv=None):
     )
     mtp = parser.add_mutually_exclusive_group()
     mtp.add_argument(
-        "--mtp", dest="mtp", action="store_true", help="Enable exact MTP when the loaded model supports it"
+        "--mtp", dest="mtp", action="store_true", help="Enable exact MTP (default if the worker drafts by default)"
     )
-    mtp.add_argument("--no-mtp", dest="mtp", action="store_false", help="Disable MTP (default)")
-    parser.set_defaults(mtp=False)
+    mtp.add_argument("--no-mtp", dest="mtp", action="store_false", help="Disable MTP")
+    parser.set_defaults(mtp=None)
     parser.add_argument(
         "--timeout",
         type=float,

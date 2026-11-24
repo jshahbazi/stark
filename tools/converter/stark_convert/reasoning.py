@@ -3,6 +3,7 @@
 import hashlib
 
 from .api_tools import GLM53_TEMPLATE_SHA256
+from .inkling_prepare import TEMPLATE_SHA as INKLING_TEMPLATE_SHA
 from .template_compat import template_program_sha256
 
 # Same source-bound GLM program as api_tools: zai-org/GLM-5.3-Flash
@@ -17,16 +18,20 @@ def prompt_opens_reasoning(prompt):
 
 
 def reasoning_options(codec, *, thinking=False, effort=None):
-    """Map controls only to the reviewed GLM effort template or boolean input."""
+    """Map controls to the reviewed model's reasoning inputs."""
     source = (codec or {}).get("prompt_template", "")
     reasoning = (codec or {}).get("reasoning_config")
     field = reasoning.get("field_name") if isinstance(reasoning, dict) else None
     if not isinstance(field, str) or field not in {"enable_thinking", "thinking"}:
         field = "enable_thinking"
     try:
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest() if isinstance(source, str) else None
+        if digest == INKLING_TEMPLATE_SHA:
+            if effort is not None and effort not in {"low", "high", "max"}:
+                raise ValueError("This model does not support the requested reasoning effort.")
+            return {"reasoning_effort": effort or ("high" if thinking else "none")}
         glm = isinstance(source, str) and (
-            hashlib.sha256(source.encode("utf-8")).hexdigest() == GLM53_TEMPLATE_SHA256
-            or template_program_sha256(source) == _GLM53_PROGRAM
+            digest == GLM53_TEMPLATE_SHA256 or template_program_sha256(source) == _GLM53_PROGRAM
         )
     except UnicodeEncodeError:
         glm = False

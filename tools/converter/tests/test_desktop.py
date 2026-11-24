@@ -17,6 +17,48 @@ import pytest
 
 from stark_convert.desktop import Desktop, DesktopError, converter_progress, metric, metrics, progress_counts
 
+INKLING_MTP = {
+    "supported": True,
+    "max_drafts": 3,
+    "recommended_drafts": 3,
+    "default_drafts": 3,
+    "sampling": "native-target-draw-match-v1",
+    "verification": "inkling-dspark-short-target-draw-v1",
+    "operations": ["generate"],
+}
+
+
+@pytest.mark.parametrize(
+    "enabled, sampling, expected",
+    [
+        (True, None, 3),
+        (True, {"mode": "greedy"}, 3),
+        (True, {"mode": "stochastic", "temperature": 1.0}, 2),
+        (False, {"mode": "stochastic", "temperature": 1.0}, 0),
+    ],
+)
+def test_inkling_requests_resolve_the_measured_best_draft_depth(enabled, sampling, expected):
+    assert Desktop.resolve_request_mtp(enabled, INKLING_MTP, None, sampling) == expected
+
+
+def test_image_requests_cannot_enable_inkling_drafting():
+    with pytest.raises(Exception, match="image requests"):
+        Desktop.resolve_request_mtp(True, INKLING_MTP, object(), None)
+
+
+def test_serial_fallback_acknowledgement_is_accepted_only_for_the_requested_count():
+    base = {"sampling": INKLING_MTP["sampling"], "verification": INKLING_MTP["verification"]}
+    Desktop.validate_mtp_reply({"mtp": {**base, "enabled": True, "drafts": 3}}, INKLING_MTP, 3)
+    Desktop.validate_mtp_reply({"mtp": {**base, "enabled": False, "drafts": 0, "requested_drafts": 3}}, INKLING_MTP, 3)
+    for ack in (
+        {**base, "enabled": False, "drafts": 0},
+        {**base, "enabled": False, "drafts": 0, "requested_drafts": 2},
+        {**base, "enabled": True, "drafts": 2},
+    ):
+        with pytest.raises(ValueError):
+            Desktop.validate_mtp_reply({"mtp": ack}, INKLING_MTP, 3)
+
+
 API_PROGRESS_FIELDS = {
     "event",
     "source",

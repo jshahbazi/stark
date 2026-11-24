@@ -1,8 +1,8 @@
 """Prepare pinned original-format weights for Stark's native hybrid worker.
 
 This path preserves quantized bytes. It downloads metadata and weights only;
-repository Python, speculative sidecars and foreign inference engines are never
-requested or executed. Native load and execution remain separate checks.
+Repository Python and foreign inference engines are excluded. A supported
+checkpoint's original speculative weights can be retained alongside its target.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-from . import qwen38_external
+from . import inkling_prepare, qwen38_external
 from .cli import _publish
 from .progress import (
     FDProgressSink,
@@ -35,6 +35,10 @@ from .sources import SourceSnapshot, _verified_hashes, huggingface_repository
 from .streaming import ConversionError, UnsupportedConversion, load_checkpoint, read_safetensors_header
 
 SOURCES = {
+    # The default Inkling choice downloads the original, then publishes the
+    # derived 8-bit artifact; the original stays available under its own name.
+    inkling_prepare.CHOICE: inkling_prepare.AFFINE8_SOURCE,
+    inkling_prepare.ORIGINAL_CHOICE: inkling_prepare.SOURCE,
     "ripple-q4-k-m": {
         "architecture": "ricursive",
         "weights_repo": "AtomicChat/Ripple-65B-Preview-GGUF",
@@ -522,6 +526,8 @@ def prepared_identity(directory: Path) -> dict | None:
         config_path = directory / "config.json"
         config = _json(config_path)
         receipt = _json(directory / "native-source.json")
+        if config.get("model_type") == inkling_prepare.FAMILY:
+            return inkling_prepare.prepared_identity(directory, config, receipt)
         marker = config.get("stark_native_hybrid")
         if not isinstance(marker, dict) or marker.get("schema_version") != 1:
             return None
@@ -590,7 +596,7 @@ def prepared_identity(directory: Path) -> dict | None:
             "weight_bytes": size,
             "quantization": source["quantization"],
         }
-    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError, ConversionError):
         return None
 
 
@@ -708,12 +714,18 @@ def prepare(
     progress: ProgressCallback | ProgressReporter | None = None,
     artifact_mode: str = "text",
 ) -> dict:
+    inkling = choice in inkling_prepare.CHOICES
     if artifact_mode not in {"text", "vision-language"} or (
-        artifact_mode == "vision-language" and choice not in {"qwen38-mlx-serve-mixed", "qwen38-lily-q4-xl"}
+        artifact_mode == "vision-language"
+        and choice not in {"qwen38-mlx-serve-mixed", "qwen38-lily-q4-xl"}
+        and not inkling
     ):
         raise ValueError("unsupported native artifact mode")
     progress = reporter(progress)
-    source = SOURCES[choice]
+    published = SOURCES[choice]
+    # A derived choice downloads and verifies its pinned base exactly as that
+    # base's own choice does; only the published folder differs.
+    source = SOURCES[published["derived_from"]] if "derived_from" in published else published
     output = output.absolute()
     if output.exists() or output.is_symlink():
         raise ValueError("output already exists")
@@ -732,6 +744,9 @@ def prepare(
     else:
         marker.write_text(json.dumps(identity, sort_keys=True))
     disk_bytes = source["weight_bytes"] + (0 if source.get("ngram_in_weight_bytes") else source.get("ngram_bytes", 0))
+    if published is not source:
+        # The download and the derived folder coexist until the derived one is verified.
+        disk_bytes += published["weight_bytes"]
     if not offline and shutil.disk_usage(output.parent).free < disk_bytes + 4 * 1024**3:
         # Account for a resumable completed shard already in our owned staging
         # directory. Hugging Face handles its own incomplete-file recovery.
@@ -783,7 +798,7 @@ def prepare(
     snapshot_download(
         source["metadata_repo"],
         revision=source["metadata_revision"],
-        allow_patterns=_METADATA,
+        allow_patterns=inkling_prepare.METADATA if inkling else _METADATA,
         local_dir=stage,
         local_files_only=offline,
         max_workers=2,
@@ -820,18 +835,120 @@ def prepare(
     if progress is not None:
         progress.emit("download", "complete", weight_bytes, weight_bytes, force=True)
         progress.emit("conversion", "running", force=True)
-    receipt = finish_metadata(stage, choice)
-    if artifact_mode == "vision-language":
+    receipt = inkling_prepare.stage(stage) if inkling else finish_metadata(stage, choice)
+    if artifact_mode == "vision-language" and not inkling:
         from .hybrid_vision import prepare_image_artifact
 
         prepare_image_artifact(stage, choice)
-    # Publish only the completed, metadata-bound directory. The download remains
-    # resumable on all preceding failures and is never treated as a ready model.
-    _publish(stage, output)
-    (output / marker.name).unlink()
+    if published is not source:
+        # Derive beside the verified download and publish only the verified
+        # derived folder. Any failure before publication leaves the download
+        # resumable and no output; the download is removed after publication.
+        derived = output.with_name(output.name + _DERIVE_SUFFIX)
+        receipt = _derive_inkling_affine8(stage, derived)
+        _publish(derived, output)
+        (output / _DERIVE_MARKER).unlink()
+        shutil.rmtree(stage)
+        weight_bytes = published["weight_bytes"]
+    else:
+        # Publish only the completed, metadata-bound directory. The download remains
+        # resumable on all preceding failures and is never treated as a ready model.
+        _publish(stage, output)
+        (output / marker.name).unlink()
     if progress is not None:
         progress.emit("conversion", "complete", force=True)
     return {**receipt, "weight_bytes": weight_bytes, "status": "prepared"}
+
+
+_DERIVE_SUFFIX = ".native-derive"
+_UPGRADE_SUFFIX = ".affine8-upgrade"
+_DERIVE_MARKER = "stark-derive.json"
+_DERIVE_IDENTITY = {"layout": inkling_prepare.AFFINE8_LAYOUT, "derived_from": inkling_prepare.ORIGINAL_CHOICE}
+_DERIVE_MARGIN = 4 * 1024**3
+
+
+def _identity(source: dict) -> dict:
+    return {
+        "repo": source["weights_repo"],
+        "revision": source["weights_revision"],
+        "architecture": source["architecture"],
+        "weight_bytes": source["weight_bytes"],
+        "quantization": source["quantization"],
+    }
+
+
+def _derive_inkling_affine8(original: Path, work: Path) -> dict:
+    """Write the 8-bit artifact from a verified original into an owned folder and verify it.
+
+    ``work`` is created here and carries an ownership marker; an interrupted
+    derive leaves only that unpublished folder, which the next attempt replaces.
+    """
+    from . import inkling_affine8_artifact
+
+    if work.is_symlink():
+        raise ValueError("invalid derived staging directory")
+    if work.exists():
+        marker = work / _DERIVE_MARKER
+        if marker.is_symlink() or not marker.is_file() or _json(marker) != _DERIVE_IDENTITY:
+            raise ValueError("derived staging directory is not owned by this operation")
+        shutil.rmtree(work)
+    target_bytes = inkling_prepare.AFFINE8_TARGET_BYTES + inkling_prepare.WEIGHTS[inkling_prepare.DRAFT][0]
+    if shutil.disk_usage(work.parent).free < target_bytes + _DERIVE_MARGIN:
+        raise OSError(errno.ENOSPC, "insufficient disk space for the derived 8-bit artifact")
+    work.mkdir(mode=0o700)
+    (work / _DERIVE_MARKER).write_text(json.dumps(_DERIVE_IDENTITY, sort_keys=True))
+    result = inkling_affine8_artifact.build(original, work)
+    if (
+        result["target_sha256"] != inkling_prepare.AFFINE8_TARGET_SHA
+        or result["target_bytes"] != inkling_prepare.AFFINE8_TARGET_BYTES
+    ):
+        raise ConversionError("Derived Inkling 8-bit artifact identity mismatch")
+    if prepared_identity(work) != _identity(inkling_prepare.AFFINE8_SOURCE):
+        raise ConversionError("Derived Inkling 8-bit prepared identity could not be verified")
+    return _json(work / "native-source.json")
+
+
+def _exchange(first: Path, second: Path) -> None:
+    """Atomically swap two directories (macOS RENAME_SWAP, Linux RENAME_EXCHANGE)."""
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename = library.renamex_np
+        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        result = rename(os.fsencode(first), os.fsencode(second), 2)
+    elif sys.platform.startswith("linux"):
+        rename = library.renameat2
+        rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+        result = rename(-100, os.fsencode(first), -100, os.fsencode(second), 2)
+    else:
+        raise RuntimeError("unsupported_publication_platform")
+    if result:
+        raise OSError(ctypes.get_errno(), "atomic_exchange_failed")
+
+
+def upgrade_inkling_affine8(directory: Path) -> dict:
+    """Replace a prepared original Inkling 2 Mini folder with the derived 8-bit artifact.
+
+    The 8-bit artifact is written and verified beside the folder, then the two
+    are exchanged atomically and the original is removed. On any failure before
+    the exchange the original folder is untouched. This is an explicit
+    operation; nothing migrates an installation automatically.
+    """
+    directory = directory.absolute()
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError("8-bit upgrade requires a prepared Inkling 2 Mini folder")
+    identity = prepared_identity(directory)
+    if identity == _identity(inkling_prepare.AFFINE8_SOURCE):
+        return {**_json(directory / "native-source.json"), "status": "unchanged"}
+    if identity != _identity(inkling_prepare.SOURCE):
+        raise ValueError("8-bit upgrade requires a prepared original Inkling 2 Mini folder")
+    inkling_prepare._read(directory, "tokenizer.json", 32 * 1024 * 1024, inkling_prepare.TOKENIZER_SHA)
+    work = directory.with_name(directory.name + _UPGRADE_SUFFIX)
+    receipt = _derive_inkling_affine8(directory, work)
+    _exchange(work, directory)
+    (directory / _DERIVE_MARKER).unlink()
+    # ``work`` now holds the replaced original folder.
+    shutil.rmtree(work)
+    return {**receipt, "status": "upgraded"}
 
 
 def main(argv=None):
@@ -841,13 +958,23 @@ def main(argv=None):
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--artifact-mode", choices=("text", "vision-language"), default="text")
     parser.add_argument("--upgrade-images", action="store_true", help="Upgrade the existing --output folder in place")
+    parser.add_argument(
+        "--upgrade-8bit",
+        action="store_true",
+        help=f"Replace a prepared {inkling_prepare.ORIGINAL_CHOICE} --output folder with the {inkling_prepare.CHOICE} "
+        "8-bit artifact derived from it",
+    )
     parser.add_argument("--progress-fd", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.upgrade_8bit and (args.model != inkling_prepare.CHOICE or args.upgrade_images):
+        parser.error(f"--upgrade-8bit applies only to {inkling_prepare.CHOICE}")
     progress_sink = None
     try:
         if args.progress_fd is not None:
             progress_sink = FDProgressSink(args.progress_fd)
-        if args.upgrade_images:
+        if args.upgrade_8bit:
+            receipt = upgrade_inkling_affine8(args.output)
+        elif args.upgrade_images:
             from .hybrid_vision import prepare_image_artifact
 
             receipt = prepare_image_artifact(args.output, args.model)

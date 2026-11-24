@@ -1,0 +1,159 @@
+# Stark standard benchmark profile: Inkling 2 Mini.
+#
+# A profile holds the facts about one model that the standard benchmark needs:
+# its artifacts, context limits, chat adapter, and the reference engines it is
+# compared against. The protocol itself (scenarios, caps, repeats, validity
+# rules) is the same for every model and is defined in docs/BENCHMARK.md and
+# scripts/benchmark_standard.py, not here.
+#
+# Every value below names where it was verified. Paths are defaults under the
+# ignored runtime/ directory; the command line replaces them.
+
+schema = "stark-benchmark-profile-v1"
+key = "inkling-2-mini"
+title = "Inkling 2 Mini"
+status = "complete"
+# The arm every other arm's speed ratio is taken against.
+reference_arm = "mlx-original"
+
+[source]
+# tools/converter/stark_convert/inkling_prepare.py (REPO, REVISION).
+repo = "thinkingmachines/Inkling-2-Mini"
+revision = "6e7c8248f75265bdd4fbab5273304243b5d8c2cb"
+
+[client]
+# llmprobe --reasoning off: on this model the template then renders effort
+# level 0 on both engines and the model may still think. The renders match,
+# which is what the comparison needs
+# (docs/benchmarks/2026-11-22-inkling-mini-engine-matrix.md).
+reasoning = "off"
+# Part of every cache-busted prompt. Kept from the first recorded runs so the
+# rendered inputs stay identical to them.
+cache_tag_base = "inkbench"
+
+[stark]
+# Model id the benchmark gateway serves; it never reaches the worker.
+served_model_id = "inkling-2-mini-stark"
+# config.json "model_type" of a prepared artifact (checked before a run).
+model_type = "inkling2_loop"
+# config.json text_config.vocab_size of the prepared artifact; used only when
+# an artifact's config.json does not carry it.
+vocab_size = 201024
+# Response splitter: tools/converter/stark_convert/inkling_chat.py (PARSER).
+chat_adapter = "inkling2-json-v1"
+# tools/converter/stark_convert/inkling_prepare.py (TEMPLATE_SHA). An artifact
+# whose chat template hashes differently is refused: the render would differ.
+template_sha256 = "53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc"
+# Image-capable: the worker must report images loaded for every session, so
+# text speed is measured with images resident (AGENTS.md, image default).
+image_capable = true
+# Drafting is the worker's own default (three proposals for greedy requests,
+# two for sampled: tools/converter/stark_convert/mtp.py).
+drafting = "engine-default"
+# The artifact a run uses when none is named: Stark's default, which the
+# catalog choice inkling2-mini prepares (tools/converter/stark_convert/
+# inkling_prepare.py, CHOICE; 20261123-INKAFFINE8-04). The original stays a
+# declared artifact and arm (preparation choice inkling2-mini-original).
+default_artifact = "affine8"
+
+[stark.context]
+# Worker context planning: requests up to `minimum` are planned at `minimum`,
+# larger ones are rounded up to 1,024, and nothing is planned above `maximum`
+# (crates/stark-generate/src/inkling.rs, source context tests). `burst` is the
+# per-stream context of the 16-user burst.
+minimum = 4352
+maximum = 32768
+burst = 2048
+
+[stark.artifacts.original]
+description = "Prepared original checkpoint"
+quantization = "original (NVFP4 and MXFP8 expert banks as published)"
+# Arms whose artifacts share a `match` value are a matched pair.
+match = "original"
+path = "runtime/inkling-2-mini-stark"
+record = "docs/INKLING_2_MINI_PLAN.md"
+
+[stark.artifacts.affine8]
+description = "8-bit affine dense weights"
+quantization = "8-bit affine attention, embedding and head; original expert bytes"
+# Byte-identical in its 178 quantized tensors to the author's 8-bit pack
+# (20261122-INKAFFINE8-02), so it pairs with the reference arm of that pack.
+match = "affine8"
+path = "runtime/inkling-affine8/artifact"
+record = "docs/model-experiments/2026-11-22-inkling-mini-affine8.md"
+
+[[reference]]
+engine = "mlx-serve"
+label = "MLX-Serve"
+# Arm names are <arm_prefix>-<artifact>: mlx-original, mlx-author-8bit, ...
+arm_prefix = "mlx"
+binary = "runtime/mlx-serve/mlx-serve"
+# Release measured in the first recorded runs; a run records the binary hash.
+version = "v26.11.4-pre-release.1"
+# Launch arguments added to the adapter's own (--model, --serve, --host,
+# --port, --ctx-size, --max-concurrent, --prefix-cache-entries). No draft
+# flag: the server's own drafting default applies.
+flags = ["--no-pld", "--metrics", "--warmup-full", "--log-file", "off"]
+# The burst forces drafting off on every engine.
+draft_off_flags = ["--no-mtp"]
+# Only with --reference-force-drafts, which takes a run off the scoreboard.
+draft_force_flags = ["--mtp"]
+
+# Console lines kept as fixed events (a state word only, never the line).
+[[reference.log_event]]
+event = "inkling_draft_head"
+all = ["draft head"]
+any = ["Inkling 2", "inkling2"]
+states = ["loaded", "disabled"]
+
+[reference.artifacts.original]
+description = "Original checkpoint"
+quantization = "original (as published)"
+match = "original"
+path = "runtime/inkling-2-mini-original"
+repo = "thinkingmachines/Inkling-2-Mini"
+revision = "6e7c8248f75265bdd4fbab5273304243b5d8c2cb"
+
+[reference.artifacts.author-8bit]
+description = "Author 8-bit pack"
+quantization = "8-bit affine attention, embedding and head; original expert bytes"
+match = "affine8"
+# docs/model-experiments/2026-11-22-inkling-mini-affine8.md.
+repo = "ddalcu/Inkling-2-Mini-MLX-8bit"
+revision = "cb7fa052a9bbafbbeb91750edc67046e7bacd4f1"
+
+[reference.artifacts.community-4bit]
+description = "Community 4-bit pack"
+quantization = "4-bit (community pack)"
+# No Stark artifact matches it. Its repository and revision are not recorded
+# in this repository; a run records the hashes of whatever directory is given.
+match = "community-4bit"
+
+[quality]
+# Stark artifact the quality probe compares every Stark arm against, and the
+# execution path of that reference.
+reference_artifact = "original"
+reference_path = "exact"
+# The pluggable probe. It is an engine-level diagnostic, run separately under
+# the GPU lock; its report is attached with `quality attach`. The command is
+# printed by `plan` and is not executed by the benchmark.
+probe = "inkling_slice --quality-compare"
+probe_format = "inkling-slice-quality-compare"
+probe_command = [
+    "target/release/examples/inkling_slice",
+    "--quality-compare",
+    "exact:{reference_weights}",
+    "default:{candidate_weights}",
+    "{private_token_directory}",
+    "{prompt_tokens}",
+    "{context}",
+    "{window}",
+]
+
+[notes]
+# Model-specific readings of standard scenarios, shown beside their definitions.
+decode = "About 71 to 76 rendered input tokens on this tokenizer."
+sustained_decode = "MLX-Serve's published best for this model (115.3 tok/s on the author 8-bit pack, M4 Max) came from this cell; the same run's initial-coding cell measured 94.8 tok/s."
+prefill_repeated = "8,768 rendered input tokens on this tokenizer."
+unseen_prefill = "About 7,500 tokens on this tokenizer, not 8.8K; the exact 8,800-ID control is the matched prefill cell."
+context_512 = "About 498 input tokens on this tokenizer."

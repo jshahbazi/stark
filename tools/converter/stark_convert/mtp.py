@@ -6,6 +6,9 @@ from typing import Any
 
 _MAX_DRAFTS = 2**32 - 1
 _SAMPLING = "exact-rejection-v1"
+_INKLING_SAMPLING = "native-target-draw-match-v1"
+_INKLING_VERIFICATION = "inkling-dspark-target-draw-v1"
+_INKLING_SHORT_VERIFICATION = "inkling-dspark-short-target-draw-v1"
 
 
 def _unsupported() -> dict[str, Any]:
@@ -40,14 +43,29 @@ def mtp_capabilities(readiness: Any) -> dict[str, Any]:
     default = value.get("default_drafts", 0)
     operations = value.get("operations", ["generate"])
     verification = value.get("verification")
+    sampling = value.get("sampling")
     if (
         type(recommended) is not int
         or not 1 <= recommended <= maximum
         or type(default) is not int
-        or default != 0
+        or not (
+            default == 0
+            # The Inkling multi-row source verifier drafts by default.
+            or (
+                (sampling, verification, maximum) == (_INKLING_SAMPLING, _INKLING_SHORT_VERIFICATION, 3)
+                and default == maximum
+            )
+        )
         or operations != ["generate"]
         or not isinstance(operations, list)
-        or value.get("sampling") != _SAMPLING
+        or (
+            sampling != _SAMPLING
+            and (sampling, verification, maximum)
+            not in (
+                (_INKLING_SAMPLING, _INKLING_VERIFICATION, 1),
+                (_INKLING_SAMPLING, _INKLING_SHORT_VERIFICATION, 3),
+            )
+        )
         or not isinstance(verification, str)
         or not 1 <= len(verification) <= 128
         or any(not (character.isascii() and (character.isalnum() or character in "._-")) for character in verification)
@@ -57,15 +75,44 @@ def mtp_capabilities(readiness: Any) -> dict[str, Any]:
         "supported": True,
         "max_drafts": maximum,
         "recommended_drafts": recommended,
-        "default_drafts": 0,
-        "sampling": _SAMPLING,
+        "default_drafts": default,
+        "sampling": sampling,
         "verification": verification,
         "operations": ["generate"],
     }
 
 
-def resolve_mtp(enabled: Any, capabilities: Any) -> int:
-    """Resolve one boolean toggle without carrying state across requests."""
+_INKLING_GREEDY_DRAFTS = 3
+_INKLING_SAMPLED_DRAFTS = 2
+
+
+def is_inkling_short_verifier(capabilities: Any) -> bool:
+    """Whether the loaded worker advertises the Inkling multi-row verifier."""
+    return (
+        isinstance(capabilities, dict)
+        and capabilities.get("supported") is True
+        and capabilities.get("sampling") == _INKLING_SAMPLING
+        and capabilities.get("verification") == _INKLING_SHORT_VERIFICATION
+    )
+
+
+def default_mtp_enabled(capabilities: Any) -> bool:
+    """Drafting is on by default when the loaded worker drafts by default."""
+    current = mtp_capabilities({"mtp": capabilities})
+    return current["supported"] and current["default_drafts"] > 0
+
+
+def _greedy(sampling: Any) -> bool:
+    return sampling is None or (isinstance(sampling, dict) and sampling.get("mode") == "greedy")
+
+
+def resolve_mtp(enabled: Any, capabilities: Any, sampling: Any = None) -> int:
+    """Resolve one boolean toggle without carrying state across requests.
+
+    The Inkling multi-row verifier uses its measured best depth: three
+    proposals for greedy and two for sampled decoding. `sampling` is the
+    request's wire sampling object; omitted means greedy.
+    """
     if type(enabled) is not bool:
         raise ValueError("invalid_mtp_option")
     if not enabled:
@@ -73,4 +120,7 @@ def resolve_mtp(enabled: Any, capabilities: Any) -> int:
     current = mtp_capabilities({"mtp": capabilities})
     if not current["supported"]:
         raise ValueError("mtp_not_supported")
+    if is_inkling_short_verifier(current):
+        best = _INKLING_GREEDY_DRAFTS if _greedy(sampling) else _INKLING_SAMPLED_DRAFTS
+        return min(best, current["max_drafts"])
     return current["recommended_drafts"]

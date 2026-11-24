@@ -31,6 +31,16 @@ normalized source. Parser names are the local reviewed protocol implementations.
 | `smollm2.jinja` | `HuggingFaceTB/SmolLM2-1.7B-Instruct` @ `31b70e2e869a7173562077fd711b654946d38674` | [tokenizer_config.json](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct/blob/31b70e2e869a7173562077fd711b654946d38674/tokenizer_config.json) | `872be49dbb638044ad01b60388f48d469ff2980e5f0dccdc22ec907db54d0788` | `872be49dbb638044ad01b60388f48d469ff2980e5f0dccdc22ec907db54d0788` | `ff802fefdd364f94905651d6f8abf16d9001cb8b4d8b1fb9b72f1cab2645fecf` | `smollm2-json-v1` | Apache-2.0; see [`apache2.LICENSE.txt`](apache2.LICENSE.txt) and [model card](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct/blob/31b70e2e869a7173562077fd711b654946d38674/README.md). |
 | `smollm3.jinja` | `HuggingFaceTB/SmolLM3-3B` @ `a07cc9a04f16550a088caea529712d1d335b0ac1` | [chat_template.jinja](https://huggingface.co/HuggingFaceTB/SmolLM3-3B/blob/a07cc9a04f16550a088caea529712d1d335b0ac1/chat_template.jinja) | `3e0e275a527f249670056e0078e474eadbdd007c134b4fdfae5a7b3089702814` | `5389af391984d661fc19bb01456dd698df94babd9e054e6656f1953c586167d0` | `96229b4a4c5f52570ad056a7d53857a52675848e1d4ac983d6922678fbd4c5ed` | `smollm3-hermes-v1` | Apache-2.0; see [`apache2.LICENSE.txt`](apache2.LICENSE.txt) and [model card](https://huggingface.co/HuggingFaceTB/SmolLM3-3B/blob/a07cc9a04f16550a088caea529712d1d335b0ac1/README.md). |
 
+## Inkling 2 Mini runtime source
+
+`inkling2_mini.jinja` is the unmodified publisher template from
+`thinkingmachines/Inkling-2-Mini` at `6e7c8248f75265bdd4fbab5273304243b5d8c2cb`.
+Its SHA-256 is `53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc`.
+It is Apache-2.0 under [`apache2.LICENSE.txt`](apache2.LICENSE.txt). The runtime
+copy removes Transformers' mask-tracking tags, materializes MiniJinja's lazy
+tool declaration list and selects Transformers serialization for argument names.
+The official source and its identity remain intact. [Publisher template](https://huggingface.co/thinkingmachines/Inkling-2-Mini/blob/6e7c8248f75265bdd4fbab5273304243b5d8c2cb/chat_template.jinja) · [Pinned Ollama reference cases](https://github.com/ollama/ollama/blob/6949a42ad24450cf567d7ce1ff7d278ebb3eb5d8/model/renderers/inkling2_reference_test.go)
+
 ## Mistral runtime source
 
 `mistral_v03.jinja` is the unmodified upstream template fixture. Runtime tool

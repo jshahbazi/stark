@@ -172,6 +172,11 @@ uv run --project tools/converter --locked --python 3.13.13 python \
 
 Use `--reuse rewind` for a backend that can rewind to any eligible full chunk.
 Use `--reuse boundary` for a backend that can restore only its retained snapshot.
+The validator checks every reuse count against the rule the worker advertises:
+`prefix_cache.chunk_tokens`, `prefix_cache.tail_tokens` (a backend whose boundary
+keeps more than the final token advertises its tail and gets the edge cases at
+that tail) and `mtp.default_drafts` (a request naming no MTP setting is keyed as
+drafted when the default is nonzero, and explicit `mtp_drafts: 0` cases are added).
 Choose prompts long enough to cross the advertised chunk boundary, and a context
 large enough for the synthetic follow-ups and output budget. `--first-tokens`
 sets the first-turn target; `--tools`, `--instruction-paragraphs` and
@@ -225,6 +230,14 @@ requests. Record the artifact, backend, draft depth and timing evidence for that
 choice. Supporting an MTP head does not by itself justify enabling it by
 default. Preserve an explicit user override and keep image support enabled by
 default independently of this choice.
+
+Measure the model's speed against its reference engine with the
+[standard benchmark](BENCHMARK.md). Add a profile for the model under
+`scripts/benchmark_profiles/`, following
+[Adding a model](BENCHMARK.md#adding-a-model), and declare every artifact that
+ships with its quantization and matching class. A new checkpoint, quantization
+or format is a new artifact in the profile; it gets its own standard run and
+its own quality result and inherits neither from another artifact.
 
 Update the current support documentation with one of these dispositions:
 

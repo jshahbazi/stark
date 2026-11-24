@@ -119,6 +119,27 @@ fn membership_tuple_end(
     None
 }
 
+fn compact_json_separator_tuple(
+    tokens: &[(Token<'_>, minijinja::machinery::Span)],
+    tuple_start: usize,
+    call_start: usize,
+) -> bool {
+    matches!(tokens.get(call_start.wrapping_sub(2)..call_start), Some([(Token::Pipe, _), (Token::Ident("tojson"), _)]))
+        && matches!(
+            tokens.get(tuple_start.wrapping_sub(2)..tuple_start + 6),
+            Some([
+                (Token::Ident("separators"), _),
+                (Token::Assign, _),
+                (Token::ParenOpen, _),
+                (Token::Str(","), _),
+                (Token::Comma, _),
+                (Token::Str(":"), _),
+                (Token::ParenClose, _),
+                (Token::Comma | Token::ParenClose, _),
+            ])
+        )
+}
+
 /// Single-underscore temporaries are ordinary template bindings, not members
 /// of a Python object. Recognize only plain set/for targets; member targets,
 /// undeclared names and dunder identifiers do not gain admission.
@@ -168,7 +189,8 @@ fn check_source(source: &str) -> Result<(), Failure> {
     // MiniJinja represents tuple literals as lists. Reject that unsupported
     // construct before rendering instead of silently changing Python repr/type
     // behavior. Constant-string tuples used solely as a membership RHS have
-    // identical primitive membership semantics and are admitted narrowly.
+    // identical primitive membership semantics and are admitted narrowly. The
+    // constant compact-JSON separator tuple is consumed directly by one filter.
     // Parenthesized calls and groups remain supported; comma-separated
     // loop/assignment targets need no parentheses.
     let tokens = tokenize(source, false, Default::default(), Default::default())
@@ -220,10 +242,14 @@ fn check_source(source: &str) -> Result<(), Failure> {
             },
             Token::Ident("autoescape" | "include" | "import" | "from" | "extends") => return Err(Failure::Sandbox),
             Token::ParenOpen | Token::BracketOpen | Token::BraceOpen => {
-                let membership_only = matches!(token, Token::ParenOpen)
-                    && (condition_statement || set_rhs || value_expression)
-                    && membership_tuple_end(&tokens, index).is_some();
-                nesting.push((matches!(token, Token::ParenOpen), previous_callable, index, membership_only));
+                let parenthesis = matches!(token, Token::ParenOpen);
+                let tuple_allowed = parenthesis
+                    && (((condition_statement || set_rhs || value_expression)
+                        && membership_tuple_end(&tokens, index).is_some())
+                        || nesting.last().is_some_and(|&(parenthesis, call, opened_at, _)| {
+                            parenthesis && call && compact_json_separator_tuple(&tokens, index, opened_at)
+                        }));
+                nesting.push((parenthesis, previous_callable, index, tuple_allowed));
                 if nesting.len() > 128 {
                     return Err(Failure::Runtime);
                 }
@@ -231,7 +257,7 @@ fn check_source(source: &str) -> Result<(), Failure> {
             Token::Comma
                 if nesting
                     .last()
-                    .is_some_and(|&(parenthesis, call, _, membership)| parenthesis && !call && !membership) =>
+                    .is_some_and(|&(parenthesis, call, _, tuple_allowed)| parenthesis && !call && !tuple_allowed) =>
             {
                 return Err(Failure::Runtime);
             },
@@ -364,6 +390,7 @@ fn quoted(
     value: &str,
     json: bool,
     ensure_ascii: bool,
+    escape_html: bool,
 ) -> String {
     let quote = if json || (value.contains('\'') && !value.contains('"')) {
         '"'
@@ -384,7 +411,7 @@ fn quoted(
                 result.push('\\');
                 result.push(character);
             },
-            '<' | '>' | '&' | '\'' if json => {
+            '<' | '>' | '&' | '\'' if escape_html => {
                 let _ = write!(result, "\\u{:04x}", character as u32);
             },
             character
@@ -442,7 +469,7 @@ fn python_repr(
         ValueKind::String => {
             let text = value.as_str().ok_or_else(unsupported)?;
             if nested {
-                quoted(text, false, false)
+                quoted(text, false, false, false)
             } else {
                 text.to_owned()
             }
@@ -496,18 +523,26 @@ fn python_repr(
     Ok(result)
 }
 
+struct JsonFormat {
+    indent: Option<usize>,
+    ensure_ascii: bool,
+    escape_html: bool,
+    sort_keys: bool,
+    item_separator: &'static str,
+    key_separator: &'static str,
+}
+
 fn write_json(
     value: &Json,
     output: &mut String,
-    indent: Option<usize>,
-    ensure_ascii: bool,
+    format: &JsonFormat,
     depth: usize,
 ) -> Result<(), Error> {
     if depth > MAX_DEPTH || output.len() > crate::limits::input_bytes() {
         return Err(unsupported());
     }
     let newline = |output: &mut String, depth: usize| {
-        if let Some(indent) = indent {
+        if let Some(indent) = format.indent {
             output.push('\n');
             for _ in 0..depth * indent {
                 output.push(' ');
@@ -515,7 +550,7 @@ fn write_json(
         }
     };
     match value {
-        Json::String(value) => output.push_str(&quoted(value, true, ensure_ascii)),
+        Json::String(value) => output.push_str(&quoted(value, true, format.ensure_ascii, format.escape_html)),
         Json::Number(value) if value.is_f64() => {
             output.push_str(&python_float(value.as_f64().ok_or_else(unsupported)?)?)
         },
@@ -535,13 +570,10 @@ fn write_json(
             output.push('[');
             for (index, item) in items.iter().enumerate() {
                 if index > 0 {
-                    output.push(',');
-                    if indent.is_none() {
-                        output.push(' ');
-                    }
+                    output.push_str(format.item_separator);
                 }
                 newline(output, depth + 1);
-                write_json(item, output, indent, ensure_ascii, depth + 1)?;
+                write_json(item, output, format, depth + 1)?;
             }
             if !items.is_empty() {
                 newline(output, depth);
@@ -553,19 +585,18 @@ fn write_json(
                 return Err(unsupported());
             }
             let mut items: Vec<_> = items.iter().collect();
-            items.sort_unstable_by(|left, right| left.0.cmp(right.0));
+            if format.sort_keys {
+                items.sort_unstable_by(|left, right| left.0.cmp(right.0));
+            }
             output.push('{');
             for (index, (key, item)) in items.iter().enumerate() {
                 if index > 0 {
-                    output.push(',');
-                    if indent.is_none() {
-                        output.push(' ');
-                    }
+                    output.push_str(format.item_separator);
                 }
                 newline(output, depth + 1);
-                output.push_str(&quoted(key, true, ensure_ascii));
-                output.push_str(": ");
-                write_json(item, output, indent, ensure_ascii, depth + 1)?;
+                output.push_str(&quoted(key, true, format.ensure_ascii, format.escape_html));
+                output.push_str(format.key_separator);
+                write_json(item, output, format, depth + 1)?;
             }
             if !items.is_empty() {
                 newline(output, depth);
@@ -585,6 +616,27 @@ fn tojson(
     kwargs: Kwargs,
 ) -> Result<Value, Error> {
     let named: Option<Value> = kwargs.get("indent")?;
+    let transformers = kwargs.has("sort_keys") || kwargs.has("separators");
+    let sort_keys = if kwargs.has("sort_keys") {
+        let value: Value = kwargs.get("sort_keys")?;
+        if value.kind() != ValueKind::Bool {
+            return Err(unsupported());
+        }
+        value.is_true()
+    } else {
+        !transformers
+    };
+    let compact = kwargs.has("separators");
+    if compact {
+        let value: Value = kwargs.get("separators")?;
+        if value.kind() != ValueKind::Seq
+            || value.len() != Some(2)
+            || value.get_item_by_index(0)?.as_str() != Some(",")
+            || value.get_item_by_index(1)?.as_str() != Some(":")
+        {
+            return Err(unsupported());
+        }
+    }
     let ensure_ascii = if kwargs.has("ensure_ascii") {
         let value: Value = kwargs.get("ensure_ascii")?;
         if value.kind() != ValueKind::Bool {
@@ -592,7 +644,7 @@ fn tojson(
         }
         value.is_true()
     } else {
-        true
+        !transformers
     };
     kwargs.assert_all_used()?;
     let indent = positional.or(named).filter(|value| !value.is_none());
@@ -607,7 +659,23 @@ fn tojson(
     let value = serde_json::to_value(value).map_err(|_| unsupported())?;
     check_json(&value, 0, &mut 0, &mut 0).map_err(|_| unsupported())?;
     let mut result = String::new();
-    write_json(&value, &mut result, indent, ensure_ascii, 0)?;
+    let format = JsonFormat {
+        indent,
+        ensure_ascii,
+        escape_html: !transformers,
+        sort_keys,
+        item_separator: if compact || indent.is_some() {
+            ","
+        } else {
+            ", "
+        },
+        key_separator: if compact {
+            ":"
+        } else {
+            ": "
+        },
+    };
+    write_json(&value, &mut result, &format, 0)?;
     Ok(Value::from(result))
 }
 

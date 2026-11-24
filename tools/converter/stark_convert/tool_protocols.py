@@ -10,7 +10,8 @@ import keyword
 import re
 from importlib.resources import files
 
-from .template_compat import MAX_TEMPLATE_BYTES, template_program_sha256
+from .inkling_prepare import TEMPLATE_SHA as INKLING_TEMPLATE_SHA
+from .template_compat import MAX_TEMPLATE_BYTES, normalize_chat_template, template_program_sha256
 
 # Raw source and converter-normalized source hashes. The converter removes only
 # Transformers' generation-tracking tags; the original fixtures stay unchanged.
@@ -131,7 +132,7 @@ def validate_functiongemma_tools(tools):
 
 
 def runtime_template_source(source):
-    """Apply the reviewed Mistral serializer patch, keeping source provenance."""
+    """Apply reviewed runtime adaptations to a copy of the source."""
     if not isinstance(source, str) or len(source) > MAX_TEMPLATE_BYTES:
         return source
     try:
@@ -141,6 +142,15 @@ def runtime_template_source(source):
     if len(encoded) > MAX_TEMPLATE_BYTES:
         return source
     digest = hashlib.sha256(encoded).hexdigest()
+    if digest == INKLING_TEMPLATE_SHA:
+        # Tracking tags only affect assistant masks. MiniJinja stays lazy when
+        # adding lists, so materialize the tool registry before serializing it.
+        # Explicit options select the same Transformers serializer for keys.
+        return (
+            normalize_chat_template(source)
+            .replace("tool_state.specs | tojson", "tool_state.specs | list | tojson")
+            .replace("key | tojson)", "key | tojson(sort_keys=false))")
+        )
     if (
         TEMPLATE_HASHES.get(digest) == "mistral-json-v1"
         or TEMPLATE_PROGRAMS.get(template_program_sha256(source)) == "mistral-json-v1"

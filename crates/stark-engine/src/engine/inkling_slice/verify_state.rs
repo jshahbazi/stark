@@ -1,0 +1,1118 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Short source verifier and rollback of overwritten ring rows.
+
+use super::{prefill::VerifyExperts, *};
+use crate::engine::inkling_slice::dspark::DraftBlock;
+
+pub const MAX_VERIFY_ROWS: usize = 4;
+const KV_ROW_BYTES: usize = KV * size_of::<u16>();
+const CONV_ROW_BYTES: [usize; 4] = [KV_ROW_BYTES, KV_ROW_BYTES, WIDTH * 2, WIDTH * 2];
+const CONV_OFFSETS: [usize; 4] = [0, KV_ROW_BYTES, 2 * KV_ROW_BYTES, 2 * KV_ROW_BYTES + WIDTH * 2];
+const CONV_BYTES: usize = 2 * KV_ROW_BYTES + 4 * WIDTH;
+const SAVED_VISIT_BYTES: usize = 2 * MAX_VERIFY_ROWS * KV_ROW_BYTES + 3 * CONV_BYTES;
+
+pub(super) struct VerifyWorkspace {
+    saved: Buffer,
+    undo_table: Option<Buffer>,
+    anchors: Buffer,
+    attention_parts: Option<Buffer>,
+    pub(super) local_rows_per_group: usize,
+    pub(super) global_share: (usize, usize),
+    pub(super) lanes: PrefillLanes,
+    mix_rows: bool,
+    pub(super) draft: DraftBlock,
+    /// Diagnostic control only: false sends short blocks down the per-row
+    /// attention path. The worker never clears it.
+    pub(super) short_attention: bool,
+}
+
+impl VerifyWorkspace {
+    fn new(
+        runtime: &mut Runtime,
+        visits: usize,
+    ) -> Result<Self> {
+        let mut lanes = PrefillLanes::for_m5_rows(runtime, MAX_VERIFY_ROWS)?;
+        lanes.enable_verify_groups(runtime)?;
+        packed_prefill::register_verify_nvfp4_matvec(runtime)?;
+        packed_prefill::register_parallel_route(runtime)?;
+        packed_prefill::register(
+            runtime,
+            include_str!("verify_state.metal"),
+            &["ink_save_anchor_convolution", "ink_verify_prepare_rows"],
+        )?;
+        {
+            packed_prefill::register(
+                runtime,
+                concat!(
+                    "#define INK_VERIFY_DRAFT_EMBEDDING\n#define ink_embedding ink_embedding_draft_ids\n",
+                    include_str!("long_position.metal"),
+                    include_str!("serial.metal"),
+                    "\n",
+                    include_str!("session.metal"),
+                ),
+                &["ink_embedding_draft_ids"],
+            )?;
+            runtime.verify_overlap = true;
+            runtime.verify_single_draft = true;
+        }
+        let shared_attention = true;
+        let shared_global = true;
+        if shared_attention || shared_global {
+            packed_prefill::register(
+                runtime,
+                include_str!("verify_attention.metal"),
+                &["ink_verify_local_parts", "ink_verify_global_parts"],
+            )?;
+        }
+        {
+            packed_prefill::register(
+                runtime,
+                concat!(include_str!("long_position.metal"), include_str!("verify_cache.metal")),
+                &["ink_verify_kv_pack", "ink_verify_qr_pack"],
+            )?;
+            runtime.verify_fused_cache = true;
+        }
+        let combined_short = true;
+        let undo_table = if combined_short {
+            packed_prefill::register(
+                runtime,
+                include_str!("verify_controller.metal"),
+                &["ink_verify_controller_native_m16n16"],
+            )?;
+            packed_prefill::register(
+                runtime,
+                include_str!("prefill.metal"),
+                &["ink_matvec_verify2", "ink_matvec_verify3"],
+            )?;
+            packed_prefill::register(runtime, include_str!("verify_relative.metal"), &["ink_verify_relative_tables"])?;
+            packed_prefill::register(runtime, include_str!("verify_gate.metal"), &["ink_verify_gate_batched"])?;
+            packed_prefill::register(
+                runtime,
+                include_str!("verify_short.metal"),
+                &["ink_verify_short_parts", "ink_verify_short_gate"],
+            )?;
+            // The verifier's NVFP4 half dot reading unquantized BF16 expert
+            // inputs directly, without the activation pass.
+            packed_prefill::register(
+                runtime,
+                concat!(
+                    "#define INK_VERIFY_BYTE_COEFFICIENTS\n#include <metal_stdlib>\nusing namespace metal;\n",
+                    "#define INK_NVFP4_VECTOR_BLOCK\n#define INK_VERIFY_EXACT_RUN_WIDTH\n#define INK_VERIFY_HALF_ACT\n",
+                    "#define INK_VERIFY_BF16_INPUT\n#define ink_verify_nvfp4_group_dot ink_verify_nvfp4_bf_dot\n",
+                    include_str!("experts.metal"),
+                    include_str!("verify_nvfp4.metal"),
+                ),
+                &[super::VERIFY_DIRECT_DOT],
+            )?;
+            packed_prefill::register(runtime, include_str!("verify_undo.metal"), &["ink_verify_undo_all"])?;
+            Some(zeroed(&runtime.device, visits * 7 * size_of::<u64>())?)
+        } else {
+            None
+        };
+        runtime.verify_combined_short = combined_short;
+        let qkv_batch = true;
+        if combined_short && qkv_batch {
+            lanes.enable_verify_qkv_batch(runtime)?;
+        }
+        let mix_rows = combined_short && runtime.verify_fused_attention;
+        if mix_rows {
+            packed_prefill::register(
+                runtime,
+                concat!(
+                    include_str!("long_position.metal"),
+                    include_str!("serial.metal"),
+                    "\n",
+                    include_str!("verify_mix_rows.metal"),
+                    "\n",
+                    include_str!("verify_first_norm.metal")
+                ),
+                &[
+                    "ink_verify_mix_rows",
+                    "ink_verify_mix_attention",
+                    "ink_verify_first_qkv_norm",
+                    "ink_verify_first_expert_norm",
+                    "ink_verify_mix_qkv_norm",
+                    "ink_verify_mix_expert_norm",
+                    "ink_verify_attention_mix",
+                ],
+            )?;
+        }
+        runtime.verify_fast_three = mix_rows && shared_attention;
+        if runtime.verify_fast_three {
+            packed_prefill::register(
+                runtime,
+                concat!(include_str!("verify_attention.metal"), "\n", include_str!("verify_local_three.metal")),
+                &["ink_verify_local_three_parts"],
+            )?;
+            packed_prefill::register(
+                runtime,
+                concat!(include_str!("dspark.metal"), "\n", include_str!("verify_draft_kv.metal")),
+                &["ink_draft_kv_four_rows"],
+            )?;
+        }
+        let draft = DraftBlock::new(runtime)?;
+        let alloc = |bytes| {
+            runtime
+                .device
+                .new_buffer(bytes, MTLResourceOptions::STORAGE_MODE_PRIVATE)
+                .ok_or("Inkling verifier rollback allocation failed")
+        };
+        Ok(Self {
+            saved: alloc(visits * SAVED_VISIT_BYTES)?,
+            undo_table,
+            anchors: alloc(visits * CONV_BYTES)?,
+            attention_parts: (shared_attention || shared_global)
+                .then(|| alloc(MAX_VERIFY_ROWS * HEADS * 64 * 130 * 4))
+                .transpose()?,
+
+            global_share: if shared_global {
+                (3, 1)
+            } else {
+                (0, 0)
+            },
+            local_rows_per_group: if shared_attention {
+                2
+            } else {
+                0
+            },
+            lanes,
+            mix_rows,
+            draft,
+            short_attention: true,
+        })
+    }
+
+    pub(super) fn mixes_rows(&self) -> bool {
+        self.mix_rows
+    }
+
+    pub(super) fn mix_rows(
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        flows: [&Flow; MAX_VERIFY_ROWS],
+        scratch: [&Scratch; MAX_VERIFY_ROWS],
+        state: VisitInput,
+        rows: usize,
+        expert: bool,
+    ) {
+        let mut buffers = [binding(&flows[0].blocks); 22];
+        for i in 0..MAX_VERIFY_ROWS {
+            buffers[i] = binding(&flows[i].blocks);
+            buffers[4 + i] = binding(&flows[i].partial);
+            buffers[8 + i] = binding(&scratch[i].mixed);
+        }
+        if expert {
+            buffers[12] = binding(&layer.mlp_query);
+            gpu.dispatch(
+                "ink_verify_mix_rows",
+                &buffers[..13],
+                (state.blocks + usize::from(state.boundary)) as u32,
+                (1, rows),
+                WIDTH / 4,
+            );
+        } else if state.blocks != 0 {
+            buffers[12] = binding(layer.attn_queries.as_ref().unwrap_or(&layer.mlp_query));
+            let queries = if layer.local {
+                1
+            } else {
+                3
+            };
+            if state.later {
+                for i in 0..MAX_VERIFY_ROWS {
+                    buffers[13 + i] = binding(&flows[i].previous);
+                    buffers[17 + i] = binding(&scratch[i].messages);
+                }
+                buffers[21] = binding(layer.gate_queries.as_ref().expect("cross-pass query"));
+                gpu.dispatch(
+                    "ink_verify_mix_attention",
+                    &buffers,
+                    [state.blocks as u32, queries as u32],
+                    (queries + 4, rows),
+                    WIDTH / 4,
+                );
+            } else {
+                gpu.dispatch("ink_verify_mix_rows", &buffers[..13], state.blocks as u32, (queries, rows), WIDTH / 4);
+            }
+        }
+    }
+
+    /// Prepare every row for a visit in one launch: the prelude save, the
+    /// later-pass residual copies or the draft tap capture. Returns false
+    /// when the rows need the per-row path (mixed tap presence).
+    pub(super) fn prepare_rows(
+        gpu: &mut Stream<'_>,
+        flows: [&Flow; MAX_VERIFY_ROWS],
+        taps: [Option<&Buffer>; MAX_VERIFY_ROWS],
+        index: usize,
+        rows: usize,
+    ) -> bool {
+        let tap = DRAFT_TAPS.iter().position(|&value| index == value);
+        let (mode, word) = match (index, tap) {
+            (6, _) => (0u32, 0),
+            (18 | 30, _) => (1, 0),
+            (_, Some(tap)) => {
+                let present = taps[..rows].iter().filter(|taps| taps.is_some()).count();
+                if present == 0 {
+                    return true;
+                }
+                if present != rows {
+                    return false;
+                }
+                (2, tap * WIDTH)
+            },
+            _ => return true,
+        };
+        let mut buffers = [binding(&flows[0].partial); 20];
+        for i in 0..MAX_VERIFY_ROWS {
+            buffers[i] = binding(&flows[i].partial);
+            buffers[4 + i] = binding(&flows[i].prelude);
+            buffers[8 + i] = binding(&flows[i].blocks);
+            buffers[12 + i] = binding(&flows[i].previous);
+            buffers[16 + i] = binding(taps[i.min(rows - 1)].unwrap_or(&flows[i].partial));
+        }
+        gpu.dispatch("ink_verify_prepare_rows", &buffers, [mode, word as u32], (WIDTH / 128, rows), 128);
+        true
+    }
+
+    /// First-pass attention residual mix and the q, k and v input norms in
+    /// one launch. Requires live blocks; the mixed F32 rows are still stored.
+    pub(super) fn mix_qkv_norm(
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        flows: [&Flow; MAX_VERIFY_ROWS],
+        scratch: [&Scratch; MAX_VERIFY_ROWS],
+        state: VisitInput,
+        rows: usize,
+    ) {
+        debug_assert!(state.blocks != 0 && !state.later);
+        let mut buffers = [binding(&flows[0].blocks); 28];
+        for i in 0..MAX_VERIFY_ROWS {
+            buffers[i] = binding(&flows[i].blocks);
+            buffers[4 + i] = binding(&flows[i].partial);
+            buffers[8 + i] = binding(&scratch[i].mixed);
+            for slot in 0..3 {
+                buffers[16 + slot * 4 + i] = binding(&scratch[i].qkv_input[slot]);
+            }
+        }
+        buffers[12] = binding(layer.attn_queries.as_ref().unwrap_or(&layer.mlp_query));
+        for slot in 0..3 {
+            buffers[13 + slot] = binding(&layer.qkv_norm[slot]);
+        }
+        let queries = if layer.local {
+            1
+        } else {
+            3
+        };
+        gpu.dispatch(
+            "ink_verify_mix_qkv_norm",
+            &buffers,
+            [state.blocks as u32, u32::from(layer.local)],
+            (queries, rows),
+            WIDTH / 4,
+        );
+    }
+
+    /// Attention convolution, scaled residual and boundary block, the expert
+    /// residual mix and, with outputs, the first-pass MLP norm in one launch.
+    /// The caller must have `finish_verify_rows` store the attention history.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn attention_mix(
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        visit: &Visit,
+        inputs: [&Buffer; MAX_VERIFY_ROWS],
+        flows: [&Flow; MAX_VERIFY_ROWS],
+        scratch: [&Scratch; MAX_VERIFY_ROWS],
+        outputs: Option<[Binding<'_>; MAX_VERIFY_ROWS]>,
+        state: VisitInput,
+        position: usize,
+        rows: usize,
+    ) {
+        let mut buffers = [binding(&layer.attn_conv); 24];
+        buffers[1] = binding(&visit.conv[2]);
+        for i in 0..MAX_VERIFY_ROWS {
+            buffers[2 + i] = binding(inputs[i]);
+            buffers[6 + i] = binding(&flows[i].partial);
+            buffers[10 + i] = binding(&flows[i].blocks);
+            buffers[14 + i] = binding(&scratch[i].mixed);
+            buffers[20 + i] = outputs.map_or(binding(&scratch[i].mixed), |outputs| outputs[i]);
+        }
+        buffers[18] = binding(&layer.mlp_query);
+        buffers[19] = binding(&layer.mlp_norm);
+        gpu.dispatch(
+            "ink_verify_attention_mix",
+            &buffers,
+            [position as u32, state.blocks as u32, u32::from(state.boundary), u32::from(outputs.is_some())],
+            (1, rows),
+            WIDTH / 4,
+        );
+    }
+
+    /// Expert residual mix and the first-pass MLP norm in one launch.
+    pub(super) fn mix_expert_norm(
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        flows: [&Flow; MAX_VERIFY_ROWS],
+        scratch: [&Scratch; MAX_VERIFY_ROWS],
+        outputs: [Binding<'_>; MAX_VERIFY_ROWS],
+        state: VisitInput,
+        rows: usize,
+    ) {
+        let mut buffers = [binding(&flows[0].blocks); 18];
+        for i in 0..MAX_VERIFY_ROWS {
+            buffers[i] = binding(&flows[i].blocks);
+            buffers[4 + i] = binding(&flows[i].partial);
+            buffers[8 + i] = binding(&scratch[i].mixed);
+            buffers[14 + i] = outputs[i];
+        }
+        buffers[12] = binding(&layer.mlp_query);
+        buffers[13] = binding(&layer.mlp_norm);
+        gpu.dispatch(
+            "ink_verify_mix_expert_norm",
+            &buffers,
+            (state.blocks + usize::from(state.boundary)) as u32,
+            (1, rows),
+            WIDTH / 4,
+        );
+    }
+
+    fn copy_undo(
+        &self,
+        table: &Buffer,
+        command: &ProtocolObject<dyn MTLCommandBuffer>,
+        session: &Session,
+        rows: usize,
+        kept: usize,
+    ) -> Result<()> {
+        use metal::{MTLComputeCommandEncoderExt, MTLResource, MTLResourceUsage};
+
+        let encoder = command.compute_command_encoder().ok_or("Inkling batched undo encoder allocation failed")?;
+        let mut descriptors = Vec::<u64>::with_capacity(session.visits.len() * 7);
+        let mut resources = Vec::with_capacity(session.visits.len() * 6);
+        for visit in &session.visits {
+            for buffer in [&visit.keys, &visit.values].into_iter().chain(visit.conv.iter()) {
+                descriptors.push(buffer.gpu_address());
+                resources.push(ProtocolObject::<dyn MTLResource>::from_ref(&**buffer));
+            }
+            descriptors.push(visit.capacity as u64);
+        }
+        // Context changes recreate the visit buffers. Rebuild the addresses
+        // from the current session after the preceding verifier command completes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                descriptors.as_ptr(),
+                table.contents().as_ptr().cast::<u64>(),
+                descriptors.len(),
+            );
+        }
+        encoder.use_resources(
+            &resources,
+            if kept == 0 {
+                MTLResourceUsage::Read
+            } else {
+                MTLResourceUsage::Write
+            },
+        );
+        let mut gpu = Stream {
+            encoder: Some(encoder),
+            runtime: &session.runtime,
+            dispatches: 0,
+            nvfp4_dots: 0,
+            defer_expert_merge: false,
+            mxfp8_dots: 0,
+            profile: None,
+        };
+        gpu.one(
+            "ink_verify_undo_all",
+            &[table, &self.saved, &self.anchors],
+            [session.position as u32, rows as u32, 0, kept as u32],
+            (12, session.visits.len()),
+            128,
+        );
+        gpu.encoder.take().expect("undo compute encoder").end_encoding();
+        Ok(())
+    }
+
+    pub(super) fn save(
+        &self,
+        command: &ProtocolObject<dyn MTLCommandBuffer>,
+        session: &Session,
+        rows: usize,
+    ) -> Result<()> {
+        if let Some(table) = &self.undo_table {
+            return self.copy_undo(table, command, session, rows, 0);
+        }
+        let blit = command.blit_command_encoder().ok_or("Inkling verifier save encoder allocation failed")?;
+        for (index, visit) in session.visits.iter().enumerate() {
+            let base = index * SAVED_VISIT_BYTES;
+            for (plane, dst) in [&visit.keys, &visit.values].into_iter().enumerate() {
+                for row in 0..rows {
+                    let position = session.position + row;
+                    if position >= visit.capacity {
+                        let saved = base + (plane * MAX_VERIFY_ROWS + row) * KV_ROW_BYTES;
+                        let cache = (position % visit.capacity) * KV_ROW_BYTES;
+                        blit.copy_buffer_to_buffer(dst, cache, &self.saved, saved, KV_ROW_BYTES);
+                    }
+                }
+            }
+            for (i, buffer) in visit.conv.iter().enumerate() {
+                let saved = base + 2 * MAX_VERIFY_ROWS * KV_ROW_BYTES + CONV_OFFSETS[i] * 3;
+                blit.copy_buffer_to_buffer(buffer, 0, &self.saved, saved, CONV_ROW_BYTES[i] * 3);
+            }
+        }
+        blit.end_encoding();
+        Ok(())
+    }
+
+    pub(super) fn restore_suffix(
+        &self,
+        command: &ProtocolObject<dyn MTLCommandBuffer>,
+        session: &Session,
+        rows: usize,
+        kept: usize,
+    ) -> Result<()> {
+        if kept == rows {
+            return Ok(());
+        }
+        if let Some(table) = &self.undo_table {
+            return self.copy_undo(table, command, session, rows, kept);
+        }
+        let blit = command.blit_command_encoder().ok_or("Inkling verifier undo encoder allocation failed")?;
+        for (index, visit) in session.visits.iter().enumerate() {
+            let base = index * SAVED_VISIT_BYTES;
+            for row in kept..rows {
+                let position = session.position + row;
+                if position >= visit.capacity {
+                    for (plane, dst) in [&visit.keys, &visit.values].into_iter().enumerate() {
+                        let saved = base + (plane * MAX_VERIFY_ROWS + row) * KV_ROW_BYTES;
+                        let cache = (position % visit.capacity) * KV_ROW_BYTES;
+                        blit.copy_buffer_to_buffer(&self.saved, saved, dst, cache, KV_ROW_BYTES);
+                    }
+                }
+                for (i, buffer) in visit.conv.iter().enumerate() {
+                    let stride = CONV_ROW_BYTES[i];
+                    let slot = (position % 3) * stride;
+                    // Row 3 overwrites the accepted anchor's ring slot. Other
+                    // rejected rows overwrite disjoint slots from before the call.
+                    if row == 3 {
+                        let saved = index * CONV_BYTES + CONV_OFFSETS[i];
+                        blit.copy_buffer_to_buffer(&self.anchors, saved, buffer, slot, stride);
+                    } else {
+                        let saved = base + 2 * MAX_VERIFY_ROWS * KV_ROW_BYTES + CONV_OFFSETS[i] * 3 + slot;
+                        blit.copy_buffer_to_buffer(&self.saved, saved, buffer, slot, stride);
+                    }
+                }
+            }
+        }
+        blit.end_encoding();
+        Ok(())
+    }
+
+    fn batch_attention_heads(
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        visit: &Visit,
+        position: usize,
+        rows: &[&Scratch],
+        window: usize,
+    ) {
+        let [a, b, c, d] = std::array::from_fn(|i| rows[i.min(rows.len() - 1)]);
+        gpu.dispatch(
+            "ink_verify_kv_pack",
+            &[
+                &a.k,
+                &b.k,
+                &c.k,
+                &d.k,
+                &a.v,
+                &b.v,
+                &c.v,
+                &d.v,
+                &a.dynamic[0],
+                &b.dynamic[0],
+                &c.dynamic[0],
+                &d.dynamic[0],
+                &a.dynamic[1],
+                &b.dynamic[1],
+                &c.dynamic[1],
+                &d.dynamic[1],
+                &layer.key_conv,
+                &layer.value_conv,
+                &visit.conv[0],
+                &visit.conv[1],
+                &visit.keys,
+                &visit.values,
+            ]
+            .map(binding),
+            [position as u32, rows.len() as u32, visit.capacity as u32, u32::from(layer.dynamic.is_some())],
+            (4, 1),
+            128,
+        );
+        gpu.dispatch(
+            "ink_verify_qr_pack",
+            &[&a.q, &b.q, &c.q, &d.q, &a.r, &b.r, &c.r, &d.r, &layer.q_scale, &layer.r_scale].map(binding),
+            [position as u32, window as u32],
+            (12, rows.len()),
+            128,
+        );
+    }
+
+    fn relative_tables(
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        rows: &[&Scratch],
+    ) {
+        if gpu.runtime.verify_combined_short {
+            let [a, b, c, d] = std::array::from_fn(|i| rows[i.min(rows.len() - 1)]);
+            gpu.dispatch(
+                "ink_verify_relative_tables",
+                &[&a.r, &b.r, &c.r, &d.r, &layer.relative, &a.table, &b.table, &c.table, &d.table].map(binding),
+                (),
+                (LOCAL / 32, HEADS.div_ceil(16) * rows.len()),
+                32,
+            );
+        } else {
+            for scratch in rows {
+                gpu.one(
+                    "ink_prefill_relative_table_source",
+                    &[&scratch.r, &layer.relative, &scratch.table],
+                    HEADS as u32,
+                    (LOCAL / 32, HEADS.div_ceil(16)),
+                    32,
+                );
+            }
+        }
+    }
+
+    fn gate_shared_attention(
+        gpu: &mut Stream<'_>,
+        parts: &Buffer,
+        rows: &[&Scratch],
+    ) {
+        if gpu.runtime.verify_combined_short {
+            let [a, b, c, d] = std::array::from_fn(|i| rows[i.min(rows.len() - 1)]);
+            gpu.dispatch(
+                "ink_verify_gate_batched",
+                &[
+                    parts,
+                    &a.attn_gate,
+                    &b.attn_gate,
+                    &c.attn_gate,
+                    &d.attn_gate,
+                    &a.attended,
+                    &b.attended,
+                    &c.attended,
+                    &d.attended,
+                ]
+                .map(binding),
+                (),
+                (8, HEADS * rows.len()),
+                128,
+            );
+        } else {
+            for (row, scratch) in rows.iter().enumerate() {
+                gpu.dispatch(
+                    "ink_attention_source_gate",
+                    &[(parts, row * HEADS * 64 * 130 * 4), binding(&scratch.attn_gate), binding(&scratch.attended)],
+                    [64u32, 64],
+                    (8, HEADS),
+                    128,
+                );
+            }
+        }
+    }
+
+    pub(super) fn shares_local_attention(&self) -> bool {
+        self.local_rows_per_group > 0 && self.attention_parts.is_some()
+    }
+
+    pub(super) fn encode_shared_local(
+        &self,
+        gpu: &mut Stream<'_>,
+        index: usize,
+        layer: &Layer,
+        visit: &Visit,
+        position: usize,
+        rows: &[&Scratch],
+    ) {
+        let parts = self.attention_parts.as_ref().expect("shared local verifier workspace");
+        if gpu.runtime.verify_fused_cache {
+            Self::batch_attention_heads(gpu, layer, visit, position, rows, LOCAL);
+        }
+        for (row, scratch) in rows.iter().enumerate() {
+            if !gpu.runtime.verify_fused_cache {
+                layer.attention_write_cache(
+                    gpu,
+                    scratch,
+                    visit,
+                    [(position + row) as u32, LOCAL as u32, LOCAL as u32, 64],
+                );
+            }
+        }
+        Self::relative_tables(gpu, layer, rows);
+        let [a, b, c, d] = std::array::from_fn(|index| rows[index.min(rows.len() - 1)]);
+        let (kernel, head_group, row_group) = if rows.len() == 3 && gpu.runtime.verify_fast_three {
+            ("ink_verify_local_three_parts", 3, 1)
+        } else {
+            ("ink_verify_local_parts", 1, self.local_rows_per_group)
+        };
+        gpu.dispatch(
+            kernel,
+            &[
+                binding(&a.q),
+                binding(&b.q),
+                binding(&c.q),
+                binding(&d.q),
+                binding(&a.table),
+                binding(&b.table),
+                binding(&c.table),
+                binding(&d.table),
+                binding(&a.sink),
+                binding(&b.sink),
+                binding(&c.sink),
+                binding(&d.sink),
+                binding(&visit.keys),
+                binding(&visit.values),
+                (&self.saved, index * SAVED_VISIT_BYTES),
+                binding(parts),
+            ],
+            [position as u32, rows.len() as u32, row_group as u32, 0],
+            (16, HEADS / head_group * rows.len().div_ceil(row_group)),
+            128,
+        );
+        Self::gate_shared_attention(gpu, parts, rows);
+    }
+
+    /// All rows of a short block below 1,024 visible keys in one launch
+    /// each for parts and gate, with the single-row 32-shard arithmetic.
+    pub(super) fn shares_short_attention(&self) -> bool {
+        self.short_attention && self.attention_parts.is_some()
+    }
+
+    pub(super) fn encode_shared_short(
+        &self,
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        visit: &Visit,
+        position: usize,
+        rows: &[&Scratch],
+    ) {
+        let parts = self.attention_parts.as_ref().expect("shared short verifier workspace");
+        gpu.phase(PrefillPhase::KeyValue);
+        let window = if layer.local {
+            LOCAL
+        } else {
+            0
+        };
+        Self::batch_attention_heads(gpu, layer, visit, position, rows, window);
+        gpu.phase(PrefillPhase::RelativeTable);
+        Self::relative_tables(gpu, layer, rows);
+        gpu.phase(PrefillPhase::LocalAttention);
+        let [a, b, c, d] = std::array::from_fn(|index| rows[index.min(rows.len() - 1)]);
+        gpu.dispatch(
+            "ink_verify_short_parts",
+            &[
+                binding(&a.q),
+                binding(&b.q),
+                binding(&c.q),
+                binding(&d.q),
+                binding(&a.table),
+                binding(&b.table),
+                binding(&c.table),
+                binding(&d.table),
+                binding(&a.sink),
+                binding(&b.sink),
+                binding(&c.sink),
+                binding(&d.sink),
+                binding(&visit.keys),
+                binding(&visit.values),
+                binding(parts),
+            ],
+            [position as u32, visit.capacity as u32],
+            (8, HEADS * rows.len()),
+            128,
+        );
+        gpu.dispatch(
+            "ink_verify_short_gate",
+            &[
+                parts,
+                &a.attn_gate,
+                &b.attn_gate,
+                &c.attn_gate,
+                &d.attn_gate,
+                &a.attended,
+                &b.attended,
+                &c.attended,
+                &d.attended,
+            ]
+            .map(binding),
+            (),
+            (8, HEADS * rows.len()),
+            128,
+        );
+    }
+
+    pub(super) fn shares_global_attention(&self) -> bool {
+        self.global_share.0 != 0 && self.attention_parts.is_some()
+    }
+
+    pub(super) fn encode_shared_global(
+        &self,
+        gpu: &mut Stream<'_>,
+        layer: &Layer,
+        visit: &Visit,
+        position: usize,
+        rows: &[&Scratch],
+    ) {
+        let parts = self.attention_parts.as_ref().expect("shared global verifier workspace");
+        let (heads_per_group, rows_per_group) = self.global_share;
+        gpu.phase(PrefillPhase::KeyValue);
+        if gpu.runtime.verify_fused_cache {
+            Self::batch_attention_heads(gpu, layer, visit, position, rows, 0);
+        } else {
+            for (row, scratch) in rows.iter().enumerate() {
+                layer.attention_write_cache(
+                    gpu,
+                    scratch,
+                    visit,
+                    [(position + row) as u32, visit.capacity as u32, 0, 64],
+                );
+            }
+        }
+        gpu.phase(PrefillPhase::RelativeTable);
+        Self::relative_tables(gpu, layer, rows);
+        gpu.phase(PrefillPhase::GlobalAttention);
+        let [a, b, c, d] = std::array::from_fn(|index| rows[index.min(rows.len() - 1)]);
+        gpu.dispatch(
+            "ink_verify_global_parts",
+            &[
+                binding(&a.q),
+                binding(&b.q),
+                binding(&c.q),
+                binding(&d.q),
+                binding(&a.table),
+                binding(&b.table),
+                binding(&c.table),
+                binding(&d.table),
+                binding(&a.sink),
+                binding(&b.sink),
+                binding(&c.sink),
+                binding(&d.sink),
+                binding(&visit.keys),
+                binding(&visit.values),
+                binding(parts),
+            ],
+            [position as u32, rows.len() as u32, rows_per_group as u32, heads_per_group as u32],
+            (16, HEADS / heads_per_group * rows.len().div_ceil(rows_per_group)),
+            128,
+        );
+        Self::gate_shared_attention(gpu, parts, rows);
+    }
+
+    pub(super) fn save_anchor(
+        &self,
+        gpu: &mut Stream<'_>,
+        index: usize,
+        scratch: &Scratch,
+        experts: Binding<'_>,
+    ) {
+        gpu.dispatch(
+            "ink_save_anchor_convolution",
+            &[
+                binding(&scratch.k),
+                binding(&scratch.v),
+                binding(&scratch.attn_raw),
+                experts,
+                (&self.anchors, index * CONV_BYTES),
+            ],
+            (),
+            ((2 * KV + 2 * WIDTH) / 128, 1),
+            128,
+        );
+    }
+}
+
+/// A completed target command with provisional cache writes. The caller
+/// commits one or more verified inputs before the session can be used again.
+pub struct Verification<'a> {
+    session: Option<&'a mut Session>,
+    rows: usize,
+}
+
+impl<'a> Verification<'a> {
+    pub fn logits(
+        &self,
+        row: usize,
+    ) -> Result<&[f32]> {
+        if row >= self.rows {
+            return Err("Inkling verifier readout is outside the block");
+        }
+        // The command completed and this transaction has exclusive access to
+        // the session. The logits cannot change while the slice is borrowed.
+        let values = unsafe {
+            let session = self.session.as_ref().ok_or("Inkling verifier is already committed")?;
+            let base = session.logits.contents().as_ptr().cast::<f32>();
+            std::slice::from_raw_parts(base.add(row * PADDED_VOCABULARY), VOCABULARY)
+        };
+        if values.iter().any(|x| !x.is_finite()) {
+            return Err("Inkling verifier produced nonfinite logits");
+        }
+        Ok(values)
+    }
+
+    pub fn commit(
+        mut self,
+        kept: usize,
+    ) -> Result<&'a mut Session> {
+        if kept == 0 || kept > self.rows {
+            return Err("Inkling verifier commit is outside the block");
+        }
+        let session = self.session.as_deref_mut().ok_or("Inkling verifier is already committed")?;
+        let workspace = session.verifier.as_ref().ok_or("Inkling verifier workspace unavailable")?;
+        let draft = session.active_dspark().ok_or("Inkling verifier draft unavailable")?;
+        let position = session.position;
+        execute_prepared(
+            &session.runtime,
+            None,
+            |command| workspace.restore_suffix(command, session, self.rows, kept),
+            |gpu| {
+                for (row, taps) in workspace.lanes.verify_taps(session, self.rows).take(kept).enumerate() {
+                    draft.commit(gpu, taps, position + row);
+                }
+            },
+        )?;
+        session.position += kept;
+        session.features_ready = false;
+        self.session.take().ok_or("Inkling verifier is already committed")
+    }
+}
+
+impl Drop for Verification<'_> {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            session.reset();
+        }
+    }
+}
+
+impl Session {
+    pub const SOURCE_VERIFIER_RESERVE_BYTES: usize = 96 * 1024 * 1024;
+
+    /// Enable source-mode draft prefill and reserve the short verifier.
+    /// Select the mode at a request boundary after setting the context.
+    pub fn set_source_verifier(
+        &mut self,
+        enabled: bool,
+    ) -> Result<()> {
+        if self.position != 0 {
+            return Err("Inkling verifier mode must be selected before prefill");
+        }
+        if enabled {
+            if !self.has_dspark() || !self.source_text_ready() {
+                return Err("Inkling source verifier requires the source M5 path and DSpark");
+            }
+            if self.verifier.is_none() {
+                let workspace = VerifyWorkspace::new(&mut self.runtime, self.visits.len())?;
+                self.packed_prefill
+                    .as_mut()
+                    .ok_or("Inkling packed prefill unavailable")?
+                    .enable_draft_taps(&mut self.runtime)?;
+                self.verifier = Some(workspace);
+            }
+        }
+        self.source_verifier = enabled;
+        self.apply_prefill_scope();
+        Ok(())
+    }
+
+    pub fn propose_verify(
+        &self,
+        anchor: u32,
+        depth: usize,
+    ) -> Result<Vec<u32>> {
+        if !self.source_verifier
+            || !self.runtime.source_text_active
+            || self.position == 0
+            || depth == 0
+            || depth >= MAX_VERIFY_ROWS
+            || anchor as usize >= VOCABULARY
+            || self.context - self.position < depth + 1
+        {
+            return Err("Inkling draft proposal exceeds the verifier extent");
+        }
+        let workspace = self.verifier.as_ref().ok_or("Inkling verifier workspace unavailable")?;
+        let draft = self.active_dspark().ok_or("Inkling verifier draft unavailable")?;
+        if depth == 1 {
+            return draft
+                .propose(&self.runtime, anchor, self.position, &self.embedding, &self.embed_norm, &self.unembedding)
+                .map(|token| vec![token]);
+        }
+        draft.propose_many(
+            &self.runtime,
+            anchor,
+            self.position,
+            &self.embedding,
+            &self.embed_norm,
+            &self.unembedding,
+            depth,
+            &workspace.draft,
+        )
+    }
+
+    /// The draft head's confidence in each of the first count proposals of
+    /// the last multi-row proposal block (two or more drafts), in order.
+    pub fn proposal_confidences(
+        &self,
+        count: usize,
+    ) -> Result<Vec<f32>> {
+        let workspace = self.verifier.as_ref().ok_or("Inkling verifier workspace unavailable")?;
+        if count >= MAX_VERIFY_ROWS {
+            return Err("Inkling draft confidence request exceeds the block");
+        }
+        Ok(workspace.draft.confidences(count))
+    }
+
+    pub fn overlaps_verify(&self) -> bool {
+        self.source_verifier && self.runtime.verify_overlap
+    }
+
+    pub fn overlaps_verify_for(
+        &self,
+        depth: usize,
+    ) -> bool {
+        self.overlaps_verify()
+            && (1..MAX_VERIFY_ROWS).contains(&depth)
+            && (depth > 1 || (self.runtime.verify_single_draft && self.dspark_int8_head_resident_bytes() > 0))
+    }
+
+    /// Submit the short verifier while the prior draft command is running.
+    /// Report wall time before verifier encoding followed by the verifier's
+    /// wall time, which includes any draft work still outstanding.
+    pub fn begin_overlapped_verify(
+        &mut self,
+        anchor: u32,
+        depth: usize,
+    ) -> Result<(Vec<u32>, Verification<'_>, f64, f64)> {
+        if !self.overlaps_verify_for(depth)
+            || !self.runtime.source_text_active
+            || self.active_dspark().is_none()
+            || self.position == 0
+            || anchor as usize >= VOCABULARY
+        {
+            return Err("Inkling overlapped verifier requires a supported source draft depth");
+        }
+        let rows = depth + 1;
+        self.check_append(rows)?;
+        let workspace = self.verifier.as_ref().ok_or("Inkling verifier workspace unavailable")?;
+        // Only the anchor is already known on the CPU. Draft rows read the
+        // preceding command's proposal buffer in their embedding dispatches.
+        let inputs = [anchor, 0, 0, 0];
+        let mut target_timing = None;
+        let parallel = self.runtime.parallel_route;
+        let matvec = self.runtime.verify_nvfp4_matvec;
+        self.runtime.parallel_route = true;
+        self.runtime.verify_nvfp4_matvec = true;
+        let draft = self.active_dspark().expect("checked source verifier draft");
+        let command = draft.propose_many_with_submit(
+            &self.runtime,
+            anchor,
+            self.position,
+            &self.embedding,
+            &self.embed_norm,
+            &self.unembedding,
+            depth,
+            &workspace.draft,
+            || {
+                target_timing = Some(execute_prepared(
+                    &self.runtime,
+                    None,
+                    |command| workspace.save(command, self, rows),
+                    |gpu| {
+                        self.encode_verify_transaction(
+                            gpu,
+                            &workspace.lanes,
+                            &inputs[..rows],
+                            VerifyExperts::Grouped,
+                            workspace,
+                            Some(workspace.draft.winners()),
+                        )
+                    },
+                )?);
+                Ok(())
+            },
+        );
+        self.runtime.verify_nvfp4_matvec = matvec;
+        self.runtime.parallel_route = parallel;
+        match (command, target_timing) {
+            (Ok((proposals, total)), Some(target)) => {
+                let draft_prefix = total.wall_ms - target.wall_ms;
+                Ok((
+                    proposals,
+                    Verification {
+                        session: Some(self),
+                        rows,
+                    },
+                    draft_prefix,
+                    target.wall_ms,
+                ))
+            },
+            (result, _) => {
+                // Both commands have completed before a fault can clear the
+                // session. Invalid proposal IDs were clamped in the GPU shader.
+                self.reset();
+                Err(result.err().unwrap_or("Inkling overlapped verifier did not submit"))
+            },
+        }
+    }
+
+    pub fn begin_verify(
+        &mut self,
+        tokens: &[u32],
+    ) -> Result<Verification<'_>> {
+        self.begin_verify_profiled(tokens, None).map(|(verification, _)| verification)
+    }
+
+    pub(super) fn begin_verify_profiled(
+        &mut self,
+        tokens: &[u32],
+        profile: Option<&mut PrefillTiming>,
+    ) -> Result<(Verification<'_>, Timing)> {
+        self.check_append(tokens.len())?;
+        if !self.source_verifier
+            || !self.runtime.source_text_active
+            || self.active_dspark().is_none()
+            || !(2..=MAX_VERIFY_ROWS).contains(&tokens.len())
+            || tokens.iter().any(|&token| token as usize >= VOCABULARY)
+        {
+            return Err("Inkling short verifier requires source draft mode and two to four tokens");
+        }
+        let workspace = self.verifier.as_ref().ok_or("Inkling verifier workspace unavailable")?;
+        let parallel = self.runtime.parallel_route;
+        let matvec = self.runtime.verify_nvfp4_matvec;
+        self.runtime.parallel_route = true;
+        self.runtime.verify_nvfp4_matvec = true;
+        let command = execute_prepared(
+            &self.runtime,
+            profile,
+            |command| workspace.save(command, self, tokens.len()),
+            |gpu| {
+                self.encode_verify_transaction(gpu, &workspace.lanes, tokens, VerifyExperts::Grouped, workspace, None)
+            },
+        );
+        self.runtime.verify_nvfp4_matvec = matvec;
+        self.runtime.parallel_route = parallel;
+        match command {
+            Ok(timing) => Ok((
+                Verification {
+                    session: Some(self),
+                    rows: tokens.len(),
+                },
+                timing,
+            )),
+            Err(error) => {
+                self.reset();
+                Err(error)
+            },
+        }
+    }
+}

@@ -71,6 +71,9 @@ from .guided_models import (
 )
 from .hybrid_prepare import SOURCES as NATIVE_SOURCES
 from .hybrid_prepare import prepared_identity
+from .inkling_chat import PARSER as INKLING_PARSER
+from .inkling_chat import ResponseStream as InklingResponseStream
+from .inkling_chat import parse_response as parse_inkling_response
 from .json_budget import check_json_structure
 from .local_api import APIError, LocalAPI
 from .media import MAX_IMAGE_BYTES, MediaError
@@ -79,7 +82,7 @@ from .model_removal import RemovalError, prepare_removal, removal_info, remove_m
 from .model_support import support_matrix
 from .mtp import mtp_capabilities, resolve_mtp
 from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
-from .native_catalog import RIPPLE_FAMILY_ID
+from .native_catalog import INKLING_FAMILY_ID, RIPPLE_FAMILY_ID
 from .native_catalog import allowed_choice as native_choice_allowed
 from .native_catalog import catalog_item as native_catalog_item
 from .native_catalog import catalog_items as native_catalog_items
@@ -1100,7 +1103,7 @@ class Desktop:
             native_choice = native_source_choice(family, native_identity)
             fixed_native_ids = {native_item["id"] for native_item in native_catalog_items(family)}
             if (
-                family in {NATIVE_FAMILY_ID, RIPPLE_FAMILY_ID} or item["id"] in fixed_native_ids
+                family in {NATIVE_FAMILY_ID, RIPPLE_FAMILY_ID, INKLING_FAMILY_ID} or item["id"] in fixed_native_ids
             ) and native_choice is None:
                 raise DesktopError("Refresh this family before downloading a model.")
             installed = self.catalog_installed_ids(item, mode)
@@ -2331,7 +2334,9 @@ class Desktop:
             converted = model_valid(path)
             try:
                 local_config = read_model_config(path)
-                is_stark = "decoder_config" in local_config or "stark_native_hybrid" in local_config
+                is_stark = any(
+                    key in local_config for key in ("decoder_config", "stark_native_hybrid", "stark_inkling")
+                )
             except Exception:
                 is_stark = False
             if is_stark and not converted:
@@ -2657,7 +2662,7 @@ class Desktop:
         if config.get("type") not in VISION_MODEL_TYPES and family is None:
             return None
         if not isinstance(contract, dict) or (
-            (family or {}).get("profile") != "qwen38-lily-retained-bf16-vision-v1"
+            (family or {}).get("profile") not in {"qwen38-lily-retained-bf16-vision-v1", "inkling2-mini-native-v1"}
             and contract.get("schema_version") not in (3, 4, 5)
         ):
             return None
@@ -3173,9 +3178,13 @@ class Desktop:
             if epoch != self.epoch:
                 return
             self.generation_estimates.record(estimate_key, reply)
+            inkling_message = reply.get("_inkling_message")
+            assistant = inkling_message or assistant_message(
+                reply["text"], initial_thinking=reply.get("_tool_initial_thinking", False)
+            )
             self.messages = [
                 *candidate,
-                assistant_message(reply["text"], initial_thinking=reply.get("_tool_initial_thinking", False)),
+                assistant,
             ]
             self.image_identity = identity
             fields = metrics(reply)
@@ -3183,7 +3192,7 @@ class Desktop:
             self.emit(
                 "reply",
                 epoch,
-                text=reply["text"],
+                text=inkling_message["content"] if inkling_message is not None else reply["text"],
                 finish_reason=reply.get("finish_reason"),
                 **({"request_id": request_id} if request_id else {}),
                 **fields,
@@ -3251,7 +3260,7 @@ class Desktop:
             context = context or self.context
             capability, default_mtp = self.mtp_settings()
             enabled_mtp = (default_mtp and image is None) if mtp is None else mtp
-            drafts = self.resolve_request_mtp(enabled_mtp, capability, image)
+            drafts = self.resolve_request_mtp(enabled_mtp, capability, image, sampling)
             context_capacity_known = self.context_capacity_known
             estimate_key = estimate_key or self.estimate_key(
                 context=context,
@@ -3311,12 +3320,13 @@ class Desktop:
             if worker.request({"operation": "reset_cache"}, cancelled=cancelled).get("cache_reset") is not True:
                 raise ValueError
 
+        parser = tool_parser_for(codec)
         try:
             prompt = render_template(
                 template,
                 cancelled=cancelled,
                 messages=messages,
-                tools=template_tools(tools, parser=tool_parser_for(codec)),
+                tools=template_tools(tools, parser=parser),
                 add_generation_prompt=True,
                 **reasoning_options(codec, thinking=thinking, effort=reasoning_effort),
                 bos_token=codec.get("bos_token") or "",
@@ -3327,20 +3337,29 @@ class Desktop:
         except (TemplateError, ChatError):
             raise APIError(400, "The model's chat template rejected these messages.", "invalid_messages") from None
         initial_thinking = prompt_opens_reasoning(prompt)
+        inkling_stream = None
+        if parser == INKLING_PARSER and on_delta is not None:
+            inkling_stream = InklingResponseStream(on_delta, on_reasoning or (lambda _text: None))
+            on_delta = inkling_stream.feed
         reasoning_stream = (
             ReasoningStream(on_delta, on_reasoning, initial_thinking=initial_thinking)
-            if on_delta is not None and on_reasoning is not None
+            if inkling_stream is None and on_delta is not None and on_reasoning is not None
             else None
         )
         if reasoning_stream is not None:
             on_delta = reasoning_stream.feed
 
         def completed_reply(reply):
-            if reasoning_stream is not None:
-                try:
+            try:
+                if parser == INKLING_PARSER:
+                    message, _, _ = parse_inkling_response(reply["text"])
+                    if inkling_stream is not None:
+                        inkling_stream.finish(message)
+                    reply = {**reply, "_inkling_message": message}
+                if reasoning_stream is not None:
                     reasoning_stream.finish(reply["text"])
-                except OSError:
-                    raise APIError(499, "Request cancelled.", "request_cancelled") from None
+            except OSError:
+                raise APIError(499, "Request cancelled.", "request_cancelled") from None
             # Bind parsing to the actual rendered prompt, never worker claims.
             return {**reply, "_tool_initial_thinking": initial_thinking}
 
@@ -3484,19 +3503,31 @@ class Desktop:
                 self.prefix_reset_pending = True
 
     @staticmethod
-    def resolve_request_mtp(enabled, capability, image):
+    def resolve_request_mtp(enabled, capability, image, sampling=None):
         if type(enabled) is not bool:
             raise APIError(400, "mtp must be a boolean.", "invalid_request")
         if enabled is True and image is not None:
             raise APIError(400, "MTP is not supported for image requests.", "mtp_not_supported")
         try:
-            return resolve_mtp(enabled, capability)
+            return resolve_mtp(enabled, capability, sampling)
         except ValueError:
             raise APIError(400, "MTP is not supported by the loaded model and worker.", "mtp_not_supported") from None
 
     @staticmethod
     def validate_mtp_reply(reply, capability, drafts):
         ack = reply.get("mtp")
+        # A worker may decode serially instead of a slower draft route; it then
+        # acknowledges zero drafts and echoes the requested count.
+        fallback = (
+            isinstance(ack, dict)
+            and drafts > 0
+            and ack.get("enabled") is False
+            and ack.get("drafts") == 0
+            and type(ack.get("requested_drafts")) is int
+            and ack.get("requested_drafts") == drafts
+        )
+        if fallback:
+            drafts = 0
         if (
             not isinstance(ack, dict)
             or ack.get("enabled") is not (drafts > 0)
@@ -3810,7 +3841,7 @@ class Desktop:
                 )
             capability, default_mtp = self.mtp_settings()
             enabled_mtp = (default_mtp and request["image"] is None) if request["mtp"] is None else request["mtp"]
-            drafts = self.resolve_request_mtp(enabled_mtp, capability, request["image"])
+            drafts = self.resolve_request_mtp(enabled_mtp, capability, request["image"], request["sampling"])
             epoch, identifier, worker = self.epoch, self.active_model, self.worker
             self.reserve_api_request(epoch, identifier, cancelled)
             estimate_key = self.estimate_key(
@@ -3833,11 +3864,15 @@ class Desktop:
             self.emit("generation_progress", epoch, source="api", id=progress_id, model=identifier, **value)
 
         try:
-            tool_stream = ToolTextStream(on_delta, parser=parser) if tool_request and on_delta is not None else None
+            tool_stream = (
+                ToolTextStream(on_delta, parser=parser)
+                if tool_request and parser != INKLING_PARSER and on_delta is not None
+                else None
+            )
             reasoning_delivery = (lambda text: on_delta({"reasoning_content": text})) if on_delta is not None else None
             tool_reasoning_stream = (
                 ToolTextStream(reasoning_delivery, parser=parser)
-                if tool_request and reasoning_delivery is not None
+                if tool_stream is not None and reasoning_delivery is not None
                 else None
             )
             reply = self.infer(
@@ -3881,14 +3916,14 @@ class Desktop:
                     )
                     if tool_request
                     else (
-                        {"role": "assistant", "content": reply["text"]},
+                        reply.get("_inkling_message") or {"role": "assistant", "content": reply["text"]},
                         "length" if reply.get("finish_reason") in ("length", "context") else "stop",
                     )
                 )
                 parts = assistant_message(
                     message.get("content") or "", initial_thinking=reply.get("_tool_initial_thinking", False)
                 )
-                if "reasoning_content" in parts:
+                if parser != INKLING_PARSER and "reasoning_content" in parts:
                     message = {**message, **parts}
                     if tool_request and not message["content"]:
                         message["content"] = None

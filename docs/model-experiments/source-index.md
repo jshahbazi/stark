@@ -215,6 +215,75 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Gemma 4 no-PLE residual controls](../archive/runs/2026-11-07-gemma4-nople-residual-controls.md) · Archived run, 2026-11-07
 - [Gemma 4 12B encoder-free vision controls](../archive/runs/2026-11-07-gemma4-unified-vision-controls.md) · Archived run, 2026-11-07
 
+## Inkling 2 Mini
+
+### References, native milestones and follow-up
+
+- [Original-checkpoint implementation plan](../INKLING_2_MINI_PLAN.md)
+- [Native Metal retrospective](../archive/runs/2026-11-21-inkling-mini-native-retrospective.md) · Archived run, 2026-11-21
+- [Prefill and decode performance follow-up](../INKLING_2_MINI_PERFORMANCE_FOLLOWUP.md) · Proposals, 2026-11-21
+- [Prefill, decode, DSpark and prefix reuse speed history](speed-inkling.md)
+- [Stark against MLX-Serve: every difference, what worked, what did not and what is open](inkling-mlx-serve-differences.md) · Maintained list
+
+### Benchmarks and experiment records
+
+- [M5 Max original and Unsloth baselines](../benchmarks/2026-11-20-inkling-mini-m5-max.md) · Benchmark, 2026-11-20
+- [First milestone and real-weight NVFP4](2026-11-20-inkling-mini-milestone-1.md) · Experiment, 2026-11-20
+- [Native decode slice](../benchmarks/2026-11-21-inkling-mini-native-slice.md) · Benchmark, 2026-11-21
+- [Native slice trials](2026-11-21-inkling-mini-native-slice.md) · Experiment, 2026-11-21
+- [Pinned Ollama oracle](../benchmarks/2026-11-21-inkling-mini-pinned-oracle.md) · Benchmark, 2026-11-21
+- [Pinned-runtime parity trials](2026-11-21-inkling-mini-pinned-oracle.md) · Experiment, 2026-11-21
+- [Short projection parity and budget](../benchmarks/2026-11-21-inkling-mini-short-projection.md) · Benchmark, 2026-11-21
+- [Short projection root cause](2026-11-21-inkling-mini-short-projection.md) · Experiment, 2026-11-21
+- [Full target and 64-row grouped prefill](2026-11-21-inkling-mini-full-target.md) · Experiment, 2026-11-21
+- [Native worker and 4K prefill progression](../benchmarks/2026-11-21-inkling-mini-native-worker.md) · Benchmark, 2026-11-21
+- [Worker load, vision, streaming and tool controls](2026-11-21-inkling-mini-worker.md) · Experiment, 2026-11-21
+- [Vision tower against Ollama](2026-11-21-inkling-mini-vision.md) · Experiment, 2026-11-21
+- [Native DSpark and serial verification](2026-11-21-inkling-mini-dspark.md) · Experiment, 2026-11-21
+- [Grouped NVFP4 routes and buckets](2026-11-21-inkling-mini-grouped-nvfp4.md) · Experiment, 2026-11-21
+- [Matched 512-row prefill trace](2026-11-21-inkling-mini-matched-prefill.md) · Experiment, 2026-11-21
+- [Grouped prefill stage profile](2026-11-21-inkling-mini-prefill-profile.md) · Experiment, 2026-11-21
+- [Faster 128-row native prefill](2026-11-21-inkling-mini-faster-prefill.md) · Experiment, 2026-11-21
+- [4K prefill budget and batched RMS](2026-11-21-inkling-mini-prefill-budget.md) · Experiment, 2026-11-21
+- [Packed prefill, rejected kernels and source-aligned worker](2026-11-21-inkling-mini-packed-prefill.md) · Experiment, 2026-11-21
+- [Stock 4K prefill and singleton decode attribution](2026-11-21-inkling-mini-stock-profile.md) · Experiment, 2026-11-21
+- [Stock NVFP4 occupancy, scale sharing and one-row decode router](2026-11-21-inkling-mini-nvfp4-router.md) · Experiment, 2026-11-21
+- [Wider NVFP4 run tiles on the stock 4K graph](2026-11-21-inkling-mini-nvfp4-run-tiles.md) · Experiment, 2026-11-21
+- [Tensor MXFP8 with source-order replay and wider-tile NVFP4 scale sharing](2026-11-21-inkling-mini-mxfp8-tensor.md) · Experiment, 2026-11-21
+- [Default fast prefill with flags unset](2026-11-21-inkling-mini-prefill-default.md) · Experiment, 2026-11-21
+- [Default one-row router with flags unset](2026-11-21-inkling-mini-decode-default.md) · Experiment, 2026-11-21
+- [Decode toward 80 tok/s, verifier cuts, sampled proposal headroom and MLX-Serve comparison](2026-11-22-inkling-mini-decode-80.md) · Experiment, 2026-11-22, through attempts [109](2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-109--expand-the-nvfp4-coefficients-before-verification) and [110](2026-11-22-inkling-mini-decode-80.md#20261122-inkdecode-110--shorten-the-dspark-forward)
+- [Decode toward 60 tok/s, exact verifier and sampled acceptance](2026-11-21-inkling-mini-decode-60.md) · Experiment, 2026-11-21–22
+- [Default fast paths, source admission from 1 token to 32K context and default drafting](2026-11-22-inkling-mini-default-fast-paths.md) · Experiment, 2026-11-22, attempt 20261122-INKDEFAULT-01
+- [Verifier long-position gain rounding fix](2026-11-22-inkling-mini-long-position-gain.md) · Experiment, 2026-11-22, attempt 20261122-INKLONGPOS-01
+- [Verifier and single-row launch fusion, two sessions](2026-11-22-inkling-mini-launch-fusion.md) · Experiment, 2026-11-22–23, attempts 20261122-INKFUSE-01 and -02
+- [Engine matrix against MLX-Serve, runs 1 to 5](../benchmarks/2026-11-22-inkling-mini-engine-matrix.md) · Benchmark, 2026-11-22–23, attempts 20261122-INKENGINE-01 to -03 and 20261123-INKENGINE-04 and -05
+- [Standard benchmark against MLX-Serve, three repeats with quality](../benchmarks/2026-11-23-inkling-mini-standard-benchmark.md) · Benchmark (standard result), 2026-11-23, attempt 20261123-INKENGINE-06
+- [Exact faster prefill: NVFP4 guard removal, fused NVFP4 kernels, faster MXFP8 replay](2026-11-22-inkling-mini-exact-fast-prefill.md) · Experiment, 2026-11-22, attempt 20261122-INKFASTPRE-01
+- [Unguarded MXFP8 prefill default, noise-floor gate and mask-free global attention](2026-11-22-inkling-mini-unguarded-mxfp8-prefill.md) · Experiment, 2026-11-22–23, attempt 20261122-INKFASTPRE-02
+- [Prefill attribution, MLX-Serve against Stark](../benchmarks/2026-11-22-inkling-mini-prefill-attribution.md) · Benchmark, 2026-11-22, attempt 20261122-INKPREATTR-01
+- [8-bit affine dense weights: feasibility, byte-exact pack reproduction and the Stark 8-bit engine artifact](2026-11-22-inkling-mini-affine8.md) · Experiment, 2026-11-22–23, attempts 20261122-INKAFFINE8-01 to -03
+- [The 8-bit artifact becomes the default: preparation, upgrade, catalog and qualification status](2026-11-23-inkling-mini-affine8-default.md) · Compatibility, 2026-11-23, attempt 20261123-INKAFFINE8-04
+- [Unquantized NVFP4 expert inputs as the default, and the rejected fold](2026-11-23-inkling-mini-expert-inputs-default.md) · Experiment, 2026-11-23, attempts 20261123-INKROUND-09 and -10
+- [Draft-depth planner tuning and the hold rule](2026-11-23-inkling-mini-planner-tuning.md) · Experiment, 2026-11-23, attempts 20261123-INKROUND-11 and -12
+- [Gathered NVFP4 prefill kernel for wide commands](2026-11-23-inkling-mini-gathered-nvfp4.md) · Experiment, 2026-11-23, attempt 20261122-INKFASTPRE-07
+- [Optimization wind-down: reverted unmeasured attempts, the paired-control hang and lock incidents](2026-11-23-inkling-mini-wind-down.md) · Experiment, 2026-11-23, attempts 20261123-INKROUND-13 and -14 and 20261122-INKFASTPRE-08
+- [Prefill round 3: dense kernel, packed draft commit, mask removal, width independence and two rejected kernels](2026-11-23-inkling-mini-prefill-round3.md) · Experiment, 2026-11-23, attempt 20261122-INKFASTPRE-03
+- [Prefill round 4: routing, drafting overhead, command width, expert ceiling, rejected stationary and staged kernels, BF16 attention and dense decomposition](2026-11-23-inkling-mini-prefill-round4.md) · Experiment, 2026-11-23, attempts 20261122-INKFASTPRE-04 to -06
+- [Decode round: stage table, short-context verifier attention, router, worker loop, depth policy, expert inputs and natural-text quality](2026-11-23-inkling-mini-decode-round.md) · Experiment, 2026-11-23, attempts 20261123-INKROUND-01 to -08
+- [Worker prefill command width and the cache on/off fault](2026-11-23-inkling-mini-wide-prefill-worker.md) · Experiment, 2026-11-23, attempts 20261123-INKWIDTH-01 and -02
+- [MLX-Serve source comparison](../benchmarks/2026-11-23-inkling-mini-mlx-serve-source.md) · Benchmark (source reading), 2026-11-23, attempt 20261123-INKMLXSRC-01
+
+### Protocols and aggregates
+
+- [Real-weight NVFP4 probe](../archive/experiments/2026-11-20-inkling-mini/NVFP4_PROBE.md)
+- [Pinned oracle capture, including stock prefill and seed](../archive/experiments/2026-11-21-inkling-oracle/README.md)
+- [Vision oracle capture](../archive/experiments/2026-11-21-inkling-vision/README.md)
+- [Reference server and component aggregates](../benchmarks/data/inkling-mini-m5-max-2026-11-20.json)
+- [Native slice aggregates](../benchmarks/data/inkling-mini-native-slice-2026-11-21.json)
+- [Pinned oracle aggregates](../benchmarks/data/inkling-mini-pinned-oracle-2026-11-21.json)
+- [Worker-schedule captures and checks at caller-chosen lengths and contexts](../archive/experiments/2026-11-22-inkling-schedule-oracle/README.md)
+
 ## Ripple
 
 - [Ripple-65B native GPU performance](../benchmarks/RIPPLE_65B_GPU_2026_11_05.md) · Benchmark, 2026-11-05

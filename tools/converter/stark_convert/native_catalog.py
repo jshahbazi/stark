@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 
+from .inkling_prepare import CHOICE as INKLING_CHOICE
+from .inkling_prepare import FAMILY as INKLING_FAMILY_ID
+
 FAMILY_ID = "glm5_next"
 CHOICE = "glm53-q2"
 QWEN_FAMILY_ID = "qwen4_exp"
@@ -17,6 +20,10 @@ _NATIVE_CHOICES = {
     QWEN_FAMILY_ID: (QWEN_CHOICE, "qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"),
     FLINT_FAMILY_ID: (FLINT_CHOICE,),
     RIPPLE_FAMILY_ID: ("ripple-q8", "ripple-q4-k-m"),
+    # The 8-bit default only. The original (inkling_prepare.ORIGINAL_CHOICE) is a
+    # preparation choice for reference work: it shares this item's repository and
+    # revision, which the app's installed-model matching cannot tell apart.
+    INKLING_FAMILY_ID: (INKLING_CHOICE,),
 }
 
 
@@ -41,6 +48,8 @@ def family_definition(family: str = FAMILY_ID) -> dict:
         "family_id": family,
         "name": "Ripple-65B Preview"
         if family == RIPPLE_FAMILY_ID
+        else "Inkling 2 Mini"
+        if family == INKLING_FAMILY_ID
         else "Flint"
         if family == FLINT_FAMILY_ID
         else "GLM-5.3 Flash",
@@ -49,9 +58,9 @@ def family_definition(family: str = FAMILY_ID) -> dict:
         "model_kind": "language",
         "conversion": {
             "status": "implemented",
-            "containers": [".safetensors"] if family == FLINT_FAMILY_ID else [".gguf"],
+            "containers": [".safetensors"] if family in {FLINT_FAMILY_ID, INKLING_FAMILY_ID} else [".gguf"],
             "source_formats": [source_for(choice)["quantization"] for choice in _NATIVE_CHOICES[family]]
-            if family == RIPPLE_FAMILY_ID
+            if family in {RIPPLE_FAMILY_ID, INKLING_FAMILY_ID}
             else ["MLX affine INT4"]
             if family == FLINT_FAMILY_ID
             else ["UD-Q2_K_XL"],
@@ -69,9 +78,11 @@ def family_definition(family: str = FAMILY_ID) -> dict:
                 "caveats": [],
             },
             "vision-language": {
-                "status": "unsupported",
-                "message": "Image input is not supported for this model family.",
-                "caveats": [],
+                "status": "conditional" if family == INKLING_FAMILY_ID else "unsupported",
+                "message": "Inkling 2 Mini includes its image tower."
+                if family == INKLING_FAMILY_ID
+                else "Image input is not supported for this model family.",
+                "caveats": ["local_image_checks_required"] if family == INKLING_FAMILY_ID else [],
             },
         },
     }
@@ -95,6 +106,8 @@ def catalog_item(choice: str = CHOICE) -> dict:
         name = "Qwen3.8-Flash-Next-lily-q4-xl"
     elif choice == "qwen38-mlx-serve-mixed":
         name = "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
+    elif choice == INKLING_CHOICE:
+        name = "Inkling 2 Mini"
     else:
         raise ValueError("unknown native catalog choice")
     return {
@@ -108,8 +121,10 @@ def catalog_item(choice: str = CHOICE) -> dict:
         "quantization": source["quantization"],
         "artifact_modes": ["text", "vision-language"]
         if choice in {"qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"}
+        else ["vision-language"]
+        if choice == INKLING_CHOICE
         else ["text"],
-        "default_artifact_mode": "text",
+        "default_artifact_mode": "vision-language" if choice == INKLING_CHOICE else "text",
         "downloadable": True,
         "model_group": None,
     }

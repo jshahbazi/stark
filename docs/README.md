@@ -24,6 +24,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [OLMo 3 and Gemma 4](OLMO3_GEMMA4.md) | Native text paths, Gemma 4 BF16 image profiles, encoder-free and MoE paths, precision policy and validation boundaries |
 | [Gemma 4 assistants](GEMMA4_ASSISTANT_PLAN.md) | Pinned E2B/E4B companion metadata and staged conversion, target activation/KV, text MTP and cache qualification work |
 | [Edge0-145B plan](EDGE0_PLAN.md) | Pinned metadata intake, storage and arithmetic gaps against the native Flash-Next path, and staged work; nothing implemented or run |
+| [Inkling 2 Mini plan](INKLING_2_MINI_PLAN.md) | Fixed-loop native generation plan, Apple reference, real-weight performance pilot, vision, prefix reuse and DSpark qualification |
 | [Gemma 3 images](GEMMA3_IMAGES.md) | Source-bound SigLIP image artifacts, 4B/12B/27B admission, exact processor semantics and qualification boundaries |
 | [Recursive Flint](FLINT.md) | Official INT4 preparation, native text execution, limits and reference checks |
 | [Ripple-65B Preview](RIPPLE.md) | Native Rust/Metal architecture, pinned Q4_K_M and Q8_0 preparation, precision and validation limits |
@@ -48,6 +49,9 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Manual desktop user simulation](USER_SIMULATION.md) | Explicitly invoked OpenWork, OpenCode Desktop and Pi project-building workflow, independent acceptance checks and aggregate reporting |
 | [Adding model support](MODEL_ONBOARDING.md) | Required tool-calling assessment, prefix reuse, artifact qualification and lifecycle checks for each new inference path |
 | [Model changes and experiments](model-experiments/README.md) | Attempt ledger, image-support retrospective, failed approaches, promotion decisions and a template for future correctness/performance work |
+| [Inkling 2 Mini native Metal retrospective](archive/runs/2026-11-21-inkling-mini-native-retrospective.md) | Milestones, numerical fixes, 4K benchmark scope and lessons from the original checkpoint |
+| [Inkling 2 Mini performance follow-up](INKLING_2_MINI_PERFORMANCE_FOLLOWUP.md) | Ranked prefill and decode candidates, numerical constraints and prerequisites for measurement |
+| [Standard benchmark](BENCHMARK.md) | The one protocol and tool every model is measured with: scenarios, exact metric definitions, arms and matched artifacts, validity rules, host requirements, paired comparison, the quality slot, model profiles, how to add a model, and how the older benchmark scripts relate |
 | [Performance playbook](PERFORMANCE_PLAYBOOK.md) | What to try when making a model family faster, in order, with what each lever returned on Qwen3.8-Flash-Next, what failed and why, the correctness gates and measurement rules, and a checklist for a new family. Read before optimizing a model; updated with each performance attempt |
 | [Technical guide](TECHNICAL_OVERVIEW.md) | Components, engine module layout, feature flags, Python package layout, the app control protocol |
 | [Codex, Claude and Pi integration plan](AGENT_CLIENT_INTEGRATION_PLAN.md) | Advanced Connections Pi setup, external protocol adapters, authentication and qualification gates; guarded Pi has bounded real Qwen3-4B evidence |
