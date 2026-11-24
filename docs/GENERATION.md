@@ -172,6 +172,10 @@ context limit, EOS IDs and MTP support vary by loaded model:
 
 The configured context is a token admission boundary. Available memory and the configurable content/frame budgets still apply; accepting a model's published maximum does not qualify full-length numerical accuracy or performance.
 
+Inkling 2 Mini sizes its context after loading the model, vision and draft weights and prefill resources. It subtracts a 256 MiB reserve from available unified memory and remaining Metal working-set headroom, then uses 85% of the smaller budget for context state, prefill workspace growth and a prefix snapshot. The pinned M5 Max path allows up to 131,072 tokens within Metal's per-buffer limit. Other configurations retain the 4,352-token geometry ceiling. The selected cap is fixed until the worker reloads.
+
+For each generation request the worker rechecks both memory budgets. It accounts for new live cache allocations, workspace growth and a new prefix snapshot when needed. Automatic requests can use a smaller execution context within the loaded cap. A fixed-context request can receive a recoverable resource-budget error if memory has fallen since load. Client-visible context metadata stays stable. See the [Inkling context validation record](model-experiments/2026-11-24-inkling-mini-memory-context.md).
+
 An image-capable model adds an `image_input` object without changing `mode: "text-generation-v1"` or the shared line-framing budget. Its `version` is `mediaref-v1`, its `transport` is `owner-private-file-v1`, and it lists the `prepare_image`, `generate_image` and `discard_image` operations. The object identifies artifact schema 2 through 6, family profile/version, source/revision, SHA-256 hashes for the weights, config, tokenizer, processor and template, and the actual Metal runtime identity. The host applies its [evidence checks](#image-qualification) before exposing image input. See the [readiness implementation](../crates/stark-generate/src/generation.rs).
 
 ### Prepared image operations
