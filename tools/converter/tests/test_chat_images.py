@@ -154,6 +154,22 @@ def test_image_request_orders_prepare_generate_discard_and_removes_staged_file()
         worker.media.close()
 
 
+def test_image_thinking_budget_rejects_insufficient_automatic_output_and_discards_prepared_image():
+    worker = make_worker()
+    try:
+        with pytest.raises(ChatImageError, match="at least four output tokens"):
+            worker.request_image(
+                "synthetic rendered prompt",
+                ImageData(PNG, "image/png"),
+                {"context_tokens": 15, "max_new_tokens": 0, "thinking_budget_tokens": 64},
+            )
+        assert worker.sent == ["prepare_image", "discard_image"]
+        assert worker.process.poll() is None
+        assert not list(worker.media.root.iterdir())
+    finally:
+        worker.media.close()
+
+
 @pytest.mark.parametrize(
     ("failed_operation", "worker_error", "expected_type", "expected_code"),
     [

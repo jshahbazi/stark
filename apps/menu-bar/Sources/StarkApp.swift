@@ -349,11 +349,14 @@ struct DecisionResult {
 }
 
 struct ChatOptions {
+    static let minimumThinkingBudgetOutputTokens = 4
+
     var useModelSystemPrompt = true
     var systemPrompt = ""
     var contextTokens = 0
     var maxNewTokens = 0
     var thinking = false
+    var thinkingBudgetTokens: Int?
 
     static func defaults(contextLimit: Int, outputLimit _: Int) -> ChatOptions {
         var options = ChatOptions()
@@ -1501,6 +1504,7 @@ final class EngineController: ObservableObject {
         didSet {
             if loadedID != oldValue {
                 supportsMTP = false; mtpEnabled = false
+                supportsThinkingBudget = false; options.thinkingBudgetTokens = nil
                 pendingOptions = nil; pendingOptionsModelID = nil
             }
         }
@@ -1509,7 +1513,9 @@ final class EngineController: ObservableObject {
         didSet {
             if ["idle", "error", "stopping"].contains(state) { gpuMemoryBytes = nil }
             if ["idle", "error", "stopping", "loading"].contains(state) { supportsTools = false; toolParser = "" }
-            if ["idle", "error", "stopping", "loading"].contains(state) { supportsMTP = false; mtpEnabled = false }
+            if ["idle", "error", "stopping", "loading"].contains(state) {
+                supportsMTP = false; mtpEnabled = false; supportsThinkingBudget = false
+            }
             if ["idle", "error", "stopping", "loading"].contains(state) { decisionModel = false; decisionCalibrated = false }
             if ["idle", "error", "stopping", "loading"].contains(state) { pendingOptions = nil; pendingOptionsModelID = nil }
             if state != "generating" {
@@ -1531,6 +1537,7 @@ final class EngineController: ObservableObject {
     @Published private(set) var apiPort: Int
     @Published private(set) var supportsTools = false
     @Published private(set) var toolParser = ""
+    @Published private(set) var supportsThinkingBudget = false
     @Published private(set) var supportsMTP = false
     @Published private(set) var mtpEnabled = false
     private var mtpVerificationPolicy = ""
@@ -2339,6 +2346,13 @@ final class EngineController: ObservableObject {
         outputLimit = event["max_output_tokens"] as? Int ?? outputLimit
         options.contextTokens = event["context_tokens"] as? Int ?? options.contextTokens
         options.maxNewTokens = event["max_new_tokens"] as? Int ?? options.maxNewTokens
+        supportsThinkingBudget = loadedMode == .chat && SupportMetadata.boolean(event["thinking_budget_supported"]) == true
+        if supportsThinkingBudget, let budget = SupportMetadata.integer(event["thinking_budget_tokens"]),
+           budget > 0, budget <= outputLimit {
+            options.thinkingBudgetTokens = Int(budget)
+        } else {
+            options.thinkingBudgetTokens = nil
+        }
         if let budget = SupportMetadata.integer(event["api_context_tokens"]), budget > 0, budget <= Int64(UInt32.max) {
             apiContextTokens = Int(budget)
         }
@@ -2465,14 +2479,22 @@ final class EngineController: ObservableObject {
         guard modelReady, mode == .chat else { return false }
         if let modelID, modelID != loadedID { return false }
         if mtpEnabled != nil && !supportsMTP { return false }
+        if let budget = updated.thinkingBudgetTokens,
+           !supportsThinkingBudget || budget < 1 || budget > outputLimit ||
+           (updated.maxNewTokens != 0 && updated.maxNewTokens < ChatOptions.minimumThinkingBudgetOutputTokens) { return false }
         errorMessage = nil
         var payload: [String: Any] = [
             "command": "configure", "context_tokens": updated.contextTokens,
             "max_new_tokens": updated.maxNewTokens, "thinking": updated.thinking,
             "system_prompt": updated.useModelSystemPrompt ? NSNull() : updated.systemPrompt as Any
         ]
-        if let mtpEnabled {
+        if supportsThinkingBudget || mtpEnabled != nil {
             payload["model_id"] = loadedID
+        }
+        if let budget = updated.thinkingBudgetTokens {
+            payload["thinking_budget_tokens"] = budget
+        }
+        if let mtpEnabled {
             payload["mtp_enabled"] = mtpEnabled
         }
         guard send(payload) else { return false }
@@ -4265,6 +4287,7 @@ struct AdvancedOptionsView: View {
     @State private var context: String
     @State private var output: String
     @State private var thinking: Bool
+    @State private var thinkingBudget: String
     @State private var mtpEnabled: Bool
     @State private var modelID: String
 
@@ -4276,12 +4299,19 @@ struct AdvancedOptionsView: View {
         _context = State(initialValue: String(engine.options.contextTokens))
         _output = State(initialValue: engine.options.maxNewTokens == 0 ? "" : String(engine.options.maxNewTokens))
         _thinking = State(initialValue: engine.options.thinking)
+        _thinkingBudget = State(initialValue: engine.options.thinkingBudgetTokens.map(String.init) ?? "")
         _mtpEnabled = State(initialValue: engine.mtpEnabled)
     }
 
     private var usesRequiredReasoning: Bool {
         engine.loadedID == modelID && engine.activeModel?.display?.familyID == "glm5_next"
     }
+
+    private var supportsThinkingBudget: Bool {
+        engine.loadedID == modelID && engine.supportsThinkingBudget
+    }
+
+    private var thinkingBudgetValue: String { thinkingBudget.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     private var validation: String? {
         guard let count = Int(context), count >= 2, count <= engine.contextLimit else {
@@ -4291,13 +4321,23 @@ struct AdvancedOptionsView: View {
         }
         let outputValue = output.trimmingCharacters(in: .whitespacesAndNewlines)
         let automatic = outputValue.isEmpty || outputValue.caseInsensitiveCompare("Auto") == .orderedSame
-        if automatic {
-            return nil
+        if !automatic {
+            guard let maximum = Int(outputValue), maximum > 0, maximum <= engine.outputLimit else {
+                return "Enter Auto or an output limit between 1 and \(engine.outputLimit) tokens."
+            }
+            if maximum >= count { return "Output limit must be smaller than context size." }
         }
-        guard let maximum = Int(outputValue), (1...engine.outputLimit).contains(maximum) else {
-            return "Enter Auto or an output limit between 1 and \(engine.outputLimit) tokens."
+        let budgetValue = thinkingBudgetValue
+        if supportsThinkingBudget && !budgetValue.isEmpty && budgetValue.caseInsensitiveCompare("Off") != .orderedSame {
+            guard let budget = Int(budgetValue), budget > 0, budget <= engine.outputLimit else {
+                return "Enter Off or a thinking budget between 1 and \(engine.outputLimit) tokens."
+            }
+            let minimum = ChatOptions.minimumThinkingBudgetOutputTokens
+            if let maximum = Int(outputValue), maximum < minimum {
+                return "A thinking budget requires Auto or an output limit of at least \(minimum) tokens."
+            }
         }
-        return maximum < count ? nil : "Output limit must be smaller than context size."
+        return nil
     }
 
     var body: some View {
@@ -4324,9 +4364,20 @@ struct AdvancedOptionsView: View {
                     TextField("Auto", text: $output).textFieldStyle(.roundedBorder)
                         .accessibilityLabel("Output limit in tokens")
                 }
+                if supportsThinkingBudget {
+                    GridRow {
+                        Text("Thinking budget (tokens)")
+                        TextField("Off", text: $thinkingBudget).textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("Thinking budget in tokens")
+                    }
+                }
             }
             Text("Auto uses the remaining context, within the model's limits and available memory.")
                 .font(.caption).foregroundStyle(.secondary)
+            if supportsThinkingBudget {
+                Text("Counts reasoning across the reply and leaves room for an answer. Leave blank to turn off.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if !engine.contextCapacityKnown {
                 Text("This model does not declare a context maximum. Auto sizes execution from the model's state requirements and available memory.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -4357,6 +4408,7 @@ struct AdvancedOptionsView: View {
                     mtpEnabled = engine.defaultMTPEnabled
                     context = String(defaults.contextTokens)
                     output = defaults.maxNewTokens == 0 ? "" : String(defaults.maxNewTokens)
+                    thinkingBudget = ""
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -4371,6 +4423,7 @@ struct AdvancedOptionsView: View {
                     options.useModelSystemPrompt = useModelSystemPrompt
                     options.systemPrompt = systemPrompt
                     options.contextTokens = count; options.maxNewTokens = maximum; options.thinking = thinking
+                    options.thinkingBudgetTokens = supportsThinkingBudget ? Int(thinkingBudgetValue) : nil
                     if engine.configure(options, mtpEnabled: engine.supportsMTP ? mtpEnabled : nil, modelID: modelID) { dismiss() }
                 }.buttonStyle(.borderedProminent)
                     .disabled(validation != nil || !engine.modelReady || engine.loadedID != modelID)

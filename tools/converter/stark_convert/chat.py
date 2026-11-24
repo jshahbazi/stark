@@ -51,6 +51,8 @@ from .vision_runtime import (
 _MAX_GPU_MEMORY_LINE = 128
 _MAX_GPU_MEMORY_BYTES = (1 << 63) - 1
 _LEGACY_MAX_REQUEST_BYTES = 1024 * 1024
+# Inkling needs room for the channel transition and at least one answer token.
+MIN_THINKING_BUDGET_OUTPUT_TOKENS = 4
 
 
 def _popen_with_gpu_memory(command, *, callback, **kwargs):
@@ -167,6 +169,7 @@ class ChatImageError(ChatError):
             "context_overflow": (
                 "The image and conversation exceed the context budget. Start a new chat or reduce the output limit."
             ),
+            "thinking_budget_output_too_small": "Leave at least four output tokens when Thinking Budget is enabled.",
             "invalid_image_reference": "The image attachment is no longer available. Remove it and attach it again.",
             "image_read_failed": "The image attachment could not be read. Remove it and attach it again.",
         }.get(code, "The image request could not be prepared or executed.")
@@ -837,6 +840,8 @@ class Worker:
                             raise ChatImageError("context_overflow")
                     else:
                         maximum = requested_maximum
+                    if "thinking_budget_tokens" in options and maximum < MIN_THINKING_BUDGET_OUTPUT_TOKENS:
+                        raise ChatImageError("thinking_budget_output_too_small")
                     generate_options = {**options, "max_new_tokens": maximum}
                     reply = self.request(
                         {**generate_options, "operation": "generate_image", "prepared_id": identifier},

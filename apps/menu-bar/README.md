@@ -438,6 +438,8 @@ The retained Qwen3.8 Flash Next (Lily) processor accepts up to 32 million source
 
 For GLM-5.3, **Maximum reasoning effort** selects Low effort when off and Max effort when on; the model's reviewed template always reasons. The API also accepts an explicit Low, High or Max `reasoning_effort`. For boolean templates such as Qwen, Thinking controls `enable_thinking`. Replies retain the raw Playground display, while assistant history stores reasoning separately from the visible answer for subsequent turns.
 
+Inkling 2 Mini offers **Thinking budget (tokens)**. Enter a positive count and choose **Apply and New Chat** to limit reasoning across the entire reply and reserve space for the answer. Leave the field blank or enter **Off** to use the default. With an explicit output limit, allow at least four tokens. The Playground remembers this setting per model for the current app session and applies it to text and image replies. Text replies support the budget with DSpark on or off.
+
 When a reply exhausts an explicit output limit, the Playground points to **Auto** in Advanced Options. A context termination points to the current context setting and a new chat. Automatic generation can stop at the available context or execution budget, including memory-based allowances for models with a declared context maximum; the notice does not claim that clearing the conversation is always required.
 
 If the model reaches an output or context limit before producing any answer text, Playground explains what stopped the request and returns the message to the composer for editing. The unfinished turn is excluded from the conversation history.
