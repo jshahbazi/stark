@@ -558,63 +558,61 @@ fn collect_output(
     let tokens = std::iter::from_fn(|| {
         Some((|| {
             let mut legacy_proposal = None;
-            if let Some(anchor) = previous {
-                if pending.is_none() {
-                    let target = session.take().ok_or("native_generation_failed")?;
-                    let limit = verify_depth.min(budget.saturating_sub(delivered + 1));
-                    let depth = if verify_depth > 0 {
-                        planner.choose(limit)
+            if let Some(anchor) = previous
+                && pending.is_none()
+            {
+                let target = session.take().ok_or("native_generation_failed")?;
+                let limit = verify_depth.min(budget.saturating_sub(delivered + 1));
+                let depth = if verify_depth > 0 {
+                    planner.choose(limit)
+                } else {
+                    0
+                };
+                round_depth = depth;
+                if let Some(stats) = speculative.as_mut() {
+                    stats.rounds[depth] += 1;
+                }
+                if depth == 0 {
+                    if verify_depth == 0 {
+                        legacy_proposal = target.draft_propose(anchor).map_err(|_| "native_generation_failed")?;
+                    }
+                    let started = Instant::now();
+                    logits = target.step(anchor).map_err(|_| "native_generation_failed")?;
+                    if verify_depth > 0 {
+                        planner.record(0, 0, 1000.0 * started.elapsed().as_secs_f64());
+                    }
+                    session = Some(target);
+                } else {
+                    let stats = speculative.as_mut().unwrap();
+                    let now = Instant::now();
+                    if let Some(at) = committed_at.take() {
+                        stats.between_rounds_seconds += (now - at).as_secs_f64();
+                    }
+                    round_started = Some(now);
+                    let (proposals, transaction) = if target.overlaps_verify_for(depth) {
+                        let (proposals, transaction, before_verify_ms, verify_wall_ms) =
+                            target.begin_overlapped_verify(anchor, depth).map_err(|_| "native_generation_failed")?;
+                        *stats.overlapped_rounds.get_or_insert(0) += 1;
+                        stats.draft_seconds += before_verify_ms * 0.001;
+                        stats.verify_seconds += verify_wall_ms * 0.001;
+                        (proposals, transaction)
                     } else {
-                        0
+                        let start = Instant::now();
+                        let proposals = target.propose_verify(anchor, depth).map_err(|_| "native_generation_failed")?;
+                        stats.draft_seconds += start.elapsed().as_secs_f64();
+                        let input = std::iter::once(anchor).chain(proposals.iter().copied()).collect::<Vec<_>>();
+                        let start = Instant::now();
+                        let transaction = target.begin_verify(&input).map_err(|_| "native_generation_failed")?;
+                        stats.verify_seconds += start.elapsed().as_secs_f64();
+                        (proposals, transaction)
                     };
-                    round_depth = depth;
-                    if let Some(stats) = speculative.as_mut() {
-                        stats.rounds[depth] += 1;
-                    }
-                    if depth == 0 {
-                        if verify_depth == 0 {
-                            legacy_proposal = target.draft_propose(anchor).map_err(|_| "native_generation_failed")?;
-                        }
-                        let started = Instant::now();
-                        logits = target.step(anchor).map_err(|_| "native_generation_failed")?;
-                        if verify_depth > 0 {
-                            planner.record(0, 0, 1000.0 * started.elapsed().as_secs_f64());
-                        }
-                        session = Some(target);
-                    } else {
-                        let stats = speculative.as_mut().unwrap();
-                        let now = Instant::now();
-                        if let Some(at) = committed_at.take() {
-                            stats.between_rounds_seconds += (now - at).as_secs_f64();
-                        }
-                        round_started = Some(now);
-                        let (proposals, transaction) = if target.overlaps_verify_for(depth) {
-                            let (proposals, transaction, before_verify_ms, verify_wall_ms) = target
-                                .begin_overlapped_verify(anchor, depth)
-                                .map_err(|_| "native_generation_failed")?;
-                            *stats.overlapped_rounds.get_or_insert(0) += 1;
-                            stats.draft_seconds += before_verify_ms * 0.001;
-                            stats.verify_seconds += verify_wall_ms * 0.001;
-                            (proposals, transaction)
-                        } else {
-                            let start = Instant::now();
-                            let proposals =
-                                target.propose_verify(anchor, depth).map_err(|_| "native_generation_failed")?;
-                            stats.draft_seconds += start.elapsed().as_secs_f64();
-                            let input = std::iter::once(anchor).chain(proposals.iter().copied()).collect::<Vec<_>>();
-                            let start = Instant::now();
-                            let transaction = target.begin_verify(&input).map_err(|_| "native_generation_failed")?;
-                            stats.verify_seconds += start.elapsed().as_secs_f64();
-                            (proposals, transaction)
-                        };
-                        draft_stats.proposed += proposals.len();
-                        verified_at = Some(Instant::now());
-                        pending = Some(PendingDraft {
-                            transaction,
-                            proposals,
-                            consumed: 0,
-                        });
-                    }
+                    draft_stats.proposed += proposals.len();
+                    verified_at = Some(Instant::now());
+                    pending = Some(PendingDraft {
+                        transaction,
+                        proposals,
+                        consumed: 0,
+                    });
                 }
             }
             let token = if let Some(mut draft) = pending.take() {
@@ -980,7 +978,7 @@ mod tests {
         // Empty input is rejected before admission; one token is the seed alone.
         assert_eq!(SOURCE_PREFILL_MIN_INPUT, 1);
         assert_eq!(Session::SOURCE_MIN_BULK_ROWS, 16);
-        assert!(SOURCE_PREFILL_MIN_INPUT <= SOURCE_PROMPT_SUFFIX);
+        const { assert!(SOURCE_PREFILL_MIN_INPUT <= SOURCE_PROMPT_SUFFIX) };
     }
 
     #[test]

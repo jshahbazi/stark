@@ -97,7 +97,7 @@ impl DepthPlanner {
             self.current = MAX_DEPTH;
         }
         let chosen = self.current.clamp(floor, limit);
-        if self.rounds % PROBE_PERIOD == 0 {
+        if self.rounds.is_multiple_of(PROBE_PERIOD) {
             return (chosen + 1).min(limit);
         }
         chosen

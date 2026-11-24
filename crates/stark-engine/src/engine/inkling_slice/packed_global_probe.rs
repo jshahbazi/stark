@@ -217,7 +217,8 @@ impl GlobalProbe {
         } else {
             (&self.thin, 32, 256)
         };
-        let alignments = usize::from(rows % 32 == 0) | (usize::from(columns % tile_columns == 0) << 1);
+        let alignments =
+            usize::from(rows.is_multiple_of(32)) | (usize::from(columns.is_multiple_of(tile_columns)) << 1);
         let cols = columns.div_ceil(tile_columns);
         let tiles = rows.div_ceil(32);
         let params = ThinParams {
@@ -346,11 +347,11 @@ impl GlobalProbe {
             return;
         };
         let reference = gpu.runtime.exact_prefill || gpu.runtime.global_mask_reference;
-        let alignments = usize::from(queries % 64 == 0) | (usize::from(keys % 32 == 0) << 1);
+        let alignments = usize::from(queries.is_multiple_of(64)) | (usize::from(keys.is_multiple_of(32)) << 1);
         let kv_strides = [(extent * KV) as i64, (extent * 128) as i64, 128];
         let params = AttnParams {
             dimensions: [1, HEADS as i32, 128, queries as i32, keys as i32, 3],
-            scale: 0.08838834764831845,
+            scale: 0.088_388_348,
             tiles: [
                 queries.div_ceil(64) as i32,
                 keys.div_ceil(32) as i32,

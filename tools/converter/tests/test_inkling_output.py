@@ -9,7 +9,7 @@ from stark_convert.local_api import APIError
 _THOUGHT = "<|message_model|><|content_thinking|>Use the lookup.<|end_message|>"
 _TEXT = "<|message_model|><|content_text|>I can check. <|end_message|>"
 _CALL = (
-    '<|message_model|>lookup<|content_invoke_tool_json|>'
+    "<|message_model|>lookup<|content_invoke_tool_json|>"
     '{"name":"lookup","args":{"term":"café <|end_message|>"}}<|end_message|>'
 )
 _TOOLS = [{"type": "function", "function": {"name": "lookup"}}]

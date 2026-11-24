@@ -1168,22 +1168,22 @@ def parse_tool_output(
             if not isinstance(item, dict) or set(item) != {"name", "args"} or not isinstance(item["args"], dict):
                 raise invalid("format")
             name, arguments = item["name"], item["args"]
-            if (
-                not isinstance(name, str)
-                or not _NAME.fullmatch(name)
-                or name not in names
-                or header != name
-            ):
+            if not isinstance(name, str) or not _NAME.fullmatch(name) or name not in names or header != name:
                 raise invalid("tool")
             try:
                 bounded_json(arguments, MAX_ARGUMENT_BYTES, label="Function arguments")
             except APIError:
                 raise invalid("limits") from None
-            calls.append({
-                "id": f"call_{call_id_prefix}_{len(calls)}",
-                "type": "function",
-                "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False, allow_nan=False)},
-            })
+            calls.append(
+                {
+                    "id": f"call_{call_id_prefix}_{len(calls)}",
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(arguments, ensure_ascii=False, allow_nan=False),
+                    },
+                }
+            )
         return {**message, "content": message["content"] or None, "tool_calls": calls}, "tool_calls"
 
     if parser in FORMATS:

@@ -501,6 +501,8 @@ fn decode_image_alpha<F: FnOnce(u32, u32) -> Result<(), InvalidInput>>(
     RgbImage::try_new(width, height, pixels, limits)
 }
 
+// The pixel index only feeds the inkling-slice checkerboard composite.
+#[cfg_attr(not(all(target_os = "macos", feature = "inkling-slice")), allow(clippy::unused_enumerate_index))]
 fn decode_png_rgb(
     data: &[u8],
     width: u32,

@@ -390,7 +390,7 @@ fn run_trace(
     let trace = PrefillTrace::new(&session.runtime.device, &source, visit)?;
     let mut comparison = Value::Null;
     let mut wall_ms = 0.0;
-    for (index, inputs) in tokens[..4096].chunks_exact(CHUNK).enumerate() {
+    for (index, inputs) in tokens[..4096].as_chunks::<CHUNK>().0.iter().enumerate() {
         let capture = index * CHUNK == offset;
         let timing = if let Some(packed) = &packed {
             packed.upload(inputs);

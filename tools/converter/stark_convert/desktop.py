@@ -3866,7 +3866,8 @@ class Desktop:
         try:
             tool_stream = (
                 ToolTextStream(on_delta, parser=parser)
-                if tool_request and parser != INKLING_PARSER and on_delta is not None else None
+                if tool_request and parser != INKLING_PARSER and on_delta is not None
+                else None
             )
             reasoning_delivery = (lambda text: on_delta({"reasoning_content": text})) if on_delta is not None else None
             tool_reasoning_stream = (

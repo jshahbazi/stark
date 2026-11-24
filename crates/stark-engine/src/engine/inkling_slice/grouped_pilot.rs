@@ -66,7 +66,7 @@ impl Nvfp4Probe {
         let mut phases = Vec::with_capacity(2);
         for (phase, width) in [WIDTH, MID].into_iter().enumerate() {
             let mut totals = [0u64; PROBE_FIELDS];
-            for record in count.chunks_exact(PROBE_FIELDS).skip(phase).step_by(2) {
+            for record in count.as_chunks::<PROBE_FIELDS>().0.iter().skip(phase).step_by(2) {
                 if record[1] as usize != rows * TOP || record[0] == 0 {
                     return Err("Inkling NVFP4 telemetry did not cover every real routed row");
                 }
@@ -1592,7 +1592,7 @@ pub(super) fn mlx_serve_ceiling(
     let slots = run_slots_for(rows, FAST_RUN_ROWS);
     let runs = read::<u32>(&capture.runs, slots * 3);
     let mut ids = vec![u32::MAX; routes];
-    for run in runs.chunks_exact(3) {
+    for run in runs.as_chunks::<3>().0 {
         let (start, count, expert) = (run[0] as usize, run[1] as usize, run[2]);
         if count > 0 && start + count <= routes {
             ids[start..start + count].fill(expert);
@@ -1706,7 +1706,7 @@ fn nax_ceiling(
     let fast_runs = read::<u32>(&capture.runs, fast_slots * 3).to_vec();
     // Expert-major 96-row runs over the same sorted rows.
     let mut spans: Vec<(u32, u32, u32)> = Vec::new();
-    for run in fast_runs.chunks_exact(3) {
+    for run in fast_runs.as_chunks::<3>().0 {
         if run[1] == 0 {
             continue;
         }
@@ -2575,7 +2575,7 @@ pub fn probe_prefill_expert_weights(
             grouped.source_log_weights.as_ref().map(|(weights, _)| read_shared::<f32>(weights, BATCH * TOP));
         let first_weight = aligned_weights.len();
         for (row, (source_row, actual_row)) in
-            source_ids.chunks_exact(TOP).zip(actual_ids.chunks_exact(TOP)).enumerate()
+            source_ids.as_chunks::<TOP>().0.iter().zip(actual_ids.as_chunks::<TOP>().0).enumerate()
         {
             reordered_rows += usize::from(source_row != actual_row);
             let mut seen = 0u32;
@@ -2797,12 +2797,9 @@ impl<T: bytemuck::Pod> ExpertStage<T> {
         };
         let expected = &self.expected[start * self.row_width..(start + rows) * self.row_width];
         let actual_bytes = bytemuck::cast_slice::<T, u8>(&actual);
-        let expected_bytes = bytemuck::cast_slice::<T, u8>(expected);
         self.actual_hash.update(actual_bytes);
-        for (index, (a, b)) in
-            actual_bytes.chunks_exact(size_of::<T>()).zip(expected_bytes.chunks_exact(size_of::<T>())).enumerate()
-        {
-            if a != b {
+        for (index, (a, b)) in actual.iter().zip(expected).enumerate() {
+            if bytemuck::bytes_of(a) != bytemuck::bytes_of(b) {
                 self.unequal += 1;
                 self.first_row.get_or_insert(start + index / self.row_width);
             }

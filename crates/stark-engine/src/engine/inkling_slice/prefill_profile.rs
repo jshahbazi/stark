@@ -1090,7 +1090,7 @@ pub fn measure_dense_ceiling(
     columns: usize,
     reps: usize,
 ) -> Result<Value> {
-    if rows % 128 != 0 || columns % 64 != 0 || width % 64 != 0 || reps == 0 {
+    if !rows.is_multiple_of(128) || !columns.is_multiple_of(64) || !width.is_multiple_of(64) || reps == 0 {
         return Err("Inkling dense ceiling needs rows in 128s, columns and width in 64s");
     }
     let session = Session::load(checkpoint, 4352)?;

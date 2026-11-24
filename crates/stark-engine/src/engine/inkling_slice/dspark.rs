@@ -335,7 +335,7 @@ impl Dspark {
         let tensor = |name, shape: &[usize]| source.buffer(device, name, "BF16", shape);
         let fuse = zeroed(device, 4 * 4 * 2)?;
         let values = source.values::<u16>("fuse_weight", "BF16", &[4, 4])?;
-        for (row, values) in values.chunks_exact(4).enumerate() {
+        for (row, values) in values.as_chunks::<4>().0.iter().enumerate() {
             let logits: [f32; 4] = std::array::from_fn(|index| bf16::from_bits(values[index]).to_f32());
             if logits.iter().any(|x| !x.is_finite()) {
                 return Err("Inkling draft fusion contains a nonfinite value");

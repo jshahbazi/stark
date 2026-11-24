@@ -300,7 +300,7 @@ pub fn measure_full(
         .zip(initial_logits.as_ref().ok_or("empty oracle")?)
         .all(|(restored, original)| restored.to_bits() == original.to_bits());
     session.capture_draft_features(false);
-    let late_tile = if batched_prefill && prefix >= LOCAL && session.context - prefix >= BATCHED_PREFILL_ROWS + 1 {
+    let late_tile = if batched_prefill && prefix >= LOCAL && session.context - prefix > BATCHED_PREFILL_ROWS {
         let tail = &tokens[prefix - BATCHED_PREFILL_ROWS..prefix];
         Some(measure_late_tile(&mut session, &snapshot, tail, tokens[prefix])?)
     } else {
@@ -793,7 +793,9 @@ pub fn measure_decode_verify(
                         _ => (&mut unequal, &mut state_exact),
                     };
                     *state = same_state;
-                    for (row, (got, want)) in scores.chunks_exact(PADDED_VOCABULARY).zip(&serial_logits).enumerate() {
+                    for (row, (got, want)) in
+                        scores.as_chunks::<PADDED_VOCABULARY>().0.iter().zip(&serial_logits).enumerate()
+                    {
                         counts[row] =
                             got[..VOCABULARY].iter().zip(want).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
                     }

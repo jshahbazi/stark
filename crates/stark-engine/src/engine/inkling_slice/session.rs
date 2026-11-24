@@ -945,7 +945,7 @@ impl Session {
         let state = VisitInput {
             blocks: *blocks,
             later: (18..42).contains(&index),
-            boundary: physical % 6 == 0,
+            boundary: physical.is_multiple_of(6),
             capture: self.capture_visits,
         };
         *blocks += usize::from(state.boundary);

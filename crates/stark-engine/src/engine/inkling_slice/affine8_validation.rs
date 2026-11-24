@@ -799,7 +799,7 @@ pub fn measure_affine8_timing(
     let tokens = Tensors::open(&oracle.join("tokens.safetensors"))?.values::<u32>("tokens", "U32", &[prompt + 3])?;
     let mut sessions =
         [load_worker_session(original, Some(draft), context)?, load_worker_session(affine, Some(draft), context)?];
-    let mut prefill = vec![Vec::new(), Vec::new()];
+    let mut prefill = [Vec::new(), Vec::new()];
     let mut bases = Vec::new();
     let mut anchors = Vec::new();
     for (index, session) in sessions.iter_mut().enumerate() {

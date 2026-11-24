@@ -254,7 +254,7 @@ impl Affine8 {
         }
         let cols4 = cols / 4;
         let end = cols4 - cols4 % (lanes(rows) * 8);
-        if (cols4 - end) % lanes(rows) != 0 {
+        if !(cols4 - end).is_multiple_of(lanes(rows)) {
             return Err("Inkling affine8 tail is not a whole number of lanes");
         }
         let groups = cols / GROUP;
@@ -270,7 +270,7 @@ impl Affine8 {
                 dest[p * 4..p * 4 + 4].copy_from_slice(&source[c * 4..c * 4 + 4]);
             }
         }
-        for (index, dest) in params.chunks_exact_mut(4).enumerate() {
+        for (index, dest) in params.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let word = u32::from(planes.scales[index]) | (u32::from(planes.biases[index]) << 16);
             dest.copy_from_slice(&word.to_le_bytes());
         }

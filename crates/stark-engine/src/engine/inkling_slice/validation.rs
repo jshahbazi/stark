@@ -373,7 +373,7 @@ fn untouched_cache_mismatches(
     for (name, buffer) in [("keys", &visit.keys), ("values", &visit.values)] {
         let expected = fixture.values::<u16>(&format!("{id}.{name}"), "BF16", &[capacity, KV])?;
         let actual = contents::<u16>(buffer, capacity * KV, 0);
-        for (slot, (a, b)) in actual.chunks_exact(KV).zip(expected.chunks_exact(KV)).enumerate() {
+        for (slot, (a, b)) in actual.as_chunks::<KV>().0.iter().zip(expected.as_chunks::<KV>().0).enumerate() {
             if !(position..position + ROWS).any(|pos| pos % capacity == slot) {
                 mismatches += a.iter().zip(b).filter(|(x, y)| x != y).count();
             }

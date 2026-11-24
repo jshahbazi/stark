@@ -31,8 +31,7 @@ def reasoning_options(codec, *, thinking=False, effort=None):
                 raise ValueError("This model does not support the requested reasoning effort.")
             return {"reasoning_effort": effort or ("high" if thinking else "none")}
         glm = isinstance(source, str) and (
-            digest == GLM53_TEMPLATE_SHA256
-            or template_program_sha256(source) == _GLM53_PROGRAM
+            digest == GLM53_TEMPLATE_SHA256 or template_program_sha256(source) == _GLM53_PROGRAM
         )
     except UnicodeEncodeError:
         glm = False

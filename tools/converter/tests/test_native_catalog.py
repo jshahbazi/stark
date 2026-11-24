@@ -25,7 +25,8 @@ def test_inkling_catalog_binds_original_target_and_draft_to_default_vision_mode(
     assert item["default_artifact_mode"] == "vision-language"
     assert item["repo"] == "thinkingmachines/Inkling-2-Mini"
     assert hybrid_prepare.SOURCES[choice]["required_weight_files"] == [
-        "model-00001-of-00001.safetensors", "mtp.safetensors"
+        "model-00001-of-00001.safetensors",
+        "mtp.safetensors",
     ]
     assert native_catalog.source_choice(family, item) == choice
 

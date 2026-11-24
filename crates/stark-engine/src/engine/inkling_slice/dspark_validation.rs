@@ -44,7 +44,7 @@ pub fn measure_dspark(
     let (reference_ingress, source_stages) = {
         let draft = session.dspark.as_ref().ok_or("Inkling draft weights unavailable")?;
         let staging = zeroed(&session.runtime.device, 4 * WIDTH * 2)?;
-        for (position, row) in taps.chunks_exact(4 * WIDTH).enumerate() {
+        for (position, row) in taps.as_chunks::<{ 4 * WIDTH }>().0.iter().enumerate() {
             unsafe { std::ptr::copy_nonoverlapping(row.as_ptr(), staging.contents().as_ptr().cast(), row.len()) };
             execute(&session.runtime, |gpu| draft.commit(gpu, &staging, position))?;
         }

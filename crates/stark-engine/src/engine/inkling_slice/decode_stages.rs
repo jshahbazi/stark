@@ -823,7 +823,7 @@ pub fn measure_round_budget(
                 continue;
             }
             rounds += 1;
-            let phase = usize::from(output.len() - 1 >= answer_from);
+            let phase = usize::from(output.len() > answer_from);
             phase_rounds[phase] += 1;
             let round_start = Instant::now();
             let (proposals, draft_timing, verify_timing) = overlapped_round(&mut session, anchor, next_depth)?;

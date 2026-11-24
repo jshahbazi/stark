@@ -740,7 +740,7 @@ fn residual_differences(
     got: &[f32],
     want: &[f32],
 ) -> Vec<usize> {
-    got.chunks_exact(WIDTH).zip(want.chunks_exact(WIDTH)).map(|(a, b)| unequal(a, b)).collect()
+    got.as_chunks::<WIDTH>().0.iter().zip(want.as_chunks::<WIDTH>().0).map(|(a, b)| unequal(a, b)).collect()
 }
 
 fn tolerance_arm(
@@ -869,7 +869,7 @@ pub fn measure_prefill_tolerance(
             return Err("Inkling tolerance capture is outside the context");
         }
         let tokens = read_tokens(oracle, prompt)?;
-        let ranges = if start % 512 == 0 {
+        let ranges = if start.is_multiple_of(512) {
             (0..start).step_by(512).map(|first| first..start.min(first + 512)).collect::<Vec<_>>()
         } else {
             worker_ranges(prompt, true, rows)
