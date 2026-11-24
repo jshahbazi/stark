@@ -861,6 +861,26 @@ extension EngineController {
                   !engine.configure(options, mtpEnabled: true), noCommandSent(),
                   engine.configure(options) else { return false }
             return command()["mtp_enabled"] == nil
+        case "optional-token-limit-drafts":
+            var output = TokenLimitDraft(suggested: ChatOptions.suggestedOutputLimit)
+            var thinking = TokenLimitDraft(suggested: ChatOptions.suggestedThinkingBudget)
+            guard !output.isEnabled, !thinking.isEnabled,
+                  output.text(maximum: 4096) == "1024", thinking.text(maximum: 4096) == "128",
+                  output.tokens(maximum: 4096) == nil, thinking.tokens(maximum: 4096) == nil else { return false }
+            output.isEnabled = true; thinking.isEnabled = true
+            guard output.tokens(maximum: 4096) == 1024, thinking.tokens(maximum: 4096) == 128,
+                  output.tokens(maximum: 511) == 511, thinking.tokens(maximum: 63) == 63 else { return false }
+            output.customValue = " 200 "
+            output.isEnabled = false
+            guard output.tokens(maximum: 4096) == nil else { return false }
+            output.isEnabled = true
+            guard output.tokens(maximum: 4096) == 200, output.tokens(maximum: 199) == nil else { return false }
+            for invalid in ["", "Auto", "Off", "0", "-1"] {
+                thinking.customValue = invalid
+                guard thinking.tokens(maximum: 4096) == nil else { return false }
+            }
+            let savedBudget = TokenLimitDraft(suggested: ChatOptions.suggestedThinkingBudget, applied: 256)
+            return savedBudget.isEnabled && savedBudget.tokens(maximum: 4096) == 256
         case "thinking-budget-advanced-options":
             engine.mode = .chat
             let capability: [String: Any] = ["supported": true, "max_drafts": 3,
@@ -3542,6 +3562,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_thinking_budget_advanced_options_follow_live_worker_capability(self):
         self.exercise("thinking-budget-advanced-options")
+
+    def test_optional_token_limit_suggestions(self):
+        self.exercise("optional-token-limit-drafts")
 
     def test_running_version_is_extracted_once_with_source_and_control_identity(self):
         self.exercise("models-running-version-extracted")
