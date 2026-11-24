@@ -351,7 +351,7 @@ struct DecisionResult {
 struct ChatOptions {
     static let minimumThinkingBudgetOutputTokens = 4
     static let suggestedOutputLimit = 1_024
-    static let suggestedThinkingBudget = 128
+    static let suggestedThinkingBudget = 1_024
 
     var useModelSystemPrompt = true
     var systemPrompt = ""
@@ -360,10 +360,11 @@ struct ChatOptions {
     var thinking = false
     var thinkingBudgetTokens: Int?
 
-    static func defaults(contextLimit: Int, outputLimit _: Int) -> ChatOptions {
+    static func defaults(contextLimit: Int, outputLimit _: Int, thinkingBudgetTokens: Int? = nil) -> ChatOptions {
         var options = ChatOptions()
         options.contextTokens = contextLimit
         options.maxNewTokens = 0
+        options.thinkingBudgetTokens = thinkingBudgetTokens
         return options
     }
 }
@@ -1528,7 +1529,7 @@ final class EngineController: ObservableObject {
         didSet {
             if loadedID != oldValue {
                 supportsMTP = false; mtpEnabled = false
-                supportsThinkingBudget = false; options.thinkingBudgetTokens = nil
+                supportsThinkingBudget = false; defaultThinkingBudgetTokens = nil; options.thinkingBudgetTokens = nil
                 pendingOptions = nil; pendingOptionsModelID = nil
             }
         }
@@ -1538,7 +1539,8 @@ final class EngineController: ObservableObject {
             if ["idle", "error", "stopping"].contains(state) { gpuMemoryBytes = nil }
             if ["idle", "error", "stopping", "loading"].contains(state) { supportsTools = false; toolParser = "" }
             if ["idle", "error", "stopping", "loading"].contains(state) {
-                supportsMTP = false; mtpEnabled = false; supportsThinkingBudget = false
+                supportsMTP = false; mtpEnabled = false
+                supportsThinkingBudget = false; defaultThinkingBudgetTokens = nil
             }
             if ["idle", "error", "stopping", "loading"].contains(state) { decisionModel = false; decisionCalibrated = false }
             if ["idle", "error", "stopping", "loading"].contains(state) { pendingOptions = nil; pendingOptionsModelID = nil }
@@ -1562,6 +1564,7 @@ final class EngineController: ObservableObject {
     @Published private(set) var supportsTools = false
     @Published private(set) var toolParser = ""
     @Published private(set) var supportsThinkingBudget = false
+    @Published private(set) var defaultThinkingBudgetTokens: Int?
     @Published private(set) var supportsMTP = false
     @Published private(set) var mtpEnabled = false
     private var mtpVerificationPolicy = ""
@@ -2371,12 +2374,13 @@ final class EngineController: ObservableObject {
         options.contextTokens = event["context_tokens"] as? Int ?? options.contextTokens
         options.maxNewTokens = event["max_new_tokens"] as? Int ?? options.maxNewTokens
         supportsThinkingBudget = loadedMode == .chat && SupportMetadata.boolean(event["thinking_budget_supported"]) == true
-        if supportsThinkingBudget, let budget = SupportMetadata.integer(event["thinking_budget_tokens"]),
-           budget > 0, budget <= outputLimit {
-            options.thinkingBudgetTokens = Int(budget)
-        } else {
-            options.thinkingBudgetTokens = nil
+        func thinkingBudget(_ field: String) -> Int? {
+            guard supportsThinkingBudget, let budget = SupportMetadata.integer(event[field]),
+                  budget > 0, budget <= outputLimit else { return nil }
+            return Int(budget)
         }
+        defaultThinkingBudgetTokens = thinkingBudget("default_thinking_budget_tokens")
+        options.thinkingBudgetTokens = thinkingBudget("thinking_budget_tokens")
         if let budget = SupportMetadata.integer(event["api_context_tokens"]), budget > 0, budget <= Int64(UInt32.max) {
             apiContextTokens = Int(budget)
         }
@@ -4430,13 +4434,15 @@ struct AdvancedOptionsView: View {
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("Restore Defaults") {
-                    let defaults = ChatOptions.defaults(contextLimit: engine.contextLimit, outputLimit: engine.outputLimit)
+                    let defaults = ChatOptions.defaults(contextLimit: engine.contextLimit, outputLimit: engine.outputLimit,
+                                                       thinkingBudgetTokens: supportsThinkingBudget ? engine.defaultThinkingBudgetTokens : nil)
                     useModelSystemPrompt = defaults.useModelSystemPrompt
                     systemPrompt = defaults.systemPrompt; thinking = defaults.thinking
                     mtpEnabled = engine.defaultMTPEnabled
                     context = String(defaults.contextTokens)
                     output = TokenLimitDraft(suggested: ChatOptions.suggestedOutputLimit)
-                    thinkingBudget = TokenLimitDraft(suggested: ChatOptions.suggestedThinkingBudget)
+                    thinkingBudget = TokenLimitDraft(suggested: ChatOptions.suggestedThinkingBudget,
+                                                    applied: defaults.thinkingBudgetTokens)
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)

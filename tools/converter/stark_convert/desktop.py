@@ -143,6 +143,7 @@ def prepared_decision_name(config):
 
 PROGRESS_PHASES = ("download", "conversion")
 MODEL_FILES = ("config.json", "tokenizer.json", "model.safetensors")
+DEFAULT_INKLING_THINKING_BUDGET_TOKENS = 1024
 
 
 class DesktopError(Exception):
@@ -2952,7 +2953,7 @@ class Desktop:
     def settings_summary(self):
         # Prompts stay in memory; acknowledgements contain limits and capabilities.
         capability, enabled = self.mtp_settings()
-        thinking_budget_supported, thinking_budget_tokens = self.thinking_budget_settings()
+        default_thinking_budget_tokens, thinking_budget_tokens = self.thinking_budget_settings()
         return {
             **(
                 {
@@ -2989,7 +2990,12 @@ class Desktop:
             else None,
             "mtp": capability,
             "mtp_enabled": enabled,
-            "thinking_budget_supported": thinking_budget_supported,
+            "thinking_budget_supported": default_thinking_budget_tokens is not None,
+            **(
+                {"default_thinking_budget_tokens": default_thinking_budget_tokens}
+                if default_thinking_budget_tokens is not None
+                else {}
+            ),
             **({"thinking_budget_tokens": thinking_budget_tokens} if thinking_budget_tokens is not None else {}),
             "image_verification": (
                 getattr(self.worker, "image_verification", "unverified")
@@ -3070,15 +3076,17 @@ class Desktop:
             raise DesktopError("Cannot save MTP options. Try again.") from None
 
     def thinking_budget_settings(self):
-        """Return the loaded model's effective, session-local Playground preference."""
-        supported = (
-            self.active_mode == "chat"
-            and self.active_model is not None
-            and getattr(self.worker, "thinking_budget_supported", False) is True
-            and tool_parser_for(self.codec) == INKLING_PARSER
-        )
-        tokens = self.thinking_budgets.get(self.active_model) if supported else None
-        return supported, min(tokens, self.output_limit) if tokens is not None else None
+        """Return the loaded model's default and session-local Playground budget."""
+        if (
+            self.active_mode != "chat"
+            or self.active_model is None
+            or getattr(self.worker, "thinking_budget_supported", False) is not True
+            or tool_parser_for(self.codec) != INKLING_PARSER
+        ):
+            return None, None
+        default_tokens = min(DEFAULT_INKLING_THINKING_BUDGET_TOKENS, self.output_limit)
+        tokens = self.thinking_budgets.get(self.active_model, default_tokens)
+        return default_tokens, min(tokens, self.output_limit) if tokens is not None else None
 
     def configure(self, payload):
         with self.lock:
@@ -3094,7 +3102,8 @@ class Desktop:
             has_mtp = "mtp_enabled" in payload
             has_budget = "thinking_budget_tokens" in payload
             has_model_id = "model_id" in payload
-            thinking_budget_supported, _ = self.thinking_budget_settings()
+            default_thinking_budget, _ = self.thinking_budget_settings()
+            thinking_budget_supported = default_thinking_budget is not None
             thinking_budget = payload.get("thinking_budget_tokens")
             if (
                 set(payload) - {"model_id", "mtp_enabled", "thinking_budget_tokens"} != fields
@@ -3121,11 +3130,9 @@ class Desktop:
                 if type(payload["mtp_enabled"]) is not bool or not capability["supported"]:
                     raise DesktopError("MTP is not supported by this model and worker.")
                 self.save_mtp_preference(payload["mtp_enabled"])
-            if thinking_budget_supported:
-                if has_budget:
-                    self.thinking_budgets[self.active_model] = thinking_budget
-                else:
-                    self.thinking_budgets.pop(self.active_model, None)
+            if thinking_budget_supported and has_model_id:
+                # A model-scoped configuration can explicitly leave the toggle off.
+                self.thinking_budgets[self.active_model] = thinking_budget
             self.context, self.maximum = context, maximum
             self.context_override = None if context == self.context_limit else context
             self.system_prompt, self.thinking = system, thinking
@@ -3305,9 +3312,9 @@ class Desktop:
             if worker is None or template is None:
                 raise APIError(503, "Run a model before sending a prompt.", "model_not_loaded")
             if thinking_budget_tokens is not None:
-                supported, _ = self.thinking_budget_settings()
+                default_thinking_budget, _ = self.thinking_budget_settings()
                 if (
-                    not supported
+                    default_thinking_budget is None
                     or type(thinking_budget_tokens) is not int
                     or not 1 <= thinking_budget_tokens <= self.output_limit
                 ):

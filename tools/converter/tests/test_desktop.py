@@ -2232,15 +2232,17 @@ def inkling_budget_model(desktop, model, executable):
     return running(desktop, model)
 
 
-def test_playground_thinking_budget_is_opt_in_and_request_local(desktop, inkling_budget_model):
-    assert desktop.settings_summary()["thinking_budget_supported"] is True
-    assert "thinking_budget_tokens" not in desktop.settings_summary()
+def test_playground_thinking_budget_defaults_on_and_stays_request_local(desktop, inkling_budget_model):
+    settings = desktop.settings_summary()
+    assert settings["thinking_budget_supported"] is True
+    assert settings["thinking_budget_tokens"] == settings["default_thinking_budget_tokens"] == 1024
     identifier = inkling_budget_model
     worker = desktop.worker
-    desktop.dispatch(advanced_options(model_id=identifier, thinking=False))
     with patch.object(worker, "request", wraps=worker.request) as request:
         desktop.dispatch({"command": "generate", "text": "Synthetic prompt"})
         finish(desktop)
+        assert request.call_args.args[0]["thinking_budget_tokens"] == 1024
+        desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "API fixture"}]})
         assert "thinking_budget_tokens" not in request.call_args.args[0]
 
         desktop.dispatch(advanced_options(model_id=identifier, thinking_budget_tokens=64, thinking=False))
@@ -2248,17 +2250,25 @@ def test_playground_thinking_budget_is_opt_in_and_request_local(desktop, inkling
         desktop.dispatch({"command": "generate", "text": "Synthetic prompt"})
         finish(desktop)
         assert request.call_args.args[0]["thinking_budget_tokens"] == 64
-        assert len(desktop.generation_estimates.history) == 2
+        assert len(desktop.generation_estimates.history) >= 2
         desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "API fixture"}]})
         assert "thinking_budget_tokens" not in request.call_args.args[0]
 
         desktop.dispatch(advanced_options(model_id=identifier))
         assert "thinking_budget_tokens" not in events(desktop)[-1]
+        assert events(desktop)[-1]["default_thinking_budget_tokens"] == 1024
         desktop.dispatch({"command": "generate", "text": "Disabled budget fixture"})
         finish(desktop)
         assert "thinking_budget_tokens" not in request.call_args.args[0]
     assert desktop.worker is worker
     assert "thinking_budget_tokens" not in desktop.registry.read_text()
+
+
+def test_playground_default_thinking_budget_is_bounded_by_loaded_model(desktop, inkling_budget_model, monkeypatch):
+    monkeypatch.setattr(desktop, "output_limit", 511)
+    desktop.dispatch(advanced_options())
+    settings = desktop.settings_summary()
+    assert settings["thinking_budget_tokens"] == settings["default_thinking_budget_tokens"] == 511
 
 
 def test_playground_thinking_budget_is_model_scoped(desktop, model, tmp_path, inkling_budget_model):
@@ -2272,12 +2282,17 @@ def test_playground_thinking_budget_is_model_scoped(desktop, model, tmp_path, in
     desktop.dispatch({"command": "run", "model_id": second})
     finish(desktop)
     assert desktop.settings_summary()["thinking_budget_supported"] is True
-    assert "thinking_budget_tokens" not in desktop.settings_summary()
+    assert desktop.settings_summary()["thinking_budget_tokens"] == 1024
+    desktop.dispatch(advanced_options(model_id=second))
     with pytest.raises(DesktopError, match="Model changed"):
         desktop.dispatch(advanced_options(model_id=first, thinking_budget_tokens=32))
     desktop.dispatch({"command": "run", "model_id": first})
     finish(desktop)
     assert desktop.settings_summary()["thinking_budget_tokens"] == 64
+    desktop.dispatch({"command": "run", "model_id": second})
+    finish(desktop)
+    assert "thinking_budget_tokens" not in desktop.settings_summary()
+    assert desktop.settings_summary()["default_thinking_budget_tokens"] == 1024
 
 
 def test_playground_rejects_invalid_or_unsupported_thinking_budgets(desktop, inkling_budget_model, monkeypatch):

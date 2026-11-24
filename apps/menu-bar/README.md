@@ -438,7 +438,7 @@ The retained Qwen3.8 Flash Next (Lily) processor accepts up to 32 million source
 
 For GLM-5.3, **Maximum reasoning effort** selects Low effort when off and Max effort when on; the model's reviewed template always reasons. The API also accepts an explicit Low, High or Max `reasoning_effort`. For boolean templates such as Qwen, Thinking controls `enable_thinking`. Replies retain the raw Playground display, while assistant history stores reasoning separately from the visible answer for subsequent turns.
 
-Inkling 2 Mini offers **Thinking budget (tokens)**. Turn it on to limit reasoning across the entire reply and reserve space for the answer. The editable suggestion is 128 tokens, bounded by the model's limit. With an explicit output limit, allow at least four tokens. Both limit toggles turn off when you restore defaults. The Playground remembers the applied thinking budget per model for the current app session and uses it for text and image replies. Text replies support the budget with DSpark on or off.
+Inkling 2 Mini starts with **Thinking budget (tokens)** on at 1,024 tokens, bounded by the model's limit. The budget counts reasoning across the entire reply and reserves space for the answer. Edit the value or turn the budget off to override it. **Restore Defaults** turns it back on at 1,024 and returns **Output limit** to automatic. Allow at least four output tokens while the thinking budget is on. The Playground remembers the budget choice per model for the current app session and uses it for text and image replies. Text replies support the budget with DSpark on or off.
 
 When a reply exhausts an explicit output limit, the Playground suggests increasing the limit or turning it off in Advanced Options. A context termination points to the current context setting and a new chat. Automatic generation can stop at the available context or execution budget, including memory-based allowances for models with a declared context maximum; the notice does not claim that clearing the conversation is always required.
 
@@ -458,6 +458,9 @@ use the model-specific default; an explicit saved choice is preserved.
 **Restore Defaults** selects that model's default for review. Image requests
 keep MTP off while preserving the text preference.
 Connected apps inherit this setting unless they override `mtp` for a request.
+The system prompt, context size, output limit, thinking mode and Inkling
+thinking budget in Advanced Options apply to Playground only. Connected apps
+use their own messages and the controls documented in the [local API](../../docs/LOCAL_API.md).
 
 ## Beginner and Advanced setup
 

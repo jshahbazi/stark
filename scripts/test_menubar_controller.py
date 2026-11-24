@@ -865,10 +865,10 @@ extension EngineController {
             var output = TokenLimitDraft(suggested: ChatOptions.suggestedOutputLimit)
             var thinking = TokenLimitDraft(suggested: ChatOptions.suggestedThinkingBudget)
             guard !output.isEnabled, !thinking.isEnabled,
-                  output.text(maximum: 4096) == "1024", thinking.text(maximum: 4096) == "128",
+                  output.text(maximum: 4096) == "1024", thinking.text(maximum: 4096) == "1024",
                   output.tokens(maximum: 4096) == nil, thinking.tokens(maximum: 4096) == nil else { return false }
             output.isEnabled = true; thinking.isEnabled = true
-            guard output.tokens(maximum: 4096) == 1024, thinking.tokens(maximum: 4096) == 128,
+            guard output.tokens(maximum: 4096) == 1024, thinking.tokens(maximum: 4096) == 1024,
                   output.tokens(maximum: 511) == 511, thinking.tokens(maximum: 63) == 63 else { return false }
             output.customValue = " 200 "
             output.isEnabled = false
@@ -888,50 +888,58 @@ extension EngineController {
                 "sampling": "exact-rejection-v1", "verification": "fixture-exact-v1"]
             let ready: [String: Any] = ["event": "ready", "mode": "chat", "model_id": "fixture-model",
                 "max_context_tokens": 8192, "context_tokens": 8192, "max_output_tokens": 4096,
-                "max_new_tokens": 512, "thinking_budget_supported": true, "mtp": capability, "mtp_enabled": true]
+                "max_new_tokens": 512, "thinking_budget_supported": true, "default_thinking_budget_tokens": 1024,
+                "thinking_budget_tokens": 1024, "mtp": capability, "mtp_enabled": true]
             engine.apply(ready)
-            guard engine.supportsThinkingBudget, engine.options.thinkingBudgetTokens == nil else { return false }
+            guard engine.supportsThinkingBudget, engine.defaultThinkingBudgetTokens == 1024,
+                  engine.options.thinkingBudgetTokens == 1024 else { return false }
             var requestedOptions = engine.options
             for invalidBudget in [0, -1, 4097] {
                 requestedOptions.thinkingBudgetTokens = invalidBudget
                 guard !engine.configure(requestedOptions), noCommandSent() else { return false }
             }
-            requestedOptions.thinkingBudgetTokens = 1024
+            requestedOptions.thinkingBudgetTokens = 256
             requestedOptions.maxNewTokens = 3
             guard !engine.configure(requestedOptions), noCommandSent() else { return false }
             requestedOptions.maxNewTokens = 512
             guard !engine.configure(requestedOptions, modelID: "stale"), noCommandSent(),
                   engine.configure(requestedOptions, mtpEnabled: false, modelID: "fixture-model") else { return false }
             let request = command()
-            guard request["thinking_budget_tokens"] as? Int == 1024,
+            guard request["thinking_budget_tokens"] as? Int == 256,
                   request["model_id"] as? String == "fixture-model", request["mtp_enabled"] as? Bool == false,
-                  engine.options.thinkingBudgetTokens == nil, engine.mtpEnabled else { return false }
+                  engine.options.thinkingBudgetTokens == 1024, engine.mtpEnabled else { return false }
             var configured = ready
             configured["event"] = "configured"
-            configured["thinking_budget_tokens"] = 1024; configured["mtp_enabled"] = false
+            configured["thinking_budget_tokens"] = 256; configured["mtp_enabled"] = false
             configured["model_id"] = "other-model"
             engine.apply(configured)
-            guard engine.state == "configuring", engine.options.thinkingBudgetTokens == nil else { return false }
+            guard engine.state == "configuring", engine.options.thinkingBudgetTokens == 1024 else { return false }
             configured["model_id"] = "fixture-model"
             engine.apply(configured)
-            guard engine.modelReady, engine.options.thinkingBudgetTokens == 1024, !engine.mtpEnabled else { return false }
+            guard engine.modelReady, engine.options.thinkingBudgetTokens == 256, !engine.mtpEnabled else { return false }
 
-            let defaults = ChatOptions.defaults(contextLimit: engine.contextLimit, outputLimit: engine.outputLimit)
-            guard defaults.thinkingBudgetTokens == nil, engine.configure(defaults, mtpEnabled: true) else { return false }
+            var off = engine.options
+            off.thinkingBudgetTokens = nil
+            guard engine.configure(off, mtpEnabled: true) else { return false }
             let disable = command()
             guard disable["model_id"] as? String == "fixture-model", disable["thinking_budget_tokens"] == nil,
                   disable["mtp_enabled"] as? Bool == true else { return false }
             configured.removeValue(forKey: "thinking_budget_tokens")
             configured["mtp_enabled"] = true
             engine.apply(configured)
-            guard engine.supportsThinkingBudget, engine.options.thinkingBudgetTokens == nil, engine.mtpEnabled else { return false }
+            guard engine.supportsThinkingBudget, engine.options.thinkingBudgetTokens == nil,
+                  engine.defaultThinkingBudgetTokens == 1024, engine.mtpEnabled else { return false }
+            let defaults = ChatOptions.defaults(contextLimit: engine.contextLimit, outputLimit: engine.outputLimit,
+                                               thinkingBudgetTokens: engine.defaultThinkingBudgetTokens)
+            guard engine.configure(defaults), command()["thinking_budget_tokens"] as? Int == 1024 else { return false }
 
             var unsupported = ready
             unsupported.removeValue(forKey: "thinking_budget_supported")
             unsupported["thinking_budget_tokens"] = 512
             engine.apply(unsupported)
-            guard !engine.supportsThinkingBudget, engine.options.thinkingBudgetTokens == nil,
-                  !engine.configure(requestedOptions), noCommandSent(), engine.configure(defaults) else { return false }
+            guard !engine.supportsThinkingBudget, engine.defaultThinkingBudgetTokens == nil,
+                  engine.options.thinkingBudgetTokens == nil, !engine.configure(requestedOptions),
+                  noCommandSent(), engine.configure(off) else { return false }
             let legacy = command()
             return legacy["model_id"] == nil && legacy["thinking_budget_tokens"] == nil
         case "context-model-defaults":
