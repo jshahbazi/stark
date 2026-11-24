@@ -1411,6 +1411,77 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the private verified Inkling artifact and Metal"]
+    fn decode_grows_the_live_cache_without_changing_output() {
+        let root = std::env::var_os("STARK_TEST_INKLING_MODEL_DIR").expect("set the private Inkling model directory");
+        let mut worker = InklingBackend::load(Path::new(&root), None).expect("load the verified Inkling artifact");
+        assert!(worker.source_verifier, "the M5 source verifier is required");
+        let input = [1, 7, 19, 23];
+        for drafts in [0, 3] {
+            let options = GenerationOptions {
+                context_tokens: 1024,
+                max_new_tokens: 16,
+                seed: 0,
+                sampling: Sampling::Greedy {},
+                thinking_budget_tokens: None,
+                mtp_drafts: drafts,
+                mtp_scheduling: Default::default(),
+                // Always exercise all sixteen decode steps in this control.
+                eos_token_ids: Vec::new(),
+                extra_stop_token_ids: Vec::new(),
+                stop: Vec::new(),
+                request_id: 0,
+                cache_scope: None,
+            };
+            let mut run = |physical| {
+                let target = &mut worker.target;
+                target.reset();
+                target.set_text_prefill_scope(true);
+                target.set_context(physical).expect("set the test allocation");
+                target.set_source_verifier(drafts > 0).expect("set the verifier");
+                target.set_dspark_enabled(drafts > 0).expect("set the draft mode");
+                target.ingest_many(&input[..input.len() - 1]).expect("prefill the test input");
+                let logits = target.step(input[input.len() - 1]).expect("prefill the final input token");
+                let mut allocation = ContextAllocation {
+                    initial_context_tokens: physical,
+                    context_tokens: physical,
+                    live_cache_bytes: target.live_context_bytes(physical),
+                    new_live_cache_bytes: 0,
+                    workspace_growth_bytes: 0,
+                    snapshot_bytes: 0,
+                    growth_count: 0,
+                };
+                let result = collect_output(
+                    target,
+                    &worker.tokenizer,
+                    &mut worker.sampler,
+                    &mut worker.cancellation,
+                    &mut DraftStats::default(),
+                    &mut allocation,
+                    true,
+                    drafts as usize,
+                    logits,
+                    input.len(),
+                    false,
+                    &options,
+                    Instant::now(),
+                    None,
+                    None,
+                )
+                .expect("decode the test input");
+                (result, allocation)
+            };
+            let (grown, resized) = run(input.len() + 1);
+            let (fresh, preallocated) = run(options.context_tokens as usize);
+            assert_eq!(resized.growth_count, 1);
+            assert_eq!(resized.context_tokens, preallocated.context_tokens);
+            assert_eq!(preallocated.growth_count, 0);
+            assert!(grown.generated_token_ids == fresh.generated_token_ids);
+            assert_eq!(grown.finish_reason, fresh.finish_reason);
+        }
+    }
+
+    #[test]
     fn fitting_context_respects_the_loaded_ceiling_and_current_budget() {
         let bytes_for_context = |context| context * 64;
         let loaded = largest_fitting_context(2, 131_072, 100_000 * 64, bytes_for_context).unwrap();
