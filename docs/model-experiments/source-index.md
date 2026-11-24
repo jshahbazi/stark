@@ -227,6 +227,8 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ### Benchmarks and experiment records
 
+- [Installed Playground generation and DSpark diagnostic](../archive/runs/2026-11-24-inkling-playground-generation.md) · Correctness and lifecycle, 2026-11-24, attempt 20261124-INKCHAT-01
+
 - [M5 Max original and Unsloth baselines](../benchmarks/2026-11-20-inkling-mini-m5-max.md) · Benchmark, 2026-11-20
 - [First milestone and real-weight NVFP4](2026-11-20-inkling-mini-milestone-1.md) · Experiment, 2026-11-20
 - [Native decode slice](../benchmarks/2026-11-21-inkling-mini-native-slice.md) · Benchmark, 2026-11-21
