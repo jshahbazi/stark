@@ -2,19 +2,24 @@ name: Build
 
 on:
   push:
-    # Not `main`: the branch build already covered the merged tree, and a
-    # post-merge build holds a macOS runner that a signed release waits for.
-    # Dispatch this workflow on `main` when a development bundle is needed.
+    # Build development bundles automatically for packaging inputs on Codex branches.
+    # Use manual dispatch for other changes or to build from main.
     branches: ['codex/**']
     paths:
       - '.github/workflows/build.yml'
+      - '.github/actions/rust-cache/**'
+      - 'scripts/ci/rust-cache-key.sh'
       - '.cargo/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
-      - 'crates/**'
-      - 'vendor/cxx/**'
-      - 'tools/converter/**'
+      - 'crates/*/Cargo.toml'
+      - 'tools/converter/.python-version'
+      - 'tools/converter/LICENSE.*'
+      - 'tools/converter/MANIFEST.in'
+      - 'tools/converter/pyproject.toml'
+      - 'tools/converter/setup.py'
+      - 'tools/converter/uv.lock'
       - 'apps/menu-bar/**'
       - 'scripts/build_distribution.py'
       - 'scripts/build_menubar.py'
@@ -26,6 +31,7 @@ on:
       - 'scripts/licenses/distribution/**'
       - 'install.sh'
       - 'LICENSE'
+      - 'LICENSE.*'
       - 'provenance/UPSTREAM.md'
   workflow_dispatch:
 
