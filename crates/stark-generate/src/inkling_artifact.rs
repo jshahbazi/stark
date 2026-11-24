@@ -95,6 +95,7 @@ pub(crate) struct Artifact {
     pub draft: VerifiedWeights,
     pub tokenizer: Tokenizer,
     pub config_sha256: String,
+    pub context_limit: u32,
 }
 
 pub(crate) struct VerifiedWeights {
@@ -210,10 +211,10 @@ impl Artifact {
         let layout = Layout::of(root);
         let config = read(&root.join("config.json"), CONFIG_LIMIT)?;
         let config_sha256 = format!("{:x}", Sha256::digest(&config));
+        let mut installed: Value = serde_json::from_slice(&config).map_err(|_| "invalid_model_config")?;
         let template = checked_bytes(&root.join("chat_template.jinja"), 256 * 1024, TEMPLATE_SHA)?;
         if config_sha256 != CONFIG_SHA || layout == Layout::Affine8 {
             let original = checked_bytes(&root.join("source-config.json"), CONFIG_LIMIT, CONFIG_SHA)?;
-            let mut installed: Value = serde_json::from_slice(&config).map_err(|_| "invalid_model_config")?;
             let original: Value = serde_json::from_slice(&original).map_err(|_| "invalid_model_config")?;
             let extra = installed.as_object_mut().ok_or("invalid_model_config")?;
             let codec = extra.remove("token_codec_config").ok_or("invalid_model_config")?;
@@ -227,6 +228,11 @@ impl Artifact {
                 return Err("inkling_checkpoint_mismatch");
             }
         }
+        let context_limit = installed["text_config"]["model_max_length"]
+            .as_u64()
+            .and_then(|length| u32::try_from(length).ok())
+            .filter(|length| *length >= 2)
+            .ok_or("invalid_model_config")?;
         checked_bytes(&root.join("processor_config.json"), CONFIG_LIMIT, PROCESSOR_SHA)?;
         checked_bytes(&root.join("hf_quant_config.json"), CONFIG_LIMIT, QUANT_SHA)?;
         let token_bytes = checked_bytes(&root.join("tokenizer.json"), 32 * 1024 * 1024, TOKENIZER_SHA)?;
@@ -239,6 +245,7 @@ impl Artifact {
             draft,
             tokenizer,
             config_sha256,
+            context_limit,
         })
     }
 }

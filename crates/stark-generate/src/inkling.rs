@@ -52,6 +52,8 @@ const GREEDY_DEFAULT_DRAFTS: u32 = 3;
 const SAMPLED_DEFAULT_DRAFTS: u32 = 2;
 const INITIAL_CONTEXT: usize = 4352;
 const LOAD_CONTEXT_MEMORY_PERCENT: usize = 85;
+const CONTEXT_ALLOCATION_ROWS: usize = 1024;
+const OUTPUT_RESERVE_TOKENS: usize = 8192;
 const SHORT_MTP_VERIFICATION: &str = "inkling-dspark-short-target-draw-v1";
 
 #[derive(Default, serde::Serialize)]
@@ -87,6 +89,66 @@ struct PendingDraft<'a> {
     consumed: usize,
 }
 
+#[derive(serde::Serialize)]
+struct ContextSizing {
+    checkpoint_context_tokens: u32,
+    engine_context_tokens: u32,
+    memory_context_tokens: u32,
+    context_tokens: u32,
+    memory_budget_bytes: usize,
+}
+
+#[derive(serde::Serialize)]
+struct ContextAllocation {
+    initial_context_tokens: usize,
+    context_tokens: usize,
+    live_cache_bytes: usize,
+    new_live_cache_bytes: usize,
+    workspace_growth_bytes: usize,
+    snapshot_bytes: usize,
+    growth_count: usize,
+}
+
+impl ContextAllocation {
+    fn additional_bytes(&self) -> usize {
+        self.new_live_cache_bytes + self.workspace_growth_bytes + self.snapshot_bytes
+    }
+
+    fn grow(
+        &mut self,
+        target: &mut Session,
+        required: usize,
+        remaining_output: usize,
+        logical_context: usize,
+        source: bool,
+    ) -> Result<(), &'static str> {
+        let growth = OUTPUT_RESERVE_TOKENS.max(target.context() / 8).min(remaining_output);
+        let preferred = rounded_capacity(target.position() + growth, logical_context);
+        let budget = current_context_memory_budget(target);
+        let (context, live, workspace) = [preferred, required]
+            .into_iter()
+            .filter(|&context| context >= required)
+            .map(|context| {
+                let live = target.live_context_bytes(context);
+                let workspace = target.source_workspace_growth_bytes(if source {
+                    context
+                } else {
+                    0
+                });
+                (context, live, workspace)
+            })
+            .find(|&(_, live, workspace)| budget > 0 && live + workspace <= budget)
+            .ok_or("resource_budget_exceeded")?;
+        target.grow_context(context).map_err(|_| "native_generation_failed")?;
+        self.context_tokens = context;
+        self.live_cache_bytes = live;
+        self.new_live_cache_bytes += live;
+        self.workspace_growth_bytes += workspace;
+        self.growth_count += 1;
+        Ok(())
+    }
+}
+
 pub(crate) struct InklingBackend {
     tokenizer: Tokenizer,
     config_sha256: String,
@@ -94,7 +156,8 @@ pub(crate) struct InklingBackend {
     layout: inkling_artifact::Layout,
     target: Session,
     /// Fixed for this loaded worker, including the capacity reported to clients.
-    context_limit: u32,
+    context_sizing: ContextSizing,
+    context_allocation: Option<ContextAllocation>,
     cancellation: Option<CancelSignal>,
     sampler: ProbabilityMapper,
     retained: Option<BoundaryEntry<((bool, bool), Snapshot)>>,
@@ -120,28 +183,28 @@ fn default_drafts_for(sampling: &Sampling) -> u32 {
 /// does not depend on the width and prefix snapshots stay 2,048-aligned, so
 /// this only trades workspace for fewer, larger commands. The base width keeps
 /// its original admission rule; a wider one must also leave room for the
-/// verifier, the proposal head and a maximum-context request, so it never
-/// costs a request that the base width would have served.
+/// verifier, proposal head and a request that can use the whole command.
 fn source_command_rows(
     fixed: usize,
     available: usize,
 ) -> Option<usize> {
-    let limit = Session::source_context_limit(true);
-    let headroom = Session::context_memory_bytes(limit, true).zip(Session::dspark_memory_bytes(limit, true)).map(
-        |(target, draft)| {
-            target
-                + draft
-                + Session::source_global_extra_bytes(true, limit)
-                + Session::SOURCE_VERIFIER_RESERVE_BYTES
-                + Session::DSPARK_INT8_HEAD_BYTES
-        },
-    );
     Session::SOURCE_COMMAND_WIDTHS.iter().rev().copied().find(|&rows| {
         let reserve = Session::batched_prefill_memory_bytes_at(true, rows);
         let needed = if rows == Session::SOURCE_PREFILL_ROWS {
             Some(fixed + reserve)
         } else {
-            headroom.map(|headroom| fixed + reserve + headroom)
+            let context = rows.max(INITIAL_CONTEXT);
+            Session::context_memory_bytes(context, true).zip(Session::dspark_memory_bytes(context, true)).map(
+                |(target, draft)| {
+                    fixed
+                        + reserve
+                        + target
+                        + draft
+                        + Session::source_global_extra_bytes(true, context)
+                        + Session::SOURCE_VERIFIER_RESERVE_BYTES
+                        + Session::DSPARK_INT8_HEAD_BYTES
+                },
+            )
         };
         admit_request_memory(needed, available).is_ok()
     })
@@ -237,6 +300,40 @@ fn largest_fitting_context(
         }
     }
     Some(low)
+}
+
+fn pinned_context(
+    memory_context: u32,
+    model_context: u32,
+    engine_context: u32,
+) -> Option<u32> {
+    let scaled = (u64::from(memory_context) * LOAD_CONTEXT_MEMORY_PERCENT as u64 / 100) as u32;
+    let rows = CONTEXT_ALLOCATION_ROWS as u32;
+    let rounded = if scaled < rows {
+        scaled
+    } else {
+        scaled - scaled % rows
+    };
+    let selected = rounded.min(model_context).min(engine_context);
+    (selected >= 2).then_some(selected)
+}
+
+fn rounded_capacity(
+    required: usize,
+    maximum: usize,
+) -> usize {
+    (required.div_ceil(CONTEXT_ALLOCATION_ROWS) * CONTEXT_ALLOCATION_ROWS).min(maximum)
+}
+
+fn current_context_memory_budget(target: &Session) -> usize {
+    context_memory_budget(target, inference_memory_budget(available_memory_bytes().unwrap_or(0)))
+}
+
+fn context_memory_budget(
+    target: &Session,
+    unified_budget: usize,
+) -> usize {
+    unified_budget.min(inference_memory_budget(target.metal_memory_headroom_bytes()))
 }
 
 struct PrefillProgress<'state, 'callback, 'environment> {
@@ -340,12 +437,36 @@ impl InklingBackend {
         }
         let source_grid = target.supports_source_text_prefill(INITIAL_CONTEXT);
         let engine_limit = u32::try_from(target.max_context_length()).map_err(|_| "inkling_load_failed")?;
-        let mut backend = Self {
+        let memory_budget_bytes = current_context_memory_budget(&target);
+        // Find the memory-derived length independently of the checkpoint and
+        // device bounds, so the margin does not shorten a model that fits.
+        let memory_context_tokens = largest_fitting_context(2, u32::MAX, memory_budget_bytes, |context| {
+            let workspace = if source_grid {
+                Session::source_global_workspace_bytes(context)
+                    .saturating_sub(Session::source_global_workspace_bytes(INITIAL_CONTEXT))
+            } else {
+                0
+            };
+            target.live_context_bytes(context)
+                + workspace
+                + Session::prefix_snapshot_bytes(context, target.has_dspark())
+        })
+        .ok_or("resource_budget_exceeded")?;
+        let context_tokens = pinned_context(memory_context_tokens, artifact.context_limit, engine_limit)
+            .ok_or("resource_budget_exceeded")?;
+        Ok(Self {
             tokenizer: artifact.tokenizer,
             config_sha256: artifact.config_sha256,
             layout: artifact.layout,
             target,
-            context_limit: engine_limit,
+            context_sizing: ContextSizing {
+                checkpoint_context_tokens: artifact.context_limit,
+                engine_context_tokens: engine_limit,
+                memory_context_tokens,
+                context_tokens,
+                memory_budget_bytes,
+            },
+            context_allocation: None,
             cancellation,
             sampler: ProbabilityMapper::default(),
             retained: None,
@@ -354,22 +475,7 @@ impl InklingBackend {
             source_grid,
             draft_stats: DraftStats::default(),
             runtime_identity,
-        };
-        // Size against the loaded model's footprint and leave room for memory
-        // pressure after clients have started budgeting against this window.
-        let budget = backend.context_memory_budget(inference_memory_budget(available_memory_bytes().unwrap_or(0)));
-        let load_budget = budget / 100 * LOAD_CONTEXT_MEMORY_PERCENT;
-        backend.context_limit = backend
-            .fit_context(2, engine_limit, load_budget, |context, _| {
-                backend.context_reserve_bytes(
-                    context,
-                    context,
-                    backend.target.supports_source_text_prefill(context),
-                    backend.target.has_dspark(),
-                )
-            })
-            .ok_or("resource_budget_exceeded")?;
-        Ok(backend)
+        })
     }
 
     fn source_text_prefill(
@@ -400,9 +506,12 @@ impl InklingBackend {
     ) -> Result<GeneratedTokens, &'static str> {
         let expanded =
             input.len().checked_add(image.map_or(0, |(image, _)| image.token_count() - 1)).ok_or("context_overflow")?;
-        if input.is_empty() || expanded >= options.context_tokens as usize {
+        let logical_context = options.context_tokens as usize;
+        if input.is_empty() || expanded >= logical_context {
             return Err("context_overflow");
         }
+        let output_budget = (logical_context - expanded).min(options.max_new_tokens as usize);
+        let required = expanded + output_budget.min(OUTPUT_RESERVE_TOKENS);
         self.draft_stats = DraftStats::default();
         let use_draft = options.mtp_drafts > 0;
         let source_prefill = image.is_none() && self.source_text_prefill(input.len(), options);
@@ -433,22 +542,21 @@ impl InklingBackend {
         };
         let mut retained = self.retained.take().filter(|_| reused > 0);
         self.pending = None;
-        let budget = self.context_memory_budget(inference_memory_budget(available_memory_bytes().unwrap_or(0)));
-        let context = options.context_tokens as usize;
         let snapshot_tokens = if boundary > reused {
             boundary
         } else {
             0
         };
-        let live_state = if context == self.target.context() {
-            0
-        } else {
-            self.target.live_context_bytes(context)
-        };
-        let needed = live_state + self.context_reserve_bytes(context, snapshot_tokens, source_prefill, use_draft);
-        if budget == 0 || needed > budget {
-            return Err("resource_budget_exceeded");
-        }
+        let mut allocation = self
+            .admit_execution(
+                required,
+                logical_context,
+                snapshot_tokens,
+                source_prefill,
+                use_draft,
+                current_context_memory_budget(&self.target),
+            )
+            .ok_or("resource_budget_exceeded")?;
         let _activity = InferenceActivity::begin().map_err(|_| "inference_activity_unavailable")?;
         let started = Instant::now();
         require_active(&mut self.cancellation, options.request_id)?;
@@ -456,11 +564,11 @@ impl InklingBackend {
         // workspace only for a request that was admitted with it.
         self.target.reset();
         self.target.set_text_prefill_scope(source_prefill);
-        self.target.set_context(options.context_tokens as usize).map_err(|_| "native_generation_failed")?;
+        self.target.set_context(allocation.context_tokens).map_err(|_| "native_generation_failed")?;
         self.target.set_source_verifier(source_verify).map_err(|_| "mtp_not_supported")?;
         self.target.set_dspark_enabled(use_draft).map_err(|_| "mtp_not_supported")?;
         if let Some(entry) = retained.as_ref() {
-            self.target.restore(&entry.state.1).map_err(|_| "native_generation_failed")?;
+            self.target.restore_prefix(&entry.state.1).map_err(|_| "native_generation_failed")?;
         }
         let mut prefill = PrefillProgress {
             cancellation: &mut self.cancellation,
@@ -523,6 +631,8 @@ impl InklingBackend {
             &mut self.sampler,
             &mut self.cancellation,
             &mut self.draft_stats,
+            &mut allocation,
+            source_prefill,
             verify_depth,
             logits,
             expanded,
@@ -533,6 +643,7 @@ impl InklingBackend {
             on_progress,
         );
         let mut result = result?;
+        self.context_allocation = Some(allocation);
         result.reused_input_tokens = reused;
         if let (Some(state), Some(scope)) = (snapshot, options.cache_scope) {
             self.pending = Some(BoundaryEntry::new(
@@ -545,25 +656,52 @@ impl InklingBackend {
         Ok(result)
     }
 
-    fn context_reserve_bytes(
+    fn execution_allocation(
         &self,
         context: usize,
         snapshot_tokens: usize,
         source: bool,
         draft: bool,
-    ) -> usize {
-        self.target.source_workspace_growth_bytes(if source {
-            context
-        } else {
-            0
-        }) + Session::prefix_snapshot_bytes(snapshot_tokens, draft)
+    ) -> ContextAllocation {
+        let live_cache_bytes = self.target.live_context_bytes(context);
+        ContextAllocation {
+            initial_context_tokens: context,
+            context_tokens: context,
+            live_cache_bytes,
+            new_live_cache_bytes: if context == self.target.context() {
+                0
+            } else {
+                live_cache_bytes
+            },
+            workspace_growth_bytes: self.target.source_workspace_growth_bytes(if source {
+                context
+            } else {
+                0
+            }),
+            snapshot_bytes: Session::prefix_snapshot_bytes(snapshot_tokens, draft),
+            growth_count: 0,
+        }
     }
 
-    fn context_memory_budget(
+    fn admit_execution(
         &self,
-        unified_budget: usize,
-    ) -> usize {
-        unified_budget.min(inference_memory_budget(self.target.metal_memory_headroom_bytes()))
+        required: usize,
+        maximum: usize,
+        snapshot_tokens: usize,
+        source: bool,
+        draft: bool,
+        budget: usize,
+    ) -> Option<ContextAllocation> {
+        if budget == 0 {
+            return None;
+        }
+        let aligned = rounded_capacity(required, maximum);
+        let resident = self.target.context();
+        [resident, aligned, required]
+            .into_iter()
+            .filter(|&context| (required..=aligned).contains(&context))
+            .map(|context| self.execution_allocation(context, snapshot_tokens, source, draft))
+            .find(|allocation| allocation.additional_bytes() <= budget)
     }
 
     fn fit_context(
@@ -635,6 +773,8 @@ fn collect_output(
     mapper: &mut ProbabilityMapper,
     cancellation: &mut Option<CancelSignal>,
     draft_stats: &mut DraftStats,
+    allocation: &mut ContextAllocation,
+    source_prefill: bool,
     verify_depth: usize,
     mut logits: Vec<f32>,
     input_tokens: usize,
@@ -671,6 +811,16 @@ fn collect_output(
             {
                 let target = session.take().ok_or("native_generation_failed")?;
                 let limit = verify_depth.min(budget.saturating_sub(delivered + 1));
+                let required = target.position() + 1 + limit;
+                if required > target.context() {
+                    allocation.grow(
+                        target,
+                        required,
+                        budget - delivered,
+                        options.context_tokens as usize,
+                        source_prefill,
+                    )?;
+                }
                 let depth = if verify_depth > 0 {
                     planner.choose(limit)
                 } else {
@@ -822,7 +972,13 @@ impl GenerationBackend for InklingBackend {
         VOCAB
     }
     fn max_context_length(&self) -> Option<u32> {
-        Some(self.context_limit)
+        Some(self.context_sizing.context_tokens)
+    }
+    fn context_sizing_metadata(&self) -> Option<Value> {
+        Some(json!(self.context_sizing))
+    }
+    fn context_allocation_metadata(&self) -> Option<Value> {
+        self.context_allocation.as_ref().map(|allocation| json!(allocation))
     }
     fn eos_token_ids(&self) -> &[u32] {
         EOS
@@ -842,28 +998,33 @@ impl GenerationBackend for InklingBackend {
         let Some(minimum) = request.input_tokens.checked_add(1) else {
             return Ok(None);
         };
+        let maximum = request.maximum.min(self.context_sizing.context_tokens);
+        if minimum > maximum {
+            return Ok(None);
+        }
         let input = request.input_tokens as usize;
         let mut options = request.options.clone();
-        options.context_tokens = self.target.context() as u32;
+        options.context_tokens = maximum;
         let boundary = self.boundary(input, &options);
-        let resident_reuses_boundary = boundary > 0
-            && request.input_token_ids.is_some_and(|ids| self.prefix_cache_plan(ids, &options) == boundary);
+        let reused = request.input_token_ids.map_or(0, |ids| self.prefix_cache_plan(ids, &options));
         let draft = options.mtp_drafts > 0;
-        let source_allowed = input >= SOURCE_PREFILL_MIN_INPUT && (!draft || self.source_verifier);
-        Ok(self.fit_context(
-            minimum,
-            request.maximum.min(self.context_limit),
-            self.context_memory_budget(memory),
-            |context, resident| {
-                let snapshot = if resident && resident_reuses_boundary {
-                    0
-                } else {
-                    boundary
-                };
-                let source = source_allowed && self.target.supports_source_text_prefill(context);
-                self.context_reserve_bytes(context, snapshot, source, draft)
-            },
-        ))
+        let source = self.source_text_prefill(input, &options);
+        let required = input + (maximum as usize - input).min(OUTPUT_RESERVE_TOKENS);
+        let budget = context_memory_budget(&self.target, memory);
+        let snapshot_tokens = if reused == boundary {
+            0
+        } else {
+            boundary
+        };
+        if self.admit_execution(required, maximum as usize, snapshot_tokens, source, draft, budget).is_some() {
+            return Ok(Some(maximum));
+        }
+        // Under current pressure only the initial output allowance may need
+        // shortening. A different logical context cannot reuse the snapshot.
+        Ok(self.fit_context(minimum, required as u32 - 1, budget, |context, _| {
+            let plan = self.execution_allocation(context, boundary, source, draft);
+            plan.workspace_growth_bytes + plan.snapshot_bytes
+        }))
     }
 
     fn tokenize(
@@ -1214,21 +1375,39 @@ mod tests {
         assert_eq!(source_command_rows(fixed, fixed + slack + base - 1), None);
         // The base width keeps its original rule: its reserve alone.
         assert_eq!(source_command_rows(fixed, fixed + slack + base), Some(2048));
-        // A wider width must also leave room for the verifier, the proposal
-        // head and a maximum-context request.
-        let limit = Session::source_context_limit(true);
-        let headroom = Session::context_memory_bytes(limit, true).unwrap()
-            + Session::dspark_memory_bytes(limit, true).unwrap()
-            + Session::source_global_extra_bytes(true, limit)
-            + Session::SOURCE_VERIFIER_RESERVE_BYTES
-            + Session::DSPARK_INT8_HEAD_BYTES;
+        // A wider width reserves the verifier, proposal head and enough
+        // context to run a complete command at that width.
         for (rows, narrower) in [(4096, 2048), (8192, 4096)] {
+            let context = rows.max(INITIAL_CONTEXT);
+            let headroom = Session::context_memory_bytes(context, true).unwrap()
+                + Session::dspark_memory_bytes(context, true).unwrap()
+                + Session::source_global_extra_bytes(true, context)
+                + Session::SOURCE_VERIFIER_RESERVE_BYTES
+                + Session::DSPARK_INT8_HEAD_BYTES;
             let needed = fixed + slack + Session::batched_prefill_memory_bytes_at(true, rows) + headroom;
             assert_eq!(source_command_rows(fixed, needed - 1), Some(narrower), "{rows}");
             assert_eq!(source_command_rows(fixed, needed), Some(rows), "{rows}");
         }
         assert_eq!(source_command_rows(fixed, usize::MAX / 2), Some(8192));
         assert_eq!(Session::SOURCE_COMMAND_WIDTHS, [2048, 4096, 8192]);
+    }
+
+    #[test]
+    fn load_margin_applies_before_model_and_device_limits() {
+        assert_eq!(pinned_context(500_000, 1_048_576, 1_048_576), Some(424_960));
+        assert_eq!(pinned_context(1_500_000, 1_048_576, 1_048_576), Some(1_048_576));
+        assert_eq!(pinned_context(1_500_000, 1_048_576, 786_432), Some(786_432));
+        assert_eq!(pinned_context(20, 1_048_576, 1_048_576), Some(17));
+        assert_eq!(pinned_context(2, 1_048_576, 1_048_576), None);
+    }
+
+    #[test]
+    fn allocation_rounding_is_small_and_respects_the_logical_context() {
+        assert_eq!(rounded_capacity(27 + 96, 786_432), 1024);
+        assert_eq!(rounded_capacity(27 + OUTPUT_RESERVE_TOKENS, 786_432), 9216);
+        assert_eq!(rounded_capacity(241_902 + 96, 786_432), 242_688);
+        assert_eq!(rounded_capacity(248_399 + 96, 786_432), 248_832);
+        assert_eq!(rounded_capacity(4500, 4512), 4512);
     }
 
     #[test]
@@ -1245,7 +1424,7 @@ mod tests {
     #[test]
     fn source_context_limit_and_capacity() {
         assert_eq!(Session::source_context_limit(false), INITIAL_CONTEXT);
-        assert_eq!(Session::source_context_limit(true), 131_072);
+        assert_eq!(Session::source_context_limit(true), 1_048_576);
         for (context, capacity) in [
             (1, 4352),
             (4352, 4352),
@@ -1253,7 +1432,9 @@ mod tests {
             (40_000, 40_000),
             (65_536, 65_536),
             (131_072, 131_072),
-            (131_073, 131_072),
+            (262_144, 262_144),
+            (1_048_576, 1_048_576),
+            (1_048_577, 1_048_576),
         ] {
             assert_eq!(Session::source_global_capacity(context), capacity, "{context}");
         }
@@ -1268,6 +1449,7 @@ mod tests {
             (32_768, 1_003_487_232, 268_435_456),
             (65_536, 2_006_974_464, 536_870_912),
             (131_072, 4_013_948_928, 1_073_741_824),
+            (262_144, 8_027_897_856, 2_147_483_648),
         ] {
             assert_eq!(Session::source_global_mask_bytes(keys), mask, "{keys}");
             assert_eq!(Session::source_global_workspace_bytes(keys), total, "{keys}");
@@ -1288,7 +1470,7 @@ mod tests {
             assert_eq!(Session::source_global_extra_bytes(true, context), 0, "{context}");
         }
         let base = Session::source_global_workspace_bytes(4352);
-        for keys in [4353, 9216, 16_384, 32_768, 65_536, 131_072] {
+        for keys in [4353, 9216, 16_384, 32_768, 65_536, 131_072, 262_144, 1_048_576] {
             assert_eq!(
                 Session::source_global_extra_bytes(true, keys),
                 Session::source_global_workspace_bytes(keys) - base,
@@ -1299,7 +1481,7 @@ mod tests {
         assert_eq!(Session::source_global_extra_bytes(true, 32_768), 232_783_872);
         assert_eq!(Session::source_global_extra_bytes(true, 131_072), 1_038_090_240);
         // Contexts beyond the session maximum are rejected before allocation.
-        assert_eq!(Session::source_global_extra_bytes(true, 131_073), 0);
+        assert_eq!(Session::source_global_extra_bytes(true, 1_048_577), 0);
         let mut previous = 0;
         for context in (4352..=131_072).step_by(512) {
             let extra = Session::source_global_extra_bytes(true, context);

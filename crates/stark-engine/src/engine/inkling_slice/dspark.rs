@@ -149,6 +149,9 @@ struct Cache {
     capacity: usize,
 }
 
+/// Replacement DSpark cache held until the shared context-growth blit completes.
+pub(super) struct ContextCache([Cache; 3]);
+
 impl Cache {
     fn new(
         device: &Device,
@@ -418,6 +421,34 @@ impl Dspark {
             Cache::new(device, context)?,
             Cache::new(device, context.min(LOCAL))?,
         ])
+    }
+
+    pub(super) fn allocate_context_cache(
+        &self,
+        device: &Device,
+        context: usize,
+    ) -> Result<ContextCache> {
+        Ok(ContextCache(Self::new_cache(device, context)?))
+    }
+
+    pub(super) fn encode_context_cache_copy(
+        &self,
+        next: &ContextCache,
+        encoder: &ProtocolObject<dyn MTLBlitCommandEncoder>,
+        position: usize,
+    ) {
+        for (old, new) in self.cache.iter().zip(&next.0) {
+            let bytes = position.min(old.capacity) * KV * 2;
+            encoder.copy_buffer_to_buffer(&old.keys, 0, &new.keys, 0, bytes);
+            encoder.copy_buffer_to_buffer(&old.values, 0, &new.values, 0, bytes);
+        }
+    }
+
+    pub(super) fn install_context_cache(
+        &mut self,
+        cache: ContextCache,
+    ) {
+        self.cache = cache.0;
     }
 
     pub(super) fn set_context(
