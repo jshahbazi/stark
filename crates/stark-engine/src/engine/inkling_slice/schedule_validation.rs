@@ -1112,6 +1112,8 @@ pub fn measure_split_consistency(
 
 #[cfg(test)]
 mod tests {
+    use stark_engine_macros::stark_test;
+
     use super::*;
 
     const SOURCE_ROWS: usize = Session::SOURCE_PREFILL_ROWS;
@@ -1129,7 +1131,7 @@ mod tests {
             && ranges.last().is_none_or(|last| last.end == end)
     }
 
-    #[test]
+    #[stark_test]
     fn split_patterns_stay_in_the_packed_source_class() {
         for (pattern, widths) in [
             (&[2048][..], 1025..=2048),
@@ -1145,7 +1147,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[stark_test]
     fn short_source_prompts_use_bulk_tail_and_seed() {
         for (prompt, bulk) in [(69, 65), (73, 69), (130, 126), (511, 507)] {
             let ranges = worker_ranges(prompt, true, SOURCE_ROWS);
@@ -1159,7 +1161,7 @@ mod tests {
         assert_eq!(PackedPrefill::SOURCE_MIN_ROWS, 65);
     }
 
-    #[test]
+    #[stark_test]
     fn worker_admission_mirror_admits_every_nonempty_prompt() {
         assert!(!worker_admits_source(0));
         for prompt in [1, 4, 5, 68, 69, 511, 512, 4096] {
@@ -1167,14 +1169,14 @@ mod tests {
         }
     }
 
-    #[test]
+    #[stark_test]
     fn stock_4k_schedule_is_unchanged() {
         let ranges = worker_ranges(4096, true, SOURCE_ROWS);
         assert_eq!(ranges, [0..2048, 2048..4092, 4092..4095]);
         assert_eq!(replay_boundaries(&ranges, 4096, true, SOURCE_ROWS), [2048]);
     }
 
-    #[test]
+    #[stark_test]
     fn long_source_prompts_cover_both_fixed_boundaries() {
         let ranges = worker_ranges(8800, true, SOURCE_ROWS);
         assert_eq!(lengths(&ranges), [2048, 2048, 2048, 2048, 604, 3]);
@@ -1195,7 +1197,7 @@ mod tests {
         assert_eq!(replay_boundaries(&ranges, 4350, true, SOURCE_ROWS), [4096]);
     }
 
-    #[test]
+    #[stark_test]
     fn incumbent_schedule_ingests_all_but_the_seed() {
         let ranges = worker_ranges(68, false, 512);
         assert_eq!(ranges, [0..67]);

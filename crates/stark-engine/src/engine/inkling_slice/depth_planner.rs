@@ -131,9 +131,11 @@ impl DepthPlanner {
 
 #[cfg(test)]
 mod tests {
+    use stark_engine_macros::stark_test;
+
     use super::*;
 
-    #[test]
+    #[stark_test]
     fn low_acceptance_prefers_short_rounds() {
         let mut planner = DepthPlanner::new();
         for _ in 0..200 {
@@ -145,7 +147,7 @@ mod tests {
         assert_eq!(planner.choose(0), 0);
     }
 
-    #[test]
+    #[stark_test]
     fn high_acceptance_holds_full_depth_despite_noisy_costs() {
         let mut planner = DepthPlanner::new();
         for _ in 0..40 {
@@ -168,7 +170,7 @@ mod tests {
         assert_eq!(planner.choose(2), 1);
     }
 
-    #[test]
+    #[stark_test]
     fn high_acceptance_prefers_full_depth() {
         let mut planner = DepthPlanner::new();
         for _ in 0..40 {
