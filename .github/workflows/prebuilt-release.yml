@@ -102,7 +102,7 @@ jobs:
             '' \
             'Installation, offline synthetic conversion, file hashes, relocation and uninstall were checked without loading a model. These checks do not qualify model outputs or performance on other Macs.' \
             '' \
-            'This preview is not Developer ID signed or notarized. The inherited release, cloud and signing workflows remain disabled.' \
+            'This preview is not Developer ID signed or notarized.' \
             '' \
             "Source commit: $GITHUB_SHA" \
             > "$RUNNER_TEMP/release-notes.md"

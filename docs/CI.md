@@ -1,17 +1,17 @@
 # Continuous integration and security checks
 
-CI, Security and CodeQL run for pull requests to `main`, pushes to `main` and manual dispatches; Security and CodeQL also run weekly. To check a branch before opening a pull request, choose the branch under **Actions > CI > Run workflow**. The pull-request `CI completed` gate requires the `engine-unit` job as well as the other required CI jobs, except that the macOS Rust jobs are skipped for changes that cannot affect them; see [skipped Rust jobs](#skipped-rust-jobs). All CI inputs are synthetic: no workflow downloads a model, and private validation artifacts never enter hosted runners.
+CI and Security run for pull requests to `main`, pushes to `main` and manual dispatches. CodeQL uses the same triggers and skips Markdown-only changes on pull requests and pushes. Security and CodeQL also run weekly. To check a branch before opening a pull request, choose the branch under **Actions > CI > Run workflow**. The pull-request `CI completed` gate requires the `engine-unit` job as well as the other required CI jobs, except that the macOS Rust jobs are skipped for changes that cannot affect them; see [skipped Rust jobs](#skipped-rust-jobs). All CI inputs are synthetic: no workflow downloads a model, and private validation artifacts never enter hosted runners.
 
 | Workflow | Coverage |
 | --- | --- |
 | CI | Repository policy, Rust formatting, locked dependency resolution, workflow syntax, native template evaluator build and tests, converter tests and lint, installer and app script tests, process lifecycle tests on Linux and macOS, Apple silicon builds, Clippy and tests of both inference workers in the default and `optimized` configurations, the CPU/grammar engine suite and compilation of Metal kernel tests on the pinned nightly compiler, and the vendored cxx panic-safety test with the engine's `grammar` feature. |
-| Build | Builds an unsigned development bundle on pushes to `codex/**` that touch source or build inputs, and on manual dispatch, verifies it, and uploads it as a seven-day artifact. Pushes to `main` do not build; see [macOS runner budget](#macos-runner-budget). |
+| Build | Builds and verifies an unsigned development bundle on pushes to `codex/**` that touch app, packaging or build configuration inputs, and on manual dispatch. The artifact is available for seven days. |
 | Security | cargo-deny advisories, soundness, licenses and sources across all Cargo features; OSV scans of the seven tracked lockfiles; dependency review on pull requests. |
 | CodeQL | Rust, C/C++, Python, JavaScript/TypeScript and GitHub Actions in build mode `none`. Metal kernels and Swift are not analyzed. |
 | Prebuilt release | Manual; builds an unsigned archive from an existing version tag and uploads a draft. See [releasing](RELEASING.md). |
 | Signed release | Manual from protected `main`; builds a combined CLI and app distribution from the dispatched `main` commit, verifies it before credentials are imported, signs and notarizes, verifies the installation and DMG, and in a separate publishing job creates the version tag and publishes the latest stable release. |
 
-The obsolete inherited `Tests` workflow was removed. The remaining inherited `Release`, `Run Benchmark` and `Run Stark Cargo Command` workflows are present but every job is `if: false`; the repository policy check requires them to stay disabled.
+The inherited `Tests`, `Release`, `Run Benchmark` and `Run Stark Cargo Command` workflows have been removed. The repository policy check blocks reintroducing the three release and cloud workflow files.
 
 ## Toolchains and runners
 
@@ -23,15 +23,15 @@ The obsolete inherited `Tests` workflow was removed. The remaining inherited `Re
 
 Hosted macOS jobs share five concurrent runners across the whole repository, and queued jobs start in order with no priority. A Signed release dispatched after a merge therefore waits behind every macOS job already queued. Two rules keep one runner free for it when no other branch is building:
 
-- Build does not run on pushes to `main`. The branch build covers the merged tree before the merge and the Signed release rebuilds and verifies the same commit. Dispatch Build on `main` under **Actions > Build > Run workflow** when a development bundle of `main` is needed.
+- Automatic development builds are limited to packaging-related changes on `codex/**`. Use **Actions > Build > Run workflow** when a development bundle is needed for other changes or from `main`. Signed release builds and verifies the release commit separately.
 - Build and Signed release reuse a locked release-distribution Rust cache keyed by the runner, toolchain, Metal compiler, locks and native build inputs. They can seed a missing cache from the compatible optimized or default scoring CI cache, then retain the complete release target on `main`; Cargo remains responsible for recompiling every changed input.
-- The CI `cxx` job starts after `lifecycle`, so a CI run holds at most four macOS runners at once. The dependency is scheduling only: `cxx` still runs when `lifecycle` fails.
+- A CI run holds at most four macOS runners at once across the scoring matrix, engine suite and macOS lifecycle job.
 
 Pull-request CI and branch builds from other branches still occupy runners. Dispatch a release before updating other open branches to avoid queueing behind them. When adding a macOS job, keep the peak for one CI run at four.
 
 ### Skipped Rust jobs
 
-The `scoring`, `cxx` and `engine-unit` jobs account for most macOS runner time. The `changes` job skips all three when every changed path is on a short list of paths those jobs never read (`scripts/ci/rust-jobs-needed.sh`):
+The `scoring` and `engine-unit` jobs account for most macOS runner time. The `changes` job skips them when every changed path is on a short list of paths those jobs never read (`scripts/ci/rust-jobs-needed.sh`):
 
 - `docs/`, `website/`, `apps/` and `provenance/`;
 - top-level Markdown, `LICENSE*` and `install.sh`;
@@ -42,7 +42,7 @@ Any other path runs the jobs, including a new top-level directory, workflow file
 
 A pull request is compared with the tip of `main` it would merge into. A push to `main` is compared with the last commit whose CI run on `main` succeeded, not with the previous push, so a Rust change whose run was cancelled by a later merge is still built by the run that replaced it. If no base can be found the jobs run.
 
-The `CI completed` gate accepts the three jobs as skipped only when `changes` succeeded and reported that they are not needed; otherwise each must succeed. Before a Rust job starts reading a file on the list, remove that path from the script. `scripts/ci/test_rust_jobs_needed.py` fails when a crate includes a file from outside `crates/` and `vendor/` that the list would skip.
+The `CI completed` gate accepts the Rust jobs as skipped only when `changes` succeeded and reported that they are not needed; otherwise each must succeed. Before a Rust job starts reading a file on the list, remove that path from the script. `scripts/ci/test_rust_jobs_needed.py` fails when a crate includes a file from outside `crates/` and `vendor/` that the list would skip.
 
 ## What CI does and does not cover
 
@@ -50,7 +50,7 @@ The `CI completed` gate accepts the three jobs as skipped only when `changes` su
 
 **Engine unit tests.** The `engine-unit` job compiles the default `cpu,metal` target with `nightly-2026-10-01`, then runs the suite under `crates/stark-engine/unit` with `--no-default-features --features cpu,grammar` (the suite needs `custom_test_frameworks`). The compile check preserves coverage of the default native target; the hosted test command avoids requiring a Metal context because macOS 26 hosted runners currently fail with `CannotCreateResidencySet`. On a physical Apple silicon Mac with working Metal residency, run the full native command from [Contributing](../CONTRIBUTING.md#engine-tests) to exercise the kernel comparisons between Metal and the CPU reference backend in `src/backends/cpu`. The ignored tests that read a converted model from `STARK_TEST_MODEL_PATH` do not run in CI; run them locally as described in [Contributing](../CONTRIBUTING.md#engine-tests). See the [failed hosted run](https://github.com/jshahbazi/stark/actions/runs/40227058178/job/121270551189) for the current runner limitation.
 
-**Grammar support.** The `cxx` job runs the vendored cxx panic-safety test with the `grammar` feature, which keeps the XGrammar bridge building although neither worker enables structured output.
+**Grammar support.** The engine suite runs the vendored CXX panic-safety tests with the `grammar` feature. To check the bridge with the pinned stable compiler after a bridge, dependency or toolchain change, use the focused `cxx_string` command in [Contributing](../CONTRIBUTING.md#engine-tests).
 
 **Not covered.** Model loading, numerical parity, GPU performance and converted-model compatibility need private, model-bound runs; see [validation](validation/SCORING_PARITY.md) and the [benchmarks index](benchmarks/README.md).
 
@@ -60,7 +60,7 @@ OSV Scanner downloads the public advisory databases and matches the seven tracke
 
 ## Rust build caches
 
-Rust jobs use `.github/actions/rust-cache`, a thin wrapper over the pinned `actions/cache`. Each job and configuration has its own cache of registry sources, Git dependencies and `target` output, keyed by runner image, compiler and Xcode identity, Cargo manifests and lockfiles, build scripts and native sources (`scripts/ci/rust-cache-key.sh`). Incremental compilation is off so no per-checkout incremental state is stored. Every build, Clippy and test step still runs after a restore; caches are saved only when the job succeeds. Pull requests can restore `main` caches, but caches saved on a merge ref do not populate `main`. A push to `main` that skips the Rust jobs saves no cache; none of the skippable paths is part of a cache key, so the existing `main` caches still match. Increment the `stark-rust-v1` namespace in the key script to force a fresh cache. The Build workflow does not use the cache and compiles from scratch each run.
+Rust jobs use `.github/actions/rust-cache`, a thin wrapper over the pinned `actions/cache`. Each job and configuration has its own cache of registry sources, Git dependencies and `target` output, keyed by runner image, compiler and Xcode identity, Cargo manifests and lockfiles, build scripts and native sources (`scripts/ci/rust-cache-key.sh`). Incremental compilation is off so no per-checkout incremental state is stored. Every build, Clippy and test step still runs after a restore; caches are saved only when the job succeeds. Pull requests can restore `main` caches, but caches saved on a merge ref do not populate `main`. A push to `main` that skips the Rust jobs saves no cache; none of the skippable paths is part of a cache key, so the existing `main` caches still match. Increment the `stark-rust-v1` namespace in the key script to force a fresh cache.
 
 ## Download a development build
 
@@ -82,7 +82,7 @@ release. See [app versioning](../apps/menu-bar/README.md#build-and-install).
 
 The prebuilt release job has `contents: write` only for its final upload step; build and verification receive no publishing token. It requires an existing version tag on a commit merged into `main`.
 
-The signed release workflow runs in the protected `macos-release` environment. Only its credential-import step receives the six Apple secrets; the signing step receives the public identity; a separate job with `contents: write` creates the immutable version tag, uploads the verified assets and publishes the latest stable release after installation, DMG and checksum verification. The helper creates a temporary Keychain, removes credential files and restores the previous Keychain search list unconditionally. Repository policy permits `secrets.*` references only in this workflow and the disabled inherited ones, and rejects other events, branches, missing cleanup and alias reuse.
+The signed release workflow runs in the protected `macos-release` environment. Only its credential-import step receives the six Apple secrets; the signing step receives the public identity; a separate job with `contents: write` creates the immutable version tag, uploads the verified assets and publishes the latest stable release after installation, DMG and checksum verification. The helper creates a temporary Keychain, removes credential files and restores the previous Keychain search list unconditionally. Repository policy permits `secrets.*` references only in this workflow and rejects other events, branches, missing cleanup and alias reuse.
 
 ## Local checks
 

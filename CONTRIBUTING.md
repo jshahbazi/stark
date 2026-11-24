@@ -90,6 +90,12 @@ cargo +nightly-2026-10-01 test --locked -p stark-engine --features cpu,metal --n
 cargo +nightly-2026-10-01 test --locked -p stark-engine --no-default-features --features cpu,grammar -- --test-threads=1
 ```
 
+To check the XGrammar bridge and CXX panic-safety tests with pinned stable Rust:
+
+```sh
+cargo +1.98.1 test --locked -p stark-engine --test cxx_string --no-default-features --features cpu,grammar -- --test-threads=1
+```
+
 Nothing in this run needs a model or the network. The ignored `test_metadata_loading` test and the model-loading benchmark read a converted model from `STARK_TEST_MODEL_PATH`; point it at a directory such as the one the smoke test below produces and add `--include-ignored` (or `--bench`, see `crates/stark-engine/unit/BENCHMARKS.md`). Kernel changes should be accompanied by a run of this suite and, where a kernel feeds the scorer, by the [scoring parity](docs/validation/SCORING_PARITY.md) replay.
 
 ## Run a model-bound smoke test

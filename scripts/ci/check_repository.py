@@ -19,10 +19,10 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 PRIVATE_ROOTS = {"target", "models", "runtime", "test-artifacts", "artifacts", ".venv"}
 WEIGHT_SUFFIXES = (".safetensors", ".gguf", ".ggml")
-INHERITED_DISABLED = {
-    "release.yml",
-    "run-benchmark.yml",
-    "run-stark-cargo-command.yml",
+RETIRED_WORKFLOWS = {
+    "release",
+    "run-benchmark",
+    "run-stark-cargo-command",
 }
 APPROVED_RUNNERS = {"ubuntu-24.04", "macos-26"}
 # Every tracked supported lockfile must have an explicit OSV scan input in
@@ -120,13 +120,6 @@ def active_jobs(document: object) -> list[tuple[str, object]]:
     if not isinstance(jobs, dict):
         return []
     return [(str(name), job) for name, job in jobs.items()]
-
-
-def job_is_disabled(job: object) -> bool:
-    if not isinstance(job, dict):
-        return False
-    condition = job.get("if")
-    return condition is False or str(condition).strip().lower() == "false"
 
 
 def iter_uses(value: object, seen: set[int] | None = None):
@@ -308,11 +301,14 @@ def check_signing_workflow(document: object, triggers: object) -> list[str]:
 def check_workflows(paths: list[Path]) -> list[str]:
     errors: list[str] = []
     for path in paths:
-        text = path.read_text(encoding="utf-8")
         try:
             relative = path.relative_to(ROOT).as_posix()
         except ValueError:
             relative = path.as_posix()
+        if path.parent.name == "workflows" and path.stem in RETIRED_WORKFLOWS:
+            errors.append(f"retired inherited workflow is forbidden: {relative}")
+            continue
+        text = path.read_text(encoding="utf-8")
         try:
             document = yaml.load(text, Loader=UniqueKeyLoader)
         except (yaml.YAMLError, RecursionError, MemoryError, TypeError, ValueError) as exc:
@@ -327,36 +323,23 @@ def check_workflows(paths: list[Path]) -> list[str]:
             if "@" not in reference or not SHA.fullmatch(reference.rsplit("@", 1)[1]):
                 errors.append(f"unpinned action reference in {relative}")
 
-        if path.parent.name == "workflows" and path.name in INHERITED_DISABLED:
-            jobs = active_jobs(document)
-            if not jobs:
-                errors.append(f"inherited workflow has no jobs section: {relative}")
-            else:
-                for job, definition in jobs:
-                    if not job_is_disabled(definition):
-                        errors.append(f"inherited workflow job is not disabled: {relative}:{job}")
-
-        # Disabled inherited jobs retain historical references. The dedicated
-        # protected manual signing job is the sole active Apple-secret consumer.
-        disabled = path.parent.name == "workflows" and path.name in INHERITED_DISABLED
-        if not disabled:
-            if isinstance(document, dict) and True in document:
-                triggers = document[True]
-            elif isinstance(document, dict):
-                triggers = document.get("on")
-            else:
-                triggers = None
-            if has_trigger(triggers, "pull_request_target"):
-                errors.append(f"pull_request_target is forbidden in active workflow: {relative}")
-            if relative == ".github/workflows/signed-release.yml":
-                errors.extend(f"{error}: {relative}" for error in check_signing_workflow(document, triggers))
-            elif has_secret_reference(text):
-                errors.append(f"secrets reference is forbidden in active workflow: {relative}")
-            if has_secrets_mapping(document):
-                errors.append(f"secrets mapping is forbidden in active workflow: {relative}")
-            for job, definition in active_jobs(document):
-                if not approved_runner(definition):
-                    errors.append(f"unsupported runner configuration in active workflow: {relative}:{job}")
+        if isinstance(document, dict) and True in document:
+            triggers = document[True]
+        elif isinstance(document, dict):
+            triggers = document.get("on")
+        else:
+            triggers = None
+        if has_trigger(triggers, "pull_request_target"):
+            errors.append(f"pull_request_target is forbidden in active workflow: {relative}")
+        if relative == ".github/workflows/signed-release.yml":
+            errors.extend(f"{error}: {relative}" for error in check_signing_workflow(document, triggers))
+        elif has_secret_reference(text):
+            errors.append(f"secrets reference is forbidden in active workflow: {relative}")
+        if has_secrets_mapping(document):
+            errors.append(f"secrets mapping is forbidden in active workflow: {relative}")
+        for job, definition in active_jobs(document):
+            if not approved_runner(definition):
+                errors.append(f"unsupported runner configuration in active workflow: {relative}:{job}")
     return errors
 
 
