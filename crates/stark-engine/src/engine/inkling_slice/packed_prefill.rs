@@ -851,6 +851,21 @@ impl PackedPrefill {
         })
     }
 
+    /// Copy the draft feature rows produced by the last completed packed
+    /// command. Call only after its command buffer has completed.
+    pub(super) fn packed_draft_features(
+        &self,
+        rows: usize,
+    ) -> Option<Vec<u16>> {
+        let taps = self.draft_taps.as_ref()?;
+        if rows > self.rows {
+            return None;
+        }
+        let words = rows * 4 * WIDTH;
+        let source = unsafe { std::slice::from_raw_parts(taps.contents().as_ptr().cast::<u16>(), words) };
+        Some(source.to_vec())
+    }
+
     pub(super) fn encode(
         &self,
         session: &Session,

@@ -81,6 +81,8 @@ The stage order has been stable since the first profile on 2026-10-28 (MoE 31 pe
 
 One sampled two-draft round on the base build: 29.39 ms, of which draft 2.91, verify 25.39, finish 0.88 and other host work 0.20, for 2.28 tokens.
 
+At a verifier width limit, measure both the full-block cost and the probability of reaching a second transaction. On four original Inkling traces, DFlash 2 emitted 3.51 tokens per seven-proposal round and DSpark emitted 2.67. On the 4K trace, Stark took 25.4 ms to verify four rows and 51.1 ms to verify eight rows in two transactions. On actual DFlash 2 proposals, depth seven took 279 target calls versus 271 at depth three. Seven saved 52 draft rounds and reached verifier-plus-commit break-even if each saved draft round was worth 3.77 ms on this cohort. [Matched traces and verifier measurements](model-experiments/2026-11-24-inkling-mini-dflash2-traces.md)
+
 ### Estimate the ceiling before building
 
 If a stage is a fraction f of the time and a change makes it s times faster, the whole gets `1 / (1 - f + f / s)` times faster. Removing a 5 percent stage entirely cannot give 10 percent. Halving a stage gives 10 percent more throughput only if the stage is about 18 percent of the time.

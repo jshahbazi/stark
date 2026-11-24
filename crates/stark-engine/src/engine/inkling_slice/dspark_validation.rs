@@ -1,12 +1,311 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Aggregate-only DSpark source-ingress and target-verification control.
 
-use std::time::Instant;
+use std::{
+    fs::{self, OpenOptions},
+    io::{BufWriter, Write},
+    os::unix::fs::OpenOptionsExt,
+    path::Path,
+    time::Instant,
+};
 
 use half::bf16;
 use serde_json::{Value, json};
 
 use super::*;
+
+/// Capture a private, native teacher trajectory and the exact four target
+/// features consumed by Inkling's DSpark/DFlash target adapter. Input carries
+/// the rendered prompt, EOS ID, and optionally a historical continuation.
+/// The report exposes aggregate counts and digests.
+pub fn capture_dspark_trace(
+    checkpoint: &Path,
+    draft: &Path,
+    input: &Path,
+    output: &Path,
+) -> Result<Value> {
+    const TEACHER_CAP: usize = 192;
+    let source = Tensors::open(input)?;
+    let prompt_len = source.values::<u32>("prompt_len", "U32", &[1])?[0] as usize;
+    if !(PackedPrefill::MIN_ROWS + 4..=4096).contains(&prompt_len) || prompt_len + TEACHER_CAP > 4352 {
+        return Err("Inkling DFlash trace prompt must be 20 to 4,096 tokens for the 4,352-token diagnostic context");
+    }
+    let prompt = source.values::<u32>("tokens", "U32", &[prompt_len])?;
+    let eos = source.values::<u32>("eos_token_id", "U32", &[1])?[0];
+    let reference_teacher = source
+        .contains("reference_teacher")
+        .then(|| source.values::<u32>("reference_teacher", "U32", &[TEACHER_CAP]))
+        .transpose()?;
+    if prompt.iter().any(|&token| token as usize >= VOCABULARY) || eos as usize >= VOCABULARY {
+        return Err("Inkling DFlash trace token is outside the vocabulary");
+    }
+    if reference_teacher.as_ref().is_some_and(|tokens| tokens.iter().any(|&token| token as usize >= VOCABULARY)) {
+        return Err("Inkling historical teacher token is outside the vocabulary");
+    }
+
+    let mut session = Session::load(checkpoint, 4352)?;
+    session.load_dspark(draft)?;
+    session.set_dspark_enabled(true)?;
+    session.capture_draft_features(true);
+    session.set_batched_prefill_width(true, true, 8192)?;
+    if !session.supports_source_text_prefill(4352) {
+        return Err("Inkling DFlash trace requires the production M5 source-prefill path");
+    }
+    session.set_source_verifier(true)?;
+    let draft_int8_head_prepared = session.prepare_dspark_int8_head().is_ok();
+    let block = crate::engine::inkling_slice::dspark::DraftBlock::new(&mut session.runtime)?;
+    let mut tokens = Vec::with_capacity(prompt_len + TEACHER_CAP);
+    let mut features = Vec::<u16>::with_capacity((prompt_len + TEACHER_CAP) * 4 * WIDTH);
+    let mut scores: Vec<f32>;
+    let mut proposals = Vec::<Vec<u32>>::with_capacity(TEACHER_CAP);
+
+    // Use the worker's source bulk split at its 2,048-row snapshot grid and
+    // four-token suffix, including the short rendered prompts.
+    let prefill_end = prompt_len.saturating_sub(4);
+    let split = prefill_end / Session::SOURCE_PREFILL_ROWS * Session::SOURCE_PREFILL_ROWS;
+    let ranges = [0..split, split..prefill_end];
+    let chunk_rows = session.prefill_batch_rows();
+    for range in ranges {
+        for chunk in prompt[range].chunks(chunk_rows) {
+            session.ingest_many(chunk)?;
+            let captured = capture_appended_features(&session, chunk.len())?;
+            features.extend(captured);
+            tokens.extend_from_slice(chunk);
+        }
+    }
+    for &token in &prompt[prefill_end..prompt_len - 1] {
+        let _ = session.step(token)?;
+        features.extend(session.draft_features().ok_or("Inkling DFlash trace feature capture failed")?);
+        tokens.push(token);
+    }
+    let last = prompt[prompt_len - 1];
+    scores = session.step(last)?;
+    features.extend(session.draft_features().ok_or("Inkling DFlash trace feature capture failed")?);
+    tokens.push(last);
+
+    let mut eos_reached = false;
+    let mut reference_top1_matches = 0usize;
+    let mut reference_top1_tested = 0usize;
+    let mut width2_tested = 0usize;
+    let mut width2_matches = 0usize;
+    let mut width3_tested = 0usize;
+    let mut width3_matches = 0usize;
+    let share_kv_width2 = session.runtime.source_text_active && session.runtime.verify_fast_three;
+    for index in 0..TEACHER_CAP {
+        let native_top1 = greedy(&scores);
+        let anchor = reference_teacher.as_ref().map_or(native_top1, |teacher| teacher[index]);
+        if reference_teacher.is_some() {
+            reference_top1_tested += 1;
+            reference_top1_matches += usize::from(native_top1 == anchor);
+        }
+        if anchor == eos {
+            // Keep the EOS row and its target features in the fixture, then stop.
+            proposals.push(vec![0; 7]);
+            let _ = session.step(anchor)?;
+            features.extend(session.draft_features().ok_or("Inkling DFlash trace feature capture failed")?);
+            tokens.push(anchor);
+            eos_reached = true;
+            break;
+        }
+        let draft_state = session.active_dspark().ok_or("Inkling DSpark state unavailable")?;
+        let max_row = draft_state.propose_many(
+            &session.runtime,
+            anchor,
+            session.position,
+            &session.embedding,
+            &session.embed_norm,
+            &session.unembedding,
+            7,
+            &block,
+        )?;
+        if [0, 31, 95, 159].contains(&index) {
+            let depth3 = draft_state.propose_many(
+                &session.runtime,
+                anchor,
+                session.position,
+                &session.embedding,
+                &session.embed_norm,
+                &session.unembedding,
+                3,
+                &block,
+            )?;
+            width3_tested += 1;
+            width3_matches += usize::from(depth3.as_slice() == &max_row[..3]);
+            let depth2 = draft_state.propose_many(
+                &session.runtime,
+                anchor,
+                session.position,
+                &session.embedding,
+                &session.embed_norm,
+                &session.unembedding,
+                2,
+                &block,
+            )?;
+            width2_tested += 1;
+            width2_matches += usize::from(depth2.as_slice() == &max_row[..2]);
+        }
+        proposals.push(max_row);
+        scores = session.step(anchor)?;
+        features.extend(session.draft_features().ok_or("Inkling DFlash trace feature capture failed")?);
+        tokens.push(anchor);
+    }
+
+    let mut tried = [0usize; 7];
+    let mut accepted = [0usize; 7];
+    let teacher_len = tokens.len() - prompt_len;
+    for (anchor_index, proposed) in proposals.iter().take(teacher_len).enumerate() {
+        for offset in 0..7 {
+            let Some(&target) = tokens.get(prompt_len + anchor_index + 1 + offset) else {
+                break;
+            };
+            tried[offset] += 1;
+            if proposed[offset] != target {
+                break;
+            }
+            accepted[offset] += 1;
+        }
+    }
+
+    let rounds = dspark_depth_rounds(&tokens[prompt_len..], &proposals);
+    let proposal_tensor = proposals.iter().take(teacher_len).flat_map(|row| row.iter().copied()).collect::<Vec<_>>();
+    let feature_hash = super::target_validation::native_digest(&features);
+    let token_hash = super::target_validation::native_digest(&tokens);
+    let reference_hash = reference_teacher.as_ref().map(|teacher| super::target_validation::native_digest(teacher));
+    write_trace_safetensors(output, prompt_len, teacher_len, eos_reached, &tokens, &proposal_tensor, &features)?;
+    Ok(json!({
+        "prompt_tokens": prompt_len,
+        "teacher_tokens": teacher_len,
+        "prompt_target_path": "source_worker_schedule",
+        "teacher_stop": if eos_reached { "eos" } else { "fixed_cap" },
+        "teacher_source": if reference_teacher.is_some() { "historical_worker" } else { "native_greedy" },
+        "historical_teacher_sha256": reference_hash,
+        "native_top1_matches": reference_top1_matches,
+        "native_top1_tested": reference_top1_tested,
+        "proposal_anchors": proposals.len(),
+        "proposal_depths": [1, 2, 3, 4, 5, 6, 7],
+        "conditional_exposures": tried,
+        "accepted_by_position": accepted,
+        "rounds_for_depths": rounds,
+        "width_prefix_controls": {
+            "depth2": {"tested": width2_tested, "matched": width2_matches, "share_kv": share_kv_width2},
+            "depth3": {"tested": width3_tested, "matched": width3_matches},
+        },
+        "draft_int8_head_prepared": draft_int8_head_prepared,
+        "teacher_tokens_sha256": token_hash,
+        "feature_tensor_sha256": feature_hash,
+        "fixture": output.file_name().and_then(|name| name.to_str()).unwrap_or("private"),
+    }))
+}
+
+fn write_trace_safetensors(
+    output: &Path,
+    prompt_len: usize,
+    teacher_len: usize,
+    eos_reached: bool,
+    tokens: &[u32],
+    proposals: &[u32],
+    features: &[u16],
+) -> Result<()> {
+    let sequence_len = tokens.len();
+    if features.len() != sequence_len * 4 * WIDTH {
+        return Err("Inkling DFlash trace feature geometry is invalid");
+    }
+    if proposals.len() != teacher_len * 7 {
+        return Err("Inkling DFlash proposal geometry is invalid");
+    }
+    let Some(parent) = output.parent() else {
+        return Err("Inkling DFlash trace output directory is invalid");
+    };
+    fs::create_dir_all(parent).map_err(|_| "cannot create private DFlash trace directory")?;
+
+    let token_bytes = std::mem::size_of_val(tokens);
+    let proposal_bytes = std::mem::size_of_val(proposals);
+    let feature_bytes = std::mem::size_of_val(features);
+    let scalar_bytes = 4;
+    let metadata_bytes = 3 * scalar_bytes;
+    let header_value = json!({
+        "tokens": {"dtype":"U32", "shape":[sequence_len], "data_offsets":[0,token_bytes]},
+        "prompt_len": {"dtype":"U32", "shape":[1], "data_offsets":[token_bytes,token_bytes+scalar_bytes]},
+        "teacher_len": {"dtype":"U32", "shape":[1], "data_offsets":[token_bytes+scalar_bytes,token_bytes+2*scalar_bytes]},
+        "eos_reached": {"dtype":"U32", "shape":[1], "data_offsets":[token_bytes+2*scalar_bytes,token_bytes+3*scalar_bytes]},
+        "proposals": {"dtype":"U32", "shape":[teacher_len,7], "data_offsets":[token_bytes+metadata_bytes,token_bytes+metadata_bytes+proposal_bytes]},
+        "features": {"dtype":"BF16", "shape":[sequence_len,4,WIDTH], "data_offsets":[token_bytes+metadata_bytes+proposal_bytes,token_bytes+metadata_bytes+proposal_bytes+feature_bytes]}
+    });
+    let mut header = serde_json::to_vec(&header_value).map_err(|_| "cannot encode DFlash trace header")?;
+    while !header.len().is_multiple_of(8) {
+        header.push(b' ');
+    }
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(output)
+        .map_err(|_| "cannot create private DFlash trace fixture")?;
+    let mut writer = BufWriter::new(file);
+    writer.write_all(&(header.len() as u64).to_le_bytes()).map_err(|_| "cannot write DFlash trace header")?;
+    writer.write_all(&header).map_err(|_| "cannot write DFlash trace header")?;
+    writer.write_all(bytemuck::cast_slice(tokens)).map_err(|_| "cannot write DFlash trace tokens")?;
+    writer.write_all(&(prompt_len as u32).to_le_bytes()).map_err(|_| "cannot write DFlash trace metadata")?;
+    writer.write_all(&(teacher_len as u32).to_le_bytes()).map_err(|_| "cannot write DFlash trace metadata")?;
+    writer.write_all(&(eos_reached as u32).to_le_bytes()).map_err(|_| "cannot write DFlash trace metadata")?;
+    writer.write_all(bytemuck::cast_slice(proposals)).map_err(|_| "cannot write DFlash trace proposals")?;
+    writer.write_all(bytemuck::cast_slice(features)).map_err(|_| "cannot write DFlash trace features")?;
+    writer.flush().map_err(|_| "cannot finish DFlash trace fixture")?;
+    writer.get_ref().sync_all().map_err(|_| "cannot sync DFlash trace fixture")?;
+    Ok(())
+}
+
+fn capture_appended_features(
+    session: &Session,
+    rows: usize,
+) -> Result<Vec<u16>> {
+    if !session.runtime.source_text_active || rows < PackedPrefill::MIN_ROWS {
+        return Err("Inkling DFlash trace requires a packed source capture chunk");
+    }
+    session
+        .packed_prefill
+        .as_ref()
+        .and_then(|packed| packed.packed_draft_features(rows))
+        .ok_or("Inkling packed DFlash trace features unavailable")
+}
+
+fn dspark_depth_rounds(
+    teacher: &[u32],
+    proposals: &[Vec<u32>],
+) -> Value {
+    let mut by_depth = Vec::with_capacity(7);
+    for depth in 1..=7 {
+        let mut index = 0usize;
+        let mut round_count = 0usize;
+        let mut accepted_count = 0usize;
+        let mut emitted_count = 0usize;
+        while index < teacher.len() {
+            let Some(row) = proposals.get(index) else {
+                break;
+            };
+            let available = (teacher.len() - index - 1).min(depth);
+            let mut accepted = 0usize;
+            while accepted < available && row[accepted] == teacher[index + accepted + 1] {
+                accepted += 1;
+            }
+            // The current anchor is part of the emitted sequence. This also
+            // accounts for the terminal singleton when no proposal is active.
+            let emitted = 1 + accepted;
+            round_count += 1;
+            accepted_count += accepted;
+            emitted_count += emitted;
+            index += emitted;
+        }
+        by_depth.push(json!({
+            "depth": depth,
+            "rounds": round_count,
+            "accepted_proposals": accepted_count,
+            "emitted_tokens": emitted_count,
+            "teacher_tokens_accounted": emitted_count == teacher.len(),
+        }));
+    }
+    Value::Array(by_depth)
+}
 
 fn greedy(logits: &[f32]) -> u32 {
     let mut best = 0;

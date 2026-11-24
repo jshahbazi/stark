@@ -220,6 +220,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 ### References, native milestones and follow-up
 
 - [Original-checkpoint implementation plan](../INKLING_2_MINI_PLAN.md)
+- [DFlash 2 and native DSpark on four identical greedy traces](2026-11-24-inkling-mini-dflash2-traces.md) · Proposal acceptance and native verifier cost, 2026-11-24
 - [Native Metal retrospective](../archive/runs/2026-11-21-inkling-mini-native-retrospective.md) · Archived run, 2026-11-21
 - [Prefill and decode performance follow-up](../INKLING_2_MINI_PERFORMANCE_FOLLOWUP.md) · Proposals, 2026-11-21
 - [Prefill, decode, DSpark and prefix reuse speed history](speed-inkling.md)

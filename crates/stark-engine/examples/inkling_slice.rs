@@ -7,6 +7,21 @@ fn main() {
 
     fn run() -> Result<i32, &'static str> {
         let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+        if args.first().is_some_and(|arg| arg == "--capture-dspark-trace") {
+            if args.len() != 5 {
+                return Err(
+                    "expected --capture-dspark-trace, original SafeTensors, DSpark SafeTensors, prompt SafeTensors and private output SafeTensors",
+                );
+            }
+            let report = stark_engine::engine::inkling_slice::capture_dspark_trace(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
         // Diagnostic only: run the parity and transaction checks on the
         // bit-exact reference prefill kernels instead of the default path.
         let exact_prefill = match args.iter().position(|arg| arg == "--exact-prefill") {
@@ -17,6 +32,36 @@ fn main() {
             None => false,
         };
         use stark_engine::engine::inkling_slice::PrefillTraceMode;
+        if args.first().is_some_and(|arg| arg == "--measure-trace-verify-widths") {
+            if args.len() != 4 {
+                return Err(
+                    "expected --measure-trace-verify-widths, target SafeTensors, draft SafeTensors and private teacher trace",
+                );
+            }
+            let report = stark_engine::engine::inkling_slice::measure_trace_verify_widths(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
+        if args.first().is_some_and(|arg| arg == "--measure-trace-candidate-rounds") {
+            if !(5..=6).contains(&args.len()) || (args.len() == 6 && args[5] != "--seven-first") {
+                return Err(
+                    "expected --measure-trace-candidate-rounds, target SafeTensors, MTP SafeTensors, teacher trace, candidate proposals and optional --seven-first",
+                );
+            }
+            let report = stark_engine::engine::inkling_slice::measure_candidate_rounds(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                args.len() == 6,
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
         if args.first().is_some_and(|arg| arg == "--profile-stock-4k" || arg == "--probe-stock-nvfp4") {
             if args.len() < 4 {
                 return Err(

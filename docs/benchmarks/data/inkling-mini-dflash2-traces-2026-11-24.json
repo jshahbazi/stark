@@ -1,0 +1,838 @@
+{
+  "attempt": "20261124-INKDRAFT-01",
+  "source_base": "b92055b983b3c5d6887abf63422d04849544af27",
+  "weights_sha256": {
+    "model-00001-of-00001.safetensors": "65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1",
+    "mtp.safetensors": "7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2",
+    "tokenizer.json": "7f332727f9a3f093dd452a39cc978e6757627e5dad1b0673aa4e75174f236dd6",
+    "draft.safetensors": "217980ab00d116693fa5946df7bbfd967caf5fac1f529afd541fbd470ddb54ee"
+  },
+  "executables_sha256": {
+    "capture": "cef574e4b0b112e37df638a7790dfa011cf2e2ed279f9c7d8cb5712bdd16f090",
+    "width2": "4f4791e33e7aa76534c7ff9d143f4280ea871f11fbb129c07b1c4660a71c2972",
+    "actual": "0c936cdc1c45ae089c2b4f6046605b68dd4d3913d9a888e400ea1781c9ff6ca2",
+    "reverse": "2c22cf7abf521a72919a8df0742cbcec89bffee2212afdff87b36568469c8af0"
+  },
+  "cases": {
+    "coding": {
+      "prompt_tokens": 71,
+      "output_tokens": 192,
+      "teacher_output_sha256": "c25783f646c0ec8e790e44134e081fbd12961c8adff366991d31831b3027a6dd",
+      "fixture_sha256": "4b979f08aecf3c971f81a8495b78ab71698609dc41660f0b8ab739d7e8e57b67",
+      "dflash_candidate_fixture_sha256": "0c8b694d4e849b087ad076a18389ee680af70c99d12a0f426a026b887738c112",
+      "dspark_rounds_1_to_7": [
+        112,
+        89,
+        80,
+        74,
+        72,
+        70,
+        70
+      ],
+      "dflash_rounds_1_to_7": [
+        107,
+        79,
+        67,
+        60,
+        59,
+        57,
+        56
+      ],
+      "full_block_verify_median_ms_by_target_rows_1_to_8": [
+        17.7852,
+        19.238,
+        21.72,
+        23.7815,
+        41.3937,
+        43.4321,
+        45.5696,
+        47.4414
+      ],
+      "py_torch_whole_blocks_matching_of_four": 4,
+      "timed_walks": {
+        "dspark_3": {
+          "tokens": 192,
+          "rounds": 80,
+          "physical_target_calls": 80,
+          "verify_ms_by_block": [
+            1891.02,
+            1952.2761,
+            2113.3979,
+            1904.0698,
+            1879.443,
+            1889.6384
+          ],
+          "commit_ms_by_block": [
+            46.0917,
+            51.9723,
+            47.8525,
+            45.8487,
+            49.0904,
+            50.5436
+          ],
+          "median_verify_ms_per_round": 23.7193,
+          "median_verify_ms_per_token": 9.883,
+          "median_verify_and_commit_ms_per_token": 10.1305
+        },
+        "dspark_7": {
+          "tokens": 192,
+          "rounds": 70,
+          "physical_target_calls": 80,
+          "verify_ms_by_block": [
+            1920.0771,
+            1917.9246,
+            2173.512,
+            1905.384,
+            1891.8544,
+            1883.9332
+          ],
+          "commit_ms_by_block": [
+            46.3232,
+            52.1257,
+            49.746,
+            44.2983,
+            47.7732,
+            52.0401
+          ],
+          "median_verify_ms_per_round": 27.3093,
+          "median_verify_ms_per_token": 9.9565,
+          "median_verify_and_commit_ms_per_token": 10.1981
+        },
+        "dflash_3": {
+          "tokens": 192,
+          "rounds": 67,
+          "physical_target_calls": 67,
+          "verify_ms_by_block": [
+            1589.7092,
+            1604.1097,
+            1808.0133,
+            1574.5692,
+            1579.4211,
+            1741.415
+          ],
+          "commit_ms_by_block": [
+            46.8254,
+            45.9548,
+            46.2135,
+            40.8838,
+            46.7041,
+            49.9882
+          ],
+          "median_verify_ms_per_round": 23.8345,
+          "median_verify_ms_per_token": 8.3172,
+          "median_verify_and_commit_ms_per_token": 8.5589
+        },
+        "dflash_7": {
+          "tokens": 192,
+          "rounds": 56,
+          "physical_target_calls": 69,
+          "verify_ms_by_block": [
+            1634.1499,
+            1669.0502,
+            1966.7377,
+            1622.329,
+            1630.8169,
+            1769.1764
+          ],
+          "commit_ms_by_block": [
+            49.6857,
+            46.5832,
+            53.8704,
+            44.1677,
+            47.1417,
+            55.1875
+          ],
+          "median_verify_ms_per_round": 29.4929,
+          "median_verify_ms_per_token": 8.6021,
+          "median_verify_and_commit_ms_per_token": 8.8528
+        }
+      },
+      "native_walk_receipts_sha256": {
+        "actual0-dspark": "e96086a41f1e31eb6a8bddf9a1a4c942aba6cf3723abc313809eff9ecedb7141",
+        "actual1-dspark": "53416baed2e38a619ed4e190c07533ef686b1d2c1f444f8c44c6fac8cb78a5c0",
+        "actual2-dspark": "d106aade359495f717680737d7d18922ff1e2153467a1e7583df4a73cde8e1d5",
+        "actual3-dspark": "496d33df7fa070f47b9fdedae4357ca7208e76693ad95cdae30d51f165b23e43",
+        "actual4-dspark": "1b9c2efef21bab0e4a03fc9eb2f45812c361ab4a9eb676eb0b273d1027d17bf3",
+        "actual5-dspark": "b0510e7ed32b049a70e010196dcf94b654a6147bd755a1c1c6e8595095025fe1",
+        "actual0-dflash": "bef4468c7e4a226ad9c6b9da64d624d6133dee90e70824bee499f7eb9ccbe91a",
+        "actual1-dflash": "ee378984aca73d1aa6e7149f3d92f2173fcbb607e9539dde4cd1f5437891873d",
+        "actual2-dflash": "cf0cbcbff3db2912f7a571a6de67776efefd7f566eaec49b083bfcef5c842c8e",
+        "actual3-dflash": "976bd0f00bd65e1e96a4da36b3195a787b08cd21d56929b20e362a3d5110d88e",
+        "actual4-dflash": "bea5e0287f84c1a933edde009e950dab92d7c21dfe0754672d5081e02541472a",
+        "actual5-dflash": "1a60082a683febd83c161138a025175f0b2728df76b7982c64e33f538a41a371"
+      },
+      "native_dspark_width_prefix_controls": {
+        "depth2": {
+          "tested": 4,
+          "matched": 4,
+          "share_kv": true
+        },
+        "depth3": {
+          "tested": 4,
+          "matched": 4
+        }
+      },
+      "prompt_ids_le_u32_sha256": "58d1a5bfacee4a6e34a871690362677dd011d0b1ede87f884d8c852324d49ccf",
+      "peak_thermal_by_process": {
+        "actual0-dspark": 0,
+        "actual1-dspark": 0,
+        "actual2-dspark": 1,
+        "actual3-dspark": 0,
+        "actual4-dspark": 0,
+        "actual5-dspark": 1,
+        "actual0-dflash": 0,
+        "actual1-dflash": 0,
+        "actual2-dflash": 1,
+        "actual3-dflash": 1,
+        "actual4-dflash": 1,
+        "actual5-dflash": 1
+      }
+    },
+    "sustained": {
+      "prompt_tokens": 72,
+      "output_tokens": 192,
+      "teacher_output_sha256": "cfd730b39adaeac1f2999fef7aef023a741953475fda8927ef50733b9d538271",
+      "fixture_sha256": "ebbfb913e32bb6040432a313986bea8316360b8a7c8208e2e36991d2ceb0d066",
+      "dflash_candidate_fixture_sha256": "b0b95a5eb8ee7396ea733a7252d4b63faacd2be9fd0a04dce4b70dd5e0d91a46",
+      "dspark_rounds_1_to_7": [
+        111,
+        91,
+        82,
+        78,
+        76,
+        74,
+        74
+      ],
+      "dflash_rounds_1_to_7": [
+        107,
+        84,
+        71,
+        64,
+        61,
+        60,
+        59
+      ],
+      "full_block_verify_median_ms_by_target_rows_1_to_8": [
+        17.6708,
+        19.3077,
+        21.5603,
+        23.8428,
+        41.3928,
+        43.4223,
+        45.7234,
+        47.4375
+      ],
+      "py_torch_whole_blocks_matching_of_four": 4,
+      "timed_walks": {
+        "dspark_3": {
+          "tokens": 192,
+          "rounds": 82,
+          "physical_target_calls": 82,
+          "verify_ms_by_block": [
+            1931.0577,
+            1947.8235,
+            2205.7557,
+            1948.3712,
+            1957.868,
+            2141.5693
+          ],
+          "commit_ms_by_block": [
+            46.7881,
+            46.9351,
+            52.232,
+            48.9528,
+            49.1551,
+            49.6889
+          ],
+          "median_verify_ms_per_round": 23.8185,
+          "median_verify_ms_per_token": 10.1725,
+          "median_verify_and_commit_ms_per_token": 10.428
+        },
+        "dspark_7": {
+          "tokens": 192,
+          "rounds": 74,
+          "physical_target_calls": 83,
+          "verify_ms_by_block": [
+            1996.0148,
+            1947.0344,
+            2362.6315,
+            1994.2038,
+            1965.3079,
+            2142.0327
+          ],
+          "commit_ms_by_block": [
+            47.6617,
+            43.517,
+            53.8914,
+            49.7471,
+            44.033,
+            51.7833
+          ],
+          "median_verify_ms_per_round": 26.9609,
+          "median_verify_ms_per_token": 10.3912,
+          "median_verify_and_commit_ms_per_token": 10.6449
+        },
+        "dflash_3": {
+          "tokens": 192,
+          "rounds": 71,
+          "physical_target_calls": 71,
+          "verify_ms_by_block": [
+            1665.3348,
+            1773.4298,
+            1828.51,
+            1673.8959,
+            1660.23,
+            1715.7813
+          ],
+          "commit_ms_by_block": [
+            48.1643,
+            51.4432,
+            51.2139,
+            51.3215,
+            51.438,
+            45.3495
+          ],
+          "median_verify_ms_per_round": 23.871,
+          "median_verify_ms_per_token": 8.8273,
+          "median_verify_and_commit_ms_per_token": 9.079
+        },
+        "dflash_7": {
+          "tokens": 192,
+          "rounds": 59,
+          "physical_target_calls": 72,
+          "verify_ms_by_block": [
+            1693.5249,
+            1949.7201,
+            2027.0785,
+            1687.0144,
+            1700.7079,
+            1697.8577
+          ],
+          "commit_ms_by_block": [
+            51.681,
+            44.7565,
+            55.1251,
+            46.4264,
+            37.743,
+            50.3894
+          ],
+          "median_verify_ms_per_round": 28.8014,
+          "median_verify_ms_per_token": 8.8504,
+          "median_verify_and_commit_ms_per_token": 9.0975
+        }
+      },
+      "native_walk_receipts_sha256": {
+        "actual0-dspark": "1f701fad3a78feca16a6d3aa7d88dd4091b2c12398bb24d2d03ac4cdb90836d1",
+        "actual1-dspark": "74469c852686872884b39f93b890ed21dccdab496297febe3ebc3e6443baa889",
+        "actual2-dspark": "93155550adf636ebf4c832eaf8e717fdf905e3baffedb09fddcf384f88fe1b38",
+        "actual3-dspark": "251f3950a8ddff26aa95d8db69541eddb9e5dcfb32d63661fe50a8b6edc74cf8",
+        "actual4-dspark": "8e913dfc61a96332b2060e2a49fecba73dbaa09681b48ddda5f3e5609f8c2792",
+        "actual5-dspark": "3a76b2235beaece4904f4369464e4d8d297bd7659c9e4f34175bc756b2be232e",
+        "actual0-dflash": "2bdfc29d99caaa4b5a5edfe9e4679a12cda392f65a26b893ce1d0504b94c46c8",
+        "actual1-dflash": "1397da42eb43f680463bbca131e70c3a55271b6c3d7502cc4b92516c1565cd4e",
+        "actual2-dflash": "6370718f3e1920342ad66b720a98b71ea0f59b0ff94f4f356abc2867c50ee2a6",
+        "actual3-dflash": "c188b709be46a969e93fe2548da1b5cb04adfb3eb5b0af2eb004fb459c99cee2",
+        "actual4-dflash": "37ae9ed1972f5ae627e7dbaa20f1476c39739aec27bcc5e8c9aaf4c989566727",
+        "actual5-dflash": "6d8aaff6cfb7dc61724c0622293280a78c1388b9675257bc1f15c1b7ba6b77ab"
+      },
+      "native_dspark_width_prefix_controls": {
+        "depth2": {
+          "tested": 4,
+          "matched": 4,
+          "share_kv": true
+        },
+        "depth3": {
+          "tested": 4,
+          "matched": 4
+        }
+      },
+      "prompt_ids_le_u32_sha256": "dece38fd11b280a45021dba02c15cda869e27efde45229952f8dbf780a2b9600",
+      "peak_thermal_by_process": {
+        "actual0-dspark": 0,
+        "actual1-dspark": 0,
+        "actual2-dspark": 1,
+        "actual3-dspark": 0,
+        "actual4-dspark": 1,
+        "actual5-dspark": 1,
+        "actual0-dflash": 0,
+        "actual1-dflash": 1,
+        "actual2-dflash": 1,
+        "actual3-dflash": 0,
+        "actual4-dflash": 1,
+        "actual5-dflash": 1
+      }
+    },
+    "prose": {
+      "prompt_tokens": 40,
+      "output_tokens": 192,
+      "teacher_output_sha256": "a36a8de07794bb9ab231a830bfd0657ef26e9e133167009fc0d632b85450d984",
+      "fixture_sha256": "3fee9e2064c972232a1f464e8653a16e7a3c97aec3e72b96ec45b471d779924a",
+      "dflash_candidate_fixture_sha256": "fb9c3489b42dfc94ae91bd35bb02222d45225fbd4cd211ff4eb9d2e976417701",
+      "dspark_rounds_1_to_7": [
+        123,
+        105,
+        96,
+        93,
+        91,
+        91,
+        91
+      ],
+      "dflash_rounds_1_to_7": [
+        109,
+        85,
+        73,
+        69,
+        65,
+        63,
+        62
+      ],
+      "full_block_verify_median_ms_by_target_rows_1_to_8": [
+        17.894,
+        19.4089,
+        21.4979,
+        23.7329,
+        41.5179,
+        43.0355,
+        45.2117,
+        47.1028
+      ],
+      "py_torch_whole_blocks_matching_of_four": 3,
+      "timed_walks": {
+        "dspark_3": {
+          "tokens": 192,
+          "rounds": 96,
+          "physical_target_calls": 96,
+          "verify_ms_by_block": [
+            2316.0017,
+            2570.2393,
+            2661.3552,
+            2364.4776,
+            2235.7841,
+            2644.8651
+          ],
+          "commit_ms_by_block": [
+            49.1347,
+            56.6713,
+            57.6068,
+            53.5866,
+            48.7245,
+            53.5943
+          ],
+          "median_verify_ms_per_round": 25.7017,
+          "median_verify_ms_per_token": 12.8508,
+          "median_verify_and_commit_ms_per_token": 13.138
+        },
+        "dspark_7": {
+          "tokens": 192,
+          "rounds": 91,
+          "physical_target_calls": 98,
+          "verify_ms_by_block": [
+            2542.074,
+            2630.7053,
+            2786.7828,
+            2300.8606,
+            2290.6491,
+            2505.753
+          ],
+          "commit_ms_by_block": [
+            51.33,
+            55.342,
+            55.0494,
+            50.8961,
+            48.4677,
+            54.6446
+          ],
+          "median_verify_ms_per_round": 27.7353,
+          "median_verify_ms_per_token": 13.1454,
+          "median_verify_and_commit_ms_per_token": 13.4214
+        },
+        "dflash_3": {
+          "tokens": 192,
+          "rounds": 73,
+          "physical_target_calls": 73,
+          "verify_ms_by_block": [
+            1796.0152,
+            1696.1767,
+            1754.2323,
+            1709.4943,
+            1785.6977,
+            1752.5338
+          ],
+          "commit_ms_by_block": [
+            42.3971,
+            45.0132,
+            50.9767,
+            48.1651,
+            48.2232,
+            43.1776
+          ],
+          "median_verify_ms_per_round": 24.0189,
+          "median_verify_ms_per_token": 9.1322,
+          "median_verify_and_commit_ms_per_token": 9.3774
+        },
+        "dflash_7": {
+          "tokens": 192,
+          "rounds": 62,
+          "physical_target_calls": 74,
+          "verify_ms_by_block": [
+            1818.716,
+            1733.5229,
+            2006.073,
+            1733.4884,
+            1730.7673,
+            1738.5862
+          ],
+          "commit_ms_by_block": [
+            46.7996,
+            44.2466,
+            49.0346,
+            45.3535,
+            42.3042,
+            45.5866
+          ],
+          "median_verify_ms_per_round": 28.0009,
+          "median_verify_ms_per_token": 9.042,
+          "median_verify_and_commit_ms_per_token": 9.2787
+        }
+      },
+      "native_walk_receipts_sha256": {
+        "actual0-dspark": "e1b92fb634704e163c7e4279bef418f1b2530ced3b242940d49b8ff38f97e87b",
+        "actual1-dspark": "52d5a4a7fa6d344905873d771822fcd37619a64cbf23de54fd8e3ec5dfa1a0ec",
+        "actual2-dspark": "75c03465852d81f57572f6f5e68e53a0122cc71433cb471d4d91a1d702cc0532",
+        "actual3-dspark": "c9729e33f4b26324b815e84c41212d75f047a06e7536c17310da27f15222e25f",
+        "actual4-dspark": "f591b6dd6cb89e3c8506afd21690ed02559428ea1c270bf66d69bb7454891bbd",
+        "actual5-dspark": "ad3876dba87dbb449419585ddbc15e7426295339cfc6e87e3bff29978f18959d",
+        "actual0-dflash": "3dae9e4b946a907712d9692848759118b9a93ccd6ce46981540ee7456d18a690",
+        "actual1-dflash": "731a8e03bdb3ad16007926becd6a86a56d4b5276b63bed92b35b26ebc408a577",
+        "actual2-dflash": "d5b12ae4cbf595faa7790acffa170a7a5a27d5cb7fcd3bcce510aa01136558ad",
+        "actual3-dflash": "64d46e3d6720ec924b53a05b19134a21d5c67893a4ff21448e272ad22c77c412",
+        "actual4-dflash": "9f9c1ee3547ebfe79f434ee45fd4fb2bb396bc190c5c43b267f61e434431a5a9",
+        "actual5-dflash": "8c1f079914898b24823b2fccd43994abe1a2aeb8eebcfac6f73982a89a9c9a69"
+      },
+      "native_dspark_width_prefix_controls": {
+        "depth2": {
+          "tested": 4,
+          "matched": 4,
+          "share_kv": true
+        },
+        "depth3": {
+          "tested": 4,
+          "matched": 4
+        }
+      },
+      "prompt_ids_le_u32_sha256": "288a65a0bf13cce8a478f6f8b3c111cd71a8ff4dba68854bb8bc20c2722907ad",
+      "peak_thermal_by_process": {
+        "actual0-dspark": 0,
+        "actual1-dspark": 1,
+        "actual2-dspark": 1,
+        "actual3-dspark": 0,
+        "actual4-dspark": 1,
+        "actual5-dspark": 1,
+        "actual0-dflash": 0,
+        "actual1-dflash": 1,
+        "actual2-dflash": 1,
+        "actual3-dflash": 0,
+        "actual4-dflash": 1,
+        "actual5-dflash": 1
+      }
+    },
+    "context4k": {
+      "prompt_tokens": 4019,
+      "output_tokens": 192,
+      "teacher_output_sha256": "7a4e52831c51845d3c2d1fdff7990e38399d68119f530d45f79f2ee5d359925a",
+      "fixture_sha256": "838bba8b411856b696255a3027db53509a77398e98b987a33f41b05e6a684dfa",
+      "dflash_candidate_fixture_sha256": "2af232e893b1f4b3d4b5d297bb79c9736554685d29c5ee3653998c50e7105cc9",
+      "dspark_rounds_1_to_7": [
+        103,
+        76,
+        62,
+        60,
+        57,
+        55,
+        53
+      ],
+      "dflash_rounds_1_to_7": [
+        101,
+        75,
+        60,
+        52,
+        48,
+        45,
+        42
+      ],
+      "full_block_verify_median_ms_by_target_rows_1_to_8": [
+        18.7984,
+        20.2646,
+        22.7121,
+        25.4073,
+        44.4679,
+        45.9138,
+        48.4724,
+        51.0681
+      ],
+      "py_torch_whole_blocks_matching_of_four": 4,
+      "timed_walks": {
+        "dspark_3": {
+          "tokens": 192,
+          "rounds": 62,
+          "physical_target_calls": 62,
+          "verify_ms_by_block": [
+            1587.6598,
+            1584.1353,
+            1592.4632,
+            1554.6246,
+            1560.651,
+            1566.6411
+          ],
+          "commit_ms_by_block": [
+            49.5374,
+            48.8712,
+            45.1563,
+            49.9037,
+            44.4891,
+            55.3229
+          ],
+          "median_verify_ms_per_round": 25.4095,
+          "median_verify_ms_per_token": 8.2051,
+          "median_verify_and_commit_ms_per_token": 8.4765
+        },
+        "dspark_7": {
+          "tokens": 192,
+          "rounds": 53,
+          "physical_target_calls": 69,
+          "verify_ms_by_block": [
+            1776.6808,
+            1775.0558,
+            1822.7712,
+            1737.3954,
+            1749.5005,
+            1737.6513
+          ],
+          "commit_ms_by_block": [
+            48.4757,
+            47.7812,
+            50.0326,
+            44.8772,
+            44.0848,
+            49.3659
+          ],
+          "median_verify_ms_per_round": 33.2505,
+          "median_verify_ms_per_token": 9.1785,
+          "median_verify_and_commit_ms_per_token": 9.4178
+        },
+        "dflash_3": {
+          "tokens": 192,
+          "rounds": 60,
+          "physical_target_calls": 60,
+          "verify_ms_by_block": [
+            1549.4736,
+            1539.1977,
+            1563.2918,
+            1514.8365,
+            1521.7608,
+            1527.1873
+          ],
+          "commit_ms_by_block": [
+            46.9101,
+            55.7588,
+            53.937,
+            45.6635,
+            44.0639,
+            53.8447
+          ],
+          "median_verify_ms_per_round": 25.5532,
+          "median_verify_ms_per_token": 7.9854,
+          "median_verify_and_commit_ms_per_token": 8.2708
+        },
+        "dflash_7": {
+          "tokens": 192,
+          "rounds": 42,
+          "physical_target_calls": 64,
+          "verify_ms_by_block": [
+            1659.1935,
+            1660.806,
+            1666.8576,
+            1614.103,
+            1601.6383,
+            1606.0778
+          ],
+          "commit_ms_by_block": [
+            46.1563,
+            47.9157,
+            47.8829,
+            42.5162,
+            47.6226,
+            52.0824
+          ],
+          "median_verify_ms_per_round": 38.9678,
+          "median_verify_ms_per_token": 8.5242,
+          "median_verify_and_commit_ms_per_token": 8.7591
+        }
+      },
+      "native_walk_receipts_sha256": {
+        "actual0-dspark": "f683301f70e3eb01de3aef942e03c36fa2d5b9d844f3071a699dd6d1830d72cc",
+        "actual1-dspark": "a1f22f79cf8b6d999eda5fddfb109918e844b4a1aa46f1132e82b8d048f7c2eb",
+        "actual2-dspark": "b58d1a18d132c19fb04258858ca2bb184e2112861e71591ce7cffae5de339f1f",
+        "actual3-dspark": "92e1f041bb12d583778c9f62a5e4297c2ced4a9a8873851a9f01100e4401bcdd",
+        "actual4-dspark": "a4a122b8886f218fbb599ba7d7aa943bc12bfed910a78ceb5e6c1eb939caca64",
+        "actual5-dspark": "90296d2fbe6e936feffff2eeb7cd712e0515b7f4d45066b44f421d57d125b873",
+        "actual0-dflash": "fdfaf42706d23cd2f93a85536ae8c962dad3cde01b16b5c671572e0ee4077eaf",
+        "actual1-dflash": "fc3b20a8a1a8dbed4638b8a61bf81d629ecae8b17c2c25a4f8f42b69fa9ffebd",
+        "actual2-dflash": "3b5c5616a12087e9fc34d88a38db757d72925d99362372d1a971e90ead4661d6",
+        "actual3-dflash": "38bd0636275cc8bb59f3681056d45200be87b27c760daba1f6c0f589109e5f80",
+        "actual4-dflash": "6010769190ded1dab92a44f4af27bea6bb0771d7cd93994c5d66e9d3c9438a1b",
+        "actual5-dflash": "6484ffaeda95434d7efe4e8bf3790efbac8d95cd8ddcbebd14eb3121fbe60234"
+      },
+      "native_dspark_width_prefix_controls": {
+        "depth2": {
+          "tested": 4,
+          "matched": 4,
+          "share_kv": true
+        },
+        "depth3": {
+          "tested": 4,
+          "matched": 4
+        }
+      },
+      "prompt_ids_le_u32_sha256": "ad579de7f911b1aa3588bc9d98bd824529701cbec1b4083e07beda0f2d542400",
+      "peak_thermal_by_process": {
+        "actual0-dspark": 0,
+        "actual1-dspark": 1,
+        "actual2-dspark": 1,
+        "actual3-dspark": 0,
+        "actual4-dspark": 1,
+        "actual5-dspark": 1,
+        "actual0-dflash": 0,
+        "actual1-dflash": 1,
+        "actual2-dflash": 1,
+        "actual3-dflash": 0,
+        "actual4-dflash": 1,
+        "actual5-dflash": 1
+      }
+    }
+  },
+  "pooled_timed_walks": {
+    "dspark_3": {
+      "tokens": 768,
+      "rounds": 320,
+      "physical_target_calls": 320,
+      "verify_ms_by_block": [
+        7725.7393,
+        8054.4743,
+        8572.972,
+        7771.5432,
+        7633.7461,
+        8242.7138
+      ],
+      "commit_ms_by_block": [
+        191.5519,
+        204.45,
+        202.8477,
+        198.2918,
+        191.4591,
+        209.1497
+      ],
+      "median_verify_ms_per_round": 24.7282,
+      "median_verify_ms_per_token": 10.3034,
+      "median_verify_and_commit_ms_per_token": 10.5656
+    },
+    "dflash_3": {
+      "tokens": 768,
+      "rounds": 271,
+      "physical_target_calls": 271,
+      "verify_ms_by_block": [
+        6600.5327,
+        6612.9141,
+        6954.0474,
+        6472.7961,
+        6547.1096,
+        6736.9174
+      ],
+      "commit_ms_by_block": [
+        184.297,
+        198.17,
+        202.341,
+        186.0339,
+        190.4293,
+        192.3599
+      ],
+      "median_verify_ms_per_round": 24.3791,
+      "median_verify_ms_per_token": 8.6025,
+      "median_verify_and_commit_ms_per_token": 8.8515
+    },
+    "dspark_7": {
+      "tokens": 768,
+      "rounds": 288,
+      "physical_target_calls": 330,
+      "verify_ms_by_block": [
+        8234.8466,
+        8270.7202,
+        9145.6975,
+        7937.8437,
+        7897.3119,
+        8269.3702
+      ],
+      "commit_ms_by_block": [
+        193.7906,
+        198.7659,
+        208.7194,
+        189.8187,
+        184.3587,
+        207.8339
+      ],
+      "median_verify_ms_per_round": 28.6532,
+      "median_verify_ms_per_token": 10.7449,
+      "median_verify_and_commit_ms_per_token": 11.0014
+    },
+    "dflash_7": {
+      "tokens": 768,
+      "rounds": 219,
+      "physical_target_calls": 279,
+      "verify_ms_by_block": [
+        6805.5843,
+        7013.0992,
+        7666.7468,
+        6656.9348,
+        6663.9303,
+        6811.6981
+      ],
+      "commit_ms_by_block": [
+        194.3227,
+        183.5021,
+        205.913,
+        178.4638,
+        174.8115,
+        203.2459
+      ],
+      "median_verify_ms_per_round": 31.0897,
+      "median_verify_ms_per_token": 8.8654,
+      "median_verify_and_commit_ms_per_token": 9.1243
+    }
+  },
+  "prose_torch_all_anchors_vs_mlx": {
+    "blocks": 181,
+    "tested_blocks": 191,
+    "slots": 1287,
+    "tested_slots": 1316
+  },
+  "timing_scope": "Median of repeated warm native verifier replays. Each block sums four traces before dividing by round or token count. Verify excludes candidate generation, transaction commit and validation. Single-row steps include state update.",
+  "trace_source": "Original Inkling 2 Mini, November 23 standard benchmark, block zero; four greedy continuations capped at 192 output tokens each",
+  "host": {
+    "soc": "M5 Max",
+    "gpu_cores": 40,
+    "unified_memory_gib": 128,
+    "macos": "26.7.2",
+    "ac_power": true,
+    "width_sweep_peak_thermal_state": 0,
+    "candidate_replay_peak_thermal_state": 1
+  },
+  "upstream_revisions": {
+    "thinkingmachines/Inkling-2-Mini": "6e7c8248f75265bdd4fbab5273304243b5d8c2cb",
+    "incoai/Inkling-2-Mini-DFlash2": "4f9088ea66c21f2b99ed657d1941c306b03e84d2",
+    "z-lab/dflash": "07ebd93db9f472af339b644bb70221ad8428328a"
+  },
+  "upstream_reference_sha256": {
+    "model_mlx.py": "2f8598eaca4cb814e63ea69e791c1bdf55ba82280bfd299f9141906356b7cb87",
+    "model.py": "f55b7fe0a4c0b3073e0f9cdce547cce29f4b8e2168c4d2818760007c43b7651e"
+  }
+}

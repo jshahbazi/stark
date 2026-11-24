@@ -22,8 +22,10 @@ pub use decode_stages::{
 };
 #[path = "dspark_validation.rs"]
 mod dspark_validation;
-pub use dspark_validation::{measure_dspark, measure_dspark_depth, measure_source_dspark_depth};
+pub use dspark_validation::{capture_dspark_trace, measure_dspark, measure_dspark_depth, measure_source_dspark_depth};
 
+#[path = "candidate_round_validation.rs"]
+mod candidate_round_validation;
 #[path = "draft_overlap.rs"]
 mod draft_overlap;
 #[path = "packed_prefill.rs"]
@@ -42,10 +44,13 @@ mod prefill_trace;
 mod schedule_validation;
 #[path = "target_validation.rs"]
 mod target_validation;
+#[path = "trace_verify_validation.rs"]
+mod trace_verify_validation;
 #[path = "transaction_validation.rs"]
 mod transaction_validation;
 #[path = "verify_state.rs"]
 mod verify_state;
+pub use candidate_round_validation::measure as measure_candidate_rounds;
 pub use draft_overlap::measure_draft_overlap;
 use packed_prefill::PackedPrefill;
 use prefill::PrefillLanes;
@@ -61,6 +66,7 @@ pub use schedule_validation::{
 pub use target_validation::{
     measure_decode_verify, measure_full, measure_full_budget, measure_prefill, measure_prefill_speed,
 };
+pub use trace_verify_validation::measure as measure_trace_verify_widths;
 pub use transaction_validation::measure_verify_transaction;
 pub use verify_state::{MAX_VERIFY_ROWS, Verification};
 
