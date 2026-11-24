@@ -8,6 +8,8 @@
 
 - [20261124-INKCTX-02 · Inkling 2 Mini request-sized context allocation](2026-11-24-inkling-mini-request-context.md) records stable memory-derived windows, managed OpenCode allocation sizes, exact decode growth, prefix reuse across a resize at 248,399 input tokens, and image invalidation.
 
+- [20261124-INKCTX-03 · Inkling 2 Mini tool-loop cache diagnostic](2026-11-24-inkling-mini-tool-loop-cache.md) reproduces a repeated tool call with zero reused tokens and matches the warm output exactly after reusing 49,152 tokens.
+
 - [Inkling 2 Mini decode toward 80 tok/s, attempts 79–110](2026-11-22-inkling-mini-decode-80.md) records worker repeats, verifier kernel and scheduling experiments, dense and FP4 layout screens, the MLX-Serve comparison, exact and sparse vocabulary readout, and DSpark ranking, K/V sharing, mask reuse and layer ablation.
 
 - [Inkling 2 Mini exact decode toward 60 tok/s, attempts 01–78](2026-11-21-inkling-mini-decode-60.md) tracks exact singleton decode, shared verifier work, exact rollback, source-precision DSpark acceptance, lookup and vocabulary eligibility, certified seeded sampling, shared KV reads and writes, and stochastic acceptance estimates for the original checkpoint on M5 Max.

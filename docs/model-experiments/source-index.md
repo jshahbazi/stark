@@ -230,6 +230,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Opt-in cumulative thinking budget](../archive/runs/2026-11-24-inkling-thinking-budget.md) · Experiment, 2026-11-24
 - [Load-time context and live memory admission](2026-11-24-inkling-mini-memory-context.md) · Experiment, 2026-11-24, attempt 20261124-INKCTX-01
 - [Request-sized context allocation](2026-11-24-inkling-mini-request-context.md) · Experiment, 2026-11-24, attempt 20261124-INKCTX-02
+- [Tool-loop cache diagnostic](2026-11-24-inkling-mini-tool-loop-cache.md) · Experiment, 2026-11-24, attempt 20261124-INKCTX-03
 - [M5 Max original and Unsloth baselines](../benchmarks/2026-11-20-inkling-mini-m5-max.md) · Benchmark, 2026-11-20
 - [First milestone and real-weight NVFP4](2026-11-20-inkling-mini-milestone-1.md) · Experiment, 2026-11-20
 - [Native decode slice](../benchmarks/2026-11-21-inkling-mini-native-slice.md) · Benchmark, 2026-11-21
