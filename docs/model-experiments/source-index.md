@@ -258,6 +258,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Verifier long-position gain rounding fix](2026-11-22-inkling-mini-long-position-gain.md) · Experiment, 2026-11-22, attempt 20261122-INKLONGPOS-01
 - [Verifier and single-row launch fusion, two sessions](2026-11-22-inkling-mini-launch-fusion.md) · Experiment, 2026-11-22–23, attempts 20261122-INKFUSE-01 and -02
 - [Engine matrix against MLX-Serve, runs 1 to 5](../benchmarks/2026-11-22-inkling-mini-engine-matrix.md) · Benchmark, 2026-11-22–23, attempts 20261122-INKENGINE-01 to -03 and 20261123-INKENGINE-04 and -05
+- [Standard benchmark against MLX-Serve, three repeats with quality](../benchmarks/2026-11-23-inkling-mini-standard-benchmark.md) · Benchmark (standard result), 2026-11-23, attempt 20261123-INKENGINE-06
 - [Exact faster prefill: NVFP4 guard removal, fused NVFP4 kernels, faster MXFP8 replay](2026-11-22-inkling-mini-exact-fast-prefill.md) · Experiment, 2026-11-22, attempt 20261122-INKFASTPRE-01
 - [Unguarded MXFP8 prefill default, noise-floor gate and mask-free global attention](2026-11-22-inkling-mini-unguarded-mxfp8-prefill.md) · Experiment, 2026-11-22–23, attempt 20261122-INKFASTPRE-02
 - [Prefill attribution, MLX-Serve against Stark](../benchmarks/2026-11-22-inkling-mini-prefill-attribution.md) · Benchmark, 2026-11-22, attempt 20261122-INKPREATTR-01
@@ -266,6 +267,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Unquantized NVFP4 expert inputs as the default, and the rejected fold](2026-11-23-inkling-mini-expert-inputs-default.md) · Experiment, 2026-11-23, attempts 20261123-INKROUND-09 and -10
 - [Draft-depth planner tuning and the hold rule](2026-11-23-inkling-mini-planner-tuning.md) · Experiment, 2026-11-23, attempts 20261123-INKROUND-11 and -12
 - [Gathered NVFP4 prefill kernel for wide commands](2026-11-23-inkling-mini-gathered-nvfp4.md) · Experiment, 2026-11-23, attempt 20261122-INKFASTPRE-07
+- [Optimization wind-down: reverted unmeasured attempts, the paired-control hang and lock incidents](2026-11-23-inkling-mini-wind-down.md) · Experiment, 2026-11-23, attempts 20261123-INKROUND-13 and -14 and 20261122-INKFASTPRE-08
 - [Prefill round 3: dense kernel, packed draft commit, mask removal, width independence and two rejected kernels](2026-11-23-inkling-mini-prefill-round3.md) · Experiment, 2026-11-23, attempt 20261122-INKFASTPRE-03
 - [Prefill round 4: routing, drafting overhead, command width, expert ceiling, rejected stationary and staged kernels, BF16 attention and dense decomposition](2026-11-23-inkling-mini-prefill-round4.md) · Experiment, 2026-11-23, attempts 20261122-INKFASTPRE-04 to -06
 - [Decode round: stage table, short-context verifier attention, router, worker loop, depth policy, expert inputs and natural-text quality](2026-11-23-inkling-mini-decode-round.md) · Experiment, 2026-11-23, attempts 20261123-INKROUND-01 to -08

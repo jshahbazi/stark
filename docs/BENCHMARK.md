@@ -14,7 +14,7 @@ Every new family, checkpoint, quantization or format adds or extends a profile a
 
 Out of scope: scoring and decision workers (`stark-score`, `stark-decide`), image requests, conversion time, memory, startup and idle wake. Those have their own records. Kernel-level and stage-level profiling is diagnostic evidence and is covered by the playbook.
 
-The protocol first ran on Inkling 2 Mini on 2026-11-22 ([engine matrix](benchmarks/2026-11-22-inkling-mini-engine-matrix.md), [prefill attribution](benchmarks/2026-11-22-inkling-mini-prefill-attribution.md)). Each rule under [Validity rules](#validity-rules) is there because a comparison went wrong without it.
+The protocol first ran on Inkling 2 Mini on 2026-11-22 ([engine matrix](benchmarks/2026-11-22-inkling-mini-engine-matrix.md), [prefill attribution](benchmarks/2026-11-22-inkling-mini-prefill-attribution.md)). Its first standard result, also Inkling 2 Mini, is the three-repeat run of 2026-11-23 ([standard benchmark](benchmarks/2026-11-23-inkling-mini-standard-benchmark.md)). Each rule under [Validity rules](#validity-rules) is there because a comparison went wrong without it.
 
 ## Levels
 
