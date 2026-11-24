@@ -85,6 +85,22 @@ def test_catalogue_is_read_only_and_stale_family_results_cannot_publish(host, mo
     assert len(events(host)) == before and host.catalog_entries == {}
 
 
+def test_inkling_family_publishes_its_installable_catalog_item(host, monkeypatch):
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    family = native_catalog.INKLING_FAMILY_ID
+    host.catalog_request_id, host.catalog_family_id = "request", family
+
+    host.load_catalog(family, "request", host.catalog_generation)
+
+    event = events(host)[-1]
+    assert event["event"] == "model_catalog"
+    assert event["report"]["status"] == "ready"
+    [item] = event["report"]["items"]
+    assert item == {**native_catalog.catalog_item(native_catalog.INKLING_CHOICE), "installed_ids": []}
+    assert item["default_artifact_mode"] == "vision-language"
+    assert native_catalog.source_choice(family, host.catalog_entries[item["id"]]) == native_catalog.INKLING_CHOICE
+
+
 def test_stopping_catalogue_download_preserves_choices_and_fences_installation(host, monkeypatch):
     host.catalog_request_id, host.catalog_family_id = "request", "qwen3"
     monkeypatch.setattr(host, "run_catalog_check", lambda *_args: report())
@@ -158,6 +174,17 @@ def test_catalogue_accepts_optional_model_group_descriptor(host):
     value = report()
     value["items"][0]["model_group"] = {"id": "c" * 32, "name": "Model", "publisher": "owner"}
     assert host.catalog_report(value, "qwen3")["items"][0]["model_group"] == value["items"][0]["model_group"]
+
+
+def test_catalogue_quantization_label_limit_is_measured_in_utf8_bytes(host):
+    value = report()
+    label = "é" * 128
+    value["items"][0]["quantization"] = label
+    assert host.catalog_report(value, "qwen3")["items"][0]["quantization"] == label
+
+    value["items"][0]["quantization"] += "a"
+    with pytest.raises(ValueError):
+        host.catalog_report(value, "qwen3")
 
 
 def test_legacy_catalogue_more_flag_without_offset_is_not_pageable(host):

@@ -111,6 +111,7 @@ MAX_PROGRESS_BYTES = 4096
 DOWNLOAD_RETRY_INITIAL_SECONDS = 5
 MAX_SUPPORT_BYTES = 65536
 MAX_CATALOG_BYTES = 256 * 1024
+MAX_QUANTIZATION_LABEL_BYTES = 256
 
 
 def decision_installer(source, kind):
@@ -853,7 +854,7 @@ class Desktop:
                 or not 0 < len(item["name"].encode()) <= 256
                 or any(ord(char) < 32 or ord(char) == 127 for char in item["name"])
                 or not isinstance(item.get("quantization"), str)
-                or not 0 < len(item["quantization"]) <= 64
+                or not 0 < len(item["quantization"].encode()) <= MAX_QUANTIZATION_LABEL_BYTES
                 or type(item.get("downloadable")) is not bool
                 or not isinstance(item.get("artifact_modes"), list)
                 or not item["artifact_modes"]
