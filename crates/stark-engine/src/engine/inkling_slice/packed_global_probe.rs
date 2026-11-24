@@ -7,10 +7,7 @@ use super::*;
 
 /// Base key capacity, covered by the load-time source reserve. Non-source
 /// requests and contexts up to this extent keep exactly this size.
-pub(super) const MAX_KEYS: usize = 4352;
-/// Largest key capacity of the context-sized workspace. It equals the
-/// session's maximum M5 context; the per-head mask is then 957.0 MiB.
-pub(super) const MAX_CONTEXT_KEYS: usize = 32_768;
+pub(super) const MAX_KEYS: usize = CAPACITY;
 /// Reference query tile, bounded by the explicit mask's size.
 const TILE: usize = 256;
 /// Default (mask-free) query tile. Each query row still visits the same key
@@ -43,7 +40,7 @@ pub(super) const fn workspace_bytes(keys: usize) -> usize {
 /// Key capacity that serves a context. It never falls below the default so
 /// contexts within the default extent keep the default buffers.
 pub(super) fn capacity_for(context: usize) -> usize {
-    context.clamp(MAX_KEYS, MAX_CONTEXT_KEYS)
+    context.clamp(MAX_KEYS, MAX_M5_CONTEXT)
 }
 const STEEL: &str = "steel_attention_float32_bq64_bk32_bd128_bv128_wm4_wn1_maskfloat32";
 /// Stark derivative of STEEL that computes the relative bias in the kernel.
@@ -185,7 +182,7 @@ impl GlobalProbe {
         if keys == self.capacity {
             return Ok(());
         }
-        if !(MAX_KEYS..=MAX_CONTEXT_KEYS).contains(&keys) || mask_bytes(keys) > device.max_buffer_length() {
+        if !(MAX_KEYS..=MAX_M5_CONTEXT).contains(&keys) || mask_bytes(keys) > device.max_buffer_length() {
             return Err("Inkling source global workspace exceeds the supported key capacity");
         }
         self.capacity = 0;

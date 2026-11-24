@@ -91,7 +91,7 @@ impl PackedPrefill {
     /// Largest request context the source path admits.
     pub(super) fn source_context_limit(context_workspace: bool) -> usize {
         if context_workspace {
-            packed_global_probe::MAX_CONTEXT_KEYS
+            MAX_M5_CONTEXT
         } else {
             packed_global_probe::MAX_KEYS
         }
@@ -453,6 +453,20 @@ impl PackedPrefill {
         context: usize,
     ) -> usize {
         Self::source_global_extra_bytes(self.context_workspace, context)
+    }
+
+    /// Resizing releases the old staging buffers before replacing them.
+    pub(super) fn source_workspace_growth_bytes(
+        &self,
+        context: usize,
+    ) -> usize {
+        if !self.context_workspace {
+            return 0;
+        }
+        self.source.as_ref().and_then(|source| source.global.as_ref()).map_or(0, |global| {
+            Self::source_global_workspace_bytes(Self::source_global_capacity(context))
+                .saturating_sub(Self::source_global_workspace_bytes(global.capacity()))
+        })
     }
 
     fn source_for_rows(

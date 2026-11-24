@@ -78,6 +78,7 @@ const MID: usize = 1152;
 const KV: usize = 1024;
 const LOCAL: usize = 1024;
 const CAPACITY: usize = 4352;
+const MAX_M5_CONTEXT: usize = 131_072;
 const HEADS: usize = 24;
 const START: usize = 4096;
 

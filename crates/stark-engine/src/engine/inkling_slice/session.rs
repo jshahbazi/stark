@@ -66,7 +66,6 @@ use super::{dspark::Dspark, vision::Vision, *};
 const STORAGE_VOCABULARY: usize = 201_024;
 pub const VOCABULARY: usize = 200_058;
 pub(super) const PADDED_VOCABULARY: usize = VOCABULARY.div_ceil(32) * 32;
-const MAX_CONTEXT: usize = 32_768;
 const PREFILL_COMMAND_ROWS: usize = 8;
 const BATCHED_PREFILL_ROWS: usize = 64;
 const M5_PREFILL_ROWS: usize = 128;
@@ -226,12 +225,7 @@ impl Session {
         runtime: &Runtime,
         context: usize,
     ) -> Result<()> {
-        let max_context = if runtime.pinned_m5 {
-            MAX_CONTEXT
-        } else {
-            CAPACITY
-        };
-        if !(1..=max_context).contains(&context) {
+        if !(1..=Self::supported_context(runtime)).contains(&context) {
             return Err("Inkling context exceeds the supported Metal layout");
         }
         let persistent =
@@ -240,6 +234,37 @@ impl Session {
             return Err("Inkling persistent state exceeds recommended Metal working set");
         }
         Ok(())
+    }
+
+    fn supported_context(runtime: &Runtime) -> usize {
+        if !runtime.pinned_m5 {
+            return CAPACITY;
+        }
+        Self::m5_context_for_buffer_limit(runtime.device.max_buffer_length())
+    }
+
+    fn m5_context_for_buffer_limit(buffer_limit: usize) -> usize {
+        // A full prefix snapshot includes the target and optionally the draft
+        // in one buffer. The source workspace also bounds its diagnostic mask.
+        let fits = |context| {
+            let snapshot_bytes = Self::state_bytes(context) + Dspark::state_bytes(context);
+            let mask_bytes = PackedPrefill::source_global_mask_bytes(PackedPrefill::source_global_capacity(context));
+            snapshot_bytes.max(mask_bytes) <= buffer_limit
+        };
+        if fits(MAX_M5_CONTEXT) {
+            return MAX_M5_CONTEXT;
+        }
+        let mut fitting = 0;
+        let mut too_large = MAX_M5_CONTEXT;
+        while too_large - fitting > 1 {
+            let context = usize::midpoint(fitting, too_large);
+            if fits(context) {
+                fitting = context;
+            } else {
+                too_large = context;
+            }
+        }
+        fitting
     }
 
     fn new_visits(
@@ -253,13 +278,18 @@ impl Session {
             .collect()
     }
 
-    /// Maximum supported context, which depends on the selected attention kernel.
+    /// Maximum supported context for the attention layout and device buffer limit.
     pub fn max_context_length(&self) -> usize {
-        if self.runtime.pinned_m5 {
-            MAX_CONTEXT
-        } else {
-            CAPACITY
-        }
+        Self::supported_context(&self.runtime)
+    }
+
+    /// Bytes remaining in Metal's recommended working set after resident allocations.
+    /// Zero indicates no headroom or an unavailable recommendation.
+    pub fn metal_memory_headroom_bytes(&self) -> usize {
+        let device = &self.runtime.device;
+        usize::try_from(device.recommended_max_working_set_size())
+            .unwrap_or(usize::MAX)
+            .saturating_sub(device.current_allocated_size())
     }
 
     /// Resident persistent cache bytes at a given context. Include one full
@@ -269,7 +299,7 @@ impl Session {
         context: usize,
         prefix: bool,
     ) -> Option<usize> {
-        if !(1..=MAX_CONTEXT).contains(&context) {
+        if !(1..=MAX_M5_CONTEXT).contains(&context) {
             return None;
         }
         Some(
@@ -286,6 +316,40 @@ impl Session {
         let keys_and_values = (40 * position.min(LOCAL) + 8 * position) * 2 * KV * 2;
         let convolutions = PHYSICAL.len() * 3 * (2 * KV + 2 * WIDTH) * 2;
         keys_and_values + convolutions
+    }
+
+    /// Bytes for a complete live cache at a new capacity. A resize creates
+    /// replacement caches while the old ones are still resident.
+    pub fn live_context_bytes(
+        &self,
+        context: usize,
+    ) -> usize {
+        Self::state_bytes(context) + self.dspark.as_ref().map_or(0, |_| Dspark::state_bytes(context))
+    }
+
+    /// Bytes copied into a new prefix snapshot, including draft state only
+    /// when drafting. A zero boundary means no allocation.
+    pub fn prefix_snapshot_bytes(
+        tokens: usize,
+        draft: bool,
+    ) -> usize {
+        if tokens == 0 {
+            return 0;
+        }
+        Self::state_bytes(tokens)
+            + if draft {
+                Dspark::state_bytes(tokens)
+            } else {
+                0
+            }
+    }
+
+    /// Additional workspace bytes above the buffers already resident.
+    pub fn source_workspace_growth_bytes(
+        &self,
+        context: usize,
+    ) -> usize {
+        self.packed_prefill.as_ref().map_or(0, |packed| packed.source_workspace_growth_bytes(context))
     }
 
     /// Set the worker's context and discard live generation state. A context
@@ -640,7 +704,7 @@ impl Session {
         context: usize,
         prefix: bool,
     ) -> Option<usize> {
-        if !(1..=MAX_CONTEXT).contains(&context) {
+        if !(1..=MAX_M5_CONTEXT).contains(&context) {
             return None;
         }
         let resident = 736 * 1024 * 1024;
@@ -1120,7 +1184,7 @@ impl Session {
         &self,
         position: usize,
     ) -> usize {
-        Self::state_bytes(position) + self.active_dspark().map_or(0, |_| Dspark::state_bytes(position))
+        Self::prefix_snapshot_bytes(position, self.active_dspark().is_some())
     }
 
     fn transfer_snapshot(
@@ -1155,6 +1219,20 @@ impl Session {
             return Err("Inkling snapshot command failed");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use stark_engine_macros::stark_test;
+
+    use super::*;
+
+    #[stark_test]
+    fn metal_buffer_limit_bounds_the_combined_prefix_snapshot() {
+        let bytes = Session::state_bytes(MAX_M5_CONTEXT) + Dspark::state_bytes(MAX_M5_CONTEXT);
+        assert_eq!(Session::m5_context_for_buffer_limit(bytes), MAX_M5_CONTEXT);
+        assert_eq!(Session::m5_context_for_buffer_limit(bytes - 1), MAX_M5_CONTEXT - 1);
     }
 }
 
