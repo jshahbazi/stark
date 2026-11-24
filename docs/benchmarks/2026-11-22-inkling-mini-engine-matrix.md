@@ -78,7 +78,7 @@ A single-repeat run: one llmprobe invocation per arm on a fresh server, with n c
 
 **Harness changes since the first run** ([`scripts/benchmark_inkling_engine_matrix.py`](../../scripts/benchmark_inkling_engine_matrix.py), tests in [`scripts/test_benchmark_inkling_engine_matrix.py`](../../scripts/test_benchmark_inkling_engine_matrix.py), 45 passing at the time of the change):
 
-- Power-mode parsing: `pmset`'s `lowpowermode` is read as the Low Power flag, and `powermode` as an enumeration in which only 1 is Low Power, so High Power mode (2) is no longer mistaken for Low Power Mode. How the earlier parse behaved on this host is not recorded in the session reports.
+- Power-mode parsing: `pmset`'s `lowpowermode` is read as the Low Power flag, and `powermode` as an enumeration in which only 1 is Low Power, so High Power mode (2) is no longer mistaken for Low Power Mode. On this host, on AC power in High Power mode (`powermode 2`), the earlier parse reported Low Power Mode on and the harness refused its dry run on 2026-11-22 ([session audit](../model-experiments/2026-11-23-inkling-mini-session-audit.md)).
 - Weight-shard preflight: every shard named in `model.safetensors.index.json` must exist and be non-empty (without an index, at least one shard other than `mtp.safetensors`). A pack with missing shards is refused before anything starts.
 - A failed arm no longer aborts the run: it is recorded under `arm_failures`, skipped for the rest of the run, the status becomes `partial` and the command exits 3. Losing AC power still aborts everything. `summarize` lists arms with no data as failed and merges a later run of the same arm under its normal name.
 - Readable start failures: up to 60 lines of MLX-Serve's own pre-ready output are kept in the private run directory on a failed start; collection stops once the server answers, before any benchmark request. For Stark only the fixed failure code is recorded.
@@ -139,7 +139,7 @@ A single-repeat run (`20261122-232425-both`, started 23:24 local, manifest SHA-2
 | Prefill, 8,768 repeated-sentence tokens | 1,693 | 2,137 | 2,012 |
 | Prefill, exact 8,800 IDs | 1,707 | 2,088 | 1,897 |
 
-One invocation per arm; not a standard result. The busy host makes this run the least reliable of the four.
+One invocation per arm; not a standard result. The busy host makes this run the least reliable of the four. A first attempt was refused because one worker binary served both Stark arms; the harness guard was relaxed to allow one build on two model directories. The run also has an unseen-text prefill row at about 7,550 tokens (Stark 1,760, MLX-Serve original 2,189, 8-bit pack 2,097 tok/s), and the worker's own prefill phase rate equals the client's, so the time is inside the engine ([session audit](../model-experiments/2026-11-23-inkling-mini-session-audit.md)).
 
 ### 20261123-INKENGINE-04 · Fourth run with the Stark 8-bit artifact
 

@@ -297,6 +297,7 @@ Records made with those scripts keep their original scope and are not regenerate
 The standing rule, the quality bar, the burst's status, the reference-engine policy, the block layout, the image rule and the arm names were decided on 2026-11-23 and are stated above. What remains:
 
 - the reference engine and matched packs of every family other than Inkling 2 Mini, which are chosen by the policy above when that family's profile is written;
+- whether the 16-user burst is required for a standard result. The scenario text above says it runs in every standard run; the tool does not check that it ran, and the first standard result ([20261123-INKENGINE-06](benchmarks/2026-11-23-inkling-mini-standard-benchmark.md)) omitted it by owner decision and was reported eligible. The page or the tool has to change;
 - whether KL divergence or the log-probability change should have a bar of their own; today they are reported only;
 - the quality probe's own interface, which is still changing, so the converter for its output is provisional;
 - continuous host monitoring with per-block exclusion, which the older stock-engine harness had and the standard does not.

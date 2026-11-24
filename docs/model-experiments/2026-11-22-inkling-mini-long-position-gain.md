@@ -66,7 +66,7 @@ The fix build's binary hashes are not recorded.
 
 - The single-rounding form has never been compared with the pinned reference past position 8,192, because no reference capture reaches that far. Both paths now agree with each other; whether they agree with the reference above 8,192 is unknown.
 - No timing was taken; the change is not a performance attempt.
-- No audit of other expressions that differ only in contraction between the serial and verifier kernels is recorded.
+- The diagnosis read five serial-against-verifier kernel pairs and found them identical (attention parts accumulation, output gate, relative table, K/V packing and convolution, the source-path q/r reduction), ruled out the shard-count difference by reading, and saw an unpatched control on the fused tree fail at 14,000 tokens before the fix ([session audit](2026-11-23-inkling-mini-session-audit.md#5-long-position-divergence-inklongpos-01)). A general audit of expressions that differ only in contraction was not done.
 - Performance playbook: not applicable.
 
 Keep prompts, completions, token vectors and probabilities out of this document; the private reports stay ignored.
