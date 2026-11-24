@@ -48,7 +48,7 @@ admission limits and prefix-state qualification are documented there.
 
 ## Checkpoints and preparation
 
-The preparation command pins these sources:
+The preparation command uses these qualified checkpoint identities:
 
 | Choice | Checkpoint | Weight files |
 | --- | --- | --- |
@@ -60,6 +60,8 @@ The preparation command pins these sources:
 | `ripple-q4-k-m` | `AtomicChat/Ripple-65B-Preview-GGUF`, standard Q4_K_M, revision `df550a7178a87bbfb6ee2bdbd37603c553d536ee` | 38,798,820,576 bytes, 36.13 GiB |
 | `inkling2-mini` (default) | Stark 8-bit dense artifact derived from `thinkingmachines/Inkling-2-Mini` at `6e7c8248f75265bdd4fbab5273304243b5d8c2cb`; target SHA-256 `c9e14848ad017467dc0deb91c6aa67022e181dbcdfe02a1b04024434bf9acddd` | 18,687,815,064 bytes, 17.40 GiB, including the DSpark head; preparation downloads the 20,161,820,584-byte original and needs about 43.1 GB free while both exist |
 | `inkling2-mini-original` | `thinkingmachines/Inkling-2-Mini`, source NVFP4/MXFP8, revision `6e7c8248f75265bdd4fbab5273304243b5d8c2cb` | 20,161,820,584 bytes, 18.78 GiB, including the separate DSpark head |
+
+Both Inkling choices download from the publisher's [original public upload](https://huggingface.co/thinkingmachines/Inkling-2-Mini/tree/1fb4134b9a74f9681054f4ef82e4bf1f458a2337). The qualified revision in the table returns HTTP 404 from the Hub. The public upload lists the same byte counts and SHA-256 hashes for the target and draft weights. Its config, processor config, chat template, tokenizer, quantization config and weight index also match Stark's pinned SHA-256 hashes. Preparation checks the pinned bytes before publishing and retains the qualified revision in the catalog and prepared artifact identity.
 
 See [Recursive Flint](FLINT.md) for its architecture, installation command,
 precision policy and validation. The GLM/Qwen-specific execution details below

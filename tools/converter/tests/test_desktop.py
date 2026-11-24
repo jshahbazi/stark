@@ -369,6 +369,63 @@ def test_playground_keeps_reasoning_out_of_visible_history(desktop, model, monke
     assert "assistant:Synthetic reasoning</think>" not in prompts[1]
 
 
+@pytest.mark.parametrize("finish_reason", ["length", "context"])
+def test_playground_capped_inkling_reasoning_does_not_commit_an_unanswered_turn(
+    desktop, model, monkeypatch, finish_reason
+):
+    from stark_convert.chat import _ChatTemplate
+
+    running(desktop, model)
+    source = (Path(__file__).parent / "fixtures/tool_templates/inkling2_mini.jinja").read_text(encoding="utf-8")
+    desktop.codec = {"type": "ChatCodecConfig", "prompt_template": source}
+    desktop.template = _ChatTemplate(source)
+    desktop.maximum = 512
+    prior = [{"role": "user", "content": "Earlier turn"}, {"role": "assistant", "content": "Earlier answer"}]
+    desktop.messages = prior.copy()
+    operations, prompts = [], []
+
+    def request(payload, **_options):
+        operation = payload["operation"]
+        operations.append(operation)
+        if operation == "reset_cache":
+            return {"cache_reset": True}
+        if operation == "tokenize":
+            prompts.append(payload["text"])
+            return {"token_count": 24, "token_ids": [2] * 24}
+        return {
+            "text": (
+                "<|message_model|><|content_thinking|>Unfinished reasoning"
+                if len(prompts) == 1
+                else "<|message_model|><|content_text|>Partial answer"
+            ),
+            "input_tokens": 24,
+            "output_tokens": 512,
+            "reused_input_tokens": 0,
+            "finish_reason": finish_reason,
+        }
+
+    monkeypatch.setattr(desktop.worker, "prefix_cache", True)
+    monkeypatch.setattr(desktop.worker, "request", request)
+    desktop.generate(desktop.epoch, "First review request", request_id="first")
+    reply = [event for event in events(desktop) if event["event"] == "reply"][-1]
+    assert reply["text"] == "" and reply["answer_missing"] is True
+    assert reply["finish_reason"] == finish_reason and reply["output_tokens"] == 512
+    assert reply["request_id"] == "first" and "Unfinished reasoning" not in desktop.output.getvalue()
+    assert desktop.messages == prior and desktop.current_state == "ready"
+
+    desktop.generate(desktop.epoch, "Edited review request", request_id="retry")
+    assert operations == ["tokenize", "generate", "reset_cache", "tokenize", "generate"]
+    assert "Earlier answer" in prompts[-1] and "Edited review request" in prompts[-1]
+    assert "First review request" not in prompts[-1] and "Unfinished reasoning" not in prompts[-1]
+    reply = [event for event in events(desktop) if event["event"] == "reply"][-1]
+    assert reply["text"] == "Partial answer" and "answer_missing" not in reply
+    assert desktop.messages == [
+        *prior,
+        {"role": "user", "content": "Edited review request"},
+        {"role": "assistant", "content": "Partial answer"},
+    ]
+
+
 def test_api_completions_are_stateless_and_share_loaded_worker(desktop, model):
     from stark_convert.local_api import APIError
 

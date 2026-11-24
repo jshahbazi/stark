@@ -1557,6 +1557,7 @@ final class EngineController: ObservableObject {
     @Published var decisionAnswers = "Yes, No"
     @Published private(set) var decisionResult: DecisionResult?
     @Published var finishReason = ""
+    @Published private(set) var replyHasNoAnswer = false
     @Published var inputSpeed: Double?
     @Published var outputSpeed: Double?
     @Published private(set) var firstTokenSeconds: Double?
@@ -1704,6 +1705,24 @@ final class EngineController: ObservableObject {
     }
     var hasPlaygroundGeneration: Bool {
         mode == .chat && loadedMode == .chat && state == "generating" && pendingMessageID != nil
+    }
+    var chatFinishNotice: String? {
+        switch finishReason {
+        case "length":
+            if replyHasNoAnswer {
+                return "The model reached its output budget before answering. Edit your message and try again."
+            }
+            return options.maxNewTokens > 0
+                ? "Reply reached your output limit. Increase it or choose Auto in Advanced Options."
+                : "Reply reached the available context or execution budget."
+        case "context":
+            if replyHasNoAnswer {
+                return "The model reached the context limit before answering. Shorten your message or start a new chat."
+            }
+            return "Reply reached the current context limit. Review Advanced Options or start a new chat for more room."
+        default:
+            return nil
+        }
     }
     // The serialized worker runs either a Playground message or a connected-application request.
     var hasAPIGeneration: Bool {
@@ -2116,15 +2135,21 @@ final class EngineController: ObservableObject {
                   let text = event["text"] as? String else { return }
             if let requestID = event["request_id"] as? String,
                UUID(uuidString: requestID) != pendingMessageID { return }
-            messages.append(ChatMessage(text: text, isUser: false))
-            if conversationImage == nil, let id = pendingMessageID {
-                conversationImage = messages.first { $0.id == id }?.image
-            }
-            pendingMessageID = nil
-            generationProgress = nil
-            imageProgress = ""
-            attachmentStaging?.clear()
             finishReason = event["finish_reason"] as? String ?? ""
+            replyHasNoAnswer = ["length", "context"].contains(finishReason)
+                && SupportMetadata.boolean(event["answer_missing"]) == true
+            if replyHasNoAnswer {
+                discardPendingMessage()
+            } else {
+                messages.append(ChatMessage(text: text, isUser: false))
+                if conversationImage == nil, let id = pendingMessageID {
+                    conversationImage = messages.first { $0.id == id }?.image
+                }
+                pendingMessageID = nil
+                generationProgress = nil
+                imageProgress = ""
+                attachmentStaging?.clear()
+            }
             applyMetrics(event)
         case "metrics":
             applyMetrics(event)
@@ -3004,7 +3029,7 @@ final class EngineController: ObservableObject {
                 payload["image"] = try storage.stage(image)
             } catch { imageProgress = ""; imageError(error); return }
         }
-        state = "generating"; message = "Generating…"; finishReason = ""
+        state = "generating"; message = "Generating…"; finishReason = ""; replyHasNoAnswer = false
         generationProgress = nil
         if send(payload) {
             messages.append(entry)
@@ -3182,7 +3207,7 @@ final class EngineController: ObservableObject {
     private func clearConversation() {
         clearDecisionAttachment()
         messages.removeAll(); pendingMessageID = nil
-        finishReason = ""; inputSpeed = nil; outputSpeed = nil
+        finishReason = ""; replyHasNoAnswer = false; inputSpeed = nil; outputSpeed = nil
         generationProgress = nil; firstTokenSeconds = nil; generationSeconds = nil; reusedInputTokens = nil
         inputTokens = 0; outputTokens = 0
         draftImage = nil; conversationImage = nil; imageProgress = ""
@@ -4565,13 +4590,8 @@ struct ChatContentView: View {
                 }
             }.frame(minHeight: 180, maxHeight: .infinity)
                 .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
-            if ["length", "context"].contains(engine.finishReason) {
-                Text(engine.finishReason == "length" && engine.options.maxNewTokens > 0
-                     ? "Reply reached your output limit. Increase it or choose Auto in Advanced Options."
-                     : (engine.finishReason == "context"
-                        ? "Reply reached the current context limit. Review Advanced Options or start a new chat for more room."
-                        : "Reply reached the available context or execution budget."))
-                    .font(.caption).foregroundStyle(.orange)
+            if let notice = engine.chatFinishNotice {
+                Text(notice).font(.caption).foregroundStyle(.orange)
             }
             if let image = engine.draftImage {
                 HStack {

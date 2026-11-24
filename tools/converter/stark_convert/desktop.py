@@ -3183,19 +3183,25 @@ class Desktop:
             assistant = inkling_message or assistant_message(
                 reply["text"], initial_thinking=reply.get("_tool_initial_thinking", False)
             )
-            self.messages = [
-                *candidate,
-                assistant,
-            ]
-            self.image_identity = identity
+            visible_text = inkling_message["content"] if inkling_message is not None else reply["text"]
+            finish_reason = reply.get("finish_reason")
+            answer_missing = finish_reason in {"length", "context"} and not visible_text.strip()
+            if answer_missing:
+                # The composer can retry or edit this turn. Its unfinished
+                # reasoning and prompt prefix must not carry into that request.
+                self.prefix_reset_pending = True
+            else:
+                self.messages = [*candidate, assistant]
+                self.image_identity = identity
             fields = metrics(reply)
             self.emit("metrics", epoch, **fields)
             self.emit(
                 "reply",
                 epoch,
-                text=inkling_message["content"] if inkling_message is not None else reply["text"],
-                finish_reason=reply.get("finish_reason"),
+                text=visible_text,
+                finish_reason=finish_reason,
                 **({"request_id": request_id} if request_id else {}),
+                **({"answer_missing": True} if answer_missing else {}),
                 **fields,
             )
             self.status("ready", "Ready", epoch)

@@ -726,6 +726,17 @@ def prepare(
     # A derived choice downloads and verifies its pinned base exactly as that
     # base's own choice does; only the published folder differs.
     source = SOURCES[published["derived_from"]] if "derived_from" in published else published
+    # Keep the staging marker bound to the qualified source identity. The Hub
+    # receipts and download calls use the reachable public revision.
+    download_source = (
+        {
+            **source,
+            "weights_revision": inkling_prepare.DOWNLOAD_REVISION,
+            "metadata_revision": inkling_prepare.DOWNLOAD_REVISION,
+        }
+        if inkling
+        else source
+    )
     output = output.absolute()
     if output.exists() or output.is_symlink():
         raise ValueError("output already exists")
@@ -781,14 +792,16 @@ def prepare(
         capture = SnapshotDownloadProgress(
             progress,
             source["weight_bytes"],
-            completed_files=lambda: source["weight_bytes"] if gguf_complete else completed_model_bytes(stage, source),
+            completed_files=lambda: (
+                source["weight_bytes"] if gguf_complete else completed_model_bytes(stage, download_source)
+            ),
         )
         capture.close()
         download_options["tqdm_class"] = capture.bar_class()
     if not gguf_complete:
         snapshot_download(
             source["weights_repo"],
-            revision=source["weights_revision"],
+            revision=download_source["weights_revision"],
             allow_patterns=source["weights_patterns"],
             local_dir=stage,
             local_files_only=offline,
@@ -797,7 +810,7 @@ def prepare(
         )
     snapshot_download(
         source["metadata_repo"],
-        revision=source["metadata_revision"],
+        revision=download_source["metadata_revision"],
         allow_patterns=inkling_prepare.METADATA if inkling else _METADATA,
         local_dir=stage,
         local_files_only=offline,

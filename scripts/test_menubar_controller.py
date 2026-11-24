@@ -537,6 +537,29 @@ extension EngineController {
             guard engine.generationProgress == nil else { return false }
             engine.apply(["event": "reply", "text": "synthetic answer"])
             return !engine.hasPlaygroundGeneration
+        case "playground-capped-without-answer":
+            engine.mode = .chat; engine.loadedMode = .chat
+            engine.messages = [ChatMessage(text: "Earlier answer", isUser: false)]
+            for (reason, limit) in [("length", "output budget"), ("context", "context limit")] {
+                engine.draft = "Synthetic review question"
+                engine.generate()
+                let id = command()["request_id"] as! String
+                guard engine.chatFinishNotice == nil, engine.messages.count == 2 else { return false }
+                engine.apply(generationProgress(sampled: 4, elapsed: 0.9))
+                engine.apply(["event": "reply", "request_id": id, "text": "", "finish_reason": reason,
+                              "answer_missing": true, "output_tokens": 512])
+                engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+                guard engine.messages.map(\.text) == ["Earlier answer"], engine.draft == "Synthetic review question",
+                      engine.pendingMessageID == nil, engine.generationProgress == nil, engine.modelReady,
+                      engine.outputTokens == 512, engine.finishReason == reason,
+                      engine.chatFinishNotice?.contains("\(limit) before answering") == true else { return false }
+            }
+            engine.draft = "Edited review question"
+            engine.generate()
+            let retry = command()["request_id"] as! String
+            engine.apply(["event": "reply", "request_id": retry, "text": "Partial answer", "finish_reason": "length"])
+            return engine.messages.map(\.text) == ["Earlier answer", "Edited review question", "Partial answer"] &&
+                engine.draft.isEmpty && engine.chatFinishNotice == "Reply reached the available context or execution budget."
         case "playground-request-error":
             engine.mode = .chat; engine.loadedMode = .chat; engine.draft = "synthetic prompt"
             engine.generate()
@@ -3182,6 +3205,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_playground_request_error_restores_draft_and_ignores_stale_ids(self):
         self.exercise("playground-request-error")
+
+    def test_playground_capped_without_answer_restores_draft_and_keeps_partial_answers(self):
+        self.exercise("playground-capped-without-answer")
 
     def test_generation_progress_matches_active_request_and_retains_actual_first_token(
         self,

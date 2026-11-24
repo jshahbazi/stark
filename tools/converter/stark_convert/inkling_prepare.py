@@ -17,7 +17,10 @@ from ._build_metadata import file_hash
 from .streaming import open_regular
 
 REPO = "thinkingmachines/Inkling-2-Mini"
+# The qualified receipt and catalog identity use REVISION. The public upload
+# carries the same pinned weights and metadata and is the reachable download.
 REVISION = "6e7c8248f75265bdd4fbab5273304243b5d8c2cb"
+DOWNLOAD_REVISION = "1fb4134b9a74f9681054f4ef82e4bf1f458a2337"
 CHOICE = "inkling2-mini"
 ORIGINAL_CHOICE = "inkling2-mini-original"
 CHOICES = (CHOICE, ORIGINAL_CHOICE)
