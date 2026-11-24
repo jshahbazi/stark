@@ -159,6 +159,7 @@ context limit, EOS IDs and MTP support vary by loaded model:
 | `mode` | Protocol tag for this contract |
 | `operations` | Accepted `operation` values |
 | `generation_budget` | `memory-context-v1` when the loaded text backend supports native memory planning |
+| `thinking_budget_supported` | `true` when the loaded Inkling backend accepts `thinking_budget_tokens` on `generate` and `generate_image` |
 | `state_policy` | `fresh-per-request`: no state survives between requests. `consecutive-prefix-v1` when [prefix reuse](#prefix-reuse) is enabled |
 | `prefix_cache` | Present only when the worker was started with `--prefix-cache`: `supported`, `enabled`, `chunk_tokens` (the reuse grid, a multiple of 1,024: 1,024 for converted models and native GLM-5.3, 4,096 for native mixed-precision Qwen3.8, 2,048 for Inkling 2 Mini with its packed source prefill loaded), `tail_tokens` (the prompt tokens a request always prefills after a boundary, so its own boundary is the largest `chunk_tokens` multiple at or below its input length less the tail: 1, except 4 for Inkling 2 Mini with its packed source prefill and 2 without it), `idle_seconds` (600) and the reuse `key`. When enabled, `operations` also lists `reset_cache` |
 | `vocab_size` | Upper bound for every token ID |
@@ -222,6 +223,7 @@ Reply: `{"text":"...","token_count":N}`. An empty vector is valid. The whole vec
 | `max_new_tokens` | Required, positive and at most `context_tokens - 1`; there is no separate fixed output-token ceiling. The actual rendered input and requested output must fit the context. |
 | `seed` | Optional unsigned 64-bit integer, default 0. Only stochastic sampling uses it. |
 | `sampling` | Optional, default `{"mode":"greedy"}`. See [Sampling](#sampling). |
+| `thinking_budget_tokens` | Optional positive 32-bit integer, available when `thinking_budget_supported` is `true`. Omit to disable. Supported on `generate` and `generate_image`, with `max_new_tokens` of at least four. |
 | `mtp` | Optional boolean, default `false`. `true` uses this model's `recommended_drafts`; `false` disables MTP. Unsupported models reject `true` with `mtp_not_supported`. Applies to text `generate` only. |
 | `mtp_drafts` | Optional explicit draft count, default 0. Nonzero values must fit the loaded model's `max_drafts`. Retained for advanced callers and benchmarks. Supply either `mtp` or `mtp_drafts`; supplying both, including `false` and `0`, is invalid. |
 | `mtp_policy` | Optional, `"fixed"` or `"adaptive"`. Only on backends whose readiness `mtp` object lists `policies`. When omitted on a request with MTP on, the loaded model's readiness `default_policy` applies: `"adaptive"` on the pinned Lily Q4-XL artifact, `"fixed"` elsewhere. `"fixed"` opts out. See [MTP round scheduling](#mtp-round-scheduling). |
@@ -233,6 +235,8 @@ Reply: `{"text":"...","token_count":N}`. An empty vector is valid. The whole vec
 | `cache_scope` | Optional, only when prefix reuse is enabled: 32 lowercase hexadecimal characters chosen by the host. See [Prefix reuse](#prefix-reuse). Otherwise the field is rejected with `invalid_generation_request`. |
 
 The worker honors the union of `generation_config.stop_token_ids` and the tokenizer ID for a nonempty `token_codec_config.eos_token`. The chat EOS must resolve to a single vocabulary token; an unresolved declaration fails model loading with `invalid_model_config`. This covers checkpoints whose end-of-text and end-of-turn declarations differ, including existing converted models. The ColGrep checkpoint declares both EOS IDs, `1` and `130073`; both are honored automatically. Caller stops supplement model stops. A terminal stop is excluded from `generated_token_ids` and `text`.
+
+Inkling counts generated reasoning tokens across all thinking blocks in the reply. It reserves one quarter of the output allowance for the answer, clamped to 1–256 tokens, plus space for message framing. It raises the score of the thinking-block terminator near the effective budget, closes the block when the budget runs out, and prevents subsequent thinking blocks from opening during that reply. The same rules apply to serial and DSpark target-token selection. The model still chooses the next message and when to end the reply. Prefill cache reuse is independent of the setting and each request starts a fresh reasoning count.
 
 The terminal reply:
 

@@ -401,6 +401,7 @@ extension EngineController {
         contextLimit = 8192; contextCapacityKnown = true; outputLimit = 4096
         options = ChatOptions.defaults(contextLimit: contextLimit, outputLimit: outputLimit)
         supportsMTP = supported; mtpEnabled = supported
+        supportsThinkingBudget = supported
     }
 }
 

@@ -149,6 +149,8 @@ enum Request {
         #[serde(default)]
         sampling: Sampling,
         #[serde(default, deserialize_with = "present_value")]
+        thinking_budget_tokens: Option<u32>,
+        #[serde(default, deserialize_with = "present_value")]
         mtp: Option<bool>,
         #[serde(default, deserialize_with = "present_value")]
         mtp_drafts: Option<u32>,
@@ -184,6 +186,8 @@ enum Request {
         seed: u64,
         #[serde(default)]
         sampling: Sampling,
+        #[serde(default, deserialize_with = "present_value")]
+        thinking_budget_tokens: Option<u32>,
         #[serde(default)]
         stop_token_ids: Vec<u32>,
         #[serde(default)]
@@ -335,6 +339,7 @@ pub(crate) struct GenerationOptions {
     pub max_new_tokens: u32,
     pub seed: u64,
     pub sampling: Sampling,
+    pub thinking_budget_tokens: Option<u32>,
     pub mtp_drafts: u32,
     pub mtp_scheduling: MtpScheduling,
     pub eos_token_ids: Vec<u32>,
@@ -562,6 +567,9 @@ pub(crate) trait GenerationBackend {
         Ok(self.automatic_context_length(request.input_tokens, request.maximum, memory_budget_bytes))
     }
     fn supports_automatic_context_planning(&self) -> bool {
+        false
+    }
+    fn supports_thinking_budget(&self) -> bool {
         false
     }
     fn eos_token_ids(&self) -> &[u32];
@@ -921,6 +929,12 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         if options.max_new_tokens as usize > self.budget.input_bytes / std::mem::size_of::<u32>() {
             return Err("resource_budget_exceeded");
         }
+        if options
+            .thinking_budget_tokens
+            .is_some_and(|budget| budget == 0 || options.max_new_tokens < 4 || !self.backend.supports_thinking_budget())
+        {
+            return Err("invalid_generation_request");
+        }
         self.resolve_mtp(None, Some(options.mtp_drafts))?;
         if !options.mtp_scheduling.is_default() && (options.mtp_drafts == 0 || !self.backend.supports_mtp_scheduling())
         {
@@ -1189,6 +1203,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     max_new_tokens: maximum - input_tokens,
                     seed: 0,
                     sampling,
+                    thinking_budget_tokens: None,
                     mtp_drafts: default_drafts,
                     mtp_scheduling: MtpScheduling::default(),
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
@@ -1234,6 +1249,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 max_new_tokens,
                 seed,
                 sampling,
+                thinking_budget_tokens,
                 mtp,
                 mtp_drafts,
                 mtp_policy,
@@ -1253,6 +1269,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     max_new_tokens,
                     seed,
                     sampling,
+                    thinking_budget_tokens,
                     mtp_drafts: drafts,
                     mtp_scheduling,
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
@@ -1307,6 +1324,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     max_new_tokens,
                     seed: 0,
                     sampling: Sampling::default(),
+                    thinking_budget_tokens: None,
                     mtp_drafts: 0,
                     mtp_scheduling: MtpScheduling::default(),
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
@@ -1380,6 +1398,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 max_new_tokens,
                 seed,
                 sampling,
+                thinking_budget_tokens,
                 stop_token_ids,
                 stream,
                 stop,
@@ -1397,6 +1416,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     max_new_tokens,
                     seed,
                     sampling,
+                    thinking_budget_tokens,
                     mtp_drafts: 0,
                     mtp_scheduling: MtpScheduling::default(),
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
@@ -1603,6 +1623,9 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         readiness["operations"] = operations;
         readiness["generation_budget"] = json!("memory-context-v1");
         readiness["generation_budget_inputs"] = json!("token-ids-v1");
+    }
+    if worker.backend.supports_thinking_budget() {
+        readiness["thinking_budget_supported"] = json!(true);
     }
     if let Some(memory) = worker.backend.loaded_memory_metadata() {
         readiness["loaded_memory"] = memory;
@@ -3257,6 +3280,7 @@ mod tests {
             max_new_tokens: 8,
             seed: 0,
             sampling: Sampling::Greedy {},
+            thinking_budget_tokens: None,
             mtp_drafts: 0,
             mtp_scheduling: MtpScheduling::default(),
             eos_token_ids: vec![1],
@@ -3296,6 +3320,7 @@ mod tests {
             max_new_tokens: 8,
             seed: 0,
             sampling: Sampling::Greedy {},
+            thinking_budget_tokens: None,
             mtp_drafts: 0,
             mtp_scheduling: MtpScheduling::default(),
             eos_token_ids: vec![1],
@@ -3462,6 +3487,7 @@ mod tests {
             max_new_tokens: 4,
             seed: 0,
             sampling: Sampling::default(),
+            thinking_budget_tokens: None,
             mtp_drafts: 0,
             mtp_scheduling: MtpScheduling::default(),
             eos_token_ids: vec![1],
@@ -3517,6 +3543,7 @@ mod tests {
                     max_new_tokens: 1,
                     seed: 0,
                     sampling: Sampling::default(),
+                    thinking_budget_tokens: None,
                     mtp_drafts: 0,
                     mtp_scheduling: MtpScheduling::default(),
                     eos_token_ids: vec![1],
@@ -3810,6 +3837,8 @@ mod tests {
             json!({"context_tokens":16385}),
             json!({"context_tokens":1025}),
             json!({"max_new_tokens":0}),
+            json!({"thinking_budget_tokens":64}),
+            json!({"thinking_budget_tokens":0}),
             json!({"input_token_ids":[]}),
             json!({"input_token_ids":[8]}),
             json!({"input_token_ids":[2,3],"context_tokens":2}),
@@ -3843,6 +3872,9 @@ mod tests {
             json!({"input_token_ids":[-1]}),
             json!({"input_token_ids":[1.5]}),
             json!({"seed":-1}),
+            json!({"thinking_budget_tokens":null}),
+            json!({"thinking_budget_tokens":true}),
+            json!({"thinking_budget_tokens":-1}),
             json!({"sampling":{"mode":"greedy","temperature":0.6}}),
             json!({"sampling":{"mode":"stochastic","temperature":0.6,"repetition_penalty":1.1}}),
         ] {

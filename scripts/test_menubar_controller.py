@@ -861,6 +861,87 @@ extension EngineController {
                   !engine.configure(options, mtpEnabled: true), noCommandSent(),
                   engine.configure(options) else { return false }
             return command()["mtp_enabled"] == nil
+        case "optional-token-limit-drafts":
+            var output = TokenLimitDraft(suggested: ChatOptions.suggestedOutputLimit)
+            var thinking = TokenLimitDraft(suggested: ChatOptions.suggestedThinkingBudget)
+            guard !output.isEnabled, !thinking.isEnabled,
+                  output.text(maximum: 4096) == "1024", thinking.text(maximum: 4096) == "1024",
+                  output.tokens(maximum: 4096) == nil, thinking.tokens(maximum: 4096) == nil else { return false }
+            output.isEnabled = true; thinking.isEnabled = true
+            guard output.tokens(maximum: 4096) == 1024, thinking.tokens(maximum: 4096) == 1024,
+                  output.tokens(maximum: 511) == 511, thinking.tokens(maximum: 63) == 63 else { return false }
+            output.customValue = " 200 "
+            output.isEnabled = false
+            guard output.tokens(maximum: 4096) == nil else { return false }
+            output.isEnabled = true
+            guard output.tokens(maximum: 4096) == 200, output.tokens(maximum: 199) == nil else { return false }
+            for invalid in ["", "Auto", "Off", "0", "-1"] {
+                thinking.customValue = invalid
+                guard thinking.tokens(maximum: 4096) == nil else { return false }
+            }
+            let savedBudget = TokenLimitDraft(suggested: ChatOptions.suggestedThinkingBudget, applied: 256)
+            return savedBudget.isEnabled && savedBudget.tokens(maximum: 4096) == 256
+        case "thinking-budget-advanced-options":
+            engine.mode = .chat
+            let capability: [String: Any] = ["supported": true, "max_drafts": 3,
+                "recommended_drafts": 2, "default_drafts": 3, "operations": ["generate"],
+                "sampling": "exact-rejection-v1", "verification": "fixture-exact-v1"]
+            let ready: [String: Any] = ["event": "ready", "mode": "chat", "model_id": "fixture-model",
+                "max_context_tokens": 8192, "context_tokens": 8192, "max_output_tokens": 4096,
+                "max_new_tokens": 512, "thinking_budget_supported": true, "default_thinking_budget_tokens": 1024,
+                "thinking_budget_tokens": 1024, "mtp": capability, "mtp_enabled": true]
+            engine.apply(ready)
+            guard engine.supportsThinkingBudget, engine.defaultThinkingBudgetTokens == 1024,
+                  engine.options.thinkingBudgetTokens == 1024 else { return false }
+            var requestedOptions = engine.options
+            for invalidBudget in [0, -1, 4097] {
+                requestedOptions.thinkingBudgetTokens = invalidBudget
+                guard !engine.configure(requestedOptions), noCommandSent() else { return false }
+            }
+            requestedOptions.thinkingBudgetTokens = 256
+            requestedOptions.maxNewTokens = 3
+            guard !engine.configure(requestedOptions), noCommandSent() else { return false }
+            requestedOptions.maxNewTokens = 512
+            guard !engine.configure(requestedOptions, modelID: "stale"), noCommandSent(),
+                  engine.configure(requestedOptions, mtpEnabled: false, modelID: "fixture-model") else { return false }
+            let request = command()
+            guard request["thinking_budget_tokens"] as? Int == 256,
+                  request["model_id"] as? String == "fixture-model", request["mtp_enabled"] as? Bool == false,
+                  engine.options.thinkingBudgetTokens == 1024, engine.mtpEnabled else { return false }
+            var configured = ready
+            configured["event"] = "configured"
+            configured["thinking_budget_tokens"] = 256; configured["mtp_enabled"] = false
+            configured["model_id"] = "other-model"
+            engine.apply(configured)
+            guard engine.state == "configuring", engine.options.thinkingBudgetTokens == 1024 else { return false }
+            configured["model_id"] = "fixture-model"
+            engine.apply(configured)
+            guard engine.modelReady, engine.options.thinkingBudgetTokens == 256, !engine.mtpEnabled else { return false }
+
+            var off = engine.options
+            off.thinkingBudgetTokens = nil
+            guard engine.configure(off, mtpEnabled: true) else { return false }
+            let disable = command()
+            guard disable["model_id"] as? String == "fixture-model", disable["thinking_budget_tokens"] == nil,
+                  disable["mtp_enabled"] as? Bool == true else { return false }
+            configured.removeValue(forKey: "thinking_budget_tokens")
+            configured["mtp_enabled"] = true
+            engine.apply(configured)
+            guard engine.supportsThinkingBudget, engine.options.thinkingBudgetTokens == nil,
+                  engine.defaultThinkingBudgetTokens == 1024, engine.mtpEnabled else { return false }
+            let defaults = ChatOptions.defaults(contextLimit: engine.contextLimit, outputLimit: engine.outputLimit,
+                                               thinkingBudgetTokens: engine.defaultThinkingBudgetTokens)
+            guard engine.configure(defaults), command()["thinking_budget_tokens"] as? Int == 1024 else { return false }
+
+            var unsupported = ready
+            unsupported.removeValue(forKey: "thinking_budget_supported")
+            unsupported["thinking_budget_tokens"] = 512
+            engine.apply(unsupported)
+            guard !engine.supportsThinkingBudget, engine.defaultThinkingBudgetTokens == nil,
+                  engine.options.thinkingBudgetTokens == nil, !engine.configure(requestedOptions),
+                  noCommandSent(), engine.configure(off) else { return false }
+            let legacy = command()
+            return legacy["model_id"] == nil && legacy["thinking_budget_tokens"] == nil
         case "context-model-defaults":
             engine.mode = .chat
             for limit in [2, 512, 32_768, 262_144, 1_048_576] {
@@ -3486,6 +3567,12 @@ class ControllerLifecycleTests(unittest.TestCase):
         self,
     ):
         self.exercise("mtp-advanced-options")
+
+    def test_thinking_budget_advanced_options_follow_live_worker_capability(self):
+        self.exercise("thinking-budget-advanced-options")
+
+    def test_optional_token_limit_suggestions(self):
+        self.exercise("optional-token-limit-drafts")
 
     def test_running_version_is_extracted_once_with_source_and_control_identity(self):
         self.exercise("models-running-version-extracted")

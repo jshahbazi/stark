@@ -2,6 +2,8 @@
 
 [Look up research and speed changes by model](../MODEL_RESEARCH.md), including benchmark comparisons and branch-only attempts. The [source index](source-index.md) groups individual reports by family and topic.
 
+- [20261124-INKBUDGET-01 through -03 · Inkling 2 Mini thinking budget](../archive/runs/2026-11-24-inkling-thinking-budget.md) tracks the reasoning limit and answer reserve with DSpark on and off, and the adoption of the 1,024-token Playground default.
+
 - [Inkling 2 Mini decode toward 80 tok/s, attempts 79–110](2026-11-22-inkling-mini-decode-80.md) records worker repeats, verifier kernel and scheduling experiments, dense and FP4 layout screens, the MLX-Serve comparison, exact and sparse vocabulary readout, and DSpark ranking, K/V sharing, mask reuse and layer ablation.
 
 - [Inkling 2 Mini exact decode toward 60 tok/s, attempts 01–78](2026-11-21-inkling-mini-decode-60.md) tracks exact singleton decode, shared verifier work, exact rollback, source-precision DSpark acceptance, lookup and vocabulary eligibility, certified seeded sampling, shared KV reads and writes, and stochastic acceptance estimates for the original checkpoint on M5 Max.

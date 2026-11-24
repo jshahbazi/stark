@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Original Inkling 2 Mini target through the serialized JSONL worker.
 
+mod thinking_budget;
+
 use std::{
     path::Path,
     time::{Duration, Instant},
@@ -20,6 +22,7 @@ use stark_engine::{
 };
 use tokenizers::Tokenizer;
 
+use self::thinking_budget::{SamplingControl, THINKING, ThinkingBudget};
 use crate::{
     cancel::CancelSignal,
     generation::{
@@ -469,6 +472,7 @@ impl InklingBackend {
             verify_depth,
             logits,
             expanded,
+            input.last().copied() == Some(THINKING),
             options,
             started,
             on_text,
@@ -520,6 +524,42 @@ impl InklingBackend {
     }
 }
 
+fn sample_with_thinking_budget(
+    scores: &[f32],
+    control: SamplingControl,
+    sampling: &Sampling,
+    rng: &mut u64,
+    mapper: &mut ProbabilityMapper,
+    scratch: &mut Vec<f32>,
+) -> Result<u32, &'static str> {
+    let scores = match control {
+        SamplingControl::Natural => scores,
+        SamplingControl::Close => return Ok(END_MESSAGE),
+        SamplingControl::BiasClose(bias) => {
+            scratch.clear();
+            scratch.extend_from_slice(scores);
+            scratch[END_MESSAGE as usize] += bias;
+            scratch
+        },
+        SamplingControl::BlockThinking => {
+            // The normal sampler rejects nonfinite scores. Remove the opening
+            // marker from its candidates and preserve the other IDs' ordering.
+            if !scores[THINKING as usize].is_finite() {
+                return Err("native_generation_failed");
+            }
+            scratch.clear();
+            scratch.extend_from_slice(&scores[..THINKING as usize]);
+            scratch.extend_from_slice(&scores[THINKING as usize + 1..]);
+            scratch
+        },
+    };
+    let token = match sample_certified_prefix(scores, sampling, rng) {
+        Some(token) => token,
+        None => sample_with_mapper(scores, sampling, rng, Some(mapper))?,
+    };
+    Ok(token + u32::from(matches!(control, SamplingControl::BlockThinking) && token >= THINKING))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_output(
     target: &mut Session,
@@ -530,6 +570,7 @@ fn collect_output(
     verify_depth: usize,
     mut logits: Vec<f32>,
     input_tokens: usize,
+    starts_thinking: bool,
     options: &GenerationOptions,
     started: Instant,
     mut on_text: Option<&mut TextCallback<'_>>,
@@ -537,13 +578,12 @@ fn collect_output(
 ) -> Result<GeneratedTokens, &'static str> {
     let mut previous = None;
     let mut rng = options.seed;
-    let mut sample = |scores: &[f32]| {
-        if let Some(token) = sample_certified_prefix(scores, &options.sampling, &mut rng) {
-            return Ok(token);
-        }
-        sample_with_mapper(scores, &options.sampling, &mut rng, Some(mapper))
+    let mut modified_scores = Vec::new();
+    let mut sample = |scores: &[f32], control| {
+        sample_with_thinking_budget(scores, control, &options.sampling, &mut rng, mapper, &mut modified_scores)
     };
     let budget = (options.context_tokens as usize - input_tokens).min(options.max_new_tokens as usize);
+    let mut thinking = options.thinking_budget_tokens.map(|limit| ThinkingBudget::new(limit, budget, starts_thinking));
     let mut delivered = 0;
     let mut session = Some(target);
     let mut pending: Option<PendingDraft<'_>> = None;
@@ -615,8 +655,12 @@ fn collect_output(
                     });
                 }
             }
+            let control = thinking
+                .as_ref()
+                .map_or(SamplingControl::Natural, |thinking| thinking.sampling_control(budget - delivered));
             let token = if let Some(mut draft) = pending.take() {
-                let token = sample(draft.transaction.logits(draft.consumed).map_err(|_| "native_generation_failed")?)?;
+                let token =
+                    sample(draft.transaction.logits(draft.consumed).map_err(|_| "native_generation_failed")?, control)?;
                 let matched = draft.proposals.get(draft.consumed) == Some(&token);
                 draft.consumed += 1;
                 if matched {
@@ -639,13 +683,16 @@ fn collect_output(
                 }
                 token
             } else {
-                let token = sample(&logits)?;
+                let token = sample(&logits, control)?;
                 if let Some(proposal) = legacy_proposal {
                     draft_stats.proposed += 1;
                     draft_stats.accepted += usize::from(proposal == token);
                 }
                 token
             };
+            if let Some(thinking) = thinking.as_mut() {
+                thinking.observe(token, || tokenizer.id_to_token(token));
+            }
             previous = Some(token);
             delivered += 1;
             Ok(u64::from(token))
@@ -714,6 +761,9 @@ impl GenerationBackend for InklingBackend {
     }
 
     fn supports_automatic_context_planning(&self) -> bool {
+        true
+    }
+    fn supports_thinking_budget(&self) -> bool {
         true
     }
     fn automatic_context_length(
@@ -972,6 +1022,42 @@ mod tests {
     use super::*;
 
     const MIB: usize = 1024 * 1024;
+
+    #[test]
+    fn thinking_budget_changes_only_the_selected_marker_in_target_sampling() {
+        let alternate = THINKING + 1;
+        let mut scores = vec![-1.0; VOCAB];
+        scores[THINKING as usize] = 7.0;
+        scores[alternate as usize] = 6.0;
+        scores[END_MESSAGE as usize] = 5.0;
+        let mut mapper = ProbabilityMapper::default();
+        let mut scratch = Vec::new();
+
+        for sampling in [
+            Sampling::Greedy {},
+            Sampling::Stochastic {
+                temperature: 1.0,
+                top_k: Some(1),
+                top_p: None,
+                min_p: None,
+            },
+        ] {
+            let mut rng = 42;
+            for (control, expected) in [
+                (SamplingControl::Natural, THINKING),
+                (SamplingControl::BlockThinking, alternate),
+                (SamplingControl::BiasClose(3.0), END_MESSAGE),
+                (SamplingControl::Close, END_MESSAGE),
+            ] {
+                assert_eq!(
+                    sample_with_thinking_budget(&scores, control, &sampling, &mut rng, &mut mapper, &mut scratch),
+                    Ok(expected),
+                );
+            }
+        }
+        assert_eq!(scores[THINKING as usize], 7.0);
+        assert_eq!(scores[END_MESSAGE as usize], 5.0);
+    }
 
     #[test]
     fn source_prefill_admits_every_nonempty_prompt() {

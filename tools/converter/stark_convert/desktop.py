@@ -40,6 +40,7 @@ from .api_tools import (
 from .catalog_ranking import RELATIONSHIPS as REFERENCE_RELATIONSHIPS
 from .catalog_reasons import REPOSITORY as ORIGINAL_REPOSITORY
 from .chat import (
+    MIN_THINKING_BUDGET_OUTPUT_TOKENS,
     ChatBudgetUnavailable,
     ChatCancelled,
     ChatError,
@@ -142,6 +143,7 @@ def prepared_decision_name(config):
 
 PROGRESS_PHASES = ("download", "conversion")
 MODEL_FILES = ("config.json", "tokenizer.json", "model.safetensors")
+DEFAULT_INKLING_THINKING_BUDGET_TOKENS = 1024
 
 
 class DesktopError(Exception):
@@ -541,6 +543,7 @@ class Desktop:
         self.generation_estimates = GenerationEstimates()
         self.system_prompt = None
         self.thinking = False
+        self.thinking_budgets = {}
         self.context_limit = 0
         self.context_capacity_known = False
         self.output_limit = 512
@@ -1594,6 +1597,7 @@ class Desktop:
                         raise
 
                 result = remove_model(plan, commit)
+                self.thinking_budgets.pop(identifier, None)
                 self.library()
                 self.emit(
                     "model_removed",
@@ -2831,6 +2835,7 @@ class Desktop:
             worker.stop_sequences = ready.get("stop_sequences") is True
             worker.mtp = mtp_capabilities(ready)
             worker.generation_budget = ready.get("generation_budget") == "memory-context-v1"
+            worker.thinking_budget_supported = ready.get("thinking_budget_supported") is True
             worker.max_new_tokens = ready.get("max_new_tokens", 0)
             self.codec, self.template = codec, template
             self.context_limit = ready["max_context_tokens"]
@@ -2948,6 +2953,7 @@ class Desktop:
     def settings_summary(self):
         # Prompts stay in memory; acknowledgements contain limits and capabilities.
         capability, enabled = self.mtp_settings()
+        default_thinking_budget_tokens, thinking_budget_tokens = self.thinking_budget_settings()
         return {
             **(
                 {
@@ -2984,6 +2990,13 @@ class Desktop:
             else None,
             "mtp": capability,
             "mtp_enabled": enabled,
+            "thinking_budget_supported": default_thinking_budget_tokens is not None,
+            **(
+                {"default_thinking_budget_tokens": default_thinking_budget_tokens}
+                if default_thinking_budget_tokens is not None
+                else {}
+            ),
+            **({"thinking_budget_tokens": thinking_budget_tokens} if thinking_budget_tokens is not None else {}),
             "image_verification": (
                 getattr(self.worker, "image_verification", "unverified")
                 if self.context_capacity_known
@@ -3062,6 +3075,19 @@ class Desktop:
             model.update(previous)
             raise DesktopError("Cannot save MTP options. Try again.") from None
 
+    def thinking_budget_settings(self):
+        """Return the loaded model's default and session-local Playground budget."""
+        if (
+            self.active_mode != "chat"
+            or self.active_model is None
+            or getattr(self.worker, "thinking_budget_supported", False) is not True
+            or tool_parser_for(self.codec) != INKLING_PARSER
+        ):
+            return None, None
+        default_tokens = min(DEFAULT_INKLING_THINKING_BUDGET_TOKENS, self.output_limit)
+        tokens = self.thinking_budgets.get(self.active_model, default_tokens)
+        return default_tokens, min(tokens, self.output_limit) if tokens is not None else None
+
     def configure(self, payload):
         with self.lock:
             if self.job is not None or self.api_queue:
@@ -3073,9 +3099,16 @@ class Desktop:
             context, maximum = payload.get("context_tokens"), payload.get("max_new_tokens")
             system, thinking = payload.get("system_prompt"), payload.get("thinking")
             fields = {"command", "context_tokens", "max_new_tokens", "system_prompt", "thinking"}
-            has_mtp = "mtp_enabled" in payload or "model_id" in payload
+            has_mtp = "mtp_enabled" in payload
+            has_budget = "thinking_budget_tokens" in payload
+            has_model_id = "model_id" in payload
+            default_thinking_budget, _ = self.thinking_budget_settings()
+            thinking_budget_supported = default_thinking_budget is not None
+            thinking_budget = payload.get("thinking_budget_tokens")
             if (
-                set(payload) != fields | ({"model_id", "mtp_enabled"} if has_mtp else set())
+                set(payload) - {"model_id", "mtp_enabled", "thinking_budget_tokens"} != fields
+                or ((has_mtp or has_budget) and not has_model_id)
+                or (has_model_id and not (has_mtp or has_budget or thinking_budget_supported))
                 or type(context) is not int
                 or not 2 <= context <= self.context_limit
                 or type(maximum) is not int
@@ -3084,13 +3117,22 @@ class Desktop:
                 or type(thinking) is not bool
             ):
                 raise DesktopError("Invalid advanced options. Check the model's token limits.")
+            if has_model_id and payload["model_id"] != self.active_model:
+                raise DesktopError("Model changed. Refresh its advanced options.")
+            if has_budget and not thinking_budget_supported:
+                raise DesktopError("Thinking Budget is not supported by this model and worker.")
+            if has_budget and (type(thinking_budget) is not int or not 1 <= thinking_budget <= self.output_limit):
+                raise DesktopError("Invalid Thinking Budget. Check the model's output limit.")
+            if has_budget and (maximum or min(self.output_limit, context - 1)) < MIN_THINKING_BUDGET_OUTPUT_TOKENS:
+                raise DesktopError("Leave at least four output tokens when Thinking Budget is enabled.")
             if has_mtp:
-                if payload["model_id"] != self.active_model:
-                    raise DesktopError("Model changed. Refresh its MTP options.")
                 capability, _ = self.mtp_settings()
                 if type(payload["mtp_enabled"]) is not bool or not capability["supported"]:
                     raise DesktopError("MTP is not supported by this model and worker.")
                 self.save_mtp_preference(payload["mtp_enabled"])
+            if thinking_budget_supported and has_model_id:
+                # A model-scoped configuration can explicitly leave the toggle off.
+                self.thinking_budgets[self.active_model] = thinking_budget
             self.context, self.maximum = context, maximum
             self.context_override = None if context == self.context_limit else context
             self.system_prompt, self.thinking = system, thinking
@@ -3128,12 +3170,14 @@ class Desktop:
                 raise DesktopError("Resupply the conversation image or start a new chat.")
             history = list(self.messages)
             maximum, thinking = self.maximum, self.thinking
+            _, thinking_budget_tokens = self.thinking_budget_settings()
             cache_scope = getattr(self, "chat_cache_scope", None)
             capability, default_mtp = self.mtp_settings()
             enabled_mtp = default_mtp and reference is None
             drafts = self.resolve_request_mtp(enabled_mtp, capability, reference)
             estimate_key = self.estimate_key(
                 thinking=thinking,
+                thinking_budget_tokens=thinking_budget_tokens,
                 image=reference is not None,
                 mtp_drafts=drafts,
             )
@@ -3163,6 +3207,7 @@ class Desktop:
                 maximum,
                 epoch=epoch,
                 thinking=thinking,
+                thinking_budget_tokens=thinking_budget_tokens,
                 image=image,
                 mtp=enabled_mtp,
                 on_progress=on_progress,
@@ -3212,6 +3257,7 @@ class Desktop:
         context=None,
         sampling=None,
         thinking=False,
+        thinking_budget_tokens=None,
         reasoning_effort=None,
         image=False,
         tools=False,
@@ -3225,6 +3271,7 @@ class Desktop:
             context or self.context,
             json.dumps(sampling or {"mode": "greedy"}, sort_keys=True),
             bool(thinking),
+            thinking_budget_tokens,
             reasoning_effort,
             bool(image),
             bool(tools),
@@ -3245,6 +3292,7 @@ class Desktop:
         cancelled=None,
         epoch=None,
         thinking=False,
+        thinking_budget_tokens=None,
         reasoning_effort=None,
         on_reasoning=None,
         image=None,
@@ -3260,10 +3308,20 @@ class Desktop:
             worker, template, codec = self.worker, self.template, self.codec
             prefix_cache = getattr(worker, "prefix_cache", False) is True
             reset_prefix = getattr(self, "prefix_reset_pending", False) and prefix_cache
-            self.prefix_reset_pending = False
             dispatch_epoch, identifier = self.epoch, self.active_model
             if worker is None or template is None:
                 raise APIError(503, "Run a model before sending a prompt.", "model_not_loaded")
+            if thinking_budget_tokens is not None:
+                default_thinking_budget, _ = self.thinking_budget_settings()
+                if (
+                    default_thinking_budget is None
+                    or type(thinking_budget_tokens) is not int
+                    or not 1 <= thinking_budget_tokens <= self.output_limit
+                ):
+                    raise DesktopError("This model or worker does not support the requested Thinking Budget.")
+                if maximum not in (None, 0) and maximum < MIN_THINKING_BUDGET_OUTPUT_TOKENS:
+                    raise DesktopError("Leave at least four output tokens when Thinking Budget is enabled.")
+            self.prefix_reset_pending = False
             context = context or self.context
             capability, default_mtp = self.mtp_settings()
             enabled_mtp = (default_mtp and image is None) if mtp is None else mtp
@@ -3273,6 +3331,7 @@ class Desktop:
                 context=context,
                 sampling=sampling,
                 thinking=thinking,
+                thinking_budget_tokens=thinking_budget_tokens,
                 reasoning_effort=reasoning_effort,
                 image=image is not None,
                 tools=tools is not None,
@@ -3387,6 +3446,8 @@ class Desktop:
                 "stop": stop or [],
                 "stream": on_delta is not None,
             }
+            if thinking_budget_tokens is not None:
+                options["thinking_budget_tokens"] = thinking_budget_tokens
             reply = worker.request_image(
                 prompt, image, options, on_delta=on_delta, cancelled=cancelled, **progress_options
             )
@@ -3421,6 +3482,8 @@ class Desktop:
                     raise APIError(503, str(error), "automatic_output_unavailable") from None
             if maximum < 1:
                 raise DesktopError("Conversation is full. Start a new conversation and try again.")
+        if thinking_budget_tokens is not None and maximum < MIN_THINKING_BUDGET_OUTPUT_TOKENS:
+            raise DesktopError("Leave at least four output tokens when Thinking Budget is enabled.")
         if count + maximum > context:
             raise DesktopError("Conversation is full. Start a new conversation and try again.")
         token_ids = tokens.get("token_ids")
@@ -3443,6 +3506,8 @@ class Desktop:
             "sampling": sampling or {"mode": "greedy"},
             "seed": seed,
         }
+        if thinking_budget_tokens is not None:
+            request["thinking_budget_tokens"] = thinking_budget_tokens
         protocol_ids = protocol_stop_ids(
             worker,
             tool_parser_for(codec),
