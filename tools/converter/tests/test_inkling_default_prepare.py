@@ -120,9 +120,9 @@ def test_default_choice_downloads_the_original_and_publishes_the_verified_8bit_a
     result = hybrid.prepare(inkling_prepare.CHOICE, output, progress=progress.append, artifact_mode="vision-language")
     assert result["status"] == "prepared" and result["layout"] == inkling_prepare.AFFINE8_LAYOUT
     assert result["weight_bytes"] == hybrid.SOURCES[inkling_prepare.CHOICE]["weight_bytes"]
-    # The download is the pinned original at its revision, metadata and weights only.
+    # Both requests use the public upload while prepared identity stays qualified.
     assert [(repo, revision) for repo, revision, _ in pinned.calls] == [
-        (inkling_prepare.REPO, inkling_prepare.REVISION)
+        (inkling_prepare.REPO, inkling_prepare.DOWNLOAD_REVISION)
     ] * 2
     assert pinned.calls[0][2] == tuple(inkling_prepare.SOURCE["weights_patterns"])
     # Only the verified derived folder is published; the download and derive folders are gone.
@@ -154,10 +154,13 @@ def test_original_choice_is_prepared_exactly_as_before(tmp_path, pinned):
     assert result["weight_bytes"] == pinned.original["weight_bytes"]
     assert (output / inkling_prepare.TARGET).read_bytes() == pinned.target
     assert hybrid.prepared_identity(output) == _identity(pinned.original)
+    assert [revision for _, revision, _ in pinned.calls] == [inkling_prepare.DOWNLOAD_REVISION] * 2
     assert _siblings(output) == ["model"]
 
 
 def test_an_existing_download_from_before_the_change_resumes_into_the_default(tmp_path, pinned):
+    from huggingface_hub._local_folder import write_download_metadata
+
     # The default's staging marker names the original download, as before.
     output = tmp_path / "model"
     stage = tmp_path / "model.native-download"
@@ -165,7 +168,12 @@ def test_an_existing_download_from_before_the_change_resumes_into_the_default(tm
     marker = {"choice": inkling_prepare.CHOICE, "source": hybrid.SOURCES[inkling_prepare.ORIGINAL_CHOICE]}
     (stage / "stark-download.json").write_text(json.dumps(marker, sort_keys=True))
     _write_original(stage, pinned.target)
-    hybrid.prepare(inkling_prepare.CHOICE, output, offline=True)
+    write_download_metadata(stage, inkling_prepare.TARGET, inkling_prepare.DOWNLOAD_REVISION, "etag")
+    progress = []
+    hybrid.prepare(inkling_prepare.CHOICE, output, offline=True, progress=progress.append)
+    assert next(event for event in progress if event.get("transferred_bytes") == 0)["completed_bytes"] == len(
+        pinned.target
+    )
     assert hybrid.prepared_identity(output)["quantization"] == inkling_prepare.AFFINE8_QUANTIZATION
 
 
