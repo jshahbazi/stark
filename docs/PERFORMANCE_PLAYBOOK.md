@@ -91,6 +91,8 @@ For a second draft candidate, pair both proposals at the same anchor, count exac
 
 For a drafter that already scores multiple candidates, time the extra selection work and keep a control that always gives the runner-up a slot. With three slots on Inkling DFlash 2, using the runner-up at the first low-margin position cut replayed rounds by 2.10% on held-out prose and 1.19% on coding. Always forking at the first position increased rounds by 7.30% and 11.07%. After charging the measured selector overhead, modeled remaining target-time savings were about 0.46 and 0.27 ms per draft round before branch handling. [Held-out replay and M5 Max selector timing](model-experiments/2026-11-25-inkling-dflash-self-correction.md)
 
+The live packed sibling reduced target rounds by 1.67% on prose and 1.20% on coding. Separate worker launches swung several percentage points across blocks. Adjacent requests in a single worker measured +0.67% and +0.02% decode throughput, with about 0.7% movement in an unaffected width-two control. The measured time allowance per candidate round was 0.60 ms and 0.43 ms, respectively. Retain the ordinary policy by default on this artifact. [Live DFlash three-slot comparison](benchmarks/2026-11-25-inkling-live-runner-up.md)
+
 If a stage is a fraction f of the time and a change makes it s times faster, the whole gets `1 / (1 - f + f / s)` times faster. Removing a 5 percent stage entirely cannot give 10 percent. Halving a stage gives 10 percent more throughput only if the stage is about 18 percent of the time.
 
 This rule stopped several projects before any code was written:
@@ -848,6 +850,7 @@ These rules are for optimization work on one engine. To compare engines, or to s
 | 2026-11-23 | [Inkling session audit][inkaudit] | Attempts, intermediate figures and incidents of 2026-11-22 to 11-23 that the records lacked; corrections to earlier records; the merged tree's lint commit that the gates did not cover |
 | 2026-11-25 | [Inkling cross-drafter first-miss recovery](model-experiments/2026-11-25-inkling-first-miss.md) | Three- and seven-slot greedy fork replay, M5 Max packet prices and break-even per paid attempt |
 | 2026-11-25 | [Inkling DFlash runner-up](model-experiments/2026-11-25-inkling-dflash-self-correction.md) | Paired holdout replay and selector-cost screen for a three-slot fork |
+| 2026-11-25 | [Inkling live DFlash runner-up](benchmarks/2026-11-25-inkling-live-runner-up.md) | Packed sibling commit parity, matched worker rates, adjacent same-process pairs and a width-two timing control |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 

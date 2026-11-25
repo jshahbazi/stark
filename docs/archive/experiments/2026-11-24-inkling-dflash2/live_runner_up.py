@@ -100,19 +100,19 @@ def read_tokens(path):
         return [token for (token,) in struct.iter_unpack("<I", source.read(stop - start))]
 
 
-def measure(worker, prompt, teacher):
+def measure(worker, prompt, teacher, *, seed=0, width=3):
     started = time.perf_counter()
     result = worker.request(
         {"operation": "generate", "input_token_ids": prompt, "context_tokens": 4352,
-         "max_new_tokens": len(teacher), "seed": 0, "sampling": {"mode": "greedy"},
-         "stream": True, "mtp_drafts": 3},
+         "max_new_tokens": len(teacher), "seed": seed, "sampling": {"mode": "greedy"},
+         "stream": True, "mtp_drafts": width},
         on_delta=lambda _: None,
     )
     wall = time.perf_counter() - started
     if result.get("generated_token_ids") != teacher:
         raise ValueError("live output differed from frozen greedy teacher or request failed")
     mtp = result.get("mtp") or {}
-    if not mtp.get("enabled") or mtp.get("drafts") != 3 or result.get("reused_input_tokens", 0):
+    if not mtp.get("enabled") or mtp.get("drafts") != width or result.get("reused_input_tokens", 0):
         raise ValueError("unexpected generation configuration")
     stats = mtp["stats"]
     spec = stats["speculative"]
