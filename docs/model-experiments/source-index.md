@@ -220,6 +220,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 ### References, native milestones and follow-up
 
 - [Original-checkpoint implementation plan](../INKLING_2_MINI_PLAN.md)
+- [DFlash 2 and DSpark first-miss recovery](2026-11-25-inkling-first-miss.md) · Fixed-node replay and modeled M5 Max correction budgets
 - [Live DFlash 2 worker and three-block benchmark](../benchmarks/2026-11-24-inkling-mini-live-dflash2.md) · Original checkpoint, M5 Max
 - [DFlash 2 and native DSpark on four identical greedy traces](2026-11-24-inkling-mini-dflash2-traces.md) · Proposal acceptance and native verifier cost, 2026-11-24
 - [Native Metal retrospective](../archive/runs/2026-11-21-inkling-mini-native-retrospective.md) · Archived run, 2026-11-21

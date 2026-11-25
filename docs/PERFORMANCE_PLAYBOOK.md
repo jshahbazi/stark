@@ -1,6 +1,6 @@
 # Performance playbook
 
-What to try when making a model family faster on Stark, in roughly the order to try it, with what each idea returned on Qwen3.8-Flash-Next ("Lily"). Compiled 2026-11-19 and updated 2026-11-23 from the records listed at the end.
+What to try when making a model family faster on Stark, in roughly the order to try it, with what each idea returned on Qwen3.8-Flash-Next ("Lily"). Compiled 2026-11-19 and updated 2026-11-25 from the records listed at the end.
 
 This page summarizes records; it is not one. Every number was measured on a named artifact, build, workload and host, and keeps that scope. Nothing here qualifies another artifact, and where this page and a dated record differ, the record is right. A technique that paid on Lily has to be measured again on the next family. One that failed on Lily failed for a stated reason, and the reason is the thing to check before trying it again.
 
@@ -86,6 +86,8 @@ At a verifier width limit, measure both the full-block cost and the probability 
 Include live draft execution and feature transfer when pricing that limit. The original Inkling DFlash 2 companion took 8.7–9.4 ms per warm draft call on the two sampled traces. Seven proposals gained 2.6% over three in the matched worker screen. On the server, seven reached 84.9 tok/s on initial coding and 79.3 tok/s on novel prose. [Live DFlash benchmark](benchmarks/2026-11-24-inkling-mini-live-dflash2.md)
 
 ### Estimate the ceiling before building
+
+For a second draft candidate, pair both proposals at the same anchor, count exact-prefix catches at the first miss, and re-walk the entire trajectory after charging the sibling one verifier slot. On the original Inkling checkpoint, DFlash 2 caught 49% of DSpark's three-slot prose misses and 48% on three coding traces. The modeled target time available to an alternate called on every draft round was 5.26 ms on prose and 2.17 ms on coding. At seven slots, additional physical verifier calls erased the savings on the 4K coding trace. [First-miss and packet-cost replay](model-experiments/2026-11-25-inkling-first-miss.md)
 
 If a stage is a fraction f of the time and a change makes it s times faster, the whole gets `1 / (1 - f + f / s)` times faster. Removing a 5 percent stage entirely cannot give 10 percent. Halving a stage gives 10 percent more throughput only if the stage is about 18 percent of the time.
 
@@ -842,6 +844,7 @@ These rules are for optimization work on one engine. To compare engines, or to s
 | 2026-11-23 | [Inkling wind-down][inkwind] | Optimization stopped by owner decision; reverted unmeasured launch merges and prefill items, the paired-control hang, the lock incidents |
 | 2026-11-23 | [Inkling 2 Mini standard benchmark][inkstd] | First standard result: three repeats, quality attached, standings against MLX-Serve on matched artifacts |
 | 2026-11-23 | [Inkling session audit][inkaudit] | Attempts, intermediate figures and incidents of 2026-11-22 to 11-23 that the records lacked; corrections to earlier records; the merged tree's lint commit that the gates did not cover |
+| 2026-11-25 | [Inkling cross-drafter first-miss recovery](model-experiments/2026-11-25-inkling-first-miss.md) | Three- and seven-slot greedy fork replay, M5 Max packet prices and break-even per paid attempt |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 

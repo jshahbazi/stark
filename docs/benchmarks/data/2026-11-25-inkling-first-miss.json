@@ -1,0 +1,849 @@
+{
+  "attempt": "20261125-INKDRAFT-01",
+  "matched_receipt_sha256": "5885831a3017a000c909111b9a6f109aadcaded0c21d83fec4b0d3bb25f1495c",
+  "live_receipt_sha256": "104cbc9ea5bf440b76d54fd3c5a88196476306e7aed76f5f4bc6ba154c642e21",
+  "groups": {
+    "prose": {
+      "dspark_3": {
+        "baseline_rounds": 96,
+        "first_misses": 79,
+        "other_catches": 39,
+        "fork_rounds": 80,
+        "fork_draft_rounds": 80,
+        "forks": 52,
+        "sibling_taken": 25,
+        "saved_draft_rounds": 16,
+        "verify_commit_savings_ms_by_block": [
+          394.5684,
+          438.2391,
+          453.5959,
+          403.3977,
+          381.1173,
+          450.1761
+        ],
+        "verify_commit_ms_per_attempt": 8.0927,
+        "verify_commit_ms_per_taken": 16.8327,
+        "verify_commit_ms_per_draft_round": 5.2602
+      },
+      "dspark_7": {
+        "baseline_rounds": 91,
+        "first_misses": 90,
+        "other_catches": 46,
+        "fork_rounds": 74,
+        "fork_draft_rounds": 74,
+        "forks": 73,
+        "sibling_taken": 35,
+        "saved_draft_rounds": 17,
+        "verify_commit_savings_ms_by_block": [
+          291.3708,
+          301.7791,
+          319.282,
+          264.2211,
+          262.8012,
+          287.6621
+        ],
+        "verify_commit_ms_per_attempt": 3.966,
+        "verify_commit_ms_per_taken": 8.2719,
+        "verify_commit_ms_per_draft_round": 3.9124
+      },
+      "dflash_3": {
+        "baseline_rounds": 73,
+        "first_misses": 47,
+        "other_catches": 7,
+        "fork_rounds": 75,
+        "fork_draft_rounds": 75,
+        "forks": 49,
+        "sibling_taken": 7,
+        "saved_draft_rounds": -2,
+        "verify_commit_savings_ms_by_block": [
+          -50.431,
+          -47.7639,
+          -49.5199,
+          -48.2155,
+          -50.3076,
+          -49.2596
+        ],
+        "verify_commit_ms_per_attempt": -1.008,
+        "verify_commit_ms_per_taken": -7.0557,
+        "verify_commit_ms_per_draft_round": -0.6585,
+        "worker_savings_ms_by_block": [
+          -69.2877,
+          -69.2842,
+          -69.2863,
+          -69.2847,
+          -69.2874,
+          -69.2862
+        ],
+        "worker_ms_per_attempt": -1.414,
+        "worker_ms_per_taken": -9.898,
+        "worker_ms_per_draft_round": -0.9238
+      },
+      "dflash_7": {
+        "baseline_rounds": 62,
+        "first_misses": 56,
+        "other_catches": 6,
+        "fork_rounds": 60,
+        "fork_draft_rounds": 60,
+        "forks": 59,
+        "sibling_taken": 7,
+        "saved_draft_rounds": 2,
+        "verify_commit_savings_ms_by_block": [
+          -75.723,
+          -72.1613,
+          -83.4188,
+          -72.2048,
+          -71.9707,
+          -72.4211
+        ],
+        "verify_commit_ms_per_attempt": -1.2256,
+        "verify_commit_ms_per_taken": -10.3304,
+        "verify_commit_ms_per_draft_round": -1.2052,
+        "worker_savings_ms_by_block": [
+          -57.2998,
+          -50.9076,
+          -71.1115,
+          -50.9857,
+          -50.5655,
+          -51.374
+        ],
+        "worker_ms_per_attempt": -0.8675,
+        "worker_ms_per_taken": -7.3114,
+        "worker_ms_per_draft_round": -0.853
+      }
+    },
+    "coding_pooled": {
+      "dspark_3": {
+        "baseline_rounds": 224,
+        "first_misses": 149,
+        "other_catches": 72,
+        "fork_rounds": 206,
+        "fork_draft_rounds": 205,
+        "forks": 103,
+        "sibling_taken": 48,
+        "saved_draft_rounds": 18,
+        "verify_commit_savings_ms_by_block": [
+          440.3853,
+          447.7253,
+          487.4857,
+          441.8854,
+          440.9831,
+          460.8612
+        ],
+        "verify_commit_ms_per_attempt": 4.3185,
+        "verify_commit_ms_per_taken": 9.2668,
+        "verify_commit_ms_per_draft_round": 2.1698
+      },
+      "dspark_7": {
+        "baseline_rounds": 197,
+        "first_misses": 186,
+        "other_catches": 80,
+        "fork_rounds": 173,
+        "fork_draft_rounds": 172,
+        "forks": 158,
+        "sibling_taken": 69,
+        "saved_draft_rounds": 24,
+        "verify_commit_savings_ms_by_block": [
+          139.5161,
+          137.2749,
+          171.4831,
+          140.4172,
+          137.5976,
+          146.6063
+        ],
+        "verify_commit_ms_per_attempt": 0.8859,
+        "verify_commit_ms_per_taken": 2.0285,
+        "verify_commit_ms_per_draft_round": 0.8138
+      },
+      "dflash_3": {
+        "baseline_rounds": 198,
+        "first_misses": 102,
+        "other_catches": 22,
+        "fork_rounds": 199,
+        "fork_draft_rounds": 198,
+        "forks": 99,
+        "sibling_taken": 22,
+        "saved_draft_rounds": -1,
+        "verify_commit_savings_ms_by_block": [
+          -22.2194,
+          -22.6482,
+          -28.378,
+          -22.1896,
+          -22.4192,
+          -27.1054
+        ],
+        "verify_commit_ms_per_attempt": -0.2276,
+        "verify_commit_ms_per_taken": -1.0243,
+        "verify_commit_ms_per_draft_round": -0.1138,
+        "worker_savings_ms_by_block": [
+          -30.1083,
+          -30.1094,
+          -30.1159,
+          -30.1096,
+          -30.1094,
+          -30.1154
+        ],
+        "worker_ms_per_attempt": -0.3041,
+        "worker_ms_per_taken": -1.3686,
+        "worker_ms_per_draft_round": -0.1521
+      },
+      "dflash_7": {
+        "baseline_rounds": 157,
+        "first_misses": 134,
+        "other_catches": 22,
+        "fork_rounds": 154,
+        "fork_draft_rounds": 153,
+        "forks": 145,
+        "sibling_taken": 24,
+        "saved_draft_rounds": 3,
+        "verify_commit_savings_ms_by_block": [
+          -182.4404,
+          -186.6441,
+          -192.7669,
+          -178.2058,
+          -177.8629,
+          -180.8219
+        ],
+        "verify_commit_ms_per_attempt": -1.2526,
+        "verify_commit_ms_per_taken": -7.568,
+        "verify_commit_ms_per_draft_round": -1.1871,
+        "worker_savings_ms_by_block": [
+          -150.3905,
+          -168.4625,
+          -189.7283,
+          -147.2486,
+          -147.9246,
+          -156.1953
+        ],
+        "worker_ms_per_attempt": -1.0572,
+        "worker_ms_per_taken": -6.3872,
+        "worker_ms_per_draft_round": -1.0019
+      }
+    }
+  },
+  "cases": {
+    "coding": {
+      "dspark_3": {
+        "baseline_rounds": 80,
+        "first_misses": 58,
+        "other_catches": 30,
+        "fork_rounds": 73,
+        "fork_draft_rounds": 73,
+        "forks": 40,
+        "sibling_taken": 20,
+        "saved_draft_rounds": 7,
+        "verify_commit_savings_ms_by_block": [
+          169.6768,
+          175.557,
+          189.31,
+          170.7986,
+          168.9251,
+          169.9453
+        ],
+        "verify_commit_ms_per_attempt": 4.2593,
+        "verify_commit_ms_per_taken": 8.5186,
+        "verify_commit_ms_per_draft_round": 2.3339,
+        "baseline_packets": [
+          0,
+          0,
+          1,
+          79
+        ],
+        "fork_packets": [
+          0,
+          0,
+          1,
+          72
+        ]
+      },
+      "dspark_7": {
+        "baseline_rounds": 70,
+        "first_misses": 66,
+        "other_catches": 27,
+        "fork_rounds": 61,
+        "fork_draft_rounds": 61,
+        "forks": 56,
+        "sibling_taken": 23,
+        "saved_draft_rounds": 9,
+        "verify_commit_savings_ms_by_block": [
+          123.0302,
+          123.2582,
+          139.101,
+          121.9843,
+          121.355,
+          121.1261
+        ],
+        "verify_commit_ms_per_attempt": 2.1876,
+        "verify_commit_ms_per_taken": 5.3264,
+        "verify_commit_ms_per_draft_round": 2.0083,
+        "baseline_packets": [
+          0,
+          0,
+          1,
+          79
+        ],
+        "fork_packets": [
+          0,
+          0,
+          1,
+          74
+        ]
+      },
+      "dflash_3": {
+        "baseline_rounds": 67,
+        "first_misses": 36,
+        "other_catches": 6,
+        "fork_rounds": 69,
+        "fork_draft_rounds": 69,
+        "forks": 38,
+        "sibling_taken": 6,
+        "saved_draft_rounds": -2,
+        "verify_commit_savings_ms_by_block": [
+          -48.9133,
+          -49.3177,
+          -55.42,
+          -48.2834,
+          -48.6021,
+          -53.5421
+        ],
+        "verify_commit_ms_per_attempt": -1.2925,
+        "verify_commit_ms_per_taken": -8.1859,
+        "verify_commit_ms_per_draft_round": -0.7118,
+        "worker_savings_ms_by_block": [
+          -65.9963,
+          -65.9969,
+          -66.0048,
+          -65.9957,
+          -65.9959,
+          -66.0022
+        ],
+        "worker_ms_per_attempt": -1.7368,
+        "worker_ms_per_taken": -10.9994,
+        "worker_ms_per_draft_round": -0.9565,
+        "baseline_packets": [
+          0,
+          0,
+          1,
+          66
+        ],
+        "fork_packets": [
+          0,
+          0,
+          1,
+          68
+        ]
+      },
+      "dflash_7": {
+        "baseline_rounds": 56,
+        "first_misses": 48,
+        "other_catches": 7,
+        "fork_rounds": 54,
+        "fork_draft_rounds": 54,
+        "forks": 49,
+        "sibling_taken": 8,
+        "saved_draft_rounds": 2,
+        "verify_commit_savings_ms_by_block": [
+          -24.4332,
+          -24.8947,
+          -29.32,
+          -24.1817,
+          -24.348,
+          -26.4723
+        ],
+        "verify_commit_ms_per_attempt": -0.5033,
+        "verify_commit_ms_per_taken": -3.083,
+        "verify_commit_ms_per_draft_round": -0.4567,
+        "worker_savings_ms_by_block": [
+          -8.3052,
+          -9.9023,
+          -25.2196,
+          -7.4345,
+          -8.0101,
+          -15.3632
+        ],
+        "worker_ms_per_attempt": -0.1858,
+        "worker_ms_per_taken": -1.138,
+        "worker_ms_per_draft_round": -0.1686,
+        "baseline_packets": [
+          0,
+          0,
+          1,
+          68
+        ],
+        "fork_packets": [
+          0,
+          0,
+          1,
+          69
+        ]
+      }
+    },
+    "sustained": {
+      "dspark_3": {
+        "baseline_rounds": 82,
+        "first_misses": 62,
+        "other_catches": 30,
+        "fork_rounds": 74,
+        "fork_draft_rounds": 73,
+        "forks": 46,
+        "sibling_taken": 21,
+        "saved_draft_rounds": 8,
+        "verify_commit_savings_ms_by_block": [
+          193.8351,
+          195.4925,
+          221.289,
+          195.7454,
+          196.6959,
+          214.7486
+        ],
+        "verify_commit_ms_per_attempt": 4.2657,
+        "verify_commit_ms_per_taken": 9.3438,
+        "verify_commit_ms_per_draft_round": 2.688,
+        "baseline_packets": [
+          1,
+          0,
+          1,
+          80
+        ],
+        "fork_packets": [
+          1,
+          0,
+          1,
+          72
+        ]
+      },
+      "dspark_7": {
+        "baseline_rounds": 74,
+        "first_misses": 73,
+        "other_catches": 30,
+        "fork_rounds": 64,
+        "fork_draft_rounds": 63,
+        "forks": 61,
+        "sibling_taken": 28,
+        "saved_draft_rounds": 10,
+        "verify_commit_savings_ms_by_block": [
+          98.9312,
+          96.3584,
+          116.9791,
+          98.9452,
+          97.268,
+          106.1994
+        ],
+        "verify_commit_ms_per_attempt": 1.6219,
+        "verify_commit_ms_per_taken": 3.5335,
+        "verify_commit_ms_per_draft_round": 1.5704,
+        "baseline_packets": [
+          1,
+          0,
+          1,
+          81
+        ],
+        "fork_packets": [
+          1,
+          0,
+          1,
+          77
+        ]
+      },
+      "dflash_3": {
+        "baseline_rounds": 71,
+        "first_misses": 42,
+        "other_catches": 11,
+        "fork_rounds": 71,
+        "fork_draft_rounds": 70,
+        "forks": 42,
+        "sibling_taken": 11,
+        "saved_draft_rounds": 0,
+        "verify_commit_savings_ms_by_block": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "verify_commit_ms_per_attempt": 0.0,
+        "verify_commit_ms_per_taken": 0.0,
+        "verify_commit_ms_per_draft_round": 0.0,
+        "worker_savings_ms_by_block": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "worker_ms_per_attempt": 0.0,
+        "worker_ms_per_taken": 0.0,
+        "worker_ms_per_draft_round": 0.0,
+        "baseline_packets": [
+          1,
+          0,
+          1,
+          69
+        ],
+        "fork_packets": [
+          1,
+          0,
+          1,
+          69
+        ]
+      },
+      "dflash_7": {
+        "baseline_rounds": 59,
+        "first_misses": 52,
+        "other_catches": 9,
+        "fork_rounds": 56,
+        "fork_draft_rounds": 55,
+        "forks": 54,
+        "sibling_taken": 10,
+        "saved_draft_rounds": 3,
+        "verify_commit_savings_ms_by_block": [
+          -24.3655,
+          -27.8438,
+          -29.0696,
+          -24.2006,
+          -24.2694,
+          -24.4078
+        ],
+        "verify_commit_ms_per_attempt": -0.4516,
+        "verify_commit_ms_per_taken": -2.4387,
+        "verify_commit_ms_per_draft_round": -0.4434,
+        "worker_savings_ms_by_block": [
+          9.2518,
+          -7.1199,
+          -12.8832,
+          10.0252,
+          9.6972,
+          9.0522
+        ],
+        "worker_ms_per_attempt": 0.1695,
+        "worker_ms_per_taken": 0.9152,
+        "worker_ms_per_draft_round": 0.1664,
+        "baseline_packets": [
+          1,
+          0,
+          1,
+          70
+        ],
+        "fork_packets": [
+          1,
+          0,
+          1,
+          71
+        ]
+      }
+    },
+    "prose": {
+      "dspark_3": {
+        "baseline_rounds": 96,
+        "first_misses": 79,
+        "other_catches": 39,
+        "fork_rounds": 80,
+        "fork_draft_rounds": 80,
+        "forks": 52,
+        "sibling_taken": 25,
+        "saved_draft_rounds": 16,
+        "verify_commit_savings_ms_by_block": [
+          394.5684,
+          438.2391,
+          453.5959,
+          403.3977,
+          381.1173,
+          450.1761
+        ],
+        "verify_commit_ms_per_attempt": 8.0927,
+        "verify_commit_ms_per_taken": 16.8327,
+        "verify_commit_ms_per_draft_round": 5.2602,
+        "baseline_packets": [
+          0,
+          0,
+          1,
+          95
+        ],
+        "fork_packets": [
+          0,
+          0,
+          1,
+          79
+        ]
+      },
+      "dspark_7": {
+        "baseline_rounds": 91,
+        "first_misses": 90,
+        "other_catches": 46,
+        "fork_rounds": 74,
+        "fork_draft_rounds": 74,
+        "forks": 73,
+        "sibling_taken": 35,
+        "saved_draft_rounds": 17,
+        "verify_commit_savings_ms_by_block": [
+          291.3708,
+          301.7791,
+          319.282,
+          264.2211,
+          262.8012,
+          287.6621
+        ],
+        "verify_commit_ms_per_attempt": 3.966,
+        "verify_commit_ms_per_taken": 8.2719,
+        "verify_commit_ms_per_draft_round": 3.9124,
+        "baseline_packets": [
+          0,
+          0,
+          1,
+          97
+        ],
+        "fork_packets": [
+          0,
+          0,
+          1,
+          86
+        ]
+      },
+      "dflash_3": {
+        "baseline_rounds": 73,
+        "first_misses": 47,
+        "other_catches": 7,
+        "fork_rounds": 75,
+        "fork_draft_rounds": 75,
+        "forks": 49,
+        "sibling_taken": 7,
+        "saved_draft_rounds": -2,
+        "verify_commit_savings_ms_by_block": [
+          -50.431,
+          -47.7639,
+          -49.5199,
+          -48.2155,
+          -50.3076,
+          -49.2596
+        ],
+        "verify_commit_ms_per_attempt": -1.008,
+        "verify_commit_ms_per_taken": -7.0557,
+        "verify_commit_ms_per_draft_round": -0.6585,
+        "worker_savings_ms_by_block": [
+          -69.2877,
+          -69.2842,
+          -69.2863,
+          -69.2847,
+          -69.2874,
+          -69.2862
+        ],
+        "worker_ms_per_attempt": -1.414,
+        "worker_ms_per_taken": -9.898,
+        "worker_ms_per_draft_round": -0.9238,
+        "baseline_packets": [
+          0,
+          0,
+          1,
+          72
+        ],
+        "fork_packets": [
+          0,
+          0,
+          1,
+          74
+        ]
+      },
+      "dflash_7": {
+        "baseline_rounds": 62,
+        "first_misses": 56,
+        "other_catches": 6,
+        "fork_rounds": 60,
+        "fork_draft_rounds": 60,
+        "forks": 59,
+        "sibling_taken": 7,
+        "saved_draft_rounds": 2,
+        "verify_commit_savings_ms_by_block": [
+          -75.723,
+          -72.1613,
+          -83.4188,
+          -72.2048,
+          -71.9707,
+          -72.4211
+        ],
+        "verify_commit_ms_per_attempt": -1.2256,
+        "verify_commit_ms_per_taken": -10.3304,
+        "verify_commit_ms_per_draft_round": -1.2052,
+        "worker_savings_ms_by_block": [
+          -57.2998,
+          -50.9076,
+          -71.1115,
+          -50.9857,
+          -50.5655,
+          -51.374
+        ],
+        "worker_ms_per_attempt": -0.8675,
+        "worker_ms_per_taken": -7.3114,
+        "worker_ms_per_draft_round": -0.853,
+        "baseline_packets": [
+          0,
+          0,
+          1,
+          73
+        ],
+        "fork_packets": [
+          0,
+          0,
+          1,
+          76
+        ]
+      }
+    },
+    "context4k": {
+      "dspark_3": {
+        "baseline_rounds": 62,
+        "first_misses": 29,
+        "other_catches": 12,
+        "fork_rounds": 59,
+        "fork_draft_rounds": 59,
+        "forks": 17,
+        "sibling_taken": 7,
+        "saved_draft_rounds": 3,
+        "verify_commit_savings_ms_by_block": [
+          76.8734,
+          76.6758,
+          76.8867,
+          75.3414,
+          75.3621,
+          76.1673
+        ],
+        "verify_commit_ms_per_attempt": 4.4954,
+        "verify_commit_ms_per_taken": 10.9174,
+        "verify_commit_ms_per_draft_round": 1.2953,
+        "baseline_packets": [
+          0,
+          1,
+          1,
+          60
+        ],
+        "fork_packets": [
+          0,
+          1,
+          0,
+          58
+        ]
+      },
+      "dspark_7": {
+        "baseline_rounds": 53,
+        "first_misses": 47,
+        "other_catches": 23,
+        "fork_rounds": 48,
+        "fork_draft_rounds": 48,
+        "forks": 41,
+        "sibling_taken": 18,
+        "saved_draft_rounds": 5,
+        "verify_commit_savings_ms_by_block": [
+          -82.4453,
+          -82.3416,
+          -84.5971,
+          -80.5124,
+          -81.0253,
+          -80.7191
+        ],
+        "verify_commit_ms_per_attempt": -1.9923,
+        "verify_commit_ms_per_taken": -4.538,
+        "verify_commit_ms_per_draft_round": -1.7017,
+        "baseline_packets": [
+          0,
+          1,
+          1,
+          67
+        ],
+        "fork_packets": [
+          0,
+          1,
+          0,
+          71
+        ]
+      },
+      "dflash_3": {
+        "baseline_rounds": 60,
+        "first_misses": 24,
+        "other_catches": 5,
+        "fork_rounds": 59,
+        "fork_draft_rounds": 59,
+        "forks": 19,
+        "sibling_taken": 5,
+        "saved_draft_rounds": 1,
+        "verify_commit_savings_ms_by_block": [
+          26.6938,
+          26.6694,
+          27.042,
+          26.0938,
+          26.1829,
+          26.4367
+        ],
+        "verify_commit_ms_per_attempt": 1.3975,
+        "verify_commit_ms_per_taken": 5.3106,
+        "verify_commit_ms_per_draft_round": 0.4501,
+        "worker_savings_ms_by_block": [
+          35.8881,
+          35.8875,
+          35.8888,
+          35.8861,
+          35.8865,
+          35.8868
+        ],
+        "worker_ms_per_attempt": 1.8888,
+        "worker_ms_per_taken": 7.1774,
+        "worker_ms_per_draft_round": 0.6083,
+        "baseline_packets": [
+          0,
+          1,
+          0,
+          59
+        ],
+        "fork_packets": [
+          0,
+          1,
+          0,
+          58
+        ]
+      },
+      "dflash_7": {
+        "baseline_rounds": 42,
+        "first_misses": 34,
+        "other_catches": 6,
+        "fork_rounds": 44,
+        "fork_draft_rounds": 44,
+        "forks": 42,
+        "sibling_taken": 6,
+        "saved_draft_rounds": -2,
+        "verify_commit_savings_ms_by_block": [
+          -133.6417,
+          -133.9055,
+          -134.3773,
+          -129.8235,
+          -129.2455,
+          -129.9419
+        ],
+        "verify_commit_ms_per_attempt": -3.1379,
+        "verify_commit_ms_per_taken": -21.9653,
+        "verify_commit_ms_per_draft_round": -2.9953,
+        "worker_savings_ms_by_block": [
+          -151.3371,
+          -151.4404,
+          -151.6255,
+          -149.8393,
+          -149.6118,
+          -149.8844
+        ],
+        "worker_ms_per_attempt": -3.586,
+        "worker_ms_per_taken": -25.1018,
+        "worker_ms_per_draft_round": -3.423,
+        "baseline_packets": [
+          0,
+          1,
+          0,
+          63
+        ],
+        "fork_packets": [
+          0,
+          1,
+          0,
+          68
+        ]
+      }
+    }
+  }
+}
