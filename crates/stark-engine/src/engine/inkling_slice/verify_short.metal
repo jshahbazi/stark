@@ -19,8 +19,9 @@ constant uint ink_short_shards = 32;
 constant uint ink_short_distances = 1024;
 constant uint ink_short_kv_width = 1024;
 
-// Grid: (8, heads * rows), 128 threads. shape: x = first row position,
-// y = cache capacity. Row r attends keys 0 ..= x + r, none of which wrap.
+// Grid: (8, heads * rows), 128 threads. Ordinary shape: x = first row
+// position, y = cache capacity. Fork shape adds z = physical row count and
+// w = the sibling's logical depth.
 kernel void ink_verify_short_parts(
     device const bfloat *q0 [[buffer(0)]], device const bfloat *q1 [[buffer(1)]],
     device const bfloat *q2 [[buffer(2)]], device const bfloat *q3 [[buffer(3)]],
@@ -29,7 +30,12 @@ kernel void ink_verify_short_parts(
     device const bfloat *s0 [[buffer(8)]], device const bfloat *s1 [[buffer(9)]],
     device const bfloat *s2 [[buffer(10)]], device const bfloat *s3 [[buffer(11)]],
     device const bfloat *keys [[buffer(12)]], device const bfloat *values [[buffer(13)]],
-    device float *all_parts [[buffer(14)]], constant uint2 &shape [[buffer(15)]],
+    device float *all_parts [[buffer(14)]],
+#ifdef INK_VERIFY_FORK
+    constant uint4 &shape [[buffer(15)]],
+#else
+    constant uint2 &shape [[buffer(15)]],
+#endif
     uint2 group [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
     device const bfloat *queries[] = {q0, q1, q2, q3};
@@ -37,12 +43,18 @@ kernel void ink_verify_short_parts(
     device const bfloat *sinks[] = {s0, s1, s2, s3};
     const uint row = group.y / ink_short_heads;
     const uint head = group.y % ink_short_heads;
+#ifdef INK_VERIFY_FORK
+    const bool sibling = row + 1 == shape.z;
+    const uint logical_depth = sibling ? shape.w : row;
+#else
+    const uint logical_depth = row;
+#endif
     device const bfloat *q = queries[row];
     device const bfloat *table = tables[row];
     device float *parts = all_parts + row * ink_short_heads * ink_short_shards * ink_short_part;
     uint shard = group.x * 4 + sg;
-    uint visible = min(shape.x + row + 1, shape.y);
-    uint first = shape.x + row + 1 - visible;
+    uint visible = min(shape.x + logical_depth + 1, shape.y);
+    uint first = shape.x + logical_depth + 1 - visible;
     uint component = lane * 4;
     uint kv_component = (head / 3) * 128 + component;
     float4 query = float4(*reinterpret_cast<device const bfloat4 *>(q + head * 128 + component))
@@ -52,7 +64,14 @@ kernel void ink_verify_short_parts(
     float weight = shard == 0 ? 1.0f : 0.0f;
     float4 numerator(0.0f);
     for (uint i = shard; i < visible; i += ink_short_shards) {
-        uint base = ((first + i) % shape.y) * ink_short_kv_width + kv_component;
+        const uint logical_position = first + i;
+#ifdef INK_VERIFY_FORK
+        const uint physical_position = sibling && logical_position == shape.x + logical_depth
+            ? shape.x + shape.z - 1 : logical_position;
+#else
+        const uint physical_position = logical_position;
+#endif
+        uint base = (physical_position % shape.y) * ink_short_kv_width + kv_component;
         float4 key = float4(*reinterpret_cast<device const bfloat4 *>(keys + base));
         float dot = 0.0f;
         for (uint j = 0; j < 4; ++j) dot += query[j] * key[j];

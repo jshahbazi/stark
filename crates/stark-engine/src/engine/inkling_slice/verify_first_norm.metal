@@ -165,7 +165,15 @@ kernel void ink_verify_attention_mix(
     device float *mixed[] = {o0, o1, o2, o3};
     device bfloat *outputs[] = {y0, y1, y2, y3};
     const uint row = group.y;
-    const uint pos = args.x + row;
+#ifdef INK_VERIFY_FORK
+    const uint sibling_depth = (args.w >> 8) & 0xff;
+    const uint physical_last_row = (args.w >> 16) & 0xff;
+    const bool sibling = row == physical_last_row;
+    const uint logical_depth = sibling ? sibling_depth : row;
+#else
+    const uint logical_depth = row;
+#endif
+    const uint pos = args.x + logical_depth;
     const bool boundary = args.z != 0;
     device float *partial = partials[row];
     device float *block = sources[row] + min(args.y, 3u) * ink_width;
@@ -177,9 +185,21 @@ kernel void ink_verify_attention_mix(
         for (uint tap = 0; tap < 4; ++tap) {
             const uint lag = 3 - tap;
             if (pos < lag) continue;
-            const float value = lag == 0 ? current
-                : row >= lag ? float(inputs[row - lag][channel])
-                : float(history[((pos - lag) % 3) * ink_width + channel]);
+            float value;
+            if (lag == 0) {
+                value = current;
+#ifdef INK_VERIFY_FORK
+            } else if (sibling && lag <= logical_depth) {
+                value = float(inputs[logical_depth - lag][channel]);
+            } else if (!sibling && row >= lag) {
+                value = float(inputs[row - lag][channel]);
+#else
+            } else if (row >= lag) {
+                value = float(inputs[row - lag][channel]);
+#endif
+            } else {
+                value = float(history[((pos - lag) % 3) * ink_width + channel]);
+            }
             result += float(weight[channel * 4 + tap]) * value;
         }
         const bfloat attention = bfloat((result + current) * 0.447213595499958f);
@@ -194,7 +214,7 @@ kernel void ink_verify_attention_mix(
     threadgroup float scale;
     const float4 x = ink_verify_mixed_value(sources[row], partial, queries, mixed[row],
         args.y + uint(boundary), 0, tid, simd, lane, sums, dots, inverse, scores);
-    if (args.w != 0) {
+    if ((args.w & 1) != 0) {
         ink_norm_row(x, w, outputs[row], true, norm_sums, scale, tid, simd, lane);
     }
 }

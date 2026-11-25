@@ -24,6 +24,7 @@ const CONFIG_SHA: &str = "d094e435eb939e01fca6297f637c5af35e3da4b552f8e1ab0a181c
 const WEIGHTS_BYTES: usize = 989_975_616;
 const RESET: u32 = 1;
 const PROPOSE: u32 = 2;
+const PROPOSE_RUNNERS: u32 = 4;
 const MODEL_LIMIT: u64 = 16 * 1024;
 const LOAD_ERROR: &str = "inkling_dflash2_load_failed";
 const REQUEST_ERROR: &str = "inkling_dflash2_request_failed";
@@ -37,6 +38,7 @@ struct Profile {
     draft: PathBuf,
     dflash_repo: PathBuf,
     greedy_drafts: Option<u32>,
+    greedy_self_correction: Option<bool>,
 }
 
 impl Profile {
@@ -115,6 +117,13 @@ pub(super) struct Drafter {
     sent: usize,
     failed: bool,
     pub(super) greedy_drafts: u32,
+    pub(super) greedy_self_correction: bool,
+}
+
+pub(super) struct RunnerProposals {
+    pub(super) primary: [u32; MAX_DRAFTS],
+    pub(super) alternate: [u32; 2],
+    pub(super) gap: [f32; 2],
 }
 
 impl Drafter {
@@ -151,6 +160,7 @@ impl Drafter {
             sent: 0,
             failed: false,
             greedy_drafts: profile.greedy_drafts.unwrap_or(super::GREEDY_DEFAULT_DRAFTS),
+            greedy_self_correction: profile.greedy_self_correction.unwrap_or(false),
         };
         set_nonblocking(drafter.input.as_raw_fd()).map_err(|_| LOAD_ERROR)?;
         set_nonblocking(drafter.output.as_raw_fd()).map_err(|_| LOAD_ERROR)?;
@@ -171,7 +181,16 @@ impl Drafter {
         features: &FeatureWindow,
         anchor: u32,
     ) -> Result<[u32; MAX_DRAFTS], &'static str> {
-        let result = self.propose_inner(features, anchor);
+        let result = self.propose_inner(features, anchor, false).map(|result| result.primary);
+        self.finish(result)
+    }
+
+    pub(super) fn propose_with_runners(
+        &mut self,
+        features: &FeatureWindow,
+        anchor: u32,
+    ) -> Result<RunnerProposals, &'static str> {
+        let result = self.propose_inner(features, anchor, true);
         self.finish(result)
     }
 
@@ -179,7 +198,8 @@ impl Drafter {
         &mut self,
         features: &FeatureWindow,
         anchor: u32,
-    ) -> Result<[u32; MAX_DRAFTS], &'static str> {
+        runners: bool,
+    ) -> Result<RunnerProposals, &'static str> {
         let start = features.start();
         if self.sent > features.end || anchor as usize >= VOCABULARY {
             return Err(REQUEST_ERROR);
@@ -187,20 +207,45 @@ impl Drafter {
         let offset = self.sent.max(start);
         let rows = features.end - offset;
         let deadline = Instant::now() + Duration::from_secs(30);
-        self.send_header(PROPOSE, offset as u32, rows as u32, anchor, deadline)?;
+        self.send_header(
+            if runners {
+                PROPOSE_RUNNERS
+            } else {
+                PROPOSE
+            },
+            offset as u32,
+            rows as u32,
+            anchor,
+            deadline,
+        )?;
         let (first, second) = features.words.as_slices();
         let skip = (offset - start) * DRAFT_FEATURE_WORDS;
         self.write_features(&first[skip.min(first.len())..], deadline)?;
         self.write_features(&second[skip.saturating_sub(first.len())..], deadline)?;
         self.status(deadline)?;
-        let mut bytes = [0; MAX_DRAFTS * size_of::<u32>()];
-        self.read_exact(&mut bytes, deadline)?;
-        let ids = std::array::from_fn(|i| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()));
-        if ids.iter().any(|&id| id as usize >= VOCABULARY) {
+        let mut primary_bytes = [0; MAX_DRAFTS * size_of::<u32>()];
+        self.read_exact(&mut primary_bytes, deadline)?;
+        let primary = std::array::from_fn(|i| u32::from_le_bytes(primary_bytes[i * 4..i * 4 + 4].try_into().unwrap()));
+        let (alternate, gap) = if runners {
+            let mut extra = [0; 2 * size_of::<u32>() + 2 * size_of::<f32>()];
+            self.read_exact(&mut extra, deadline)?;
+            let alternate = std::array::from_fn(|i| u32::from_le_bytes(extra[i * 4..i * 4 + 4].try_into().unwrap()));
+            let gap = std::array::from_fn(|i| f32::from_le_bytes(extra[8 + i * 4..12 + i * 4].try_into().unwrap()));
+            (alternate, gap)
+        } else {
+            ([0; 2], [f32::INFINITY; 2])
+        };
+        if primary.iter().chain(alternate.iter()).any(|&id| id as usize >= VOCABULARY)
+            || runners && gap.iter().any(|value| !value.is_finite() || *value < 0.0)
+        {
             return Err(REQUEST_ERROR);
         }
         self.sent = features.end;
-        Ok(ids)
+        Ok(RunnerProposals {
+            primary,
+            alternate,
+            gap,
+        })
     }
 
     fn write_features(

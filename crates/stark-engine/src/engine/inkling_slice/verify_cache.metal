@@ -22,6 +22,51 @@ static bfloat ink_verify_kv_conv(device const bfloat *current_row, device const 
     return bfloat((result + current) * (changing ? 1.f / 3.f : 0.447213595499958f));
 }
 
+#ifdef INK_VERIFY_FORK
+// A fork row is evaluated at its logical depth while its speculative cache
+// and history write remains in the physical last-row slot. Snapshot history
+// arguments are captured before this kernel mutates any ring entries.
+static bfloat ink_verify_kv_conv_fork(
+    device const bfloat *current_row, device const bfloat *weight,
+    device const bfloat *dynamic, device bfloat *history,
+    device const bfloat *ancestor0, device const bfloat *ancestor1,
+    device const bfloat *ancestor2, bfloat4 old0, bfloat4 old1, bfloat4 old2,
+    uint channel, uint component, uint logical_position, uint physical_position,
+    uint logical_depth, bool sibling, bool changing
+) {
+#pragma clang fp contract(off) reassociate(off)
+    constexpr uint Width = 1024;
+    const bfloat raw = current_row[channel];
+    const float current = float(raw);
+    float result = 0.f;
+    for (uint tap = 0; tap < 4; ++tap) {
+        const uint lag = changing ? tap : 3 - tap;
+        if (logical_position < lag) continue;
+        float value;
+        if (lag == 0) {
+            value = current;
+        } else if (sibling && lag <= logical_depth) {
+            const uint ancestor = logical_depth - lag;
+            device const bfloat *source = ancestor == 0 ? ancestor0
+                : ancestor == 1 ? ancestor1 : ancestor2;
+            value = float(source[channel]);
+        } else if (sibling) {
+            const uint slot = (logical_position - lag) % 3;
+            value = slot == 0 ? float(old0[component])
+                : slot == 1 ? float(old1[component]) : float(old2[component]);
+        } else {
+            value = float(history[((logical_position - lag) % 3) * Width + channel]);
+        }
+        const float coefficient = changing
+            ? float(weight[tap * Width + channel]) + float(dynamic[(channel / 128) * 4 + tap])
+            : float(weight[channel * 4 + tap]);
+        result += coefficient * value;
+    }
+    history[(physical_position % 3) * Width + channel] = raw;
+    return bfloat((result + current) * (changing ? 1.f / 3.f : 0.447213595499958f));
+}
+#endif
+
 kernel void ink_verify_kv_pack(
     device const bfloat *k0 [[buffer(0)]], device const bfloat *k1 [[buffer(1)]],
     device const bfloat *k2 [[buffer(2)]], device const bfloat *k3 [[buffer(3)]],
@@ -34,7 +79,8 @@ kernel void ink_verify_kv_pack(
     device const bfloat *wk [[buffer(16)]], device const bfloat *wv [[buffer(17)]],
     device bfloat *hk [[buffer(18)]], device bfloat *hv [[buffer(19)]],
     device bfloat *keys [[buffer(20)]], device bfloat *values [[buffer(21)]],
-    constant uint4 &shape [[buffer(22)]], uint group [[threadgroup_position_in_grid]],
+    constant uint4 &shape [[buffer(22)]],
+    uint group [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]
 ) {
     const uint ordinal = 4 * group + sg;
@@ -45,12 +91,35 @@ kernel void ink_verify_kv_pack(
     device bfloat *cache = value_head ? values : keys;
     device const bfloat *raw[] = {value_head ? v0 : k0, value_head ? v1 : k1, value_head ? v2 : k2, value_head ? v3 : k3};
     device const bfloat *dynamic[] = {value_head ? dv0 : dk0, value_head ? dv1 : dk1, value_head ? dv2 : dk2, value_head ? dv3 : dk3};
+#ifdef INK_VERIFY_FORK
+    const uint sibling_depth = (shape.w >> 8) & 0xff;
+    const bfloat4 old0 = *reinterpret_cast<device const bfloat4 *>(history + channel);
+    const bfloat4 old1 = *reinterpret_cast<device const bfloat4 *>(history + 1024 + channel);
+    const bfloat4 old2 = *reinterpret_cast<device const bfloat4 *>(history + 2048 + channel);
+#endif
     for (uint row = 0; row < shape.y; ++row) {
+#ifdef INK_VERIFY_FORK
+        const bool sibling = row + 1 == shape.y;
+        const uint logical_depth = sibling ? sibling_depth : row;
+        const uint position = shape.x + logical_depth;
+        const uint physical_position = shape.x + row;
+        const uint physical_row = row;
+#else
         const uint position = shape.x + row;
+#endif
         float4 vals;
         float norm = 0.f;
         for (uint j = 0; j < 4; ++j) {
+#ifdef INK_VERIFY_FORK
+            const float value = float(ink_verify_kv_conv_fork(
+                raw[physical_row], w, dynamic[physical_row], history,
+                raw[0], raw[1], raw[2], old0, old1, old2,
+                channel + j, j, position, physical_position, logical_depth,
+                sibling, (shape.w & 1) != 0
+            ));
+#else
             const float value = float(ink_verify_kv_conv(raw[row], w, dynamic[row], history, channel + j, position, shape.w != 0));
+#endif
             if (value_head) norm = fma(value,value,norm);
             else {
 #pragma clang fp contract(off) reassociate(off)
@@ -61,7 +130,11 @@ kernel void ink_verify_kv_pack(
         norm = simd_sum(norm);
         const float scale = value_head ? precise::rsqrt(norm / 128.0f + 1e-6f)
                                       : min(1.0f, 22.62741699797f / (precise::sqrt(norm) + 1e-6f));
+#ifdef INK_VERIFY_FORK
+        const uint slot = (physical_position % shape.z) * 1024 + channel;
+#else
         const uint slot = (position % shape.z) * 1024 + channel;
+#endif
         *reinterpret_cast<device bfloat4 *>(cache + slot) = bfloat4(vals * scale);
     }
 }

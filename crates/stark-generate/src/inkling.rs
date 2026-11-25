@@ -57,13 +57,25 @@ const CONTEXT_ALLOCATION_ROWS: usize = 1024;
 const OUTPUT_RESERVE_TOKENS: usize = 8192;
 const SHORT_MTP_VERIFICATION: &str = "inkling-dspark-short-target-draw-v1";
 const DFLASH2_VERIFICATION: &str = "inkling-dflash2-mlx-short-target-draw-v1";
+const DFLASH2_SIBLING_VERIFICATION: &str = "inkling-dflash2-greedy-sibling-short-target-draw-v1";
 
 #[derive(Default, serde::Serialize)]
 struct DraftStats {
     proposed: usize,
     accepted: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    self_correction: Option<SelfCorrectionStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     speculative: Option<SpeculationStats>,
+}
+
+#[derive(Default, serde::Serialize)]
+struct SelfCorrectionStats {
+    attempts: usize,
+    packed_rounds: usize,
+    sibling_hits: usize,
+    unsupported_rounds: usize,
+    primary_tail_truncated: usize,
 }
 
 #[derive(Default, serde::Serialize)]
@@ -102,6 +114,22 @@ struct PendingDraft<'a> {
     consumed: usize,
     offset: usize,
     rows: usize,
+    sibling: Option<PendingSibling>,
+    sibling_hit: bool,
+}
+
+struct PendingSibling {
+    slot: usize,
+    token: u32,
+    depth: usize,
+    bonus_row: usize,
+}
+
+struct DraftRound<'a> {
+    proposals: Vec<u32>,
+    transaction: Verification<'a>,
+    rows: usize,
+    sibling: Option<PendingSibling>,
 }
 
 struct PrefixState {
@@ -209,6 +237,27 @@ fn first_verifier_rows(depth: usize) -> usize {
     } else {
         (depth + 1).min(MAX_VERIFY_ROWS)
     }
+}
+
+fn begin_primary_dflash_round<'a>(
+    target: &'a mut Session,
+    anchor: u32,
+    depth: usize,
+    proposals: Vec<u32>,
+) -> Result<(DraftRound<'a>, f64), &'static str> {
+    let input = std::iter::once(anchor).chain(proposals.iter().copied()).collect::<Vec<_>>();
+    let started = Instant::now();
+    let rows = first_verifier_rows(depth);
+    let transaction = target.begin_verify(&input[..rows]).map_err(|_| "native_generation_failed")?;
+    Ok((
+        DraftRound {
+            proposals,
+            transaction,
+            rows,
+            sibling: None,
+        },
+        started.elapsed().as_secs_f64(),
+    ))
 }
 
 /// Source prefill command width chosen at load: the widest of
@@ -622,6 +671,13 @@ impl InklingBackend {
         self.draft_stats = DraftStats::default();
         let use_draft = options.mtp_drafts > 0;
         let use_dflash2 = use_draft && self.dflash2.is_some();
+        let use_self_correction = use_dflash2
+            && options.mtp_drafts == 3
+            && matches!(options.sampling, Sampling::Greedy {})
+            && self.dflash2.as_ref().is_some_and(|draft| draft.greedy_self_correction);
+        if use_self_correction {
+            self.draft_stats.self_correction = Some(SelfCorrectionStats::default());
+        }
         let use_dspark = use_draft && !use_dflash2;
         let source_prefill = image.is_none() && self.source_text_prefill(input.len(), options);
         let source_verify = self.source_verifier && use_draft && source_prefill;
@@ -759,6 +815,7 @@ impl InklingBackend {
             &mut allocation,
             source_prefill,
             verify_depth,
+            use_self_correction,
             self.dflash2.as_mut().zip(features.as_mut()),
             logits,
             expanded,
@@ -901,6 +958,7 @@ fn collect_output(
     allocation: &mut ContextAllocation,
     source_prefill: bool,
     verify_depth: usize,
+    self_correction: bool,
     mut dflash2: Option<(&mut dflash2::Drafter, &mut dflash2::Features)>,
     mut logits: Vec<f32>,
     input_tokens: usize,
@@ -955,6 +1013,8 @@ fn collect_output(
                         consumed: 0,
                         offset,
                         rows: input.len(),
+                        sibling: None,
+                        sibling_hit: false,
                     });
                 } else {
                     let limit = verify_depth.min(budget.saturating_sub(delivered + 1));
@@ -999,38 +1059,122 @@ fn collect_output(
                             stats.between_rounds_seconds += (now - at).as_secs_f64();
                         }
                         round_started = Some(now);
-                        let (proposals, transaction) = if target.overlaps_verify_for(depth) {
+                        let round = if target.overlaps_verify_for(depth) {
                             let (proposals, transaction, before_verify_ms, verify_wall_ms) = target
                                 .begin_overlapped_verify(anchor, depth)
                                 .map_err(|_| "native_generation_failed")?;
                             *stats.overlapped_rounds.get_or_insert(0) += 1;
                             stats.draft_seconds += before_verify_ms * 0.001;
                             stats.verify_seconds += verify_wall_ms * 0.001;
-                            (proposals, transaction)
+                            DraftRound {
+                                proposals,
+                                transaction,
+                                rows: first_verifier_rows(depth),
+                                sibling: None,
+                            }
                         } else {
-                            let start = Instant::now();
-                            let proposals = if let Some((drafter, features)) = dflash2.as_mut() {
-                                drafter.propose(&features.window, anchor)?[..depth].to_vec()
+                            if self_correction {
+                                let (drafter, features) = dflash2.as_mut().ok_or("native_generation_failed")?;
+                                let primary_depth = depth.min(2);
+                                if target.can_pack_sibling(primary_depth + 2) {
+                                    let draft_started = Instant::now();
+                                    let candidates = drafter.propose_with_runners(&features.window, anchor)?;
+                                    stats.draft_seconds += draft_started.elapsed().as_secs_f64();
+                                    let slot =
+                                        (0..depth.min(2)).find(|&slot| candidates.gap[slot] <= std::f32::consts::LN_2);
+                                    if let Some(slot) = slot {
+                                        draft_stats
+                                            .self_correction
+                                            .as_mut()
+                                            .ok_or("native_generation_failed")?
+                                            .attempts += 1;
+                                        let mut input = Vec::with_capacity(primary_depth + 2);
+                                        input.push(anchor);
+                                        input.extend_from_slice(&candidates.primary[..primary_depth]);
+                                        input.push(candidates.alternate[slot]);
+                                        let verify_started = Instant::now();
+                                        let transaction = target
+                                            .begin_packed_sibling(&input, slot + 1)
+                                            .map_err(|_| "native_generation_failed")?;
+                                        stats.verify_seconds += verify_started.elapsed().as_secs_f64();
+                                        let stats =
+                                            draft_stats.self_correction.as_mut().ok_or("native_generation_failed")?;
+                                        stats.packed_rounds += 1;
+                                        stats.primary_tail_truncated += usize::from(depth > primary_depth);
+                                        let proposals = candidates.primary[..primary_depth].to_vec();
+                                        DraftRound {
+                                            proposals,
+                                            transaction,
+                                            rows: input.len(),
+                                            sibling: Some(PendingSibling {
+                                                slot,
+                                                token: candidates.alternate[slot],
+                                                depth: slot + 1,
+                                                bonus_row: input.len() - 1,
+                                            }),
+                                        }
+                                    } else {
+                                        let (round, verify_seconds) = begin_primary_dflash_round(
+                                            target,
+                                            anchor,
+                                            depth,
+                                            candidates.primary[..depth].to_vec(),
+                                        )?;
+                                        stats.verify_seconds += verify_seconds;
+                                        round
+                                    }
+                                } else {
+                                    draft_stats
+                                        .self_correction
+                                        .as_mut()
+                                        .ok_or("native_generation_failed")?
+                                        .unsupported_rounds += 1;
+                                    let draft_started = Instant::now();
+                                    let proposals = drafter.propose(&features.window, anchor)?[..depth].to_vec();
+                                    stats.draft_seconds += draft_started.elapsed().as_secs_f64();
+                                    let (round, verify_seconds) =
+                                        begin_primary_dflash_round(target, anchor, depth, proposals)?;
+                                    stats.verify_seconds += verify_seconds;
+                                    round
+                                }
+                            } else if let Some((drafter, features)) = dflash2.as_mut() {
+                                let draft_started = Instant::now();
+                                let proposals = drafter.propose(&features.window, anchor)?[..depth].to_vec();
+                                stats.draft_seconds += draft_started.elapsed().as_secs_f64();
+                                let (round, verify_seconds) =
+                                    begin_primary_dflash_round(target, anchor, depth, proposals)?;
+                                stats.verify_seconds += verify_seconds;
+                                round
                             } else {
-                                target.propose_verify(anchor, depth).map_err(|_| "native_generation_failed")?
-                            };
-                            stats.draft_seconds += start.elapsed().as_secs_f64();
-                            let input = std::iter::once(anchor).chain(proposals.iter().copied()).collect::<Vec<_>>();
-                            let start = Instant::now();
-                            let transaction = target
-                                .begin_verify(&input[..first_verifier_rows(depth)])
-                                .map_err(|_| "native_generation_failed")?;
-                            stats.verify_seconds += start.elapsed().as_secs_f64();
-                            (proposals, transaction)
+                                let draft_started = Instant::now();
+                                let proposals =
+                                    target.propose_verify(anchor, depth).map_err(|_| "native_generation_failed")?;
+                                stats.draft_seconds += draft_started.elapsed().as_secs_f64();
+                                let input =
+                                    std::iter::once(anchor).chain(proposals.iter().copied()).collect::<Vec<_>>();
+                                let verify_started = Instant::now();
+                                let transaction = target
+                                    .begin_verify(&input[..first_verifier_rows(depth)])
+                                    .map_err(|_| "native_generation_failed")?;
+                                stats.verify_seconds += verify_started.elapsed().as_secs_f64();
+                                DraftRound {
+                                    proposals,
+                                    transaction,
+                                    rows: first_verifier_rows(depth),
+                                    sibling: None,
+                                }
+                            }
                         };
-                        draft_stats.proposed += proposals.len();
+                        draft_stats.proposed += round.proposals.len() + usize::from(round.sibling.is_some());
                         verified_at = Some(Instant::now());
                         pending = Some(PendingDraft {
-                            transaction,
-                            proposals,
+                            transaction: round.transaction,
+                            proposals: round.proposals,
                             consumed: 0,
                             offset: 0,
-                            rows: first_verifier_rows(depth),
+                            rows: round.rows,
+                            sibling: round.sibling,
+                            sibling_hit: false,
                         });
                     }
                 }
@@ -1039,18 +1183,17 @@ fn collect_output(
                 .as_ref()
                 .map_or(SamplingControl::Natural, |thinking| thinking.sampling_control(budget - delivered));
             let token = if let Some(mut draft) = pending.take() {
-                let token =
-                    sample(draft.transaction.logits(draft.consumed).map_err(|_| "native_generation_failed")?, control)?;
-                let matched = draft.proposals.get(draft.offset + draft.consumed) == Some(&token);
-                draft.consumed += 1;
-                if matched {
-                    draft_stats.accepted += 1;
-                }
-                if matched && draft.consumed < draft.rows {
-                    pending = Some(draft);
+                let row = if draft.sibling_hit {
+                    draft.sibling.as_ref().ok_or("native_generation_failed")?.bonus_row
                 } else {
+                    draft.consumed
+                };
+                let token = sample(draft.transaction.logits(row).map_err(|_| "native_generation_failed")?, control)?;
+                if draft.sibling_hit {
+                    let sibling = draft.sibling.as_ref().ok_or("native_generation_failed")?;
                     let start = Instant::now();
-                    let target = draft.transaction.commit(draft.consumed).map_err(|_| "native_generation_failed")?;
+                    let target =
+                        draft.transaction.commit_sibling(sibling.depth).map_err(|_| "native_generation_failed")?;
                     if let Some((_, features)) = dflash2.as_mut() {
                         features.capture(target)?;
                     }
@@ -1061,18 +1204,56 @@ fn collect_output(
                     if let Some(verified) = verified_at.take() {
                         stats.in_round_host_seconds += (start - verified).as_secs_f64();
                     }
-                    let accepted = draft.offset + draft.consumed - usize::from(!matched);
-                    if matched {
-                        continuation = Some((draft.proposals, accepted));
+                    let accepted = draft.offset + sibling.slot + 1;
+                    if let Some(begun) = round_started.take() {
+                        stats.round_seconds_by_accepted[accepted] += (done - begun).as_secs_f64();
+                        stats.rounds_by_accepted[accepted] += 1;
+                    }
+                    committed_at = Some(done);
+                } else {
+                    let primary_matched = draft.proposals.get(draft.offset + draft.consumed) == Some(&token);
+                    let sibling_matched = draft
+                        .sibling
+                        .as_ref()
+                        .is_some_and(|sibling| sibling.slot == draft.consumed && sibling.token == token);
+                    draft.consumed += 1;
+                    if primary_matched || sibling_matched {
+                        draft_stats.accepted += 1;
+                    }
+                    if sibling_matched {
+                        draft.sibling_hit = true;
+                        draft_stats.self_correction.as_mut().ok_or("native_generation_failed")?.sibling_hits += 1;
+                        pending = Some(draft);
+                    } else if primary_matched && draft.consumed < draft.rows {
+                        pending = Some(draft);
                     } else {
-                        if let Some(begun) = round_started.take() {
-                            stats.round_seconds_by_accepted[accepted] += (done - begun).as_secs_f64();
-                            stats.rounds_by_accepted[accepted] += 1;
-                            if dflash2.is_none() {
-                                planner.record(round_depth, accepted, 1000.0 * (done - begun).as_secs_f64());
-                            }
+                        let start = Instant::now();
+                        let accepted = draft.offset + draft.consumed - usize::from(!primary_matched);
+                        let target =
+                            draft.transaction.commit(draft.consumed).map_err(|_| "native_generation_failed")?;
+                        if let Some((_, features)) = dflash2.as_mut() {
+                            features.capture(target)?;
                         }
-                        committed_at = Some(done);
+                        session = Some(target);
+                        let stats = speculative.as_mut().unwrap();
+                        stats.finish_seconds += start.elapsed().as_secs_f64();
+                        let done = Instant::now();
+                        if let Some(verified) = verified_at.take() {
+                            stats.in_round_host_seconds += (start - verified).as_secs_f64();
+                        }
+                        if primary_matched {
+                            continuation = Some((draft.proposals, accepted));
+                        } else {
+                            continuation = None;
+                            if let Some(begun) = round_started.take() {
+                                stats.round_seconds_by_accepted[accepted] += (done - begun).as_secs_f64();
+                                stats.rounds_by_accepted[accepted] += 1;
+                                if dflash2.is_none() {
+                                    planner.record(round_depth, accepted, 1000.0 * (done - begun).as_secs_f64());
+                                }
+                            }
+                            committed_at = Some(done);
+                        }
                     }
                 }
                 token
@@ -1121,7 +1302,12 @@ fn collect_output(
         // The consumer stopped mid-round. Its final sampled token remains
         // pending, just as it does after a serial step.
         let start = Instant::now();
-        draft.transaction.commit(draft.consumed).map_err(|_| "native_generation_failed")?;
+        if draft.sibling_hit {
+            let sibling = draft.sibling.as_ref().ok_or("native_generation_failed")?;
+            draft.transaction.commit(sibling.depth).map_err(|_| "native_generation_failed")?;
+        } else {
+            draft.transaction.commit(draft.consumed).map_err(|_| "native_generation_failed")?;
+        }
         speculative.as_mut().unwrap().finish_seconds += start.elapsed().as_secs_f64();
     }
     draft_stats.speculative = speculative;
@@ -1307,7 +1493,9 @@ impl GenerationBackend for InklingBackend {
             max_drafts: self.requested_draft_limit(&Sampling::Greedy {}),
             recommended_drafts: self.recommended_drafts(&Sampling::Greedy {}) as usize,
             sampling: "native-target-draw-match-v1",
-            verification: if self.dflash2.is_some() {
+            verification: if self.dflash2.as_ref().is_some_and(|draft| draft.greedy_self_correction) {
+                DFLASH2_SIBLING_VERIFICATION
+            } else if self.dflash2.is_some() {
                 DFLASH2_VERIFICATION
             } else {
                 SHORT_MTP_VERIFICATION
@@ -1315,11 +1503,16 @@ impl GenerationBackend for InklingBackend {
         })
     }
     fn mtp_drafter_identity(&self) -> Option<Value> {
-        self.dflash2.as_ref().map(|_| {
-            json!({
+        self.dflash2.as_ref().map(|draft| {
+            let mut identity = json!({
                 "implementation": "dflash2-mlx", "mlx_version": "0.31.2",
-                "weights_sha256": dflash2::WEIGHTS_SHA, "revision": dflash2::REVISION
-            })
+                "weights_sha256": dflash2::WEIGHTS_SHA, "revision": dflash2::REVISION,
+                "greedy_self_correction": draft.greedy_self_correction
+            });
+            if draft.greedy_self_correction {
+                identity["self_correction_threshold_logit_gap"] = json!(std::f32::consts::LN_2);
+            }
+            identity
         })
     }
     fn recommended_mtp_drafts_for(
@@ -1673,6 +1866,7 @@ mod tests {
                     &mut allocation,
                     true,
                     drafts as usize,
+                    false,
                     None,
                     logits,
                     input.len(),

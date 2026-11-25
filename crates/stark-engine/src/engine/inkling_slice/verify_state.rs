@@ -11,6 +11,55 @@ const CONV_OFFSETS: [usize; 4] = [0, KV_ROW_BYTES, 2 * KV_ROW_BYTES, 2 * KV_ROW_
 const CONV_BYTES: usize = 2 * KV_ROW_BYTES + 4 * WIDTH;
 const SAVED_VISIT_BYTES: usize = 2 * MAX_VERIFY_ROWS * KV_ROW_BYTES + 3 * CONV_BYTES;
 
+fn register_sibling_kernels(runtime: &mut Runtime) -> Result<()> {
+    if runtime.pipelines.contains_key("ink_verify_commit_sibling") {
+        return Ok(());
+    }
+    // Compile the four tree variants only when an operator requests a sibling.
+    // The ordinary verifier keeps its original argument layout and reductions.
+    packed_prefill::register(
+        runtime,
+        concat!(
+            "#define INK_VERIFY_FORK\n#define ink_verify_kv_pack ink_verify_kv_pack_fork\n",
+            include_str!("long_position.metal"),
+            include_str!("verify_cache.metal"),
+        ),
+        &["ink_verify_kv_pack_fork"],
+    )?;
+    packed_prefill::register(
+        runtime,
+        concat!(
+            "#define INK_VERIFY_FORK\n#define ink_verify_short_parts ink_verify_short_parts_fork\n",
+            include_str!("verify_short.metal"),
+        ),
+        &["ink_verify_short_parts_fork"],
+    )?;
+    packed_prefill::register(
+        runtime,
+        concat!(
+            "#define INK_VERIFY_FORK\n#define ink_verify_attention_mix ink_verify_attention_mix_fork\n",
+            include_str!("long_position.metal"),
+            include_str!("serial.metal"),
+            "\n",
+            include_str!("verify_first_norm.metal"),
+        ),
+        &["ink_verify_attention_mix_fork"],
+    )?;
+    packed_prefill::register(
+        runtime,
+        concat!(
+            "#define INK_VERIFY_FORK\n#define ink_verify_finish_experts_history ink_verify_finish_experts_history_fork\n",
+            include_str!("verify_finish.metal"),
+        ),
+        &["ink_verify_finish_experts_history_fork"],
+    )?;
+    packed_prefill::register(
+        runtime,
+        concat!(include_str!("verify_undo.metal"), "\n", include_str!("verify_sibling_commit.metal")),
+        &["ink_verify_commit_sibling"],
+    )
+}
+
 pub(super) struct VerifyWorkspace {
     saved: Buffer,
     undo_table: Option<Buffer>,
@@ -339,10 +388,14 @@ impl VerifyWorkspace {
         }
         buffers[18] = binding(&layer.mlp_query);
         buffers[19] = binding(&layer.mlp_norm);
+        let (kernel, flags) = match gpu.runtime.verify_sibling_depth {
+            Some(depth) => ("ink_verify_attention_mix_fork", ((rows - 1) << 16 | depth << 8) as u32),
+            None => ("ink_verify_attention_mix", 0),
+        };
         gpu.dispatch(
-            "ink_verify_attention_mix",
+            kernel,
             &buffers,
-            [position as u32, state.blocks as u32, u32::from(state.boundary), u32::from(outputs.is_some())],
+            [position as u32, state.blocks as u32, u32::from(state.boundary), flags | u32::from(outputs.is_some())],
             (1, rows),
             WIDTH / 4,
         );
@@ -384,6 +437,18 @@ impl VerifyWorkspace {
         rows: usize,
         kept: usize,
     ) -> Result<()> {
+        self.encode_undo(table, command, session, rows, kept, "ink_verify_undo_all")
+    }
+
+    fn encode_undo(
+        &self,
+        table: &Buffer,
+        command: &ProtocolObject<dyn MTLCommandBuffer>,
+        session: &Session,
+        rows: usize,
+        kept: usize,
+        kernel: Kernel,
+    ) -> Result<()> {
         use metal::{MTLComputeCommandEncoderExt, MTLResource, MTLResourceUsage};
 
         let encoder = command.compute_command_encoder().ok_or("Inkling batched undo encoder allocation failed")?;
@@ -407,7 +472,9 @@ impl VerifyWorkspace {
         }
         encoder.use_resources(
             &resources,
-            if kept == 0 {
+            if kernel == "ink_verify_commit_sibling" {
+                MTLResourceUsage::Read | MTLResourceUsage::Write
+            } else if kept == 0 {
                 MTLResourceUsage::Read
             } else {
                 MTLResourceUsage::Write
@@ -424,7 +491,7 @@ impl VerifyWorkspace {
             profile: None,
         };
         gpu.one(
-            "ink_verify_undo_all",
+            kernel,
             &[table, &self.saved, &self.anchors],
             [session.position as u32, rows as u32, 0, kept as u32],
             (12, session.visits.len()),
@@ -518,8 +585,12 @@ impl VerifyWorkspace {
         window: usize,
     ) {
         let [a, b, c, d] = std::array::from_fn(|i| rows[i.min(rows.len() - 1)]);
+        let (kernel, flags) = match gpu.runtime.verify_sibling_depth {
+            Some(depth) => ("ink_verify_kv_pack_fork", (depth << 8) as u32),
+            None => ("ink_verify_kv_pack", 0),
+        };
         gpu.dispatch(
-            "ink_verify_kv_pack",
+            kernel,
             &[
                 &a.k,
                 &b.k,
@@ -545,7 +616,7 @@ impl VerifyWorkspace {
                 &visit.values,
             ]
             .map(binding),
-            [position as u32, rows.len() as u32, visit.capacity as u32, u32::from(layer.dynamic.is_some())],
+            [position as u32, rows.len() as u32, visit.capacity as u32, flags | u32::from(layer.dynamic.is_some())],
             (4, 1),
             128,
         );
@@ -710,29 +781,35 @@ impl VerifyWorkspace {
         Self::relative_tables(gpu, layer, rows);
         gpu.phase(PrefillPhase::LocalAttention);
         let [a, b, c, d] = std::array::from_fn(|index| rows[index.min(rows.len() - 1)]);
-        gpu.dispatch(
-            "ink_verify_short_parts",
-            &[
-                binding(&a.q),
-                binding(&b.q),
-                binding(&c.q),
-                binding(&d.q),
-                binding(&a.table),
-                binding(&b.table),
-                binding(&c.table),
-                binding(&d.table),
-                binding(&a.sink),
-                binding(&b.sink),
-                binding(&c.sink),
-                binding(&d.sink),
-                binding(&visit.keys),
-                binding(&visit.values),
-                binding(parts),
-            ],
-            [position as u32, visit.capacity as u32],
-            (8, HEADS * rows.len()),
-            128,
-        );
+        let bindings = [
+            binding(&a.q),
+            binding(&b.q),
+            binding(&c.q),
+            binding(&d.q),
+            binding(&a.table),
+            binding(&b.table),
+            binding(&c.table),
+            binding(&d.table),
+            binding(&a.sink),
+            binding(&b.sink),
+            binding(&c.sink),
+            binding(&d.sink),
+            binding(&visit.keys),
+            binding(&visit.values),
+            binding(parts),
+        ];
+        let grid = (8, HEADS * rows.len());
+        if let Some(depth) = gpu.runtime.verify_sibling_depth {
+            gpu.dispatch(
+                "ink_verify_short_parts_fork",
+                &bindings,
+                [position as u32, visit.capacity as u32, rows.len() as u32, depth as u32],
+                grid,
+                128,
+            );
+        } else {
+            gpu.dispatch("ink_verify_short_parts", &bindings, [position as u32, visit.capacity as u32], grid, 128);
+        }
         gpu.dispatch(
             "ink_verify_short_gate",
             &[
@@ -838,6 +915,7 @@ impl VerifyWorkspace {
 pub struct Verification<'a> {
     session: Option<&'a mut Session>,
     rows: usize,
+    sibling_depth: Option<usize>,
 }
 
 impl<'a> Verification<'a> {
@@ -865,7 +943,7 @@ impl<'a> Verification<'a> {
         mut self,
         kept: usize,
     ) -> Result<&'a mut Session> {
-        if kept == 0 || kept > self.rows {
+        if kept == 0 || kept > self.rows - usize::from(self.sibling_depth.is_some()) {
             return Err("Inkling verifier commit is outside the block");
         }
         let session = self.session.as_deref_mut().ok_or("Inkling verifier is already committed")?;
@@ -892,6 +970,32 @@ impl<'a> Verification<'a> {
                 kept,
             });
         }
+        self.session.take().ok_or("Inkling verifier is already committed")
+    }
+
+    /// Commit the ancestors and the final physical lane of a packed sibling packet.
+    pub fn commit_sibling(
+        mut self,
+        depth: usize,
+    ) -> Result<&'a mut Session> {
+        if self.sibling_depth != Some(depth) {
+            return Err("Inkling sibling commit does not match the verified path");
+        }
+        let session = self.session.as_deref_mut().ok_or("Inkling verifier is already committed")?;
+        let workspace = session.verifier.as_ref().ok_or("Inkling verifier workspace unavailable")?;
+        let table = workspace.undo_table.as_ref().ok_or("Inkling sibling undo table unavailable")?;
+        execute_prepared(
+            &session.runtime,
+            None,
+            |command| workspace.encode_undo(table, command, session, self.rows, depth, "ink_verify_commit_sibling"),
+            |_| {},
+        )?;
+        session.position += depth + 1;
+        session.features_ready = false;
+        session.external_features = Some(ExternalFeatures::Sibling {
+            rows: self.rows,
+            depth,
+        });
         self.session.take().ok_or("Inkling verifier is already committed")
     }
 }
@@ -1061,6 +1165,7 @@ impl Session {
                     Verification {
                         session: Some(self),
                         rows,
+                        sibling_depth: None,
                     },
                     draft_prefix,
                     target.wall_ms,
@@ -1082,10 +1187,56 @@ impl Session {
         self.begin_verify_profiled(tokens, None).map(|(verification, _)| verification)
     }
 
+    /// The tree kernels cover the fused, non-wrapping short source verifier only.
+    pub fn can_pack_sibling(
+        &self,
+        rows: usize,
+    ) -> bool {
+        (3..=MAX_VERIFY_ROWS).contains(&rows)
+            && self.source_verifier
+            && self.external_draft
+            && self.active_dspark().is_none()
+            && self.runtime.source_text_active
+            && !self.capture_visits
+            && self.position + rows < LOCAL
+            && self.position + rows <= self.context
+            && self.runtime.verify_fused_cache
+            && self.runtime.verify_fused_finish
+            && self.runtime.verify_fused_attention
+            && self.verifier.as_ref().is_some_and(|w| {
+                w.undo_table.is_some()
+                    && w.mixes_rows()
+                    && w.shares_short_attention()
+                    && w.lanes.supports_sibling(&self.layers, rows)
+            })
+    }
+
+    /// Verify anchor, primary child(ren), then a sibling at logical depth 1 or 2.
+    pub fn begin_packed_sibling(
+        &mut self,
+        tokens: &[u32],
+        depth: usize,
+    ) -> Result<Verification<'_>> {
+        if !self.can_pack_sibling(tokens.len()) || !(1..tokens.len() - 1).contains(&depth) {
+            return Err("unsupported Inkling sibling packet");
+        }
+        register_sibling_kernels(&mut self.runtime)?;
+        self.begin_verify_topology(tokens, None, Some(depth)).map(|(transaction, _)| transaction)
+    }
+
     pub(super) fn begin_verify_profiled(
         &mut self,
         tokens: &[u32],
         profile: Option<&mut PrefillTiming>,
+    ) -> Result<(Verification<'_>, Timing)> {
+        self.begin_verify_topology(tokens, profile, None)
+    }
+
+    fn begin_verify_topology(
+        &mut self,
+        tokens: &[u32],
+        profile: Option<&mut PrefillTiming>,
+        sibling_depth: Option<usize>,
     ) -> Result<(Verification<'_>, Timing)> {
         self.check_append(tokens.len())?;
         if !self.source_verifier
@@ -1101,6 +1252,7 @@ impl Session {
         let matvec = self.runtime.verify_nvfp4_matvec;
         self.runtime.parallel_route = true;
         self.runtime.verify_nvfp4_matvec = true;
+        self.runtime.verify_sibling_depth = sibling_depth;
         let command = execute_prepared(
             &self.runtime,
             profile,
@@ -1109,6 +1261,7 @@ impl Session {
                 self.encode_verify_transaction(gpu, &workspace.lanes, tokens, VerifyExperts::Grouped, workspace, None)
             },
         );
+        self.runtime.verify_sibling_depth = None;
         self.runtime.verify_nvfp4_matvec = matvec;
         self.runtime.parallel_route = parallel;
         match command {
@@ -1116,6 +1269,7 @@ impl Session {
                 Verification {
                     session: Some(self),
                     rows: tokens.len(),
+                    sibling_depth,
                 },
                 timing,
             )),

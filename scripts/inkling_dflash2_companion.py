@@ -34,9 +34,13 @@ BLOCK_SIZE = 8
 RESET = 1
 PROPOSE = 2
 QUIT = 3
+PROPOSE_RUNNERS = 4
 HEADER = struct.Struct("<4I")
 STATUS = struct.Struct("<I")
 PROPOSALS = struct.Struct("<7I")
+# Seven primary IDs, two conditional runner-up IDs, then their F32 corrected
+# top1-minus-top2 score gaps. Only opcode 4 uses this extended response.
+PROPOSALS_WITH_RUNNERS = struct.Struct("<7I2I2f")
 
 
 def bind_target(draft, target: Path):
@@ -209,6 +213,51 @@ def select_path(model, hidden, anchor):
     return mx.stack(path, axis=1)
 
 
+def select_path_with_runners(model, hidden, anchor):
+    """Return the unchanged greedy path plus conditional runners at slots 1–2.
+
+    Runner IDs and gaps use the same top-k candidates, predecessor conditioning
+    and post-correction softcap as the primary path. Slot two conditions on the
+    primary ID from slot one. The caller clips alternatives to its output
+    budget; the fixed-width companion response has no terminal-token policy.
+    """
+    import mlx.core as mx
+
+    selector = model.candidate_selector
+    logits = model.lm_head(hidden)[..., :VOCAB].astype(mx.float32)
+    logits = logits * float(model.config.output_multiplier)
+    top_k = selector.top_k
+    if top_k < 2:
+        raise ValueError("runner-up selection requires top_k >= 2")
+    candidates = mx.argpartition(logits, -top_k, axis=-1)[..., -top_k:]
+    unary = mx.take_along_axis(logits, candidates, axis=-1)
+    projected = selector.hidden_projection(hidden).astype(mx.float32)
+    cap = float(model.config.final_logit_softcapping)
+    predecessor = anchor
+    selector_columns = mx.arange(top_k)[None, :]
+    path = []
+    alternates = []
+    gaps = []
+    for position in range(BLOCK_SIZE - 1):
+        pred = selector.predecessor_codebook(predecessor).astype(mx.float32)[:, None, :]
+        succ = selector.successor_codebook(candidates[:, position]).astype(mx.float32)
+        edge = mx.sum(pred * projected[:, position, None, :] * succ, axis=-1)
+        scores = cap * mx.tanh((unary[:, position] + edge) / cap)
+        chosen = mx.argmax(scores, axis=-1)
+        primary = mx.take_along_axis(candidates[:, position], chosen[:, None], axis=-1)[:, 0]
+        if position < 2:
+            primary_score = mx.take_along_axis(scores, chosen[:, None], axis=-1)[:, 0]
+            runner_scores = mx.where(selector_columns == chosen[:, None], -float("inf"), scores)
+            runner_index = mx.argmax(runner_scores, axis=-1)
+            runner = mx.take_along_axis(candidates[:, position], runner_index[:, None], axis=-1)[:, 0]
+            runner_score = mx.take_along_axis(scores, runner_index[:, None], axis=-1)[:, 0]
+            alternates.append(runner)
+            gaps.append(primary_score - runner_score)
+        predecessor = primary
+        path.append(primary)
+    return mx.stack(path, axis=1), mx.stack(alternates, axis=1), mx.stack(gaps, axis=1)
+
+
 def serve(model, source, sink):
     import mlx.core as mx
     import numpy as np
@@ -227,7 +276,7 @@ def serve(model, source, sink):
             sink.write(STATUS.pack(0))
             sink.flush()
             continue
-        if opcode != PROPOSE or rows > WINDOW or anchor >= VOCAB:
+        if opcode not in (PROPOSE, PROPOSE_RUNNERS) or rows > WINDOW or anchor >= VOCAB:
             raise ValueError("invalid draft message")
         if start + rows + BLOCK_SIZE > model.config.max_position_embeddings:
             raise ValueError("draft position exceeds configured maximum")
@@ -240,8 +289,20 @@ def serve(model, source, sink):
         context = mx.array(features).view(mx.bfloat16)
         block = mx.array([[anchor] + [model.config.mask_token_id] * (BLOCK_SIZE - 1)], dtype=mx.int32)
         hidden = model.hidden_states(block, context, cache, logits_start=1)
-        path = select_path(model, hidden, block[:, 0])[0].tolist()
-        sink.write(STATUS.pack(0) + PROPOSALS.pack(*path))
+        if opcode == PROPOSE:
+            path = select_path(model, hidden, block[:, 0])[0].tolist()
+            response = PROPOSALS.pack(*path)
+        else:
+            path, alternate, gaps = select_path_with_runners(model, hidden, block[:, 0])
+            # Evaluate all outputs together to pay one device synchronization.
+            mx.eval(path, alternate, gaps)
+            primary_ids = path[0].tolist()
+            alternate_ids = alternate[0].tolist()
+            score_gaps = gaps[0].tolist()
+            response = PROPOSALS_WITH_RUNNERS.pack(
+                *primary_ids, *alternate_ids, *score_gaps
+            )
+        sink.write(STATUS.pack(0) + response)
         sink.flush()
 
 

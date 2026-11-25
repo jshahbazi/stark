@@ -513,7 +513,18 @@ impl GroupedExperts {
         } else {
             ("ink_verify_finish_experts", 8)
         };
-        gpu.dispatch(kernel, &buffers[..count], [position as u32, rows as u32], (WIDTH / 128, 1), 128);
+        if let Some(depth) = gpu.runtime.verify_sibling_depth {
+            debug_assert!(attention.is_some());
+            gpu.dispatch(
+                "ink_verify_finish_experts_history_fork",
+                &buffers,
+                [position as u32, rows as u32, depth as u32, 0],
+                (WIDTH / 128, 1),
+                128,
+            );
+        } else {
+            gpu.dispatch(kernel, &buffers[..count], [position as u32, rows as u32], (WIDTH / 128, 1), 128);
+        }
     }
 
     pub(super) fn copy_output(

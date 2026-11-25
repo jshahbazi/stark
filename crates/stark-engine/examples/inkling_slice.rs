@@ -32,6 +32,20 @@ fn main() {
             None => false,
         };
         use stark_engine::engine::inkling_slice::PrefillTraceMode;
+        if args.first().is_some_and(|arg| arg == "--measure-packed-sibling") {
+            if args.len() != 4 {
+                return Err(
+                    "expected --measure-packed-sibling, target SafeTensors, private teacher trace and runner-up sidecar",
+                );
+            }
+            let report = stark_engine::engine::inkling_slice::measure_packed_sibling(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+            )?;
+            println!("{report}");
+            return Ok(0);
+        }
         if args.first().is_some_and(|arg| arg == "--measure-trace-verify-widths") {
             if args.len() != 4 {
                 return Err(

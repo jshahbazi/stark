@@ -42,6 +42,8 @@ mod prefill_relative;
 mod prefill_trace;
 #[path = "schedule_validation.rs"]
 mod schedule_validation;
+#[path = "sibling_validation.rs"]
+mod sibling_validation;
 #[path = "target_validation.rs"]
 mod target_validation;
 #[path = "trace_verify_validation.rs"]
@@ -63,6 +65,7 @@ pub use schedule_validation::{
     measure_full_schedule, measure_prefill_tolerance, measure_schedule_replay, measure_source_dspark_depth_schedule,
     measure_split_consistency, measure_verify_transaction_schedule,
 };
+pub use sibling_validation::measure_packed_sibling;
 pub use target_validation::{
     measure_decode_verify, measure_full, measure_full_budget, measure_prefill, measure_prefill_speed,
 };
@@ -87,6 +90,10 @@ enum ExternalFeatures {
     Verified {
         rows: usize,
         kept: usize,
+    },
+    Sibling {
+        rows: usize,
+        depth: usize,
     },
 }
 
@@ -674,6 +681,24 @@ impl Session {
             }) => {
                 let workspace = self.verifier.as_ref().ok_or("Inkling external verifier capture unavailable")?;
                 append_lanes(&workspace.lanes, rows, kept, output);
+                Ok(())
+            },
+            Some(&ExternalFeatures::Sibling {
+                rows,
+                depth,
+            }) => {
+                let workspace = self.verifier.as_ref().ok_or("Inkling external verifier capture unavailable")?;
+                let selected = workspace
+                    .lanes
+                    .verify_taps(self, rows)
+                    .enumerate()
+                    .filter(|(row, _)| *row < depth || *row == rows - 1);
+                for (_, taps) in selected.skip((depth + 1).saturating_sub(limit)) {
+                    let words = unsafe {
+                        std::slice::from_raw_parts(taps.contents().as_ptr().cast::<u16>(), DRAFT_FEATURE_WORDS)
+                    };
+                    output.extend_from_slice(words);
+                }
                 Ok(())
             },
             None => Err("Inkling external capture has no committed rows"),

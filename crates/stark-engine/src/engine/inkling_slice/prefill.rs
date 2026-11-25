@@ -30,6 +30,16 @@ pub(super) struct PrefillLanes {
 }
 
 impl PrefillLanes {
+    pub(super) fn supports_sibling(
+        &self,
+        layers: &[Layer],
+        rows: usize,
+    ) -> bool {
+        self.direct_experts
+            && self.controllers.is_some()
+            && layers.iter().all(|layer| self.grouped.supports(layer, rows))
+    }
+
     pub(super) fn new(
         runtime: &mut Runtime,
         rows: usize,

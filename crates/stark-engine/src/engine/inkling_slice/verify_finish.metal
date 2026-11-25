@@ -50,11 +50,21 @@ kernel void ink_verify_finish_experts_history(
     device bfloat *attention_history [[buffer(8)]],
     device const bfloat *a0 [[buffer(9)]], device const bfloat *a1 [[buffer(10)]],
     device const bfloat *a2 [[buffer(11)]], device const bfloat *a3 [[buffer(12)]],
+#ifdef INK_VERIFY_FORK
+    constant uint4 &range [[buffer(13)]],
+#else
     constant uint2 &range [[buffer(13)]],
+#endif
     uint channel [[thread_position_in_grid]]
 ) {
 #pragma clang fp contract(off) reassociate(off)
     constexpr uint Width = 2304;
+#ifdef INK_VERIFY_FORK
+    // Preserve pre-command values before any physical rows overwrite the ring.
+    const bfloat old0 = history[channel];
+    const bfloat old1 = history[Width + channel];
+    const bfloat old2 = history[2 * Width + channel];
+#endif
     // Attention history slots deferred by ink_verify_attention_mix, stored in
     // the same increasing row order as ink_verify_finish_attention.
     for (uint row = 0; row < range.y; ++row) {
@@ -68,15 +78,38 @@ kernel void ink_verify_finish_experts_history(
         const bfloat current_bf16 = bfloat(sum);
         const float current = float(current_bf16);
         merged[row * Width + channel] = current_bf16;
+#ifdef INK_VERIFY_FORK
+        const bool sibling = row + 1 == range.y;
+        const uint logical_depth = sibling ? range.z : row;
+        const uint pos = range.x + logical_depth;
+        const uint physical_pos = range.x + row;
+#else
         const uint pos = range.x + row;
+#endif
         float result = 0.0f;
         for (uint tap = 0; tap < 4; ++tap) {
             const uint lag = 3 - tap;
             if (pos < lag) continue;
-            const float value = lag == 0 ? current : float(history[((pos-lag) % 3) * Width + channel]);
+            float value;
+            if (lag == 0) {
+                value = current;
+#ifdef INK_VERIFY_FORK
+            } else if (sibling && lag <= logical_depth) {
+                value = float(merged[(logical_depth - lag) * Width + channel]);
+            } else if (sibling) {
+                const uint slot = (pos - lag) % 3;
+                value = slot == 0 ? float(old0) : slot == 1 ? float(old1) : float(old2);
+#endif
+            } else {
+                value = float(history[((pos-lag) % 3) * Width + channel]);
+            }
             result += float(weight[channel * 4 + tap]) * value;
         }
+#ifdef INK_VERIFY_FORK
+        history[(physical_pos % 3) * Width + channel] = current_bf16;
+#else
         history[(pos % 3) * Width + channel] = current_bf16;
+#endif
         const bfloat ffn = bfloat((result + current) * 0.447213595499958f);
         device float *partial = row == 0 ? p0 : row == 1 ? p1 : row == 2 ? p2 : p3;
         partial[channel] = float(bfloat(partial[channel] + float(ffn)));

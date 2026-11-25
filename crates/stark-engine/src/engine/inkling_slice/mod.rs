@@ -29,11 +29,11 @@ pub use session::{
     measure_candidate_rounds, measure_decode_experts, measure_decode_stages, measure_decode_verify,
     measure_dense_ceiling, measure_depth_policies, measure_draft_overlap, measure_draft_trace, measure_dspark,
     measure_dspark_depth, measure_expert_ceiling, measure_full, measure_full_budget, measure_full_schedule,
-    measure_paired_control, measure_prefill, measure_prefill_speed, measure_prefill_tolerance, measure_quality_compare,
-    measure_round_budget, measure_schedule_replay, measure_source_dspark_depth, measure_source_dspark_depth_schedule,
-    measure_split_consistency, measure_trace_verify_widths, measure_verify_transaction,
-    measure_verify_transaction_schedule, probe_stock_nvfp4, profile_packed_prefill, profile_prefill, profile_schedule,
-    profile_stock_4k, profile_worker_sequence, trace_packed_prefill, trace_prefill,
+    measure_packed_sibling, measure_paired_control, measure_prefill, measure_prefill_speed, measure_prefill_tolerance,
+    measure_quality_compare, measure_round_budget, measure_schedule_replay, measure_source_dspark_depth,
+    measure_source_dspark_depth_schedule, measure_split_consistency, measure_trace_verify_widths,
+    measure_verify_transaction, measure_verify_transaction_schedule, probe_stock_nvfp4, profile_packed_prefill,
+    profile_prefill, profile_schedule, profile_stock_4k, profile_worker_sequence, trace_packed_prefill, trace_prefill,
 };
 pub use validation::measure;
 pub use vision::{INKLING_IMAGE_TOKEN, ImageEmbeddings, measure_vision};
@@ -128,6 +128,8 @@ struct Runtime {
     verify_mxfp8_vector: bool,
     verify_compact_runs: usize,
     verify_fused_finish: bool,
+    /// Logical depth of the last physical lane during a short sibling packet.
+    verify_sibling_depth: Option<usize>,
     verify_fused_attention: bool,
     verify_fused_cache: bool,
     verify_combined_short: bool,
@@ -289,6 +291,7 @@ impl Runtime {
             verify_mxfp8_vector: false,
             verify_compact_runs: 0,
             verify_fused_finish: false,
+            verify_sibling_depth: None,
             verify_fused_attention: false,
             verify_fused_cache: false,
             verify_combined_short: false,

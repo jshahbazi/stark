@@ -54,6 +54,10 @@ The profile selects DFlash 2 as its text draft head and leaves the DSpark graph 
 
 The native verifier checks up to four rows per call. With four or more proposals it runs a second call only if the first call accepts its last prediction.
 
+An operator can set `"greedy_self_correction": true` to spend one of three greedy draft slots on a runner-up. The field defaults to false. The worker checks the first two corrected selector positions in order. At the first top-one to top-two logit gap at or below `ln(2)`, it packs the runner-up and up to two primary tokens into one target pass. It commits the ancestors and the selected token, then uses that leaf's readout for the next target draw.
+
+This implementation uses the fused short verifier while the starting token position plus physical packet size is below 1,024. Later positions, unqualified packet shapes, other greedy widths and sampled requests use ordinary DFlash. A supported round with no eligible gap retains the ordinary primary chain. The profile retains its configured greedy default. Worker readiness identifies the experimental capability as `inkling-dflash2-greedy-sibling-short-target-draw-v1`. Eligible requests include packed-round and sibling-hit counts in `mtp.stats.self_correction`.
+
 Streaming uses the same target draws and stop rules as buffered generation. For matching loaded artifacts, build, input and sampling settings, greedy requests are deterministic and sampled requests use the supplied seed. [Streaming protocol](GENERATION.md#streaming)
 
 The vision tower stays loaded. Image requests use the existing image path with drafting disabled and invalidate the retained text prefix. A matching text prefix snapshot includes the committed feature window, so the worker can rebuild the draft's K/V at the restored absolute position. The companion resets between requests. During a request it keeps only committed target K/V in chronological order and receives new feature rows as they become available.
