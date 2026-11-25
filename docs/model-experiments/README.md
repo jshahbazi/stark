@@ -315,7 +315,7 @@ results from a different build.
 | Provenance | Source and dependency/vendor revisions, patch/manifest and executable/model hashes. A malformed or missing identity stays unresolved. |
 | Safety/lifecycle | Context/resource admission, cancellation, error recovery, prefix reuse and clearing, scratch lifetime, and known limits. |
 
-Existing studies also include the [Qwen3.8 optimization history](../benchmarks/QWEN38_OPTIMIZATION_HISTORY.md); its findings retain their original scope. The [performance playbook](../PERFORMANCE_PLAYBOOK.md) summarizes the Flash-Next performance attempts by lever for use on other families; it is a guide to these records and qualifies nothing.
+The family speed histories collect before/after comparisons, including superseded results. The playbook organizes lessons by the part of the request that is slow and links to the measured wins, failed controls and rejected candidates. [Family histories](../MODEL_RESEARCH.md) · [Performance playbook](../PERFORMANCE_PLAYBOOK.md#choose-a-performance-experiment) · [Qwen3.8 optimization history](../benchmarks/QWEN38_OPTIMIZATION_HISTORY.md)
 
 Use totals only within their recorded scope; overlapping reruns must not be summed. Report sampled tokens versus emitted/useful tokens explicitly. Do not use a directory name, available artifact, implemented backend or successful EOS as proof of broad model quality or speed.
 
