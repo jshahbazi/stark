@@ -78,6 +78,32 @@ pub struct DraftStats {
     pub decode_host_cut_seconds: f64,
     pub prefill_expert_bytes_read: u64,
     pub decode_expert_bytes_read: u64,
+    pub prefill_attention_seconds: f64,
+    pub prefill_dense_seconds: f64,
+    pub prefill_moe_route_seconds: f64,
+    pub prefill_moe_expert_seconds: f64,
+    pub prefill_other_seconds: f64,
+    pub prefill_profiled_blocks: u64,
+    pub prefill_grouped_tiles: u64,
+    pub prefill_grouped_tail_tiles: u64,
+    pub decode_encode_seconds: f64,
+    pub decode_commit_seconds: f64,
+    pub decode_completion_wait_seconds: f64,
+    pub decode_engram_seconds: f64,
+    pub decode_command_buffers: u64,
+    pub decode_encoders: u64,
+    pub decode_dispatches: u64,
+    pub prefill_invalid_gpu_spans: u64,
+    pub decode_invalid_gpu_spans: u64,
+}
+
+pub struct Options {
+    pub chunk: usize,
+    pub storage: ExpertStorage,
+    pub grouped: bool,
+    pub gpu_plan: bool,
+    pub profile_prefill: bool,
+    pub larger_arena: bool,
 }
 
 unsafe extern "C" {
@@ -90,9 +116,12 @@ unsafe extern "C" {
         storage: c_int,
         grouped: c_int,
         gpu_plan: c_int,
+        profile_prefill: c_int,
+        larger_arena: c_int,
         session: *mut *mut c_void,
         vision: *mut VisionGeometry,
         mapped: *mut c_int,
+        arena_bytes: *mut u64,
     ) -> c_int;
     fn stark_hy4_close(session: *mut c_void);
     fn stark_hy4_clear(session: *mut c_void);
@@ -131,6 +160,7 @@ pub struct Session {
     inner: NonNull<c_void>,
     vision: VisionGeometry,
     mapped_experts: bool,
+    arena_bytes: u64,
 }
 
 fn path_arg(path: &Path) -> Result<CString, &'static str> {
@@ -145,10 +175,7 @@ impl Session {
     pub fn load(
         model: &Path,
         prepare: &Path,
-        chunk: usize,
-        storage: ExpertStorage,
-        grouped: bool,
-        gpu_plan: bool,
+        options: Options,
     ) -> Result<Self, &'static str> {
         let shard = path_arg(&model.join(SHARD))?;
         let projector = path_arg(&model.join(PROJECTOR))?;
@@ -156,6 +183,7 @@ impl Session {
         let mut inner = ptr::null_mut();
         let mut vision = VisionGeometry::default();
         let mut mapped = 0;
+        let mut arena_bytes = 0;
         // The path arguments remain alive throughout initialization. The returned
         // handle owns all model data and the device queue.
         let code = unsafe {
@@ -164,13 +192,16 @@ impl Session {
                 projector.as_ptr(),
                 prepare.as_ptr(),
                 CONTEXT as c_int,
-                c_int::try_from(chunk).map_err(|_| "invalid_hy4_prefill_chunk")?,
-                storage as c_int,
-                c_int::from(grouped),
-                c_int::from(gpu_plan),
+                c_int::try_from(options.chunk).map_err(|_| "invalid_hy4_prefill_chunk")?,
+                options.storage as c_int,
+                c_int::from(options.grouped),
+                c_int::from(options.gpu_plan),
+                c_int::from(options.profile_prefill),
+                c_int::from(options.larger_arena),
                 &mut inner,
                 &mut vision,
                 &mut mapped,
+                &mut arena_bytes,
             )
         };
         if code != 0 {
@@ -182,6 +213,7 @@ impl Session {
                 5 => "hy4_draft_load_failed",
                 6 => "hy4_expert_arena_load_failed",
                 8 => "hy4_mapped_experts_exceed_budget",
+                9 => "hy4_larger_arena_exceeds_budget",
                 _ => "hy4_native_load_failed",
             });
         }
@@ -189,6 +221,7 @@ impl Session {
             inner: NonNull::new(inner).ok_or("hy4_native_load_failed")?,
             vision,
             mapped_experts: mapped != 0,
+            arena_bytes,
         })
     }
 
@@ -198,6 +231,10 @@ impl Session {
 
     pub fn mapped_experts(&self) -> bool {
         self.mapped_experts
+    }
+
+    pub fn arena_bytes(&self) -> u64 {
+        self.arena_bytes
     }
     pub fn begin(
         &mut self,

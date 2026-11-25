@@ -37,15 +37,19 @@ struct StarkHy4 {
     int position = 0;
     int drafts = 0;
     StarkHy4Stats start_stats{};
+    mtl::Context::SegTiming decode_start{};
+    double decode_engram_start_ms = 0;
+    uint64_t request_start_invalid_spans = 0;
     ~StarkHy4() { metal.stop_keepalive(); }
 };
 
 extern "C" int stark_hy4_open(const char* model, const char* projector, const char* pack, int context, int chunk,
-                               int storage, int grouped, int gpu_plan, StarkHy4** output, StarkHy4VisionGeometry* vision,
-                               int* mapped) noexcept {
+                               int storage, int grouped, int gpu_plan, int profile_prefill, int larger_arena,
+                               StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
+                               uint64_t* arena_bytes) noexcept {
     *output = nullptr;
     try {
-        if (chunk != 1024 && chunk != 4096) return 1;
+        if ((chunk != 1024 && chunk != 4096) || (larger_arena && storage != 1)) return 1;
         auto session = std::make_unique<StarkHy4>();
         auto& s = *session;
         s.metal.lock_safe_math();
@@ -59,6 +63,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         prefill.chunk = chunk;
         prefill.grouped_k_quant = grouped != 0;
         prefill.mapped_gpu_plan = gpu_plan != 0;
+        prefill.profile_stages = profile_prefill != 0;
         if (!s.forward.open(s.model, s.metal, pack, prefill).empty()) return 4;
         if (!s.mtp.open(s.model, s.metal, s.forward.library(), 1024, pack).empty()) return 5;
         if (!s.vision.build(s.metal, s.forward.library()).empty()) return 3;
@@ -78,6 +83,14 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         *mapped = s.model.stream.mapped() ? 1 : 0;
         const int slots = 2 * s.model.stream.n_experts();
         if (!*mapped) {
+            if (larger_arena) {
+                constexpr double candidate_bytes = 36e9;
+                const double spare = std::min({arena.gpu_room, arena.ram_room, arena.default_cap - arena.base}) - future;
+                if (spare < candidate_bytes || arena.expert_total < candidate_bytes) return 9;
+                // The existing live anonymous-arena shrink and grow guards
+                // remain active while the larger candidate allocates.
+                arena.arena = candidate_bytes;
+            }
             arena.arena = std::min(arena.arena, arena.gpu_room - future);
             if (arena.arena <= 0 || !make_arena(s.model, s.metal, arena, "", slots + 64).empty()) return 6;
             for (int c = 0; c < s.model.stream.n_classes(); ++c) {
@@ -85,6 +98,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
             }
         }
         if (!s.forward.attach_prefill().empty()) return 6;
+        *arena_bytes = s.model.stream.arena_used_bytes();
         const auto& vg = s.vision.geometry();
         *vision = {static_cast<uint32_t>(vg.image_token), static_cast<uint32_t>(vg.patch),
                    static_cast<uint32_t>(vg.merge), static_cast<uint64_t>(vg.min_pixels),
@@ -146,6 +160,9 @@ extern "C" int stark_hy4_begin(StarkHy4* session, const uint32_t* tokens, int co
         s.position = reuse;
         s.context = context;
         s.drafts = drafts;
+        s.decode_start = s.metal.seg_timing();
+        s.request_start_invalid_spans = s.decode_start.invalid_gpu_spans;
+        s.decode_engram_start_ms = s.forward.timing().engram_wait_ms;
         s.start_stats = {};
         s.start_stats = stark_hy4_stats(session);
         if (image) {
@@ -170,7 +187,10 @@ extern "C" int stark_hy4_prefill(StarkHy4* session, int rows) noexcept {
         }
         if (!s.forward.prefill(s.tokens.data(), s.position, rows, sink).empty()) return 1;
         s.position += rows;
-        s.start_stats.decode_host_cut_seconds = s.forward.timing().host_cut_ms / 1e3;
+        const auto& timing = s.forward.timing();
+        s.start_stats.decode_host_cut_seconds = timing.host_cut_ms / 1e3;
+        s.decode_engram_start_ms = timing.engram_wait_ms;
+        s.decode_start = s.metal.seg_timing();
         return 0;
     } catch (...) {
         return 1;
@@ -247,6 +267,8 @@ extern "C" StarkHy4Stats stark_hy4_stats(StarkHy4* session) noexcept {
     const auto& draft = session->mtp.stats();
     const auto& graph = session->forward.timing();
     const auto& base = session->start_stats;
+    const auto& schedule = session->metal.seg_timing();
+    const auto& schedule_base = session->decode_start;
     return {
         draft.offered, draft.accepted, draft.rounds,
         draft.draft_ms / 1e3, draft.verify_ms / 1e3, draft.catchup_ms / 1e3,
@@ -258,5 +280,22 @@ extern "C" StarkHy4Stats stark_hy4_stats(StarkHy4* session) noexcept {
         graph.host_cut_ms / 1e3 - base.decode_host_cut_seconds,
         graph.pf_bytes_read - base.prefill_expert_bytes_read,
         session->model.stream.decode_read_bytes() - base.decode_expert_bytes_read,
+        graph.pf_attention_ms / 1e3 - base.prefill_attention_seconds,
+        graph.pf_dense_ms / 1e3 - base.prefill_dense_seconds,
+        graph.pf_moe_route_ms / 1e3 - base.prefill_moe_route_seconds,
+        graph.pf_moe_expert_ms / 1e3 - base.prefill_moe_expert_seconds,
+        graph.pf_other_ms / 1e3 - base.prefill_other_seconds,
+        graph.pf_profiled_blocks - base.prefill_profiled_blocks,
+        graph.pf_grouped_tiles - base.prefill_grouped_tiles,
+        graph.pf_grouped_tail_tiles - base.prefill_grouped_tail_tiles,
+        (schedule.encode_ms - schedule_base.encode_ms) / 1e3,
+        (schedule.commit_ms - schedule_base.commit_ms) / 1e3,
+        (schedule.wait_ms - schedule_base.wait_ms) / 1e3,
+        (graph.engram_wait_ms - session->decode_engram_start_ms) / 1e3,
+        schedule.n_cb - schedule_base.n_cb,
+        schedule.n_enc - schedule_base.n_enc,
+        schedule.n_dis - schedule_base.n_dis,
+        schedule_base.invalid_gpu_spans - session->request_start_invalid_spans,
+        schedule.invalid_gpu_spans - schedule_base.invalid_gpu_spans,
     };
 }

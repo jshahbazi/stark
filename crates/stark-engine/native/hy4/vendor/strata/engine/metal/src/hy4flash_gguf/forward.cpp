@@ -573,7 +573,8 @@ struct Forward::Impl {
     }
     std::string resolve();
     void encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int>& cuts, const BW& b, const mtl::Buffer& x,
-                      const mtl::Buffer& out, int T, bool want_dump, bool gpu_plan = false);
+                      const mtl::Buffer& out, int T, bool want_dump, bool gpu_plan = false,
+                      mtl::Context::GraphProfile* profile = nullptr);
     void encode_head(std::vector<mtl::Dispatch>& ds, const mtl::Buffer& x, int x_t0, int T, bool with_logits = true);
     std::string run_head(const mtl::Buffer& x, int x_t0, int T);
     std::string run_hidden(const mtl::Buffer& x, int x_t0, int T);
@@ -1023,13 +1024,18 @@ std::string Forward::Impl::alloc() {
 
 // ---- one block -----------------------------------------------------------------------------------------------------
 void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int>& cuts, const BW& b,
-                                 const mtl::Buffer& x_in, const mtl::Buffer& out, int T, bool want_dump, bool gpu_plan) {
+                                 const mtl::Buffer& x_in, const mtl::Buffer& out, int T, bool want_dump, bool gpu_plan,
+                                 mtl::Context::GraphProfile* profile) {
     const uint32_t uT = (uint32_t) T;
     const uint32_t H = (uint32_t) b.heads;
     const mtl::Buffer* resid = &x_in;
+    const auto stage = [&](double& total_ms) {
+        if (profile != nullptr) profile->stages.push_back({ds.size(), &total_ms});
+    };
 
     // ---- Engram, BEFORE the attention pre-mix
     if (b.engram_table >= 0) {
+        stage(tm.pf_other_ms);
         const int cols = m->geo.engram_heads;
         {
             mtl::Dispatch d;
@@ -1083,6 +1089,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     }
 
     // ---- attention pre-mix
+    stage(tm.pf_attention_ms);
     hc_pre(ds, b, *resid, 0, T, b.t[W_ATTN_NORM], &anorm, eps);   // + attn_norm(cur) -> anorm
 
     // ---- MLA
@@ -1332,9 +1339,11 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     hc_post(ds, attn_out, *resid, post_a, hc_mid, T);
 
     // ---- the FFN half
+    stage(tm.pf_other_ms);
     hc_pre(ds, b, hc_mid, 1, T, b.t[W_FFN_NORM], &fnorm, eps);   // + ffn_norm(cur) -> fnorm
     const mtl::Buffer* ffn_result = nullptr;
     if (b.dense_ffn) {
+        stage(tm.pf_dense_ms);
         const gguf::Tensor* wg = b.t[W_FGATE];
         const gguf::Tensor* wu = b.t[W_FUP];
         const gguf::Tensor* wd = b.t[W_FDOWN];
@@ -1344,6 +1353,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         gv(wd).append(ds, m->dense, wd->offset, da, (uint32_t) m->geo.dense_ff, ffn_sum, (uint32_t) n_embd, 0, uT);
         ffn_result = &ffn_sum;
     } else {
+        stage(tm.pf_moe_route_ms);
         // the router, then the cut: the host reads the ids, puts the experts in the arena and writes the plan
         const gguf::Tensor* gi = b.t[W_GATE_INP];
         gv(gi).append(ds, m->dense, gi->offset, fnorm, (uint32_t) n_embd, mlogits, (uint32_t) n_experts, 0, uT);
@@ -1399,6 +1409,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         // depend on the FFN input alone, not on the ids, the weights, the plan or the arena the host is about to
         // write - so the GPU computes them while the host waits for the SSD instead of idling.  Only WHEN they run
         // moves; each writes its own buffers (shg/shu/sha/sho, rdown), so every value is the same bit for bit.
+        stage(tm.pf_dense_ms);
         const gguf::Tensor* sg = b.t[W_SH_G];
         const gguf::Tensor* su = b.t[W_SH_U];
         const gguf::Tensor* sd = b.t[W_SH_D];
@@ -1449,6 +1460,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         const auto& bank = [&](uint32_t chunk) -> const mtl::Buffer& {
             return mapped ? m->stream.mapped_layer(b.ordinal).buffer : m->stream.chunk((int)chunk);
         };
+        stage(tm.pf_moe_expert_ms);
         if (gpu_plan) {
             MoeArgs args = ps.for_chunk(ma, 0);
             args.n_tok = uT;
@@ -1569,6 +1581,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
             mo.append_combine(ds, ps.for_chunk(sa, 0, s), ye, pb, mlat, xo);
         }
 
+        stage(tm.pf_dense_ms);
         const gguf::Tensor* ru = b.t[W_RUP];
         gv(ru).append(ds, m->dense, ru->offset, mlat, (uint32_t) latent, upo, (uint32_t) n_embd, 0, uT);
         if (!early) shared_expert();   // HY4_FLASH_SHARED_EARLY=0: after the routed experts, inside the wait
@@ -1579,6 +1592,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         }
         ffn_result = &ffn_sum;
     }
+    stage(tm.pf_other_ms);
     rms(ds, *ffn_result, 0, (uint32_t) n_embd, b.t[W_POST_FFW], fout, 0, (uint32_t) n_embd, (uint32_t) n_embd, T,
         eps);
     hc_post(ds, fout, hc_mid, post_f, out, T);
@@ -1796,14 +1810,17 @@ void Forward::Impl::at_cut(int s) {
     }
     // the prefill GEMM's tile lists and grids, for the layer this cut is about to release
     if (mm_active(o, n_tok, std::min(ps.n_chunk, (uint32_t) std::max(1, m->stream.n_chunks())))) {
-        const int tm = mm_tile().tm;
+        const int tile_rows = mm_tile().tm;
+        const int gate_type = m->experts[(size_t) o].type[kGate];
+        const bool count_tail = pf.profile_stages && tile_rows == 64 &&
+                                (gate_type == ref::Q3_K || gate_type == ref::Q4_K);
         for (uint32_t s = 0; s < ps.subs_for((uint32_t) n_tok); ++s)
             for (uint32_t c = 0; c < ps.n_chunk; ++c) {
                 const size_t slot = (size_t) s * ps.n_chunk + c;
                 if (slot >= mm_slots) break;   // laid out for tcap; a shorter window uses fewer slots
                 const int32_t* gs = ps.buf.data() + (size_t) s * ps.plan_stride + ps.off_gstart + c * (ps.g_max + 1);
-                const uint32_t n = MoeMmF32::tiles_into(gs, ps.g_max, tm,
-                                                        mm_tiles.as<int32_t>() + 2 * mm_cap * slot, mm_cap);
+                int32_t* tiles = mm_tiles.as<int32_t>() + 2 * mm_cap * slot;
+                const uint32_t n = MoeMmF32::tiles_into(gs, ps.g_max, tile_rows, tiles, mm_cap);
                 if (n > mm_cap) {
                     // tile_cap is provably enough, so this is unreachable - but the recovery must not leave the
                     // REST of the grids at the previous layer's values, because cut_err is only read after the
@@ -1814,6 +1831,13 @@ void Forward::Impl::at_cut(int s) {
                                   std::to_string(s) + " chunk " + std::to_string(c) + " needs more than " +
                                   std::to_string(mm_cap) + " tiles";
                     return;
+                }
+                if (count_tail) {
+                    tm.pf_grouped_tiles += n;
+                    for (uint32_t i = 0; i < n; ++i) {
+                        const int32_t group = tiles[2 * i];
+                        if (gs[group + 1] - gs[group] - tiles[2 * i + 1] <= 32) ++tm.pf_grouped_tail_tiles;
+                    }
                 }
                 uint32_t* g = mm_ind.as<uint32_t>() + 3 * slot * 2;
                 for (int kind = 0; kind < 2; ++kind) {
@@ -2489,6 +2513,7 @@ std::string Forward::prefill(const int32_t* all_tokens, int p0, int T, const Pre
     const mtl::Buffer* out = &im.hcB;
     std::vector<mtl::Dispatch> ds;
     std::vector<int> cuts;
+    mtl::Context::GraphProfile profile;
     for (size_t l = 0; l < im.blk.size(); ++l) {
         const Impl::BW& b = im.blk[l];
         if (b.engram_table >= 0)
@@ -2496,12 +2521,15 @@ std::string Forward::prefill(const int32_t* all_tokens, int p0, int T, const Pre
         const double t_enc = mtl::now_s();
         ds.clear();
         cuts.clear();
+        profile.stages.clear();
         im.cut_block.clear();
         im.cut_wait.clear();
         im.cut_role.clear();
-        im.encode_block(ds, cuts, b, *in, *out, T, want_dump);
+        auto* stage_profile = im.pf.profile_stages ? &profile : nullptr;
+        im.encode_block(ds, cuts, b, *in, *out, T, want_dump, false, stage_profile);
         im.tm.pf_encode_ms += (mtl::now_s() - t_enc) * 1e3;
-        const double g = im.cx->run_graph_seg(ds, cuts, im.cut_wait, cut_tramp, &im) * 1e3;
+        const double g = im.cx->run_graph_seg(ds, cuts, im.cut_wait, cut_tramp, &im, stage_profile) * 1e3;
+        if (profile.sampled) ++im.tm.pf_profiled_blocks;
         im.tm.pf_gpu_ms += g;
         if (im.tm.pf_block_ms.size() != im.blk.size()) im.tm.pf_block_ms.assign(im.blk.size(), 0.0);
         im.tm.pf_block_ms[l] += g;

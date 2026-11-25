@@ -150,8 +150,15 @@ public:
     // cuts[s] <= waits[s] <= cuts[s + 1] (ds.size() for the last); waits empty, or waits[s] == cuts[s] for every s,
     // encodes exactly what the overload above does.  The dispatches in [cuts[s], waits[s]) must neither read nor
     // write anything at_cut(s) touches.
+    // Diagnostic encoder boundaries, in dispatch order, starting at zero. A block's totals are committed
+    // only when every timestamp resolves. Encoder splits can perturb timing on a concurrent graph.
+    struct GraphProfile {
+        struct Stage { size_t first; double* total_ms; };
+        std::vector<Stage> stages;
+        bool sampled = false;
+    };
     double run_graph_seg(const std::vector<Dispatch>& ds, const std::vector<int>& cuts, const std::vector<int>& waits,
-                         void (*at_cut)(void*, int), void* user);
+                         void (*at_cut)(void*, int), void* user, GraphProfile* profile = nullptr);
 
     // WHERE run_graph_seg's WALL TIME GOES, which `gpu` alone cannot say.  The value it returns is
     // `GPUEndTime - GPUStartTime` of the one command buffer, and that span CONTAINS the host's turns: at every
@@ -176,7 +183,7 @@ public:
     static constexpr int kMaxCuts = 64;
     struct SegTiming {
         double encode_ms = 0, spin_ms = 0, cut_ms = 0, commit_ms = 0, wait_ms = 0, gpu_ms = 0;
-        uint64_t n_cb = 0, n_enc = 0, n_cut = 0, n_dis = 0, n_dis_plain = 0;
+        uint64_t n_cb = 0, n_enc = 0, n_cut = 0, n_dis = 0, n_dis_plain = 0, invalid_gpu_spans = 0;
         double spin_at[kMaxCuts] = {};   ///< spin before cut s, summed over the calls
         double cut_at[kMaxCuts] = {};    ///< the at_cut body at cut s, summed over the calls
         uint64_t n_at[kMaxCuts] = {};    ///< how many calls reached cut s (the divisor for the two above)

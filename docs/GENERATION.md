@@ -82,8 +82,16 @@ The worker defaults to streamed experts, grouped F32 prefill on Metal 4 and
 1,024-token prefix boundaries. `STARK_HY4_EXPERT_STORAGE=mapped` selects the
 experimental read-only banks under Metal and live RAM limits. Mapped decode
 uses the GPU expert planner. Its first prompt can incur substantial page-fault
-latency. `STARK_HY4_PREFILL_CHUNK=4096` selects a 4,096-token boundary for a
-prefill comparison. The verification and worker gates remain artifact-specific.
+latency and system swap. `STARK_HY4_PREFILL_CHUNK=4096` selects a 4,096-token
+boundary for a prefill comparison. With `STARK_HY4_EXPERT_STORAGE=streamed`,
+`STARK_HY4_STREAM_ARENA_36GB=1` requests a larger expert cache under the existing
+memory limits. Readiness reports the actual arena allocation in bytes. Set
+`STARK_HY4_PROFILE_PREFILL=1` to capture aggregate GPU stage timings. Use a
+separate run with the profiler off to measure throughput, since stage sampling
+changes encoder boundaries. The [4K experiment
+record](model-experiments/2026-11-25-hy4-prefill-decode-profile.md) covers the
+observed benefit and remaining qualification. The verification and worker
+gates remain artifact-specific.
 
 ## Image qualification
 

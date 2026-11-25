@@ -71,6 +71,7 @@ struct Prefill {
     /// NOT decode's (matrix products, an online softmax), which the prefill tolerance allows; nothing is rounded
     /// below fp32 except the K / V operands, which are the cache's own halves.
     int mma = 1;
+    bool profile_stages = false;    ///< Sample aggregate prefill encoder times in the diagnostic worker
     bool mapped_gpu_plan = false;  ///< Build decode/verify expert groups on Metal for mapped banks
     bool grouped_k_quant = false;   ///< Q3_K/Q4_K gate/up with Q4_K down, on Metal 4
     /// A WRONG DECISION, ON PURPOSE, IN THE PREFILL PATH ONLY (HY4_FLASH_PREFILL_PROBE), so that
@@ -110,6 +111,10 @@ struct Timing {
     double pf_engram_ms = 0;
     double pf_wall_ms = 0;     ///< wall time of the chunks, the head included
     double pf_head_ms = 0;     ///< of pf_wall_ms: the output head and the logits copy-out
+    // Trunk encoder spans sampled only with profile_stages. Event waits and inter-encoder gaps are excluded.
+    double pf_attention_ms = 0, pf_dense_ms = 0, pf_moe_route_ms = 0, pf_moe_expert_ms = 0, pf_other_ms = 0;
+    uint64_t pf_profiled_blocks = 0;
+    uint64_t pf_grouped_tiles = 0, pf_grouped_tail_tiles = 0;  ///< eligible Q3_K/Q4_K M64 tiles, tail has <=32 rows
     uint64_t pf_chunks = 0, pf_positions = 0;
     uint64_t pf_bytes_read = 0;   ///< what the SSD delivered while the prompt ran
     std::vector<double> pf_block_ms;   ///< GPU ms per trunk block, summed over the chunks

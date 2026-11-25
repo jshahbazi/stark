@@ -36,12 +36,30 @@ struct StarkHy4Stats {
     double decode_host_cut_seconds;
     uint64_t prefill_expert_bytes_read;
     uint64_t decode_expert_bytes_read;
+    double prefill_attention_seconds;
+    double prefill_dense_seconds;
+    double prefill_moe_route_seconds;
+    double prefill_moe_expert_seconds;
+    double prefill_other_seconds;
+    uint64_t prefill_profiled_blocks;
+    uint64_t prefill_grouped_tiles;
+    uint64_t prefill_grouped_tail_tiles;
+    double decode_encode_seconds;
+    double decode_commit_seconds;
+    double decode_completion_wait_seconds;
+    double decode_engram_seconds;
+    uint64_t decode_command_buffers;
+    uint64_t decode_encoders;
+    uint64_t decode_dispatches;
+    uint64_t prefill_invalid_gpu_spans;
+    uint64_t decode_invalid_gpu_spans;
 };
 
 extern "C" {
 int stark_hy4_open(const char* model, const char* projector, const char* pack, int context, int chunk,
-                   int storage, int grouped, int gpu_plan, StarkHy4** output, StarkHy4VisionGeometry* vision,
-                   int* mapped) noexcept;
+                   int storage, int grouped, int gpu_plan, int profile_prefill, int larger_arena,
+                   StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
+                   uint64_t* arena_bytes) noexcept;
 void stark_hy4_close(StarkHy4* session) noexcept;
 void stark_hy4_clear(StarkHy4* session) noexcept;
 int stark_hy4_retain_prefix(StarkHy4* session, int position) noexcept;

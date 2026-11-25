@@ -17,7 +17,9 @@ use stark_engine::{
     backends::metal::Metal,
     engine::{
         Engine,
-        hy4::{CONTEXT, DraftStats, ExpertStorage, ImageInput, MAX_DRAFTS, PREFILL_CHUNK, SHARD, Session, VOCAB},
+        hy4::{
+            CONTEXT, DraftStats, ExpertStorage, ImageInput, MAX_DRAFTS, Options, PREFILL_CHUNK, SHARD, Session, VOCAB,
+        },
         hybrid::activity::InferenceActivity,
     },
 };
@@ -66,10 +68,12 @@ fn check_cancelled(
 fn verify_switch(
     name: &str,
     error: &'static str,
+    default: bool,
 ) -> Result<bool, &'static str> {
     match std::env::var(name).as_deref() {
-        Ok("1") | Err(std::env::VarError::NotPresent) => Ok(true),
+        Ok("1") => Ok(true),
         Ok("0") => Ok(false),
+        Err(std::env::VarError::NotPresent) => Ok(default),
         _ => Err(error),
     }
 }
@@ -112,14 +116,27 @@ impl Hy4Backend {
             Ok("auto") => ExpertStorage::Auto,
             _ => return Err("invalid_hy4_expert_storage"),
         };
-        let grouped = verify_switch("STARK_HY4_GROUPED_PREFILL", "invalid_hy4_grouped_prefill")?;
-        let gpu_plan = verify_switch("STARK_HY4_GPU_PLAN", "invalid_hy4_gpu_plan")?;
+        let grouped = verify_switch("STARK_HY4_GROUPED_PREFILL", "invalid_hy4_grouped_prefill", true)?;
+        let gpu_plan = verify_switch("STARK_HY4_GPU_PLAN", "invalid_hy4_gpu_plan", true)?;
         let chunk = match std::env::var("STARK_HY4_PREFILL_CHUNK").as_deref() {
             Ok("1024") | Err(std::env::VarError::NotPresent) => PREFILL_CHUNK,
             Ok("4096") => 4096,
             _ => return Err("invalid_hy4_prefill_chunk"),
         };
-        let native = Session::load(path, path, chunk, storage, grouped, gpu_plan)?;
+        let profile_prefill = verify_switch("STARK_HY4_PROFILE_PREFILL", "invalid_hy4_prefill_profile", false)?;
+        let larger_arena = verify_switch("STARK_HY4_STREAM_ARENA_36GB", "invalid_hy4_stream_arena", false)?;
+        let native = Session::load(
+            path,
+            path,
+            Options {
+                chunk,
+                storage,
+                grouped,
+                gpu_plan,
+                profile_prefill,
+                larger_arena,
+            },
+        )?;
         source.verify_unchanged()?;
         let runtime = json!({
             "backend": identity.backend,
@@ -132,6 +149,8 @@ impl Hy4Backend {
             "grouped_prefill_operands": if grouped { "f32" } else { "off" },
             "gpu_expert_plan": gpu_plan && native.mapped_experts(),
             "prefill_chunk_tokens": chunk,
+            "prefill_stage_profile_requested": profile_prefill,
+            "streamed_expert_arena_bytes": native.arena_bytes(),
         });
         Ok(Self {
             native,

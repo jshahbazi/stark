@@ -46,6 +46,21 @@ struct Context::Impl {
     std::vector<id<MTLComputePipelineState>> pipelines;
     id<MTLSharedEvent> ev = nil;   // run_graph_seg's handshake timeline
     uint64_t ev_v = 0;
+    id<MTLCounterSampleBuffer> seg_samples = nil;
+    id<MTLCounterSampleBuffer> segment_timestamp_buffer(size_t count) {
+        if (seg_samples.sampleCount >= count) return seg_samples;
+        if (![dev supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) return nil;
+        for (id<MTLCounterSet> set in dev.counterSets) {
+            if (![set.name isEqualToString:MTLCommonCounterSetTimestamp]) continue;
+            MTLCounterSampleBufferDescriptor* desc = [MTLCounterSampleBufferDescriptor new];
+            desc.counterSet = set;
+            desc.storageMode = MTLStorageModeShared;
+            desc.sampleCount = count;
+            seg_samples = [dev newCounterSampleBufferWithDescriptor:desc error:nullptr];
+            break;
+        }
+        return seg_samples;
+    }
     // #6078, the GPU keep-alive.  After about a second with no command buffer, macOS lets go of the process's GPU allocations, and the
     // next command buffer waits before it starts (M5 Ultra: 0.9-1.1 s between commit and GPUStartTime; M5 Max, Q2_0, a 21-token
     // follow-up: prompt 155 ms after a gap of 1 s or less, 440 ms after 2-4 s): an agent's turn after a tool call paid it in its
@@ -766,7 +781,7 @@ Context::~Context() {
 }
 
 double Context::run_graph_seg(const std::vector<Dispatch>& ds, const std::vector<int>& cuts, const std::vector<int>& waits,
-                              void (*at_cut)(void*, int), void* user) {
+                              void (*at_cut)(void*, int), void* user, GraphProfile* profile) {
     if (!waits.empty() && waits.size() != cuts.size()) {
         throw std::runtime_error("Hy4 Metal runtime failure");
     }
@@ -779,17 +794,26 @@ double Context::run_graph_seg(const std::vector<Dispatch>& ds, const std::vector
     const int fill = fill_ == nullptr ? 0 : fill_->armed.load(std::memory_order_acquire);
     if (fill == 2) fill_->last_ns.store(fill_now_ns(), std::memory_order_relaxed);
     @autoreleasepool {
+        id<MTLCounterSampleBuffer> samples = nil;
+        std::vector<double*> stage_totals;
+        MTLTimestamp cpu0 = 0, gpu0 = 0;
+        if (profile != nullptr) {
+            profile->sampled = false;
+            const size_t span_cap = profile->stages.size() + 2 * cuts.size();
+            if (!profile->stages.empty()) samples = impl_->segment_timestamp_buffer(2 * span_cap);
+            if (samples != nil) {
+                stage_totals.reserve(span_cap);
+                [impl_->dev sampleTimestamps:&cpu0 gpuTimestamp:&gpu0];
+            }
+        }
         if (impl_->ev == nil) impl_->ev = [impl_->dev newSharedEvent];
         id<MTLSharedEvent> ev = impl_->ev;
         const uint64_t base = impl_->ev_v;
         id<MTLCommandBuffer> cb = [impl_->q commandBufferWithUnretainedReferences];
         const double t_enc0 = now_s();
         size_t i = 0;
-        auto encoder = [&](size_t end) {
-            // an empty segment (two cuts at one index: the MoE split's second cut sits where the first one's wait
-            // is) gets no encoder at all
-            if (i == end && !waits.empty()) return;
-            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+        size_t stage = 0;
+        auto encode_span = [&](size_t end, id<MTLComputeCommandEncoder> enc) {
             const size_t first = i;
             for (; i < end; ++i) {
                 if (i > first && ds[i].barrier) [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
@@ -797,6 +821,29 @@ double Context::run_graph_seg(const std::vector<Dispatch>& ds, const std::vector
             }
             [enc endEncoding];
             ++seg_tm_.n_enc;
+        };
+        auto encoder = [&](size_t end) {
+            // Two host cuts can share a dispatch index. That empty segment has no timestamp span.
+            if (i == end && !waits.empty()) return;
+            if (samples == nil) {
+                encode_span(end, [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent]);
+                return;
+            }
+            while (i < end) {
+                const auto& stages = profile->stages;
+                while (stage + 1 < stages.size() && stages[stage + 1].first <= i) ++stage;
+                const size_t next = stage + 1 < stages.size() ? std::min(end, stages[stage + 1].first) : end;
+                MTLComputePassDescriptor* pass = [MTLComputePassDescriptor computePassDescriptor];
+                pass.dispatchType = MTLDispatchTypeConcurrent;
+                auto* attachment = pass.sampleBufferAttachments[0];
+                attachment.sampleBuffer = samples;
+                attachment.startOfEncoderSampleIndex = 2 * stage_totals.size();
+                attachment.endOfEncoderSampleIndex = 2 * stage_totals.size() + 1;
+                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoderWithDescriptor:pass];
+                if (enc == nil) throw std::runtime_error("Hy4 Metal runtime failure");
+                stage_totals.push_back(stages[stage].total_ms);
+                encode_span(next, enc);
+            }
         };
         for (size_t s = 0; s <= cuts.size(); ++s) {
             encoder(s < cuts.size() ? (size_t) cuts[s] : ds.size());
@@ -885,9 +932,34 @@ double Context::run_graph_seg(const std::vector<Dispatch>& ds, const std::vector
         if (cb.status != MTLCommandBufferStatusCompleted) {
             throw std::runtime_error("Hy4 Metal runtime failure");
         }
-        const double gpu = cb.GPUEndTime - cb.GPUStartTime;
-        seg_tm_.gpu_ms += gpu * 1e3;
-        return gpu;
+        const double gpu_start = cb.GPUStartTime;
+        const double gpu = cb.GPUEndTime - gpu_start;
+        // A missing start can turn the end timestamp into an uptime-sized
+        // duration. Leave those samples out and count them for the caller.
+        const bool valid_gpu = gpu_start > 0 && gpu >= 0 && gpu <= now_s() - t_enc0 + 0.001;
+        if (valid_gpu) seg_tm_.gpu_ms += gpu * 1e3;
+        else ++seg_tm_.invalid_gpu_spans;
+        if (!stage_totals.empty()) {
+            MTLTimestamp cpu1 = 0, gpu1 = 0;
+            [impl_->dev sampleTimestamps:&cpu1 gpuTimestamp:&gpu1];
+            const size_t count = 2 * stage_totals.size();
+            NSData* data = [samples resolveCounterRange:NSMakeRange(0, count)];
+            if (data.length == count * sizeof(MTLCounterResultTimestamp) && cpu1 > cpu0 && gpu1 > gpu0) {
+                const auto* ts = static_cast<const MTLCounterResultTimestamp*>(data.bytes);
+                size_t j = 0;
+                for (; j < count; j += 2) {
+                    const auto start = ts[j].timestamp, end = ts[j + 1].timestamp;
+                    if (start == 0 || end == MTLCounterErrorValue || end < start) break;
+                }
+                if (j == count) {
+                    const double ms_per_tick = 1e-6 * (double) (cpu1 - cpu0) / (double) (gpu1 - gpu0);
+                    for (size_t k = 0; k < stage_totals.size(); ++k)
+                        *stage_totals[k] += (double) (ts[2 * k + 1].timestamp - ts[2 * k].timestamp) * ms_per_tick;
+                    profile->sampled = true;
+                }
+            }
+        }
+        return valid_gpu ? gpu : 0;
     }
 }
 
