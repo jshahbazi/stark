@@ -1,6 +1,6 @@
 # Performance playbook
 
-What to try when making a model family faster on Stark, in roughly the order to try it, with what each idea returned on Qwen3.8-Flash-Next ("Lily"). Compiled 2026-11-19 and updated 2026-11-23 from the records listed at the end.
+What to try when making a model family faster on Stark, in roughly the order to try it, with what each idea returned on Qwen3.8-Flash-Next ("Lily"). Compiled 2026-11-19 and updated 2026-11-25 from the records listed at the end.
 
 This page summarizes records; it is not one. Every number was measured on a named artifact, build, workload and host, and keeps that scope. Nothing here qualifies another artifact, and where this page and a dated record differ, the record is right. A technique that paid on Lily has to be measured again on the next family. One that failed on Lily failed for a stated reason, and the reason is the thing to check before trying it again.
 
@@ -373,6 +373,68 @@ A 4-gram index over the prompt and committed output proposes the tokens that fol
 Lily's limit is 3. A plan for 8 is in the [depth policy record][depth]. It is deferred: at Lily's row cost a fourth head draft does not pay, and the GDN input projection kernel exists only for 1 to 4 rows with a cost that climbs at rows 3 and 4. Deeper limits would mainly help lookup rounds, which pay no draft steps.
 
 The desktop app is bounded lower still. Its paged-residency memory profile for the pinned artifact allows two drafts, and raising that needs a memory qualification ([schedule gate][gate]).
+
+#### When a drafter proposes more rows than the target can verify at once
+
+Use **wall time per emitted token** to compare designs. On a 40-GPU-core, 128 GiB M5 Max, DFlash 2 and DSpark produced identical outputs across 183 matched Inkling 2 Mini requests (20,825 tokens per arm). DFlash started 5,368 rounds to DSpark's 8,588, a 37.5% reduction. DFlash led on novel prose (+13.2% over DSpark and +7.5% over MLX-Serve). DSpark led at the 512, 4K and 8K context rungs in every block. Initial and sustained coding were unresolved between the two Stark arms. Keep DSpark as the ordinary Inkling default. [Image-loaded standard benchmark][ink-draft-live]
+
+| Design choice | Performance tradeoff |
+| --- | --- |
+| Choose verification depth independently of draft width | A block drafter may generate all candidates for a fixed cost. Checking a shorter prefix saves target work. The useful depth depends on the chance of reaching each position and the measured cost of the next verifier call. |
+| Verify a wide block in one pass or split it conditionally | One pass can amortize weight reads and dispatches. A split avoids the second pass when an early proposal fails. On one 4K trace, only 22 of 42 rounds reached the second call. That frequency determines how much a wider kernel can save. [Verifier replay](https://github.com/jshahbazi/stark/blob/a83752f22aec2139769ab8efae0d6b7729732dd1/docs/model-experiments/2026-11-24-inkling-mini-dflash2-traces.md) |
+| Keep draft features and cache updates on the GPU | Passing committed feature rows through a host process adds copies and synchronization. Separate transfer time from draft compute before estimating the benefit of sharing device buffers. |
+| Spend spare verifier rows on alternative continuations | A sibling candidate can rescue a round when the first choice fails. Its value depends on how often it recovers useful tokens and what an extra row costs. Committing a branch must restore the target state for that path and discard sibling state. [Splash implementation](https://github.com/incoai/splash/blob/2afc7337aacc044722fa95e4cb3da75c281a19a8/runtime/model/Runtime.cpp#L2541-L2591) |
+
+Native round counts and target-call counts answer different questions because one round can span several calls. Recording both alongside draft, transfer, verification and commit time makes the cost visible. Verifier milliseconds per emitted token give a lower bound on the decode time. Compare that bound with the whole-token budget for the desired throughput.
+
+#### Which drafter can repair the first miss?
+
+On four greedy traces (one prose, three coding), each primary followed its own round starts. A catch required the other drafter to match the target on **every token through the primary's first error**. The original NVFP4/MXFP8 target verified native INT8 DSpark and BF16 DFlash 2 with F32 selector corrections. Training data, architecture and precision were not independently controlled, so the source of any training advantage remains unknown. [Matched traces and artifacts][ink-draft-traces]
+
+The last three columns price a policy that offers a sibling at the first disagreement, dropping the last primary token when needed. Each divides the same modeled savings in target verification and commit by forks offered, siblings accepted, or all nonterminal draft rounds, respectively. [Cross-drafter replay and cost model][ink-draft-cross]
+
+| Primary ← alternate | Workload | First misses caught, 3 slots | First misses caught, 7 slots | 3-slot ms per attempted fork | 3-slot ms per successful fork | 3-slot ms per draft round |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| DSpark ← DFlash 2 | Prose | 39/79 (49%) | 46/90 (51%) | 8.09 | 16.83 | 5.26 |
+| DSpark ← DFlash 2 | Coding | 72/149 (48%) | 80/186 (43%) | 4.32 | 9.27 | 2.17 |
+| DFlash 2 ← DSpark | Prose | 7/47 (15%) | 6/56 (11%) | −1.01 | −7.06 | −0.66 |
+| DFlash 2 ← DSpark | Coding | 22/102 (22%) | 22/134 (16%) | −0.23 | −1.02 | −0.11 |
+
+**Use the denominator at which the implementation pays.** Calling DFlash on every DSpark round to discover disagreements gives a 5.26 ms target-time budget on prose and 2.17 ms on coding at three slots. The existing warm DFlash call including IPC took 8.71 ms on prose and 9.39 ms on 4K coding. The offline gate saw both completed proposals. An online gate that can decide *before* calling DFlash still needs a live test. At seven slots even the per-attempt budget fell to 3.97 ms on prose and 0.89 ms on pooled coding. On the 4K coding trace it was −1.99 ms because the branch increased physical target calls from 69 to 72. These estimates assume a sibling costs the same as a chain row and exclude ordinary draft work saved when rounds disappear. [Cost assumptions and sensitivity][ink-draft-cross]
+
+#### What happened when the runner-up took the third slot?
+
+The motivating paper trains a drafter to reconsider uncertain guesses with extra computation in parallel. Stark screened two ways to obtain an alternative without retraining. One ran the other drafter. The second reused the existing drafter's second-ranked token. The authors reported 3.5% to 9.2% higher speedup relative to their baselines. A trained reconsideration pass on either Stark model remains untested. [Parallel Reconsideration](https://arxiv.org/abs/2611.05724)
+
+The Inkling and Flash Next experiments shared 12 held-out prose prompts and 12 held-out coding prompts. Each model used its own template and tokenizer, with thinking off and a 192-token greedy output cap. The gate checks draft positions one and two in order. At the first top-two logit gap of at most `ln(2)` (odds at most 2:1), the runner-up takes one of three proposal slots. The target verifies the anchor and up to three nodes. A sibling has no continuation of its own. Confident rounds keep all three primary choices. [Inkling policy and holdout][ink-draft-selector] · [Flash Next policy and holdout][flash-runner]
+
+On ordinary Inkling round starts, the gated DFlash runner-up could recover 103/594 first misses on prose and 68/502 on coding. Replaying the whole candidate policy saved 19 prose rounds (904 → 885) and 10 coding rounds (840 → 830). Forcing a fork at position one on every round increased the counts to 970 and 933. After charging selector and readback, the modeled verifier savings left 0.46 ms per candidate draft round on prose and 0.27 ms on coding. The capture recomputed draft context at each anchor. The live worker updates the draft cache incrementally and reserves a final target draw. Adjusting for the output cap still left differences in the draft counts. The timings below use actual worker counts. [Held-out replay][ink-draft-selector] · [Worker accounting][ink-runner-live]
+
+| Image-loaded target and workload | Live rounds, fixed three → runner-up, one pass | Fixed three, decode tok/s | Runner-up, decode tok/s | Paired decode change (95% interval) | Whole-request tok/s, fixed → runner-up |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Inkling 2 Mini, prose | 896 → 881 | 73.05 | 73.54 | +0.67% (−0.88% to +2.34%) | 67.72 → 68.17 |
+| Inkling 2 Mini, coding | 833 → 823 | 78.64 | 78.65 | +0.02% (−1.24% to +1.32%) | 72.38 → 72.38 |
+| Flash Next Lily Q4-XL, prose | 1,002 → 983 | 67.34 | 68.10 | +1.13% (−0.39% to +2.86%) | 63.88 → 64.53 |
+| Flash Next Lily Q4-XL, coding | 710 → 703 | 95.92 | 96.04 | +0.12% (−1.04% to +1.19%) | 88.69 → 88.80 |
+
+Each row compares adjacent requests in one loaded experimental worker with the vision tower present, reversing arm order on the second pass. A four-block Inkling test with separate worker launches changed sign across blocks on both workloads. The intervals resample whole prompts with both repeats together. Identical width-two controls moved −0.75% and +0.71% on Inkling prose and coding, and −0.51% and −0.46% on Flash Next. All 128 Inkling and 176 Flash Next timed completions in these comparisons matched their frozen targets. Inkling used streaming and Flash Next used nonstreaming requests. All four paired decode intervals include zero. The evidence supports keeping the runner-up opt-in on both models. [Inkling paired benchmark][ink-runner-live] · [Flash Next paired benchmark][flash-runner]
+
+- **Inkling.** The live target chose the sibling on 98/388 prose forks and 57/295 coding forks. The net rounds saved could fund 0.60 ms extra per candidate round on prose and 0.43 ms on coding. The observed costs were 0.36 and 0.42 ms. For overhead paid only on packed forks, multiply ordinary ms/round by net rounds saved and divide by forks packed. That gives 1.35 ms per fork on prose and 1.19 ms on coding. Keep ordinary DFlash for deployments that select it. [Measured break-even calculation][ink-runner-live]
+- **Flash Next.** On the short prose prompts the sibling recovered 72/763 first misses and displaced 46 correct third choices. On coding it recovered 33/251 and displaced 33. Across both repeats, verification saved 1.28 s on prose and 0.33 s on coding, while drafting plus rollback added 0.53 s and 0.28 s. Full rounds still paid for three autoregressive head steps. Shipped adaptive MTP with prompt lookup reached 83.04 tok/s on prose and 98.29 on coding. It beat the runner-up on all 12 prose prompts. The pooled coding difference was within paired uncertainty. Keep the shipped schedule. This control allowed up to three drafts and the desktop profile caps them at two. [Stage timings and shipped-policy comparison][flash-runner]
+
+#### How to choose the next optimization
+
+1. **Locate the time that must come out of the request.** Record native draft rounds, physical target calls, and draft, feature-transfer, verify and commit milliseconds per emitted token on workloads where the winner changes. Inkling's fixed 4K seven-proposal trace took 64 target calls for 42 rounds and 8.52 ms of verification per token. A hypothetical 1.7× over the measured 88.7 tok/s MLX-Serve rate allows 6.63 ms for the entire token. That target requires cheaper verification even if drafting becomes free. [Matched verifier replay][ink-draft-traces] · [Live baseline][ink-draft-live]
+2. **Test how much of the primary chain to verify.** Replay a depth policy against fixed three and fixed seven on held-out anchors, then time it against the best ordinary schedule. Inkling DFlash produces seven proposals either way. On the four fixed traces, verifying seven instead of three saved 52 rounds, added eight physical target calls and broke even at 3.77 ms of avoided work per saved round. Seven won the separate live width screen by 2.6%. A native eight-row target pass would avoid a second call in 22/42 rounds of the 4K trace and do extra work after early rejection in the others. Price both outcomes before widening the kernel. [Width screen][ink-draft-live] · [Packet costs][ink-draft-traces]
+3. **Spend engineering time where there is measured headroom.** If the MLX companion dominates, time feature copies, synchronization, draft execution and KV updates separately before moving feature exchange onto the GPU. Revisit alternatives when there is a cheaper gate, a better candidate, or cheaper branch verification and state commit. Replay each policy from its own anchors and count first misses rescued, correct continuations displaced, and net target rounds. Charge selection on every inspected round and branch-state work on every fork that incurs it. A trained corrector is worth prototyping when its projected net savings on fresh prompts cover its critical-path compute and state costs. [Cross-drafter budgets][ink-draft-cross] · [Live runner-up costs][ink-runner-live]
+4. **Qualify the winning path and the next token.** Force sibling wins and rejections at both depths. Compare full target readouts and the next step after commit or rollback, including attention KV and model-specific convolution, recurrent or draft state. Check prefix reuse and image invalidation where supported. Flash Next passed 69 full-vocabulary comparisons, but its fork requires the packet to fit within the 2,051-token dense attention window. Its 4,096-token prefix-reuse check exercised ordinary-chain fallback. Inkling separately matched all 200,058 target logits, committed KV and convolution state, and the selected feature rows sent back to DFlash in its forced-branch tests. Sampled forks, sparse-context forks and peak memory need their own evidence. For a default change, repeat the adjacent comparison against the shipped policy on the intended workload and report both decode and whole-request rates. [Inkling state checks][ink-runner-live] · [Flash Next correctness and scope][flash-runner]
+
+[ink-draft-traces]: https://github.com/jshahbazi/stark/blob/0237919982373a37b2c14b450c701c693415ead0/docs/model-experiments/2026-11-24-inkling-mini-dflash2-traces.md
+[ink-draft-live]: https://github.com/jshahbazi/stark/blob/0237919982373a37b2c14b450c701c693415ead0/docs/benchmarks/2026-11-24-inkling-mini-live-dflash2.md
+[ink-draft-cross]: https://github.com/jshahbazi/stark/blob/0237919982373a37b2c14b450c701c693415ead0/docs/model-experiments/2026-11-25-inkling-first-miss.md
+[ink-draft-selector]: https://github.com/jshahbazi/stark/blob/0237919982373a37b2c14b450c701c693415ead0/docs/model-experiments/2026-11-25-inkling-dflash-self-correction.md
+[ink-runner-live]: https://github.com/jshahbazi/stark/blob/0237919982373a37b2c14b450c701c693415ead0/docs/benchmarks/2026-11-25-inkling-live-runner-up.md
+[flash-runner]: https://github.com/jshahbazi/stark/blob/786d1ea1269b982f0cbd2b7ce9b8cf8f92c3203d/docs/model-experiments/2026-11-25-flashnext-mtp-runner-up.md
 
 ### 6. Prefix and state reuse
 
@@ -838,6 +900,9 @@ These rules are for optimization work on one engine. To compare engines, or to s
 | 2026-11-23 | [Inkling wind-down][inkwind] | Optimization stopped by owner decision; reverted unmeasured launch merges and prefill items, the paired-control hang, the lock incidents |
 | 2026-11-23 | [Inkling 2 Mini standard benchmark][inkstd] | First standard result: three repeats, quality attached, standings against MLX-Serve on matched artifacts |
 | 2026-11-23 | [Inkling session audit][inkaudit] | Attempts, intermediate figures and incidents of 2026-11-22 to 11-23 that the records lacked; corrections to earlier records; the merged tree's lint commit that the gates did not cover |
+| 2026-11-24 | [Inkling DFlash 2 matched verifier traces][ink-draft-traces] and [live standard benchmark][ink-draft-live] | Proposal width, physical target calls and workload-specific throughput against DSpark and MLX-Serve |
+| 2026-11-25 | [Inkling cross-drafter recovery][ink-draft-cross], [runner-up replay][ink-draft-selector] and [live paired timings][ink-runner-live] | First-miss coverage, time per correction and the cost of displacing a correct third choice |
+| 2026-11-25 | [Flash Next three-slot MTP runner-up][flash-runner] | Exact branch commits, paired prose and coding results, and comparison with shipped adaptive MTP |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 

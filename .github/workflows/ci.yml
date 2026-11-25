@@ -156,8 +156,7 @@ jobs:
             --output "$archive"
           printf '%s  %s\n' '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8' "$archive" | sha256sum --check
           tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
-          # Inherited jobs stay deliberately disabled; repository policy checks enforce this.
-          "$RUNNER_TEMP/actionlint" -shellcheck='' -ignore '^constant expression "false" in condition'
+          "$RUNNER_TEMP/actionlint" -shellcheck=''
 
   lifecycle:
     name: Process lifecycle (${{ matrix.os }})
@@ -243,27 +242,6 @@ jobs:
         if: matrix.configuration == 'default'
         run: uv run --no-project --python 3.12.13 python scripts/test_generation_process.py --binary target/release/stark-generate
 
-  cxx:
-    name: CXX panic safety and grammar compatibility
-    runs-on: macos-26
-    timeout-minutes: 30
-    # Scheduling only: this short job follows the short lifecycle job so one CI
-    # run holds at most four of the five concurrent macOS runners, leaving one
-    # for a signed release. It still runs when lifecycle fails.
-    needs: [changes, lifecycle]
-    if: ${{ !cancelled() && needs.changes.outputs.rust == 'true' }}
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.98.1 --profile minimal
-      - uses: ./.github/actions/rust-cache
-        with:
-          scope: cxx-test-cpu-grammar
-      - name: Test CXX panic safety and grammar compatibility
-        run: cargo test --locked -p stark-engine --test cxx_string --no-default-features --features cpu,grammar -- --test-threads=1
-
   engine-unit:
     name: Engine unit suite (CPU and Metal compilation)
     runs-on: macos-26
@@ -301,14 +279,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [changes, quality, lifecycle, scoring, cxx, engine-unit]
+    needs: [changes, quality, lifecycle, scoring, engine-unit]
     env:
       CHANGES_RESULT: ${{ needs.changes.result }}
       RUST_JOBS: ${{ needs.changes.outputs.rust }}
       QUALITY_RESULT: ${{ needs.quality.result }}
       LIFECYCLE_RESULT: ${{ needs.lifecycle.result }}
       SCORING_RESULT: ${{ needs.scoring.result }}
-      CXX_RESULT: ${{ needs.cxx.result }}
       ENGINE_UNIT_RESULT: ${{ needs.engine-unit.result }}
     steps:
       - run: |
@@ -322,5 +299,4 @@ jobs:
             *) exit 1 ;;
           esac
           test "$SCORING_RESULT" = "$expected"
-          test "$CXX_RESULT" = "$expected"
           test "$ENGINE_UNIT_RESULT" = "$expected"

@@ -164,11 +164,16 @@ class SigningWorkflowPolicyTests(unittest.TestCase):
                     del document["jobs"]["sign"]["steps"][0]["env"]["APPLE_API_KEY_ID"]
                 self.assertTrue(self.check(document))
 
-    def test_inherited_release_workflow_still_cannot_be_enabled(self):
-        errors = self.check(signing_workflow(), "release.yml")
-        self.assertTrue(
-            any("inherited workflow job is not disabled" in error for error in errors)
-        )
+    def test_retired_inherited_workflows_cannot_be_restored(self):
+        document = signing_workflow()
+        document["jobs"]["sign"]["if"] = False
+        document["jobs"]["publish"]["if"] = False
+        for workflow in ("release.yml", "run-benchmark.yaml", "run-stark-cargo-command.yml"):
+            with self.subTest(workflow=workflow):
+                self.assertEqual(
+                    self.check(document, workflow),
+                    [f"retired inherited workflow is forbidden: .github/workflows/{workflow}"],
+                )
 
 
 class SignedReleasePublicationTests(unittest.TestCase):

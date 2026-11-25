@@ -8,7 +8,7 @@
 #   rust-jobs-needed.sh --classify   classify NUL-separated paths on stdin
 set -euo pipefail
 
-# Paths the scoring, cxx and engine-unit jobs never read. Anything else,
+# Paths the scoring and engine-unit jobs never read. Anything else,
 # including a new top-level directory, keeps the jobs running. Rust sources
 # include data files from tools/ (fixtures, memory profiles), so only Python
 # and packaging files are listed there. Remove a path from this list before a
