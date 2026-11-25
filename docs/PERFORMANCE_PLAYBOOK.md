@@ -1,25 +1,28 @@
 # Performance playbook
 
-What to try when making a model family faster on Stark, in roughly the order to try it, with what each idea returned on Qwen3.8-Flash-Next ("Lily"). Compiled 2026-11-19 and updated 2026-11-25 from the records listed at the end.
+Use this guide when adding a model or improving its performance. The family speed histories answer “what happened on this artifact?” This page answers “what should I measure or try next?” Each comparison belongs to the build, workload and host in its dated report. Updated 2026-11-25.
 
-This page summarizes records; it is not one. Every number was measured on a named artifact, build, workload and host, and keeps that scope. Nothing here qualifies another artifact, and where this page and a dated record differ, the record is right. A technique that paid on Lily has to be measured again on the next family. One that failed on Lily failed for a stated reason, and the reason is the thing to check before trying it again.
+## Choose a performance experiment
 
-Unless a row says otherwise, figures are for `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` at revision `0f94842e`, on an Apple M5 Max with 128 GiB, with 4,096 input tokens.
+1. **Find the closest prior attempt.** Look up the exact checkpoint, quantization and backend, then search for the proposed technique. Read the last follow-up in the dated report. For a retry, name the condition that changed, such as the kernel shape, cache state or cost of an extra verifier row. [Model lookup and search](MODEL_RESEARCH.md) · [Branch-only studies](model-experiments/branch-research.md)
+2. **Measure the slow part of a representative request.** Start a new family with the [bring-up checklist](#checklist-for-a-new-family). For an existing model, reproduce the workload and separate load time, first-token latency, useful decode and whole-request time. Record the image, draft and prefix-cache settings. Use the [time budget](#step-1-build-the-time-budget) to estimate how much request time the proposed change could save.
+3. **Test one change against the incumbent.** Fix the correctness and timing criteria before the run. Use a stage profile to diagnose the cost, then time the uninstrumented path. Use paired runs on the exact artifact. For a model-level text-generation speed claim, use the standard server benchmark and its natural-text quality comparison. [Correctness gates](#correctness-gates) · [Paired measurement](#measuring) · [Standard benchmark](BENCHMARK.md)
 
-For comparing a new family against it: Lily is a 48-layer hybrid, 36 GDN recurrent layers and 12 sparse-attention layers. Every layer has a routed mixture-of-experts feed-forward (512 experts, 10 routed per token, plus a shared expert) and four hyper-connection streams. It has an n-gram embedding table of about 30 GiB, a one-layer draft head and a vocabulary of 248,320. The pack is about 107 GB.
+| Observed symptom | What to try first | What happened on a recorded workload |
+| --- | --- | --- |
+| Cold prompts take too long | Time prefill with zero reused tokens. Compare batched projection widths at both short and longer prompt lengths. | On GLM-5.3-Flash UD-Q2_K_XL, 4- and 8-token batches tied at 14 input tokens. At 96 input and 8 output tokens, prefill rose from 34.895 tok/s on the control to 38.881 and 40.692 respectively. The 8-token recipe stayed opt-in. [Screened GLM runs](benchmarks/GLM53_BATCHED_PREFILL_2026_11_02.md) |
+| A follow-up reports a cache hit but the first token is still late | Count the rows actually prefilled after restore. Compare fresh, prime and hit requests on a nonrepeating input near capacity. | Gemma 4 E2B and E4B reported 1,024 reused tokens while replaying the full prompt. Dispatching just the suffix cut median first-token time by 43–50% versus fresh on the two warmed workloads. [Warmed-cache repair](benchmarks/2026-11-09-gemma4-warmed-cache.md) |
+| Serial decode is slow on a packed model | Count uploads and waits per token, then time the actual packed projections on rotating weights. Check whether the kernel repeats dequantization work. | On Ripple-65B Q4_K_M, grouped Q4_K/Q6_K projections plus cheaper attention indexing took worker decode from 4.559 to 7.460 tok/s across four short, unscreened warm requests per arm. The Q4 row-reuse variants were slower in component trials. [Saved-binary and component comparisons](benchmarks/RIPPLE_Q4_KERNELS_2026_11_12.md) |
+| Decode repeatedly reads streamed expert weights | Count expert bytes read per request and time first use and a warm repeat at two cache sizes. Track memory pressure. | On the Hy4-flash Q3_K research branch, raising the arena from 28 to 36 GB cut warm decode reads by 37%. Warm throughput rose from 16.39 to 23.58 tok/s in one comparison. The larger arena stayed opt-in pending repeats and memory-pressure testing. [Hy4 branch measurements](model-experiments/speed-other-families.md#hy4-flash) |
+| More draft tokens are accepted but generation slows | Measure committed tokens, target passes and wall time per round as draft depth changes. Compare with ordinary decode and the shipped draft policy. | On the dense Qwen3.8-27B oQ4e pilot, going from three to seven drafts raised advancement from 3.02 to 3.85 tokens per round. The second target scan pushed throughput from 48–50 down to 35–37 tok/s. Even full eight-row weight reuse lost in a separate sweep. The longer path was removed. [Draft-depth trials](benchmarks/2026-11-06-qwen38-27b-approaches.md#draft-depth-and-longer-verification) |
+| Loading vision slows ordinary text | Hold the checkpoint and draft depth fixed. Check which text graph runs with the tower resident and whether it still batches verification. Time loading separately. | Dense Qwen3.8-27B's image reference graph lost 94% of three-draft decode speed on an eight-output test. Restoring the fast text graph with shared weights gave 48.309 tok/s text-only and 48.315 with vision resident in a separate 64-output comparison. [Failed control and repair](benchmarks/2026-11-09-qwen-dense-image-text-parity.md) |
+| A decision request is slow | Split rendering, tokenization and worker forward time. If prefill dominates, test the actual batched linear shapes and validate the resulting choice and logits. | On Elephant 1 9.4B BF16, a wide-SIMD prefill kernel took a 526-token decision from 19.27 to 12.74 seconds median worker wall time (two samples). The choice matched with bounded logit drift. Generic BF16 GEMM ran about twice as slow in its trial. [Elephant prefill trials](model-experiments/2026-11-18-elephant-1.md#elephant-01e-bounded-prefill-wide-simd-acceleration) |
 
 ## Keeping this page current
 
-Find the baseline, rejected candidates and source-bound speed history for the target family in [model research and benchmarks](MODEL_RESEARCH.md).
+Record every performance attempt, including regressions, invalid timings and experiments stopped before measurement. In the same change, add its baseline, candidate, measured change or timing limitation, and decision to the family speed history. A large study can use one linked matrix that calls out its wins, losses and reversals. [Recording workflow and index check](MODEL_RESEARCH.md#record-the-next-result)
 
-This page is maintained. Read it before optimizing a model or bringing up a new family, and update it in the same change as the experiment record whenever an attempt:
-
-- changes what a lever returned, or tries a lever on another family or artifact;
-- adds a rejected or failed approach, with the reason it failed;
-- adds, settles or retires an entry under "Ideas not yet tried";
-- changes a correctness gate, a measurement rule or the checklist.
-
-Add the record to the table at the end and move the date in the first paragraph. Give a figure its own artifact, build and workload when they differ from the defaults above. Results from another family get their own rows, and their own section once there are enough of them; a Lily result is not reworded to fit another model.
+When an attempt changes what a technique returned, extends it to another artifact, explains a failure, settles an open idea or changes a gate, update the relevant section here and link the dated record. For a rejection, give the measured reason or failed control and what would justify a retry. Move settled ideas out of the open list. Add the source under [Records](#records) and update the date above.
 
 ## Terms
 
@@ -35,6 +38,8 @@ Add the record to the table at the end and move the date in the first paragraph.
 | Same-loaded | Both arms run in one loaded worker process, alternating, so load-to-load variation is removed |
 
 ## The short version
+
+The following figures describe the Flash-Next work. Unless an example names another configuration, the reference is `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` at revision `0f94842e`, with 4,096 input tokens on an Apple M5 Max with 128 GiB. Lily has 36 GDN recurrent layers and 12 sparse-attention layers. Each layer has 512 routed experts (10 selected per token), a shared expert and four hyper-connection streams. Its roughly 107 GB pack includes a 30 GiB n-gram embedding table and a one-layer draft head. The vocabulary has 248,320 entries.
 
 - The large gains were structural and came first. Putting the whole token loop on the GPU with one completion per token took the first checkpoint from 0.67 to 22.9 tok/s. The precision policy and pack took it to about 77. A sampler that does not sort the vocabulary added 48 percent at top-k 20. Speculation with a batched verifier added 13 to 16 percent at top-k 20.
 - After that, work on single kernels returned 1 to 6 percent per component and about 2 percent or less in the model. Most kernel candidates were rejected, and several were rejected twice.
@@ -820,7 +825,7 @@ These rules are for optimization work on one engine. To compare engines, or to s
 9. Choose depth from the round model, check it on a natural long response, and re-measure the cost table after each change to round cost. Gate a change of default against the current default over corpus, sampler and input-length cells with matched inputs.
 10. Inventory every piece of state a request leaves behind, then implement prefix restoration with capture points inside the prefill pass. This is required for every new path by [model onboarding](MODEL_ONBOARDING.md).
 11. Measure the first request after an idle pause, process start to ready, and peak memory against the plan.
-12. Record every attempt, including the rejected ones, in the [experiment ledger](model-experiments/README.md).
+12. Record every outcome, including rejected candidates, and check that the family speed history and playbook reflect the decision. [Experiment ledger](model-experiments/README.md) · [Recording workflow](MODEL_RESEARCH.md#record-the-next-result)
 
 For AngelSlim Hy4-flash Q3_K, inspect the dispatch path on the actual mixed expert banks before interpreting shared-format timings. The pinned Strata grouped prefill requires IQ2_XXS gate/up and leaves the Q3_K gate/up route on per-entry products. The patched llama.cpp Metal reference groups the packed Q3_K/Q4_K products from 32 tokens and uses a 256-row microbatch in the matched diagnostic. Its projection precision and reduction order need their own parity gate. Measure the Q3_K path directly and split decode GPU work from expert and Engram I/O at the host cuts. [Hy4 native diagnostic and prior reference runs](model-experiments/2026-11-25-hy4-native-q3-k.md)
 
@@ -872,6 +877,8 @@ On the Hy4 4K repeat, mapped expert admission was followed by a stalled first pr
 
 ## Records
 
+The [experiment selection table](#choose-a-performance-experiment) links the GLM, Gemma, Ripple, Hy4, dense Qwen and Elephant studies. The chronology below follows the Flash-Next and Inkling work.
+
 | Period | Record | Covers |
 | --- | --- | --- |
 | 2026-10-28 to 10-31 | [Qwen3.8 optimization history][hist] | Host loop, precision, sampler, kernels, host conditions, standard-engine migration, matched-pack comparison, first MTP series |
@@ -917,7 +924,7 @@ On the Hy4 4K repeat, mapped expert admission was followed by a stalled first pr
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 
-Performance work on other families is indexed in the [benchmark index](benchmarks/README.md): the dense Qwen3.8 27B [approach ledger](benchmarks/2026-11-06-qwen38-27b-approaches.md), GLM-5.3 [batched prefill](benchmarks/GLM53_BATCHED_PREFILL_2026_11_02.md) and the [GLM comparison with mlx-stream](benchmarks/2026-11-04-glm-mlx-stream-comparison.md). They are not summarized here. The full attempt index is the [experiment ledger](model-experiments/README.md).
+The family histories link the dated comparisons, including superseded results and the limits of incomplete trials. [Flash-Next and Lily](model-experiments/speed-flash-next.md) · [Inkling 2 Mini](model-experiments/speed-inkling.md) · [Dense Qwen and Qwen MoE](model-experiments/speed-qwen.md) · [GLM, Gemma, OLMo, Ripple and scoring models](model-experiments/speed-other-families.md) · [Model experiment ledger](model-experiments/README.md)
 
 [hist]: benchmarks/QWEN38_OPTIMIZATION_HISTORY.md
 [mtpexact]: benchmarks/QWEN38_EXACT_MTP_2026_10_30.md
