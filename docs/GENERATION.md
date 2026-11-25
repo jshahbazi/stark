@@ -48,6 +48,43 @@ finishes before cancellation resets the request and clears its prefix state.
 
 With `--image`, the CLI reads one regular local file with a 4 MiB limit and accepts PNG or JPEG signatures. The first user turn contains an image placeholder followed by its text. Later turns keep that placeholder in the conversation and resubmit the same owned image bytes for each fresh request; `/reset` clears the conversation and attaches the image to the next first turn. The image stays in process memory between turns. Each request uses the [private staging and transaction lifecycle](#prepared-image-operations). A worker without passing image evidence and an invalid image produce fixed, path-free errors. See the [CLI implementation](../tools/converter/stark_convert/chat.py) and [private image staging](../tools/converter/stark_convert/media.py).
 
+## AngelSlim Hy4 Flash Q3_K trial
+
+On Apple Silicon, the `hy4` feature runs the original Q3_K split GGUF and BF16
+projector in the generation worker. It uses the Strata Metal graph and Stark's
+request serialization, sampling, cancellation and prefix reuse. The trial
+worker admits up to 8,192 positions. It always loads the projector. Text can
+request up to two greedy NextN draft tokens per round. Image requests use
+target-only generation and invalidate the preceding text prefix.
+
+Put the two verified Q3_K shards and their original BF16 projector in one
+local directory. Prepare that directory and build the worker from the source
+checkout:
+
+```sh
+uv run --locked --project tools/converter python scripts/prepare_hy4.py /absolute/path/to/hy4-model
+cargo +1.98.1 build --locked --release -p stark-generate --features hy4
+target/release/stark-generate --model-path /absolute/path/to/hy4-model --prefix-cache
+```
+
+Preparation verifies SHA-256 on the original GGUF files, extracts the Engram
+token map from shard one and stages the small pinned Tencent metadata files.
+It writes a private local verification receipt. The worker checks the source
+file fingerprints around model load, so moving the files to another filesystem
+or replacing a shard calls for rerunning preparation.
+The first worker load builds a reusable Q8_0 draft-expert sidecar in the model
+directory. Allow 3.6 GiB of writable space there. The normal worker image
+transaction is available when launched with `--vision-staging-root`. The trial
+has its own worker and artifact evidence in the
+[Hy4 Q3_K record](model-experiments/2026-11-25-hy4-native-q3-k.md).
+
+The worker defaults to streamed experts, grouped F32 prefill on Metal 4 and
+1,024-token prefix boundaries. `STARK_HY4_EXPERT_STORAGE=mapped` selects the
+experimental read-only banks under Metal and live RAM limits. Mapped decode
+uses the GPU expert planner. Its first prompt can incur substantial page-fault
+latency. `STARK_HY4_PREFILL_CHUNK=4096` selects a 4,096-token boundary for a
+prefill comparison. The verification and worker gates remain artifact-specific.
+
 ## Image qualification
 
 The [execution catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json) contains two passed schema-2 records for BF16 `Qwen/Qwen3.5-0.8B`: the developer worker `5fc92516…` and Developer ID signed worker `741a3ea7…`. Both use Metal on an Apple M5 Max with 40 GPU cores, Apple GPU family 1010 and MXU enabled, running macOS 26.7.1. Each record binds all five artifact-file hashes, the exact full executable hash, and its source-bound evidence: [developer execution](archive/runs/2026-10-26-qwen35-image-execution.md) and [signed-worker execution](archive/runs/2026-10-27-qwen35-signed-worker.md).

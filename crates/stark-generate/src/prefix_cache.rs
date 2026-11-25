@@ -57,6 +57,7 @@ pub(crate) struct PrefixEntry<S> {
     pub state: S,
     scope: CacheScope,
     context_tokens: u32,
+    chunk: usize,
     prefix: Vec<u32>,
 }
 
@@ -71,11 +72,22 @@ impl<S> PrefixEntry<S> {
         context_tokens: u32,
         prompt: &[u32],
     ) -> Self {
+        Self::with_chunk(state, scope, context_tokens, prompt, PREFILL_CHUNK_TOKENS)
+    }
+
+    pub(crate) fn with_chunk(
+        state: S,
+        scope: CacheScope,
+        context_tokens: u32,
+        prompt: &[u32],
+        chunk: usize,
+    ) -> Self {
         Self {
             state,
             scope,
             context_tokens,
-            prefix: prompt[..reusable_prefill_rows(prompt.len())].to_vec(),
+            chunk,
+            prefix: prompt[..chunk_boundary(prompt.len(), chunk)].to_vec(),
         }
     }
 
@@ -91,7 +103,7 @@ impl<S> PrefixEntry<S> {
             return 0;
         }
         let common = self.prefix.iter().zip(input).take_while(|(cached, token)| cached == token).count();
-        common.min(reusable_prefill_rows(input.len())) / PREFILL_CHUNK_TOKENS * PREFILL_CHUNK_TOKENS
+        common.min(chunk_boundary(input.len(), self.chunk)) / self.chunk * self.chunk
     }
 }
 

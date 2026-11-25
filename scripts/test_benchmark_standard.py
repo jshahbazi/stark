@@ -341,6 +341,45 @@ def test_every_checked_in_profile_loads():
     assert all(key == profile.key == profile.path.stem for key, profile in listed)
 
 
+def test_hy4_profile_admits_split_gguf_and_passes_projector_to_reference(tmp_path):
+    profile = bench.load_profile("hy4-flash")
+    assert profile.image_capable and profile.status == "draft"
+    assert profile.reference_arm == "llama-q3-k"
+    first = tmp_path / "weights-00001-of-00002.gguf"
+    first.write_bytes(b"first")
+    second = tmp_path / "weights-00002-of-00002.gguf"
+    assert bench.weight_problem(tmp_path) == f"missing GGUF weight shard: {second.name}"
+    second.write_bytes(b"second")
+    projector = tmp_path / "mmproj-weights.gguf"
+    projector.write_bytes(b"projector")
+    assert bench.weight_problem(tmp_path) is None
+    assert set(bench.model_identity(tmp_path)["weights"]) == {
+        first.name,
+        second.name,
+        projector.name,
+    }
+    config = SimpleNamespace(profile=profile, mlx_force_mtp=True)
+    engine = bench.ENGINES["llama-cpp"]
+    arm = bench.Arm("llama-q3-k", engine.key, tmp_path / "llama-server", tmp_path)
+    argv = engine.command(config, arm, 1234, "probe")
+    assert argv[argv.index("--model") + 1] == str(first)
+    assert argv[argv.index("--mmproj") + 1] == str(projector)
+    assert argv[argv.index("--spec-type") + 1] == "draft-mtp"
+    assert "--no-cache-prompt" in argv
+    assert "--log-disable" in argv
+    argv = engine.command(config, arm, 1234, "burst")
+    assert argv[argv.index("--spec-type") + 1] == "none"
+
+
+def test_llama_cpp_metrics_name_the_same_phase_boundaries(monkeypatch):
+    source = b"# HELP text\nllamacpp:prompt_seconds_total 1.2\nllamacpp:tokens_predicted_seconds_total 0.4\n"
+    monkeypatch.setattr(bench, "http_request", lambda *_: io.BytesIO(source))
+    assert bench.native_metrics(1234) == {
+        bench.PREFILL_METRIC: 1.2,
+        bench.DECODE_METRIC: 0.4,
+    }
+
+
 @pytest.mark.parametrize(
     ("old", "new", "error"),
     [

@@ -1,0 +1,70 @@
+# AngelSlim Hy4-flash Q3_K, bound to the same split GGUF on both engines.
+schema = "stark-benchmark-profile-v1"
+key = "hy4-flash"
+title = "Hy4-flash AngelSlim Q3_K"
+# Rendering, the native image path and natural-text quality need validation
+# before this profile can measure a standard standing.
+status = "draft"
+reference_arm = "llama-q3-k"
+
+[source]
+repo = "AngelSlim/Hy4-flash-GGUF"
+revision = "c50d4dd30be42f2b91138e5731de0e2f32ad56b2"
+
+[client]
+reasoning = "off"
+cache_tag_base = "hy4bench"
+
+[stark]
+served_model_id = "hy4-flash-q3-k"
+model_type = "hy_v4_flash"
+vocab_size = 120832
+chat_adapter = "think-tags-v1"
+# Tencent metadata at eccd3123eec73f2040f4c9ed0de1883593470510.
+template_sha256 = "11b12531403da5726b7e1f6003f479043b05999e6746d39af949cbcdfd715c35"
+image_capable = true
+drafting = "engine-default"
+default_artifact = "q3-k"
+
+[stark.context]
+# Initial native admission and the local Metal reference use 8192 positions.
+minimum = 8192
+maximum = 8192
+burst = 2048
+
+[stark.artifacts.q3-k]
+description = "AngelSlim Q3_K with original NextN and BF16 projector"
+quantization = "mixed Q3_K/Q4_K experts, FP8 E4M3 Engram"
+match = "angelslim-q3-k"
+path = "runtime/hy4-angelslim-2026-11-25/model"
+repo = "AngelSlim/Hy4-flash-GGUF"
+revision = "c50d4dd30be42f2b91138e5731de0e2f32ad56b2"
+record = "docs/model-experiments/2026-11-25-hy4-native-q3-k.md"
+
+[[reference]]
+engine = "llama-cpp"
+label = "AngelSlim llama.cpp Metal"
+arm_prefix = "llama"
+binary = "runtime/hy4-angelslim-2026-11-25/llama-build/bin/llama-server"
+version = "2cbca389f515df455412dafa07e2b1359cc72a6d+AngelSlim-Mac-patch"
+# The profile stays draft until the default MTP policy is measured and matched.
+flags = ["--n-gpu-layers", "all", "--flash-attn", "on", "--fit", "off", "--batch-size", "512", "--ubatch-size", "256", "--cache-type-k", "f16", "--cache-type-v", "f16"]
+draft_off_flags = ["--spec-type", "none"]
+draft_force_flags = ["--spec-type", "draft-mtp", "--spec-draft-n-max", "2", "--spec-draft-p-min", "0", "--spec-draft-n-ubatch", "256"]
+
+[reference.artifacts.q3-k]
+description = "AngelSlim Q3_K with original NextN and BF16 projector"
+quantization = "mixed Q3_K/Q4_K experts, FP8 E4M3 Engram"
+match = "angelslim-q3-k"
+path = "runtime/hy4-angelslim-2026-11-25/model"
+repo = "AngelSlim/Hy4-flash-GGUF"
+revision = "c50d4dd30be42f2b91138e5731de0e2f32ad56b2"
+record = "docs/model-experiments/2026-11-25-hy4-native-q3-k.md"
+
+[quality]
+reference_artifact = "q3-k"
+reference_path = "llama-cpp"
+
+[notes]
+context_8k = "The initial native worker's 8,192-position limit must also hold generated tokens."
+prefill_8800_native = "The initial worker cannot hold this 8,800-ID control."

@@ -58,6 +58,15 @@ These trials used different row counts, host paths and sampling policies across 
 | 2026-11-18 regular Decider v1.3 load and score | Pinned 27B, one cold 201-token M5 Max request | 4.001 input tok/s forward and 3.989 input tok/s native end-to-end. | Single cold scoring smoke. Numerical parity, image execution and repeatable speed remain open. | [Regular Decider smoke](../benchmarks/2026-11-18-regular-decider-300-token.md) |
 | Elephant 1 batched BF16 reference-prefill linear | Exact prepared 9.4B BF16, 113/526 text tokens and one image | Worker wall 3.5059 → 2.7908 s, 19.2725 → 12.7413 s, and 7.0767 → 4.8029 s respectively. | Three, two and one samples respectively. Selected slot unchanged. One text workload had bounded logit drift. Q4 was 20–50% slower in an 89-token trial, generic BF16 GEMM about 2× slower, and disabling reference DeltaNet offered no material gain. | [Elephant 1 trials](2026-11-18-elephant-1.md) |
 
+## Hy4-flash
+
+| Artifact and route | Observed result | Source |
+| --- | --- | --- |
+| AngelSlim Q3_K, patched llama.cpp Metal with BF16 projector | On the matched 4K synthetic fixture, two external diagnostic attempts measured 7.047–7.344 s prefill and 1.692–1.721 s decode with drafting off. Depth two measured 7.332–7.428 s prefill and 1.012–1.049 s decode, with exact greedy outputs and 41/42 proposals accepted. | [Pinned reference](2026-11-25-hy4-native-q3-k.md) |
+| Same artifact, native streamed Metal worker | At 4K it matched all 64 reference IDs with and without NextN and restored 3,072 tokens exactly. Depth two accepted 41/43 proposals. The single contended diagnostic measured 20.085 s prefill and 3.846 s decode without drafting, and 21.223 s and 2.661 s with depth two. | [Native pilot](2026-11-25-hy4-native-q3-k.md#20261125-hy4native-03--mapped-expert-admission-and-streamed-equal-work-pilot) |
+| Same final worker, wider streamed prefill | The 4,096-row path matched the 1,024-row control and llama.cpp output IDs. It took 15.665 s prefill with NextN depth two and 14.692 s without drafts. The same-binary 1,024-row measurements were 19.497 s and 18.281 s. Both timing sessions had compiler contention and cache disabled. The wider geometry is opt-in. | [Final geometry diagnostic](2026-11-25-hy4-native-q3-k.md#20261125-hy4native-09--final-streamed-worker-and-prefill-chunk-size) |
+| Same final worker, first 4K request with mapped experts and depth two | Stark measured 31.092 s through first sample and 7.277 s decode. The adjacent patched llama.cpp diagnostic measured 7.402 s and 0.999 s at the same draft depth. Exact greedy IDs. One cold observation per arm. | [Matched final diagnostic](2026-11-25-hy4-native-q3-k.md#20261125-hy4native-10--final-matched-mapped-k2-diagnostic) |
+
 ## Other model paths
 
 | Model and change | Scoped result | Source |

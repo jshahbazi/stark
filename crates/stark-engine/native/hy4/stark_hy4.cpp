@@ -1,0 +1,262 @@
+// SPDX-License-Identifier: Apache-2.0
+#include "stark_hy4.h"
+#include "stark_hy4_vision.h"
+
+#include "experts.h"
+#include "engine/sysmem.h"
+#include "forward.h"
+#include "model.h"
+#include "mtp.h"
+
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <memory>
+#include <string>
+#include <vector>
+
+using namespace strata::hy4_flash;
+
+namespace {
+constexpr int kVocab = 120832;
+constexpr int kMaxDrafts = 2;
+}
+
+// Members are destroyed in reverse dependency order. Metal submissions complete
+// before the calls that encode them return.
+struct StarkHy4 {
+    mtl::Context metal;
+    Model model;
+    Forward forward;
+    Mtp mtp;
+    StarkHy4Vision vision;
+    std::unique_ptr<StarkHy4ImagePrompt> image;
+    std::vector<int32_t> tokens;
+    int capacity = 0;
+    int context = 0;
+    int position = 0;
+    int drafts = 0;
+    StarkHy4Stats start_stats{};
+    ~StarkHy4() { metal.stop_keepalive(); }
+};
+
+extern "C" int stark_hy4_open(const char* model, const char* projector, const char* pack, int context, int chunk,
+                               int storage, int grouped, int gpu_plan, StarkHy4** output, StarkHy4VisionGeometry* vision,
+                               int* mapped) noexcept {
+    *output = nullptr;
+    try {
+        if (chunk != 1024 && chunk != 4096) return 1;
+        auto session = std::make_unique<StarkHy4>();
+        auto& s = *session;
+        s.metal.lock_safe_math();
+        if (!open(s.model, model, context, true).empty()) return 1;
+        const auto& geo = s.model.geo;
+        if (geo.vocab_size != kVocab || geo.hidden_dim != 3072 || geo.idx_kpool <= 0 || chunk % geo.idx_kpool != 0)
+            return 1;
+        if (!load_dense(s.model, s.metal).empty() || !open_experts(s.model).empty()) return 2;
+        if (!s.vision.open(s.metal, model, projector, geo.hidden_dim, geo.rope_dim).empty()) return 3;
+        Prefill prefill;
+        prefill.chunk = chunk;
+        prefill.grouped_k_quant = grouped != 0;
+        prefill.mapped_gpu_plan = gpu_plan != 0;
+        if (!s.forward.open(s.model, s.metal, pack, prefill).empty()) return 4;
+        if (!s.mtp.open(s.model, s.metal, s.forward.library(), 1024, pack).empty()) return 5;
+        if (!s.vision.build(s.metal, s.forward.library()).empty()) return 3;
+        auto arena = plan_arena(s.model, s.metal);
+        // Stark's resident expert paths budget shared allocation and leave
+        // clean file mappings outside the anonymous arena. Count the pending
+        // mapped-prefill workspace and image scratch before admitting banks.
+        const double future = (2.0 * (1ull << 30)) * (chunk / 1024.0)
+            + s.vision.reserved_bytes() - 1'044'397'440ull;
+        const double system_reserve = 24.0 * (1ull << 30);
+        const double live_room = strata::metal_engine::sys_file_backed_room(arena.avail) - 4.0 * (1ull << 30);
+        const double mapped_room = std::min({arena.gpu_room, live_room, arena.phys - arena.base - system_reserve}) - future;
+        if (storage != 1 && mapped_room > 0) {
+            s.model.stream.map_experts(s.metal, static_cast<uint64_t>(mapped_room));
+        }
+        if (storage == 2 && !s.model.stream.mapped()) return 8;
+        *mapped = s.model.stream.mapped() ? 1 : 0;
+        const int slots = 2 * s.model.stream.n_experts();
+        if (!*mapped) {
+            arena.arena = std::min(arena.arena, arena.gpu_room - future);
+            if (arena.arena <= 0 || !make_arena(s.model, s.metal, arena, "", slots + 64).empty()) return 6;
+            for (int c = 0; c < s.model.stream.n_classes(); ++c) {
+                if (s.model.stream.class_slots(c) < slots) return 6;
+            }
+        }
+        if (!s.forward.attach_prefill().empty()) return 6;
+        const auto& vg = s.vision.geometry();
+        *vision = {static_cast<uint32_t>(vg.image_token), static_cast<uint32_t>(vg.patch),
+                   static_cast<uint32_t>(vg.merge), static_cast<uint64_t>(vg.min_pixels),
+                   static_cast<uint64_t>(vg.max_pixels)};
+        s.capacity = context;
+        s.tokens.reserve(static_cast<size_t>(context));
+        *output = session.release();
+        return 0;
+    } catch (...) {
+        return 7;
+    }
+}
+
+extern "C" void stark_hy4_close(StarkHy4* session) noexcept { delete session; }
+
+extern "C" void stark_hy4_clear(StarkHy4* session) noexcept {
+    auto& s = *session;
+    s.image.reset();
+    s.forward.reset();
+    s.mtp.reset();
+    s.tokens.clear();
+    s.position = 0;
+    s.context = 0;
+    s.drafts = 0;
+}
+
+extern "C" int stark_hy4_retain_prefix(StarkHy4* session, int position) noexcept {
+    auto& s = *session;
+    try {
+        if (s.image || position < 1 || position > s.position || !s.forward.rewind(position).empty()) return 1;
+        s.mtp.truncate(position);
+        s.tokens.resize(static_cast<size_t>(position));
+        s.position = position;
+        return 0;
+    } catch (...) {
+        return 1;
+    }
+}
+
+extern "C" int stark_hy4_begin(StarkHy4* session, const uint32_t* tokens, int count, int context, int reuse,
+                                int drafts, const StarkHy4ImageInput* image) noexcept {
+    auto& s = *session;
+    try {
+        if (context > s.capacity || count < 1 || count >= context || reuse < 0 || reuse >= count ||
+            drafts < 0 || drafts > kMaxDrafts || (image && (reuse || drafts))) return 1;
+        const auto valid = [](uint32_t token) { return token < kVocab; };
+        if (!std::all_of(tokens, tokens + count, valid)) return 1;
+        if (reuse == 0) {
+            stark_hy4_clear(session);
+        } else {
+            if (context != s.context || drafts != s.drafts || s.image ||
+                static_cast<size_t>(reuse) > s.tokens.size() ||
+                !std::equal(tokens, tokens + reuse, s.tokens.begin()) ||
+                !s.forward.rewind(reuse).empty()) return 1;
+            s.mtp.truncate(reuse);
+            s.mtp.stats() = {};
+        }
+        s.tokens.assign(tokens, tokens + count);
+        s.position = reuse;
+        s.context = context;
+        s.drafts = drafts;
+        s.start_stats = {};
+        s.start_stats = stark_hy4_stats(session);
+        if (image) {
+            s.image = std::make_unique<StarkHy4ImagePrompt>();
+            if (!s.image->attach(s.vision, s.metal, s.forward, s.tokens.data(), s.tokens.size(), image->rgb,
+                                 image->rgb_len, image->width, image->height).empty()) return 2;
+        }
+        return 0;
+    } catch (...) {
+        return 1;
+    }
+}
+
+extern "C" int stark_hy4_prefill(StarkHy4* session, int rows) noexcept {
+    auto& s = *session;
+    try {
+        if (rows < 1 || rows > s.forward.prefill_chunk() ||
+            s.position + rows > static_cast<int>(s.tokens.size())) return 1;
+        Forward::PrefillSink sink;
+        if (s.drafts) {
+            sink.hidden = [&](int pos, int n, const float* h) { s.mtp.set_hidden(pos + 1, n, h); };
+        }
+        if (!s.forward.prefill(s.tokens.data(), s.position, rows, sink).empty()) return 1;
+        s.position += rows;
+        s.start_stats.decode_host_cut_seconds = s.forward.timing().host_cut_ms / 1e3;
+        return 0;
+    } catch (...) {
+        return 1;
+    }
+}
+
+extern "C" int stark_hy4_greedy(const StarkHy4* session) noexcept {
+    return session->position > 0 ? session->forward.last_token() : -1;
+}
+
+extern "C" const float* stark_hy4_logits(const StarkHy4* session) noexcept {
+    return stark_hy4_greedy(session) >= 0 ? session->forward.last_logits() : nullptr;
+}
+
+extern "C" int stark_hy4_append(StarkHy4* session, uint32_t token) noexcept {
+    auto& s = *session;
+    try {
+        if (token >= kVocab || s.position >= s.context || s.position != static_cast<int>(s.tokens.size())) return 1;
+        s.tokens.push_back(static_cast<int32_t>(token));
+        if (s.drafts == 0) {
+            if (!s.forward.window(s.tokens.data(), s.position, 1).empty()) return 1;
+            ++s.position;
+        }
+        return 0;
+    } catch (...) {
+        return 1;
+    }
+}
+
+// One exact greedy verification round adapted from Strata's speculative_greedy.
+// The last committed token becomes the next input. Rejected rows are overwritten
+// by the next window and the index pool is clamped at that window's start.
+extern "C" int stark_hy4_verify(StarkHy4* session, int count, uint32_t* output) noexcept {
+    auto& s = *session;
+    try {
+        const int start = s.position;
+        if (!s.drafts || start + 1 != static_cast<int>(s.tokens.size()) ||
+            count < 1 || count > s.drafts + 1 || start + count >= s.context) return -1;
+        const int k = count - 1;
+        auto& stats = s.mtp.stats();
+        double t = mtl::now_s();
+        std::array<int32_t, kMaxDrafts> proposals{};
+        for (int i = 0; i < k; ++i) {
+            const int row = start + i;
+            if (i > 0) s.mtp.set_hidden(row, 1, s.mtp.state());
+            if (!s.mtp.step(s.tokens.data(), row, &proposals[i]).empty()) return -1;
+            s.tokens.push_back(proposals[i]);
+        }
+        s.mtp.truncate(start + 1);
+        stats.draft_ms += (mtl::now_s() - t) * 1e3;
+        t = mtl::now_s();
+        if (!s.forward.window(s.tokens.data(), start, count).empty()) return -1;
+        stats.verify_ms += (mtl::now_s() - t) * 1e3;
+        const int32_t* actual = s.forward.argmax();
+        if (!std::all_of(actual, actual + count, [](int32_t t) { return t >= 0 && t < kVocab; })) return -1;
+        const int accepted = accept_prefix(proposals.data(), actual, k);
+        s.mtp.set_hidden(start + 1, accepted + 1, s.forward.result_norm());
+        s.tokens.resize(static_cast<size_t>(start + 1));
+        for (int i = 0; i <= accepted; ++i) {
+            output[i] = static_cast<uint32_t>(actual[i]);
+            s.tokens.push_back(actual[i]);
+        }
+        s.position += accepted + 1;
+        stats.offered += static_cast<uint64_t>(k);
+        stats.accepted += static_cast<uint64_t>(accepted);
+        ++stats.rounds;
+        return accepted + 1;
+    } catch (...) {
+        return -1;
+    }
+}
+
+extern "C" StarkHy4Stats stark_hy4_stats(StarkHy4* session) noexcept {
+    const auto& draft = session->mtp.stats();
+    const auto& graph = session->forward.timing();
+    const auto& base = session->start_stats;
+    return {
+        draft.offered, draft.accepted, draft.rounds,
+        draft.draft_ms / 1e3, draft.verify_ms / 1e3, draft.catchup_ms / 1e3,
+        graph.pf_gpu_ms / 1e3 - base.prefill_gpu_span_seconds,
+        graph.pf_encode_ms / 1e3 - base.prefill_encode_seconds,
+        graph.pf_wait_ms / 1e3 - base.prefill_expert_wait_seconds,
+        graph.pf_engram_ms / 1e3 - base.prefill_engram_seconds,
+        graph.gpu_ms / 1e3 - base.decode_gpu_span_seconds,
+        graph.host_cut_ms / 1e3 - base.decode_host_cut_seconds,
+        graph.pf_bytes_read - base.prefill_expert_bytes_read,
+        session->model.stream.decode_read_bytes() - base.decode_expert_bytes_read,
+    };
+}

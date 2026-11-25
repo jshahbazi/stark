@@ -820,6 +820,14 @@ These rules are for optimization work on one engine. To compare engines, or to s
 11. Measure the first request after an idle pause, process start to ready, and peak memory against the plan.
 12. Record every attempt, including the rejected ones, in the [experiment ledger](model-experiments/README.md).
 
+For AngelSlim Hy4-flash Q3_K, inspect the dispatch path on the actual mixed expert banks before interpreting shared-format timings. The pinned Strata grouped prefill requires IQ2_XXS gate/up and leaves the Q3_K gate/up route on per-entry products. The patched llama.cpp Metal reference groups the packed Q3_K/Q4_K products from 32 tokens and uses a 256-row microbatch in the matched diagnostic. Its projection precision and reduction order need their own parity gate. Measure the Q3_K path directly and split decode GPU work from expert and Engram I/O at the host cuts. [Hy4 native diagnostic and prior reference runs](model-experiments/2026-11-25-hy4-native-q3-k.md)
+
+On the native Hy4 Q3_K release worker, grouped F32 and a single 4,096-row chunk reduced observed streamed K2 prefill from 19.497 to 15.665 s and expert reads from 232 to 87 GB. These are worker diagnostics with ambient compiler activity. Keep 1,024 rows for the default prefix grid. Read-only mapped banks and GPU routing improved observed decode with a cold page-fault cost. Consolidating the Engram submissions and switching the grouped operands to F16 produced inconsistent speed and stayed out of the worker. [Measured Hy4 attempts](model-experiments/2026-11-25-hy4-native-q3-k.md)
+
+The native grouped and mapped pilots reproduced all 64 reference output IDs at 4K. On the mapped grouped prefill, 16.15 of 16.30 wall seconds were inside command GPU spans; CPU encode and Engram together took about 30 ms. The same allocation policy took 20 to 26 seconds to emit the first token on a short request in two fresh processes. Measure first use separately from a warmed 4K request, and test the reference's FP16 grouped operand fragments against the F32 native control. [Grouped and mapped attempts](model-experiments/2026-11-25-hy4-native-q3-k.md#20261125-hy4native-05--grouped-streamed-q3_k-prefill)
+
+Increasing the streamed Hy4 group from 1,024 to 4,096 rows lowered software expert reads from 232.36 GB to 87.25 GB at depth two in separate same-binary observations. First-demand mapped decode spent 0.920 of 7.277 wall seconds inside measured command spans, despite zero software expert reads. Capture both stage wall and command spans when changing expert residency. The wider streamed path is opt-in and the mapped path remains a diagnostic option. [Final geometry and mapped comparison](model-experiments/2026-11-25-hy4-native-q3-k.md#20261125-hy4native-09--final-streamed-worker-and-prefill-chunk-size)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |

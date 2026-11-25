@@ -10,6 +10,7 @@ license.workspace = true
 default = ["metal"]
 metal = ["dep:stark-engine", "stark-engine/metal", "stark-engine/inkling-slice", "dep:sha2", "dep:tokenizers"]
 glm-exl3 = ["metal", "stark-engine/glm-exl3"]
+hy4 = ["metal", "stark-engine/hy4"]
 gemma4-assistant-staging = ["metal"]
 
 [dependencies]

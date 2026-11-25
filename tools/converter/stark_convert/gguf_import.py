@@ -133,6 +133,28 @@ def _value(stream: BinaryIO, kind: int):
     return value
 
 
+def _read_metadata(stream: _HeaderReader) -> tuple[int, dict]:
+    if _read(stream, 4) != b"GGUF" or _number(stream, "I") != 3:
+        raise UnsupportedConversion("Experiment requires little-endian GGUF version 3")
+    tensor_count, metadata_count = _count(stream), _count(stream)
+    if not tensor_count:
+        raise ConversionError("GGUF source has no tensors")
+    metadata = {}
+    for _ in range(metadata_count):
+        key = _string(stream)
+        if not key or key in metadata:
+            raise ConversionError("Duplicate or empty GGUF metadata key")
+        metadata[key] = _value(stream, _number(stream, "I"))
+    return tensor_count, metadata
+
+
+def read_gguf_metadata(path: Path) -> dict:
+    """Read bounded GGUF v3 metadata without validating the tensor inventory."""
+    with path.open("rb") as stream:
+        _, metadata = _read_metadata(_HeaderReader(stream))
+    return metadata
+
+
 def read_gguf(path: Path, *, reference_k_quants: bool = False) -> GGUFSource:
     """Validate a bounded GGUF v3 inventory without reading weight payloads.
 
@@ -143,17 +165,7 @@ def read_gguf(path: Path, *, reference_k_quants: bool = False) -> GGUFSource:
     with path.open("rb") as stream:
         signature = _signature(os.fstat(stream.fileno()))
         stream = _HeaderReader(stream)
-        if _read(stream, 4) != b"GGUF" or _number(stream, "I") != 3:
-            raise UnsupportedConversion("Experiment requires little-endian GGUF version 3")
-        tensor_count, metadata_count = _count(stream), _count(stream)
-        if not tensor_count:
-            raise ConversionError("GGUF source has no tensors")
-        metadata = {}
-        for _ in range(metadata_count):
-            key = _string(stream)
-            if not key or key in metadata:
-                raise ConversionError("Duplicate or empty GGUF metadata key")
-            metadata[key] = _value(stream, _number(stream, "I"))
+        tensor_count, metadata = _read_metadata(stream)
         alignment = metadata.get("general.alignment", 32)
         if type(alignment) is not int or alignment < 1 or alignment > 4096 or alignment & (alignment - 1):
             raise ConversionError("Invalid GGUF alignment")

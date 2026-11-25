@@ -9,6 +9,8 @@ _SAMPLING = "exact-rejection-v1"
 _INKLING_SAMPLING = "native-target-draw-match-v1"
 _INKLING_VERIFICATION = "inkling-dspark-target-draw-v1"
 _INKLING_SHORT_VERIFICATION = "inkling-dspark-short-target-draw-v1"
+_HY4_SAMPLING = "greedy-target-match-v1"
+_HY4_VERIFICATION = "hy4-nextn-greedy-prefix-match-v1"
 
 
 def _unsupported() -> dict[str, Any]:
@@ -64,6 +66,7 @@ def mtp_capabilities(readiness: Any) -> dict[str, Any]:
             not in (
                 (_INKLING_SAMPLING, _INKLING_VERIFICATION, 1),
                 (_INKLING_SAMPLING, _INKLING_SHORT_VERIFICATION, 3),
+                (_HY4_SAMPLING, _HY4_VERIFICATION, 2),
             )
         )
         or not isinstance(verification, str)
@@ -123,4 +126,6 @@ def resolve_mtp(enabled: Any, capabilities: Any, sampling: Any = None) -> int:
     if is_inkling_short_verifier(current):
         best = _INKLING_GREEDY_DRAFTS if _greedy(sampling) else _INKLING_SAMPLED_DRAFTS
         return min(best, current["max_drafts"])
+    if current["sampling"] == _HY4_SAMPLING and not _greedy(sampling):
+        return 0
     return current["recommended_drafts"]
