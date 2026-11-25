@@ -79,12 +79,13 @@ that evidence or qualify other checkpoints. Keep implemented support, numerical
 qualification, measured speed and deployment as separate outcomes; preserve
 older source-bound records when an attempt changes.
 
-For performance work on a new family or path, start from the
-[performance playbook](PERFORMANCE_PLAYBOOK.md): build its time budget before
-choosing what to optimize, follow its checklist for a new family, and apply its
-correctness gates and measurement rules. When the attempt is recorded, add what
-the family returned to the playbook in the same change. The playbook carries no
-qualification from one artifact to another.
+When adding a family, checkpoint, quantization, format or backend, read the
+applicable family speed history and the performance playbook before choosing
+an optimization. Measure the baseline on the exact artifact and use the
+new-family checklist to select the next test. Record the result and update any
+playbook guidance the attempt changes. [Family histories](MODEL_RESEARCH.md) ·
+[Performance playbook](PERFORMANCE_PLAYBOOK.md#choose-a-performance-experiment) ·
+[New-family checklist](PERFORMANCE_PLAYBOOK.md#checklist-for-a-new-family)
 
 ## Bind the implementation and artifact
 
