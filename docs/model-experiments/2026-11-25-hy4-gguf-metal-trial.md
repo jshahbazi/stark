@@ -7,6 +7,7 @@
 | Registered and executed | 2026-11-25, Codex |
 | Kind | External runtime build, artifact admission and functional compatibility |
 | Scope | AngelSlim Q3_K on Apple Silicon. Native Stark qualification remains a separate attempt. |
+| State | Builds and structural checks completed. Full-model trial resource-deferred while weights transfer. |
 | Acceptance | Load the two hash-verified shards and BF16 projector. Complete greedy text with exactly 4,096 input tokens on the same fixture, using one loaded runtime at a time. Check the short known-answer case first. |
 | Use | External reference for native implementation and differential tests |
 | Related work | [Native Stark plan](../MODEL_RESEARCH.md#research-proposals-with-no-stark-timing) · [Experiment ledger](README.md) |
@@ -47,7 +48,8 @@ Stark source base for this record is `e0e6916d8e966597ed904c36f01068ad70bac28d`.
 | Strata pack path | The publisher guide names `strata_pack.py`, whose pinned implementation targets the Qwen Q2_0 pack. The pinned launcher invokes `iq_pack.py` and limits its Hy4 model selection to the Q4_K_M route. | Use the native server protocol with the Engram token map extracted by the pinned packer. The engine reads weight tensors directly from GGUF. |
 | Strata model-free tests and header scan | The Hy4 geometry fixture and Metal host-side expert tile test passed. The pinned parser accepted the mixed Q3_K/Q4_K expert layout, the BF16 draft layer and the 120,832-entry Engram map from the shard headers. | Structural evidence. |
 | Shared artifact transfer | The original Xet process stopped advancing when the host slept. Two sample reads at the end of the retained prefixes matched the pinned publisher URLs. | Continue by HTTP range from the retained prefixes. Require all three full SHA-256 digests before running inference. |
+| Download recovery | The resumed Xet stream and a fresh current-client Xet download failed to advance in the observed retry windows. HTTP range recovery advanced after restart, with approximately 45 GiB received out of 145.67 GiB at the checkpoint. | The local runner proceeds from transfer to full digest verification and then to the serialized smoke tests. |
 
 ## Correctness, performance and decision
 
-Full-model inference is pending local artifact staging. The build result establishes candidate executables and their source pins. It supplies no output, memory or timing result for Stark.
+The BF16 projector matches its full published digest. The Q3_K and Engram shard digests, runtime loads, generation, image outcomes and operating memory are pending. Model-free tests and header acceptance establish the candidate code paths. The record contains no numerical or performance qualification.
