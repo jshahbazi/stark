@@ -2,6 +2,8 @@
 
 [Look up research and speed changes by model](../MODEL_RESEARCH.md), including benchmark comparisons and branch-only attempts. The [source index](source-index.md) groups individual reports by family and topic.
 
+- [20261125-INKDRAFT-02 · DFlash 2's own runner-up](2026-11-25-inkling-dflash-self-correction.md) records a three-slot replay on 24 held-out prose and coding requests, plus the measured M5 Max selector overhead.
+
 - [20261125-INKDRAFT-01 · Cross-drafter first-miss recovery](2026-11-25-inkling-first-miss.md) records directional catch counts and the M5 Max correction budgets for a fixed-node branch replay.
 
 - [20261124-INKDRAFT-02 · Live DFlash 2 on the original Inkling server benchmark](../benchmarks/2026-11-24-inkling-mini-live-dflash2.md) records the fixed-width screen, worker correctness and same-run DSpark and MLX-Serve comparisons.

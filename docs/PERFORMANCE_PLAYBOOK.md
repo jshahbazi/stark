@@ -89,6 +89,8 @@ Include live draft execution and feature transfer when pricing that limit. The o
 
 For a second draft candidate, pair both proposals at the same anchor, count exact-prefix catches at the first miss, and re-walk the entire trajectory after charging the sibling one verifier slot. On the original Inkling checkpoint, DFlash 2 caught 49% of DSpark's three-slot prose misses and 48% on three coding traces. The modeled target time available to an alternate called on every draft round was 5.26 ms on prose and 2.17 ms on coding. At seven slots, additional physical verifier calls erased the savings on the 4K coding trace. [First-miss and packet-cost replay](model-experiments/2026-11-25-inkling-first-miss.md)
 
+For a drafter that already scores multiple candidates, time the extra selection work and keep a control that always gives the runner-up a slot. With three slots on Inkling DFlash 2, using the runner-up at the first low-margin position cut replayed rounds by 2.10% on held-out prose and 1.19% on coding. Always forking at the first position increased rounds by 7.30% and 11.07%. After charging the measured selector overhead, modeled remaining target-time savings were about 0.46 and 0.27 ms per draft round before branch handling. [Held-out replay and M5 Max selector timing](model-experiments/2026-11-25-inkling-dflash-self-correction.md)
+
 If a stage is a fraction f of the time and a change makes it s times faster, the whole gets `1 / (1 - f + f / s)` times faster. Removing a 5 percent stage entirely cannot give 10 percent. Halving a stage gives 10 percent more throughput only if the stage is about 18 percent of the time.
 
 This rule stopped several projects before any code was written:
@@ -845,6 +847,7 @@ These rules are for optimization work on one engine. To compare engines, or to s
 | 2026-11-23 | [Inkling 2 Mini standard benchmark][inkstd] | First standard result: three repeats, quality attached, standings against MLX-Serve on matched artifacts |
 | 2026-11-23 | [Inkling session audit][inkaudit] | Attempts, intermediate figures and incidents of 2026-11-22 to 11-23 that the records lacked; corrections to earlier records; the merged tree's lint commit that the gates did not cover |
 | 2026-11-25 | [Inkling cross-drafter first-miss recovery](model-experiments/2026-11-25-inkling-first-miss.md) | Three- and seven-slot greedy fork replay, M5 Max packet prices and break-even per paid attempt |
+| 2026-11-25 | [Inkling DFlash runner-up](model-experiments/2026-11-25-inkling-dflash-self-correction.md) | Paired holdout replay and selector-cost screen for a three-slot fork |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 
