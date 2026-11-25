@@ -39,3 +39,41 @@ The installed worker also ran the follow-up at minimum reasoning effort, greedy 
 `20261125-INKREP-01` completed as a diagnostic on November 25, 2026. The reported exchange produced visible answers and stopped on all five follow-ups. The test did not reproduce sustained repetitive generation. The number of histories and seeds is small, and the exact-span checks can miss repeated ideas expressed in different words. The result applies to text-only conversations without repository tools or file contents.
 
 Both full target shards were hashed after the runs and matched the respective digests above. A weight-edit trial is deferred until a failure can be replayed. A candidate would need to reduce repetition and preserve answer correctness on separate debugging cases at matched sampling settings. No weights, runtime defaults or installed files were changed. Performance and peak memory were not measured. [Model experiment ledger](../../model-experiments/README.md)
+
+## 20261125-INKREP-02 · OpenCode workspace replay
+
+The reporter identified OpenCode as the original client and specified two exact user turns. The replay used the OpenCode 2.4.1 engine bundled with the desktop app, launched in the named repository with project instruction discovery enabled. Both prompts used one fresh session backed by an in-memory database. The tool policy allowed workspace `glob`, `grep` and `read`. Repository contents, model text, tool arguments and tool results stayed out of the receipts.
+
+An isolated local Stark API process served the installed affine 8-bit target and native executable identified above, with a 32,768-token context. It advertised streaming, tool calling and default DSpark depth 3. The replay did not change the existing desktop connection. OpenCode performed the file operations and sent their results back to the model. The observer counted tool calls, exact duplicate arguments, repeated 12-word or punctuation sequences in each output channel, finish reasons and OpenCode's reported token usage. Counts across model calls can exceed the context window because the client resubmits conversation history.
+
+| Turn | Observed workspace tool calls | Terminal outcome |
+| --- | --- | --- |
+| Directory question | 16 searches, three globs, two reads. Twenty calls completed and one returned a tool error. | Produced an answer and stopped. The most frequent exact call occurred twice. |
+| Review follow-up | Seven distinct reads completed. | OpenCode returned `provider.invalid-request` with a context-related message. There was no final answer. |
+
+The repeated-span detector found no 12-word sequence occurring twice inside one reasoning or text part on either turn. The working tree was checked before and after. The narrow tool policy and unavailable historical runtime settings limit comparison with the reported session.
+
+### Larger-context replay
+
+A second fresh OpenCode session used the same two user messages, default model variant and affine 8-bit weights. The `build` agent could also request a limited set of read-only shell operations. The isolated API used the [request-sized context build](https://github.com/jshahbazi/stark/blob/b92055b983b3c5d6887abf63422d04849544af27/docs/model-experiments/2026-11-24-inkling-mini-request-context.md) with worker SHA-256 `594c68d74304fe29847eeb1ba6d4ee9d524167f46acfc9e30651116d03d54f60` and advertised 131,072 tokens. Context size, worker and tool policy changed together. Neither fresh session enabled the historical review skill.
+
+The first turn called tools 13 times and gave a final answer identifying both application directories. The follow-up called tools 47 times across 43 assistant steps. Forty-one calls completed and six returned tool errors. The most frequent exact call occurred four times. OpenCode ended the follow-up after 623 seconds with `provider.rate-limit` and no final answer. On a request with 53,373 input tokens, the worker's last progress event counted 15,916 generated tokens. That event contains no text and cannot determine whether those tokens repeated. OpenCode's terminal error records the client classification. The harness did not interrupt either live replay.
+
+Aggregate receipt SHA-256 values are `e4093ec8dc76417cd760901efffb7da39b9356ebf542011e6d25c4d8f186b559` for the 32K run and `1189a7503cac46a8636da0015dedf489694dc56b442b38e264239c6152ef5738` for the 128K run.
+
+### Historical OpenCode evidence
+
+Two existing OpenCode 2.4.1 sessions matched the directory question and review request in the named workspace. Both used the `build` agent, Stark provider and Inkling 2 Mini. In each session the directory turn finished after three successful shell calls. The review turn loaded a local review skill and reached a normal model stop. Neither turn issued identical tool calls repeatedly. Both sessions also contained one later user turn.
+
+In both sessions the later turn was a short affirmative reply. In one, OpenCode recorded 60 completed shell calls with 15 distinct argument sets. The model requested the same shell command containing three read-only content searches **45 times consecutively**. All 45 executions returned the same result. Across assistant reasoning in that turn, a separate detector counted 75 recurring eight-word spans and four normalized sentences repeated three or more times. That turn emitted no visible answer and ended interrupted. In the other session the later turn ended interrupted after seven successful shell calls, all distinct. Neither stored original indicated a context error for the matched workflow. These records identify a tool-use failure on a later turn that the initial text-only baseline could not observe.
+
+### 20261125-INKREP-03 · Next action after a recorded result
+
+Two model-only requests tested whether a short reconstruction could reproduce the next identical call. Both used the 128K worker, greedy sampling, top-p 1, a 1,536-token output limit and automatic tool choice. The model saw the two user turns, visible replies, later acknowledgment, a preceding different tool call and its result, and either one or five copies of the repeated call and its actual result. All tools were inert. The reconstruction used a minimal shell schema and omitted the original system instructions, intervening steps and reasoning history.
+
+| Copies of the completed search in history | Input tokens | Output tokens | Next action |
+| ---: | ---: | ---: | --- |
+| 1 | 2,682 | 94 | Requested a different shell command. |
+| 5 | 8,210 | 694 | Returned text and stopped. |
+
+The historical loop is confirmed. Neither abbreviated history regenerated its next identical call. A weight-edit validation needs a baseline that reproduces the call and controls on which repeated searches are appropriate. No candidate weight edit was tested. A [separate synthetic cache experiment](https://github.com/jshahbazi/stark/blob/c5113a38c0faf415cec16d78e701e28e94383ef9/docs/model-experiments/2026-11-24-inkling-mini-tool-loop-cache.md) elicited a repeated call both with and without prefix reuse on its own fixture. Frozen-history aggregate receipt SHA-256 `adea741fbaa4e27b324c9d6aa455e2d999fc449a4d95f54bac4679e70d9e6b20`.

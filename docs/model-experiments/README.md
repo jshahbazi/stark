@@ -2,7 +2,7 @@
 
 [Look up research and speed changes by model](../MODEL_RESEARCH.md), including benchmark comparisons and branch-only attempts. The [source index](source-index.md) groups individual reports by family and topic.
 
-- [20261125-INKREP-01 · Repeated reasoning in a code-review follow-up](../archive/runs/2026-11-25-inkling-repetition.md) examines a reported failure on the original Inkling 2 Mini weights.
+- [20261125-INKREP-01 through -03 · Inkling 2 Mini repeated reasoning and tool calls](../archive/runs/2026-11-25-inkling-repetition.md) compares text-only, live OpenCode and recorded tool-result replays with the original 45-call search loop.
 
 - [20261124-INKBUDGET-01 through -03 · Inkling 2 Mini thinking budget](../archive/runs/2026-11-24-inkling-thinking-budget.md) tracks the reasoning limit and answer reserve with DSpark on and off, and the adoption of the 1,024-token Playground default.
 

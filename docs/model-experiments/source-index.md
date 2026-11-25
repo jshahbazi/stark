@@ -227,7 +227,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ### Benchmarks and experiment records
 
-- [Repeated reasoning in a code-review follow-up](../archive/runs/2026-11-25-inkling-repetition.md) · Original checkpoint, 2026-11-25
+- [Repeated reasoning and tool calls in a code-review follow-up](../archive/runs/2026-11-25-inkling-repetition.md) · Original and affine 8-bit checkpoints, OpenCode replays and historical tool calls, 2026-11-25
 - [Opt-in cumulative thinking budget](../archive/runs/2026-11-24-inkling-thinking-budget.md) · Experiment, 2026-11-24
 - [M5 Max original and Unsloth baselines](../benchmarks/2026-11-20-inkling-mini-m5-max.md) · Benchmark, 2026-11-20
 - [First milestone and real-weight NVFP4](2026-11-20-inkling-mini-milestone-1.md) · Experiment, 2026-11-20
