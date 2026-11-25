@@ -32,6 +32,8 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ## Qwen3.8-Flash-Next and Lily
 
+- [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
+
 ### Native decode, kernels and engine comparisons
 
 - [Flash-Next expert gate/up and shared-down experiment](../benchmarks/2026-11-07-flashnext-moe-projections.md) · Benchmark, 2026-11-07
@@ -113,6 +115,8 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Qwen3.8 Beginner memory admission](../archive/runs/2026-11-08-qwen-guided-memory.md) · Archived run, 2026-11-08
 
 ## Dense Qwen, Qwen MoE and GGUF
+
+- [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
 
 ### Qwen3.8 27B, catalog admission and image parity
 
@@ -216,6 +220,8 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Gemma 4 12B encoder-free vision controls](../archive/runs/2026-11-07-gemma4-unified-vision-controls.md) · Archived run, 2026-11-07
 
 ## Inkling 2 Mini
+
+- [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
 
 ### References, native milestones and follow-up
 
@@ -339,6 +345,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ## Shared runtime, catalog and image qualification
 
+- [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
 - [Image-support work: findings, failed attempts and remaining qualification](2026-11-08-image-support-retrospective.md) · Experiment, 2026-11-08
 - [Resource ceilings and installed-app recovery](2026-11-09-resource-admission.md) · Experiment, 2026-11-09
 - [Catalogue family admission](2026-11-10-catalog-family-admission.md) · Experiment, 2026-11-10
