@@ -133,7 +133,7 @@ fn file(path: &Path) -> Result<File, &'static str> {
     Ok(file)
 }
 
-fn read(
+pub(super) fn read(
     path: &Path,
     limit: u64,
 ) -> Result<Vec<u8>, &'static str> {
@@ -150,7 +150,7 @@ fn read(
     Ok(value)
 }
 
-fn checked_bytes(
+pub(super) fn checked_bytes(
     path: &Path,
     limit: u64,
     expected: &str,
@@ -162,7 +162,7 @@ fn checked_bytes(
     Ok(bytes)
 }
 
-fn check_weights(
+pub(super) fn check_weights(
     path: &Path,
     bytes: usize,
     expected: &str,

@@ -596,6 +596,9 @@ pub(crate) trait GenerationBackend {
     fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
         None
     }
+    fn mtp_drafter_identity(&self) -> Option<Value> {
+        None
+    }
     fn default_mtp_drafts(&self) -> u32 {
         0
     }
@@ -1523,6 +1526,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 if matches!(
                     code,
                     "native_generation_failed"
+                        | "inkling_dflash2_request_failed"
                         | "invalid_generation_output"
                         | "invalid_tokenization_output"
                         | "invalid_image_preparation_output"
@@ -1650,6 +1654,9 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         None => json!({"supported":false,"max_drafts":0,"recommended_drafts":0,
             "default_drafts":0,"operations":[]}),
     };
+    if let Some(drafter) = worker.backend.mtp_drafter_identity() {
+        readiness["mtp"]["drafter"] = drafter;
+    }
     if worker.mtp.is_some() && worker.backend.supports_mtp_scheduling() {
         readiness["mtp"]["policies"] = json!(["fixed", "adaptive"]);
         readiness["mtp"]["default_policy"] = json!(worker.default_mtp_scheduling.policy());

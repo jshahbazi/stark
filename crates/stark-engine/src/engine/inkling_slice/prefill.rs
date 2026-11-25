@@ -440,7 +440,7 @@ impl Session {
         }
 
         let tap_rows = taps.map(Some).enumerate().map(|(row, taps)| {
-            if draft.is_some() || (self.capture_draft_features && row + 1 == row_count) {
+            if draft.is_some() || self.external_draft || (self.capture_draft_features && row + 1 == row_count) {
                 taps
             } else {
                 None

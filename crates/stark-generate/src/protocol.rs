@@ -13,6 +13,7 @@ struct Arguments {
     staging: Option<PathBuf>,
     prefix_cache: bool,
     validation_gemma_text_only: bool,
+    inkling_dflash2_profile: Option<PathBuf>,
 }
 
 fn arguments(mut args: impl Iterator<Item = OsString>) -> Result<Arguments, &'static str> {
@@ -28,6 +29,7 @@ fn arguments(mut args: impl Iterator<Item = OsString>) -> Result<Arguments, &'st
         staging: None,
         prefix_cache: false,
         validation_gemma_text_only: false,
+        inkling_dflash2_profile: None,
     };
     while let Some(flag) = args.next() {
         if flag == OsStr::new("--vision-staging-root") && parsed.staging.is_none() {
@@ -35,6 +37,9 @@ fn arguments(mut args: impl Iterator<Item = OsString>) -> Result<Arguments, &'st
             parsed.staging = Some(PathBuf::from(root));
         } else if flag == OsStr::new("--prefix-cache") && !parsed.prefix_cache {
             parsed.prefix_cache = true;
+        } else if flag == OsStr::new("--inkling-dflash2-profile") && parsed.inkling_dflash2_profile.is_none() {
+            let profile = args.next().filter(|path| !path.is_empty()).ok_or("invalid_arguments")?;
+            parsed.inkling_dflash2_profile = Some(PathBuf::from(profile));
         } else if cfg!(feature = "gemma4-assistant-staging")
             && flag == OsStr::new("--validation-gemma-text-only")
             && !parsed.validation_gemma_text_only
@@ -85,6 +90,7 @@ pub fn main() {
             staging,
             prefix_cache,
             validation_gemma_text_only,
+            inkling_dflash2_profile,
         } = arguments(std::env::args_os().skip(1))?;
         // Validate operator resource policy before model loading allocates native state.
         let _request_budget = stark_resource_budget::Budget::from_environment()?;
@@ -100,13 +106,17 @@ pub fn main() {
                 if validation_gemma_text_only {
                     return Err("validation_family_not_supported");
                 }
-                let backend = crate::inkling::InklingBackend::load(&path, cancellation)?;
+                let backend =
+                    crate::inkling::InklingBackend::load(&path, cancellation, inkling_dflash2_profile.as_deref())?;
                 let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
                 return crate::generation::run_lines(
                     &mut worker,
                     &mut crate::prefix_cache::StandardInput::reader(),
                     &mut output,
                 );
+            }
+            if inkling_dflash2_profile.is_some() {
+                return Err("inkling_dflash2_family_not_supported");
             }
             let hybrid = {
                 match stark_engine::engine::hybrid::recognizes(&path) {
@@ -145,7 +155,7 @@ pub fn main() {
         }
         #[cfg(not(feature = "metal"))]
         {
-            let _ = (path, staging, prefix_cache, validation_gemma_text_only);
+            let _ = (path, staging, prefix_cache, validation_gemma_text_only, inkling_dflash2_profile);
             Err::<(), _>("native_backend_unavailable")
         }
     }));
@@ -196,9 +206,35 @@ mod tests {
             vec!["--model-path", "/model", "--vision-staging-root"],
             vec!["--model-path", "/model", "--vision-staging-root", ""],
             vec!["--model-path", "/model", "--vision-staging-root", "/media", "--vision-staging-root", "/other"],
+            vec!["--model-path", "/model", "--inkling-dflash2-profile"],
+            vec!["--model-path", "/model", "--inkling-dflash2-profile", ""],
+            vec![
+                "--model-path",
+                "/model",
+                "--inkling-dflash2-profile",
+                "/config",
+                "--inkling-dflash2-profile",
+                "/other",
+            ],
         ] {
             assert_eq!(parse(&args), Err("invalid_arguments"));
         }
+    }
+
+    #[test]
+    fn dflash_profile_requires_explicit_worker_option() {
+        assert_eq!(
+            arguments(["--model-path", "/model"].into_iter().map(OsString::from)).unwrap().inkling_dflash2_profile,
+            None,
+        );
+        assert_eq!(
+            arguments(
+                ["--model-path", "/model", "--inkling-dflash2-profile", "/config"].into_iter().map(OsString::from)
+            )
+            .unwrap()
+            .inkling_dflash2_profile,
+            Some(PathBuf::from("/config")),
+        );
     }
 
     #[test]

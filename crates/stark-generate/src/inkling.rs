@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Original Inkling 2 Mini target through the serialized JSONL worker.
 
+mod dflash2;
 mod thinking_budget;
 
 use std::{
@@ -15,8 +16,8 @@ use stark_engine::{
         Engine,
         hybrid::activity::InferenceActivity,
         inkling_slice::{
-            DepthPlanner, INKLING_IMAGE_TOKEN as IMAGE_TOKEN, ImageEmbeddings, MAX_VERIFY_ROWS, Session, Snapshot,
-            VOCABULARY as VOCAB, Verification,
+            DRAFT_FEATURE_WORDS, DepthPlanner, INKLING_IMAGE_TOKEN as IMAGE_TOKEN, ImageEmbeddings, MAX_VERIFY_ROWS,
+            Session, Snapshot, VOCABULARY as VOCAB, Verification,
         },
     },
 };
@@ -55,6 +56,7 @@ const LOAD_CONTEXT_MEMORY_PERCENT: usize = 85;
 const CONTEXT_ALLOCATION_ROWS: usize = 1024;
 const OUTPUT_RESERVE_TOKENS: usize = 8192;
 const SHORT_MTP_VERIFICATION: &str = "inkling-dspark-short-target-draw-v1";
+const DFLASH2_VERIFICATION: &str = "inkling-dflash2-mlx-short-target-draw-v1";
 
 #[derive(Default, serde::Serialize)]
 struct DraftStats {
@@ -66,7 +68,7 @@ struct DraftStats {
 
 #[derive(Default, serde::Serialize)]
 struct SpeculationStats {
-    rounds: [usize; MAX_VERIFY_ROWS],
+    rounds: Vec<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     overlapped_rounds: Option<usize>,
     draft_seconds: f64,
@@ -74,8 +76,8 @@ struct SpeculationStats {
     finish_seconds: f64,
     /// Wall seconds of complete drafting rounds (round start to commit end)
     /// and their count, by accepted draft count.
-    round_seconds_by_accepted: [f64; MAX_VERIFY_ROWS],
-    rounds_by_accepted: [usize; MAX_VERIFY_ROWS],
+    round_seconds_by_accepted: Vec<f64>,
+    rounds_by_accepted: Vec<usize>,
     /// Host time inside rounds between the verifier result and the commit
     /// (sampling and the consumer's per-token work).
     in_round_host_seconds: f64,
@@ -83,10 +85,29 @@ struct SpeculationStats {
     between_rounds_seconds: f64,
 }
 
+impl SpeculationStats {
+    fn new(maximum_drafts: usize) -> Self {
+        Self {
+            rounds: vec![0; maximum_drafts + 1],
+            round_seconds_by_accepted: vec![0.0; maximum_drafts + 1],
+            rounds_by_accepted: vec![0; maximum_drafts + 1],
+            ..Self::default()
+        }
+    }
+}
+
 struct PendingDraft<'a> {
     transaction: Verification<'a>,
     proposals: Vec<u32>,
     consumed: usize,
+    offset: usize,
+    rows: usize,
+}
+
+struct PrefixState {
+    mode: (bool, bool),
+    target: Snapshot,
+    dflash2: Option<dflash2::FeatureWindow>,
 }
 
 #[derive(serde::Serialize)]
@@ -160,8 +181,9 @@ pub(crate) struct InklingBackend {
     context_allocation: Option<ContextAllocation>,
     cancellation: Option<CancelSignal>,
     sampler: ProbabilityMapper,
-    retained: Option<BoundaryEntry<((bool, bool), Snapshot)>>,
-    pending: Option<BoundaryEntry<((bool, bool), Snapshot)>>,
+    retained: Option<BoundaryEntry<PrefixState>>,
+    pending: Option<BoundaryEntry<PrefixState>>,
+    dflash2: Option<dflash2::Drafter>,
     source_verifier: bool,
     /// The packed source prefill is loaded, so reuse boundaries sit on its grid.
     source_grid: bool,
@@ -175,6 +197,17 @@ fn default_drafts_for(sampling: &Sampling) -> u32 {
         GREEDY_DEFAULT_DRAFTS
     } else {
         SAMPLED_DEFAULT_DRAFTS
+    }
+}
+
+/// Long DFlash blocks use the incumbent verifier twice, and the second call
+/// is needed only when the target accepts the first call's last prediction.
+/// A four-proposal round leaves two rows in the second call.
+fn first_verifier_rows(depth: usize) -> usize {
+    if depth == MAX_VERIFY_ROWS {
+        MAX_VERIFY_ROWS - 1
+    } else {
+        (depth + 1).min(MAX_VERIFY_ROWS)
     }
 }
 
@@ -329,6 +362,19 @@ fn current_context_memory_budget(target: &Session) -> usize {
     context_memory_budget(target, inference_memory_budget(available_memory_bytes().unwrap_or(0)))
 }
 
+fn draft_snapshot_bytes(
+    tokens: usize,
+    dspark: bool,
+    dflash2: bool,
+) -> usize {
+    Session::prefix_snapshot_bytes(tokens, dspark)
+        + if dflash2 {
+            tokens.min(dflash2::WINDOW_ROWS) * DRAFT_FEATURE_WORDS * size_of::<u16>()
+        } else {
+            0
+        }
+}
+
 fn context_memory_budget(
     target: &Session,
     unified_budget: usize,
@@ -373,8 +419,15 @@ impl PrefillProgress<'_, '_, '_> {
         &mut self,
         target: &mut Session,
         tokens: &[u32],
+        features: &mut Option<dflash2::Features>,
     ) -> Result<(), &'static str> {
-        self.run(tokens.len(), |rows| target.ingest_many(&tokens[rows]))
+        self.run(tokens.len(), |rows| {
+            target.ingest_many(&tokens[rows])?;
+            if let Some(features) = features.as_mut() {
+                features.capture(target)?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -382,14 +435,25 @@ impl InklingBackend {
     pub(crate) fn load(
         root: &Path,
         cancellation: Option<CancelSignal>,
+        dflash2_profile: Option<&Path>,
     ) -> Result<Self, &'static str> {
         let runtime_identity = Engine::<Metal>::new().map_err(|_| "inkling_load_failed")?.metal_device_identity();
         let m5_max = runtime_identity.device_name == "Apple M5 Max" && runtime_identity.supports_mxu;
         let available = available_memory_bytes().unwrap_or(0);
+        let load_dflash2 = dflash2_profile.is_some();
+        let layout = inkling_artifact::Layout::of(root);
+        if load_dflash2 && (!m5_max || layout != inkling_artifact::Layout::Original) {
+            return Err("inkling_dflash2_artifact_not_supported");
+        }
         let fixed = inkling_artifact::TARGET_BYTES
             + inkling_artifact::DRAFT_BYTES
             + 1024 * 1024 * 1024
-            + inkling_artifact::Layout::of(root).extra_resident_bytes();
+            + layout.extra_resident_bytes()
+            + if load_dflash2 {
+                dflash2::RESERVE_BYTES
+            } else {
+                0
+            };
         let source_rows = if m5_max {
             source_command_rows(fixed, available)
         } else {
@@ -407,7 +471,7 @@ impl InklingBackend {
         let mut target =
             Session::load_file(artifact.target.descriptor()?, INITIAL_CONTEXT).map_err(|_| "inkling_load_failed")?;
         artifact.target.verify_unchanged()?;
-        if m5_max {
+        if m5_max && !load_dflash2 {
             target.load_dspark_file(artifact.draft.descriptor()?).map_err(|_| "inkling_draft_load_failed")?;
             artifact.draft.verify_unchanged()?;
         }
@@ -416,24 +480,44 @@ impl InklingBackend {
                 .set_batched_prefill_width(true, source_allowed, command_rows)
                 .map_err(|_| "inkling_prefill_load_failed")?;
         }
-        let source_verifier = source_allowed
+        let source_verify_admitted = source_allowed
             && admit_request_memory(Some(fixed + prefill_reserve + Session::SOURCE_VERIFIER_RESERVE_BYTES), available)
-                .is_ok()
-            && target.set_source_verifier(true).is_ok();
+                .is_ok();
+        if load_dflash2 && !source_verify_admitted {
+            return Err("resource_budget_exceeded");
+        }
+        if load_dflash2 {
+            target.set_external_draft(true).map_err(|_| "inkling_dflash2_load_failed")?;
+        }
+        let source_verifier = source_verify_admitted && target.set_source_verifier(true).is_ok();
+        if load_dflash2 && !source_verifier {
+            return Err("inkling_dflash2_load_failed");
+        }
         if source_verifier {
             // The INT8 proposal head stays resident once prepared; `context_bytes`
             // counts it through `dspark_int8_head_resident_bytes`.
-            if admit_request_memory(
-                Some(
-                    fixed + prefill_reserve + Session::SOURCE_VERIFIER_RESERVE_BYTES + Session::DSPARK_INT8_HEAD_BYTES,
-                ),
-                available,
-            )
-            .is_ok()
+            if !load_dflash2
+                && admit_request_memory(
+                    Some(
+                        fixed
+                            + prefill_reserve
+                            + Session::SOURCE_VERIFIER_RESERVE_BYTES
+                            + Session::DSPARK_INT8_HEAD_BYTES,
+                    ),
+                    available,
+                )
+                .is_ok()
             {
                 target.prepare_dspark_int8_head().map_err(|_| "inkling_draft_load_failed")?;
             }
             target.set_source_verifier(false).map_err(|_| "inkling_prefill_load_failed")?;
+        }
+        target.set_external_draft(false).map_err(|_| "inkling_dflash2_load_failed")?;
+        let dflash2 = dflash2_profile
+            .map(|profile| dflash2::Drafter::load(profile, &root.join(inkling_artifact::TARGET)))
+            .transpose()?;
+        if load_dflash2 {
+            artifact.target.verify_unchanged()?;
         }
         let source_grid = target.supports_source_text_prefill(INITIAL_CONTEXT);
         let engine_limit = u32::try_from(target.max_context_length()).map_err(|_| "inkling_load_failed")?;
@@ -449,7 +533,7 @@ impl InklingBackend {
             };
             target.live_context_bytes(context)
                 + workspace
-                + Session::prefix_snapshot_bytes(context, target.has_dspark())
+                + draft_snapshot_bytes(context, target.has_dspark(), load_dflash2)
         })
         .ok_or("resource_budget_exceeded")?;
         let context_tokens = pinned_context(memory_context_tokens, artifact.context_limit, engine_limit)
@@ -471,6 +555,7 @@ impl InklingBackend {
             sampler: ProbabilityMapper::default(),
             retained: None,
             pending: None,
+            dflash2,
             source_verifier,
             source_grid,
             draft_stats: DraftStats::default(),
@@ -496,6 +581,28 @@ impl InklingBackend {
         prefix_boundary(input_len, options.cache_scope.is_some(), self.source_grid)
     }
 
+    fn requested_draft_limit(
+        &self,
+        sampling: &Sampling,
+    ) -> usize {
+        if self.dflash2.is_some() && matches!(sampling, Sampling::Greedy {}) {
+            dflash2::MAX_DRAFTS
+        } else {
+            MAX_VERIFY_ROWS - 1
+        }
+    }
+
+    fn recommended_drafts(
+        &self,
+        sampling: &Sampling,
+    ) -> u32 {
+        if let Some(draft) = self.dflash2.as_ref().filter(|_| matches!(sampling, Sampling::Greedy {})) {
+            draft.greedy_drafts
+        } else {
+            default_drafts_for(sampling)
+        }
+    }
+
     fn generate_inner(
         &mut self,
         input: &[u32],
@@ -514,14 +621,20 @@ impl InklingBackend {
         let required = expanded + output_budget.min(OUTPUT_RESERVE_TOKENS);
         self.draft_stats = DraftStats::default();
         let use_draft = options.mtp_drafts > 0;
+        let use_dflash2 = use_draft && self.dflash2.is_some();
+        let use_dspark = use_draft && !use_dflash2;
         let source_prefill = image.is_none() && self.source_text_prefill(input.len(), options);
         let source_verify = self.source_verifier && use_draft && source_prefill;
         let supported_drafts = if source_verify {
-            MAX_VERIFY_ROWS - 1
+            self.requested_draft_limit(&options.sampling)
         } else {
             1
         };
-        if use_draft && (options.mtp_drafts as usize > supported_drafts || image.is_some() || !self.target.has_dspark())
+        if use_draft
+            && (options.mtp_drafts as usize > supported_drafts
+                || image.is_some()
+                || (use_dflash2 && !source_verify)
+                || (use_dspark && !self.target.has_dspark()))
         {
             return Err("mtp_not_supported");
         }
@@ -565,10 +678,15 @@ impl InklingBackend {
         self.target.reset();
         self.target.set_text_prefill_scope(source_prefill);
         self.target.set_context(allocation.context_tokens).map_err(|_| "native_generation_failed")?;
+        self.target.set_external_draft(use_dflash2).map_err(|_| "mtp_not_supported")?;
         self.target.set_source_verifier(source_verify).map_err(|_| "mtp_not_supported")?;
-        self.target.set_dspark_enabled(use_draft).map_err(|_| "mtp_not_supported")?;
+        self.target.set_dspark_enabled(use_dspark).map_err(|_| "mtp_not_supported")?;
+        let mut features = use_dflash2.then(dflash2::Features::default);
         if let Some(entry) = retained.as_ref() {
-            self.target.restore_prefix(&entry.state.1).map_err(|_| "native_generation_failed")?;
+            self.target.restore_prefix(&entry.state.target).map_err(|_| "native_generation_failed")?;
+            if let Some(features) = features.as_mut() {
+                features.window = entry.state.dflash2.clone().ok_or("native_generation_failed")?;
+            }
         }
         let mut prefill = PrefillProgress {
             cancellation: &mut self.cancellation,
@@ -585,22 +703,26 @@ impl InklingBackend {
         let last = input.len() - 1;
         let mut snapshot = None;
         let logits = if let Some((image, slot)) = image {
-            prefill.text(&mut self.target, &input[..slot])?;
+            prefill.text(&mut self.target, &input[..slot], &mut features)?;
             if slot == last {
                 prefill.run(image.token_count() - 1, |rows| self.target.ingest_image_rows(image, rows))?;
                 self.target.step_image_row(image, image.token_count() - 1)
             } else {
                 prefill.run(image.token_count(), |rows| self.target.ingest_image_rows(image, rows))?;
-                prefill.text(&mut self.target, &input[slot + 1..last])?;
+                prefill.text(&mut self.target, &input[slot + 1..last], &mut features)?;
                 self.target.step(input[last])
             }
         } else {
             if boundary > reused {
                 drop(retained.take());
-                prefill.text(&mut self.target, &input[reused..boundary])?;
-                snapshot = Some(self.target.snapshot().map_err(|_| "native_generation_failed")?);
+                prefill.text(&mut self.target, &input[reused..boundary], &mut features)?;
+                snapshot = Some(PrefixState {
+                    mode: (use_draft, source_prefill),
+                    target: self.target.snapshot().map_err(|_| "native_generation_failed")?,
+                    dflash2: features.as_ref().map(|features| features.window.clone()),
+                });
             } else if boundary > 0 && boundary == reused {
-                snapshot = retained.take().map(|entry| entry.state.1);
+                snapshot = retained.take().map(|entry| entry.state);
             }
             let bulk_end = if source_prefill {
                 input.len().saturating_sub(SOURCE_PROMPT_SUFFIX)
@@ -615,16 +737,19 @@ impl InklingBackend {
             // at any source command width.
             let split = unscoped_source_split(input.len(), start, source_prefill);
             if split > start {
-                prefill.text(&mut self.target, &input[start..split])?;
+                prefill.text(&mut self.target, &input[start..split], &mut features)?;
                 start = split;
             }
-            prefill.text(&mut self.target, &input[start..bulk_end])?;
+            prefill.text(&mut self.target, &input[start..bulk_end], &mut features)?;
             if source_prefill {
-                prefill.text(&mut self.target, &input[bulk_end..last])?;
+                prefill.text(&mut self.target, &input[bulk_end..last], &mut features)?;
             }
             self.target.step(input[last])
         }
         .map_err(|_| "native_generation_failed")?;
+        if let Some(features) = features.as_mut() {
+            features.capture(&self.target)?;
+        }
         let result = collect_output(
             &mut self.target,
             &self.tokenizer,
@@ -634,6 +759,7 @@ impl InklingBackend {
             &mut allocation,
             source_prefill,
             verify_depth,
+            self.dflash2.as_mut().zip(features.as_mut()),
             logits,
             expanded,
             input.last().copied() == Some(THINKING),
@@ -646,12 +772,7 @@ impl InklingBackend {
         self.context_allocation = Some(allocation);
         result.reused_input_tokens = reused;
         if let (Some(state), Some(scope)) = (snapshot, options.cache_scope) {
-            self.pending = Some(BoundaryEntry::new(
-                ((use_draft, source_prefill), state),
-                scope,
-                options.context_tokens,
-                &input[..boundary],
-            ));
+            self.pending = Some(BoundaryEntry::new(state, scope, options.context_tokens, &input[..boundary]));
         }
         Ok(result)
     }
@@ -678,7 +799,11 @@ impl InklingBackend {
             } else {
                 0
             }),
-            snapshot_bytes: Session::prefix_snapshot_bytes(snapshot_tokens, draft),
+            snapshot_bytes: draft_snapshot_bytes(
+                snapshot_tokens,
+                draft && self.dflash2.is_none(),
+                draft && self.dflash2.is_some(),
+            ),
             growth_count: 0,
         }
     }
@@ -776,6 +901,7 @@ fn collect_output(
     allocation: &mut ContextAllocation,
     source_prefill: bool,
     verify_depth: usize,
+    mut dflash2: Option<(&mut dflash2::Drafter, &mut dflash2::Features)>,
     mut logits: Vec<f32>,
     input_tokens: usize,
     starts_thinking: bool,
@@ -795,7 +921,14 @@ fn collect_output(
     let mut delivered = 0;
     let mut session = Some(target);
     let mut pending: Option<PendingDraft<'_>> = None;
-    let mut speculative = (verify_depth > 0).then(SpeculationStats::default);
+    let mut continuation: Option<(Vec<u32>, usize)> = None;
+    let mut speculative = (verify_depth > 0).then(|| {
+        SpeculationStats::new(if dflash2.is_some() {
+            dflash2::MAX_DRAFTS
+        } else {
+            MAX_VERIFY_ROWS - 1
+        })
+    });
     let mut round_started: Option<Instant> = None;
     let mut verified_at: Option<Instant> = None;
     let mut committed_at: Option<Instant> = None;
@@ -810,67 +943,96 @@ fn collect_output(
                 && pending.is_none()
             {
                 let target = session.take().ok_or("native_generation_failed")?;
-                let limit = verify_depth.min(budget.saturating_sub(delivered + 1));
-                let required = target.position() + 1 + limit;
-                if required > target.context() {
-                    allocation.grow(
-                        target,
-                        required,
-                        budget - delivered,
-                        options.context_tokens as usize,
-                        source_prefill,
-                    )?;
-                }
-                let depth = if verify_depth > 0 {
-                    planner.choose(limit)
-                } else {
-                    0
-                };
-                round_depth = depth;
-                if let Some(stats) = speculative.as_mut() {
-                    stats.rounds[depth] += 1;
-                }
-                if depth == 0 {
-                    if verify_depth == 0 {
-                        legacy_proposal = target.draft_propose(anchor).map_err(|_| "native_generation_failed")?;
-                    }
-                    let started = Instant::now();
-                    logits = target.step(anchor).map_err(|_| "native_generation_failed")?;
-                    if verify_depth > 0 {
-                        planner.record(0, 0, 1000.0 * started.elapsed().as_secs_f64());
-                    }
-                    session = Some(target);
-                } else {
-                    let stats = speculative.as_mut().unwrap();
-                    let now = Instant::now();
-                    if let Some(at) = committed_at.take() {
-                        stats.between_rounds_seconds += (now - at).as_secs_f64();
-                    }
-                    round_started = Some(now);
-                    let (proposals, transaction) = if target.overlaps_verify_for(depth) {
-                        let (proposals, transaction, before_verify_ms, verify_wall_ms) =
-                            target.begin_overlapped_verify(anchor, depth).map_err(|_| "native_generation_failed")?;
-                        *stats.overlapped_rounds.get_or_insert(0) += 1;
-                        stats.draft_seconds += before_verify_ms * 0.001;
-                        stats.verify_seconds += verify_wall_ms * 0.001;
-                        (proposals, transaction)
-                    } else {
-                        let start = Instant::now();
-                        let proposals = target.propose_verify(anchor, depth).map_err(|_| "native_generation_failed")?;
-                        stats.draft_seconds += start.elapsed().as_secs_f64();
-                        let input = std::iter::once(anchor).chain(proposals.iter().copied()).collect::<Vec<_>>();
-                        let start = Instant::now();
-                        let transaction = target.begin_verify(&input).map_err(|_| "native_generation_failed")?;
-                        stats.verify_seconds += start.elapsed().as_secs_f64();
-                        (proposals, transaction)
-                    };
-                    draft_stats.proposed += proposals.len();
+                if let Some((proposals, offset)) = continuation.take() {
+                    let input = std::iter::once(anchor).chain(proposals[offset..].iter().copied()).collect::<Vec<_>>();
+                    let start = Instant::now();
+                    let transaction = target.begin_verify(&input).map_err(|_| "native_generation_failed")?;
+                    speculative.as_mut().unwrap().verify_seconds += start.elapsed().as_secs_f64();
                     verified_at = Some(Instant::now());
                     pending = Some(PendingDraft {
                         transaction,
                         proposals,
                         consumed: 0,
+                        offset,
+                        rows: input.len(),
                     });
+                } else {
+                    let limit = verify_depth.min(budget.saturating_sub(delivered + 1));
+                    let required = target.position() + 1 + limit;
+                    if required > target.context() {
+                        allocation.grow(
+                            target,
+                            required,
+                            budget - delivered,
+                            options.context_tokens as usize,
+                            source_prefill,
+                        )?;
+                    }
+                    let depth = if dflash2.is_some() {
+                        limit
+                    } else if verify_depth > 0 {
+                        planner.choose(limit)
+                    } else {
+                        0
+                    };
+                    round_depth = depth;
+                    if let Some(stats) = speculative.as_mut() {
+                        stats.rounds[depth] += 1;
+                    }
+                    if depth == 0 {
+                        if verify_depth == 0 {
+                            legacy_proposal = target.draft_propose(anchor).map_err(|_| "native_generation_failed")?;
+                        }
+                        let started = Instant::now();
+                        logits = target.step(anchor).map_err(|_| "native_generation_failed")?;
+                        if let Some((_, features)) = dflash2.as_mut() {
+                            features.capture(target)?;
+                        }
+                        if verify_depth > 0 {
+                            planner.record(0, 0, 1000.0 * started.elapsed().as_secs_f64());
+                        }
+                        session = Some(target);
+                    } else {
+                        let stats = speculative.as_mut().unwrap();
+                        let now = Instant::now();
+                        if let Some(at) = committed_at.take() {
+                            stats.between_rounds_seconds += (now - at).as_secs_f64();
+                        }
+                        round_started = Some(now);
+                        let (proposals, transaction) = if target.overlaps_verify_for(depth) {
+                            let (proposals, transaction, before_verify_ms, verify_wall_ms) = target
+                                .begin_overlapped_verify(anchor, depth)
+                                .map_err(|_| "native_generation_failed")?;
+                            *stats.overlapped_rounds.get_or_insert(0) += 1;
+                            stats.draft_seconds += before_verify_ms * 0.001;
+                            stats.verify_seconds += verify_wall_ms * 0.001;
+                            (proposals, transaction)
+                        } else {
+                            let start = Instant::now();
+                            let proposals = if let Some((drafter, features)) = dflash2.as_mut() {
+                                drafter.propose(&features.window, anchor)?[..depth].to_vec()
+                            } else {
+                                target.propose_verify(anchor, depth).map_err(|_| "native_generation_failed")?
+                            };
+                            stats.draft_seconds += start.elapsed().as_secs_f64();
+                            let input = std::iter::once(anchor).chain(proposals.iter().copied()).collect::<Vec<_>>();
+                            let start = Instant::now();
+                            let transaction = target
+                                .begin_verify(&input[..first_verifier_rows(depth)])
+                                .map_err(|_| "native_generation_failed")?;
+                            stats.verify_seconds += start.elapsed().as_secs_f64();
+                            (proposals, transaction)
+                        };
+                        draft_stats.proposed += proposals.len();
+                        verified_at = Some(Instant::now());
+                        pending = Some(PendingDraft {
+                            transaction,
+                            proposals,
+                            consumed: 0,
+                            offset: 0,
+                            rows: first_verifier_rows(depth),
+                        });
+                    }
                 }
             }
             let control = thinking
@@ -879,25 +1041,39 @@ fn collect_output(
             let token = if let Some(mut draft) = pending.take() {
                 let token =
                     sample(draft.transaction.logits(draft.consumed).map_err(|_| "native_generation_failed")?, control)?;
-                let matched = draft.proposals.get(draft.consumed) == Some(&token);
+                let matched = draft.proposals.get(draft.offset + draft.consumed) == Some(&token);
                 draft.consumed += 1;
                 if matched {
                     draft_stats.accepted += 1;
+                }
+                if matched && draft.consumed < draft.rows {
                     pending = Some(draft);
                 } else {
                     let start = Instant::now();
-                    session = Some(draft.transaction.commit(draft.consumed).map_err(|_| "native_generation_failed")?);
+                    let target = draft.transaction.commit(draft.consumed).map_err(|_| "native_generation_failed")?;
+                    if let Some((_, features)) = dflash2.as_mut() {
+                        features.capture(target)?;
+                    }
+                    session = Some(target);
                     let stats = speculative.as_mut().unwrap();
                     stats.finish_seconds += start.elapsed().as_secs_f64();
                     let done = Instant::now();
-                    if let (Some(begun), Some(verified)) = (round_started.take(), verified_at.take()) {
-                        let accepted = (draft.consumed - 1).min(MAX_VERIFY_ROWS - 1);
-                        stats.round_seconds_by_accepted[accepted] += (done - begun).as_secs_f64();
-                        stats.rounds_by_accepted[accepted] += 1;
+                    if let Some(verified) = verified_at.take() {
                         stats.in_round_host_seconds += (start - verified).as_secs_f64();
-                        planner.record(round_depth, draft.consumed - 1, 1000.0 * (done - begun).as_secs_f64());
                     }
-                    committed_at = Some(done);
+                    let accepted = draft.offset + draft.consumed - usize::from(!matched);
+                    if matched {
+                        continuation = Some((draft.proposals, accepted));
+                    } else {
+                        if let Some(begun) = round_started.take() {
+                            stats.round_seconds_by_accepted[accepted] += (done - begun).as_secs_f64();
+                            stats.rounds_by_accepted[accepted] += 1;
+                            if dflash2.is_none() {
+                                planner.record(round_depth, accepted, 1000.0 * (done - begun).as_secs_f64());
+                            }
+                        }
+                        committed_at = Some(done);
+                    }
                 }
                 token
             } else {
@@ -1055,6 +1231,12 @@ impl GenerationBackend for InklingBackend {
             return Err("image_placeholder_requires_media");
         }
         let result = self.generate_inner(input, None, options, on_text, on_progress);
+        let reset = if options.mtp_drafts > 0 {
+            self.dflash2.as_mut().map_or(Ok(()), dflash2::Drafter::reset)
+        } else {
+            Ok(())
+        };
+        let result = reset.and(result);
         self.target.reset();
         if result.is_err() {
             self.clear_prefix_cache();
@@ -1095,7 +1277,7 @@ impl GenerationBackend for InklingBackend {
         let reused = self
             .retained
             .as_ref()
-            .filter(|entry| entry.state.0 == (options.mtp_drafts > 0, source_prefill))
+            .filter(|entry| entry.state.mode == (options.mtp_drafts > 0, source_prefill))
             .map_or(0, |entry| entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()));
         if reused <= boundary {
             reused
@@ -1121,24 +1303,36 @@ impl GenerationBackend for InklingBackend {
     /// one-draft route measured slower than serial decoding, so a worker
     /// without the verifier decodes serially and advertises no MTP.
     fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
-        (self.source_verifier && self.target.has_dspark()).then_some(MtpCapabilities {
-            max_drafts: MAX_VERIFY_ROWS - 1,
-            recommended_drafts: GREEDY_DEFAULT_DRAFTS as usize,
+        (self.source_verifier && (self.target.has_dspark() || self.dflash2.is_some())).then_some(MtpCapabilities {
+            max_drafts: self.requested_draft_limit(&Sampling::Greedy {}),
+            recommended_drafts: self.recommended_drafts(&Sampling::Greedy {}) as usize,
             sampling: "native-target-draw-match-v1",
-            verification: SHORT_MTP_VERIFICATION,
+            verification: if self.dflash2.is_some() {
+                DFLASH2_VERIFICATION
+            } else {
+                SHORT_MTP_VERIFICATION
+            },
+        })
+    }
+    fn mtp_drafter_identity(&self) -> Option<Value> {
+        self.dflash2.as_ref().map(|_| {
+            json!({
+                "implementation": "dflash2-mlx", "mlx_version": "0.31.2",
+                "weights_sha256": dflash2::WEIGHTS_SHA, "revision": dflash2::REVISION
+            })
         })
     }
     fn recommended_mtp_drafts_for(
         &self,
         sampling: &Sampling,
     ) -> Option<u32> {
-        (self.default_mtp_drafts() > 0).then(|| default_drafts_for(sampling))
+        (self.default_mtp_drafts() > 0).then(|| self.recommended_drafts(sampling))
     }
     /// Text requests that name no MTP setting draft through the multi-row
     /// source verifier. Image requests are sent with zero drafts.
     fn default_mtp_drafts(&self) -> u32 {
-        if self.source_verifier && self.target.has_dspark() {
-            GREEDY_DEFAULT_DRAFTS.max(SAMPLED_DEFAULT_DRAFTS)
+        if self.mtp_capabilities().is_some() {
+            self.recommended_drafts(&Sampling::Greedy {}).max(SAMPLED_DEFAULT_DRAFTS)
         } else {
             0
         }
@@ -1147,7 +1341,7 @@ impl GenerationBackend for InklingBackend {
         &self,
         sampling: &Sampling,
     ) -> u32 {
-        self.default_mtp_drafts().min(default_drafts_for(sampling))
+        self.default_mtp_drafts().min(self.recommended_drafts(sampling))
     }
     /// Every draft depth, including one, runs through the source verifier. If
     /// it is unavailable at this context, decode serially rather than take
@@ -1156,18 +1350,25 @@ impl GenerationBackend for InklingBackend {
         &self,
         options: &GenerationOptions,
     ) -> Result<u32, &'static str> {
-        Ok(
-            if options.mtp_drafts > 0
-                && !(self.source_verifier && self.target.supports_source_text_prefill(options.context_tokens as usize))
-            {
-                0
-            } else {
-                options.mtp_drafts
-            },
-        )
+        if options.mtp_drafts as usize > self.requested_draft_limit(&options.sampling) {
+            return Err("mtp_not_supported");
+        }
+        if options.mtp_drafts > 0
+            && !(self.source_verifier && self.target.supports_source_text_prefill(options.context_tokens as usize))
+        {
+            if self.dflash2.is_some() {
+                return Err("mtp_not_supported");
+            }
+            return Ok(0);
+        }
+        Ok(options.mtp_drafts)
     }
     fn mtp_metadata(&self) -> Option<Value> {
-        self.target.has_dspark().then(|| json!({"stats":self.draft_stats}))
+        if self.dflash2.is_some() {
+            Some(json!({"drafter":"dflash2-mlx","stats":self.draft_stats}))
+        } else {
+            self.target.has_dspark().then(|| json!({"stats":self.draft_stats}))
+        }
     }
     fn image_geometry(&self) -> (u32, u32) {
         (20, 2)
@@ -1206,6 +1407,7 @@ impl GenerationBackend for InklingBackend {
         self.clear_prefix_cache();
         require_active(&mut self.cancellation, request)?;
         self.target.reset();
+        self.target.set_external_draft(false).map_err(|_| "native_generation_failed")?;
         self.target.set_dspark_enabled(false).map_err(|_| "native_generation_failed")?;
         let mut slots = input.iter().enumerate().filter_map(|(i, &id)| (id == IMAGE_TOKEN).then_some(i));
         let slot = slots.next().ok_or("invalid_image_request")?;
@@ -1316,6 +1518,16 @@ mod tests {
     }
 
     #[test]
+    fn logical_dflash_blocks_split_into_legal_short_transactions() {
+        for depth in 1..=dflash2::MAX_DRAFTS {
+            let first = first_verifier_rows(depth);
+            let second = (depth + 1).saturating_sub(first);
+            assert!((2..=MAX_VERIFY_ROWS).contains(&first));
+            assert!(second == 0 || (2..=MAX_VERIFY_ROWS).contains(&second));
+        }
+    }
+
+    #[test]
     fn short_source_inputs_have_no_prefix_boundary() {
         for input in [0, 1, 3, 4, 5, 68, 69, 73, 511, 512, 2051] {
             assert_eq!(prefix_boundary(input, true, true), 0, "{input}");
@@ -1414,7 +1626,8 @@ mod tests {
     #[ignore = "requires the private verified Inkling artifact and Metal"]
     fn decode_grows_the_live_cache_without_changing_output() {
         let root = std::env::var_os("STARK_TEST_INKLING_MODEL_DIR").expect("set the private Inkling model directory");
-        let mut worker = InklingBackend::load(Path::new(&root), None).expect("load the verified Inkling artifact");
+        let mut worker =
+            InklingBackend::load(Path::new(&root), None, None).expect("load the verified Inkling artifact");
         assert!(worker.source_verifier, "the M5 source verifier is required");
         let input = [1, 7, 19, 23];
         for drafts in [0, 3] {
@@ -1460,6 +1673,7 @@ mod tests {
                     &mut allocation,
                     true,
                     drafts as usize,
+                    None,
                     logits,
                     input.len(),
                     false,

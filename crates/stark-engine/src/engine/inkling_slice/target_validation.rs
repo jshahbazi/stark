@@ -410,7 +410,7 @@ pub fn measure_full_budget(
         let token = SYNTHETIC_TOKENS[index % SYNTHETIC_TOKENS.len()];
         let started = Instant::now();
         let timing = execute(&session.runtime, |gpu| {
-            session.encode_token(gpu, TokenInput::Text(token), session.position, true, false);
+            session.encode_token(gpu, TokenInput::Text(token), session.position, true, None);
         })?;
         session.position += 1;
         session.read_logits()?;
@@ -757,7 +757,7 @@ pub fn measure_decode_verify(
                 let timing = execute(&session.runtime, |gpu| {
                     if width == 1 || mode == 0 {
                         for (row, &token) in rows.iter().enumerate() {
-                            session.encode_token(gpu, TokenInput::Text(token), prefix + row, true, false);
+                            session.encode_token(gpu, TokenInput::Text(token), prefix + row, true, None);
                         }
                     } else {
                         let kind = if mode >= 3 {
@@ -810,7 +810,7 @@ pub fn measure_decode_verify(
                 session.runtime.nvfp4_vector = vector;
                 let timing = execute_with_profile(&session.runtime, Some(&mut profiler), |gpu| {
                     if width == 1 {
-                        session.encode_token(gpu, TokenInput::Text(rows[0]), prefix, true, false);
+                        session.encode_token(gpu, TokenInput::Text(rows[0]), prefix, true, None);
                     } else {
                         session.encode_verify_rows(
                             gpu,

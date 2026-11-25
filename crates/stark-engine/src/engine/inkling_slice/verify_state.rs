@@ -870,20 +870,28 @@ impl<'a> Verification<'a> {
         }
         let session = self.session.as_deref_mut().ok_or("Inkling verifier is already committed")?;
         let workspace = session.verifier.as_ref().ok_or("Inkling verifier workspace unavailable")?;
-        let draft = session.active_dspark().ok_or("Inkling verifier draft unavailable")?;
+        let draft = session.active_dspark();
         let position = session.position;
         execute_prepared(
             &session.runtime,
             None,
             |command| workspace.restore_suffix(command, session, self.rows, kept),
             |gpu| {
-                for (row, taps) in workspace.lanes.verify_taps(session, self.rows).take(kept).enumerate() {
-                    draft.commit(gpu, taps, position + row);
+                if let Some(draft) = draft {
+                    for (row, taps) in workspace.lanes.verify_taps(session, self.rows).take(kept).enumerate() {
+                        draft.commit(gpu, taps, position + row);
+                    }
                 }
             },
         )?;
         session.position += kept;
         session.features_ready = false;
+        if session.external_draft {
+            session.external_features = Some(ExternalFeatures::Verified {
+                rows: self.rows,
+                kept,
+            });
+        }
         self.session.take().ok_or("Inkling verifier is already committed")
     }
 }
@@ -909,8 +917,8 @@ impl Session {
             return Err("Inkling verifier mode must be selected before prefill");
         }
         if enabled {
-            if !self.has_dspark() || !self.source_text_ready() {
-                return Err("Inkling source verifier requires the source M5 path and DSpark");
+            if !(self.has_dspark() || self.external_draft) || !self.source_text_ready() {
+                return Err("Inkling source verifier requires the source M5 path and a configured drafter");
             }
             if self.verifier.is_none() {
                 let workspace = VerifyWorkspace::new(&mut self.runtime, self.visits.len())?;
@@ -982,6 +990,7 @@ impl Session {
         depth: usize,
     ) -> bool {
         self.overlaps_verify()
+            && self.active_dspark().is_some()
             && (1..MAX_VERIFY_ROWS).contains(&depth)
             && (depth > 1 || (self.runtime.verify_single_draft && self.dspark_int8_head_resident_bytes() > 0))
     }
@@ -1081,7 +1090,7 @@ impl Session {
         self.check_append(tokens.len())?;
         if !self.source_verifier
             || !self.runtime.source_text_active
-            || self.active_dspark().is_none()
+            || !(self.active_dspark().is_some() || self.external_draft)
             || !(2..=MAX_VERIFY_ROWS).contains(&tokens.len())
             || tokens.iter().any(|&token| token as usize >= VOCABULARY)
         {

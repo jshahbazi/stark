@@ -145,6 +145,8 @@ budget may be larger on a machine with more available memory.
 
 Start the worker with `--model-path PATH`, where `PATH` is a converted model directory. The owning host may also pass `--vision-staging-root PATH` to enable the private media-reference transport and `--prefix-cache` to request [prefix reuse](#prefix-reuse). Models that contain a `speculator` directory are refused.
 
+For the original Inkling 2 Mini checkpoint, `--inkling-dflash2-profile PATH` selects the experimental resident MLX draft and native Stark target verification. See the [DFlash 2 operator guide](INKLING_DFLASH2.md).
+
 ### Readiness
 
 On success the first line is a readiness object. This example's vocabulary,

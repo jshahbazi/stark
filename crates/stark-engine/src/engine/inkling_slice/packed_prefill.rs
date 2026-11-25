@@ -866,6 +866,21 @@ impl PackedPrefill {
         Some(source.to_vec())
     }
 
+    pub(super) fn append_draft_features(
+        &self,
+        rows: usize,
+        limit: usize,
+        output: &mut Vec<u16>,
+    ) -> Result<()> {
+        let taps = self.draft_taps.as_ref().ok_or("Inkling external packed capture unavailable")?;
+        let words = rows.min(limit) * DRAFT_FEATURE_WORDS;
+        let start = rows * DRAFT_FEATURE_WORDS - words;
+        // The command completed and rows stay valid until the next forward.
+        let source = unsafe { std::slice::from_raw_parts(taps.contents().as_ptr().cast::<u16>().add(start), words) };
+        output.extend_from_slice(source);
+        Ok(())
+    }
+
     pub(super) fn encode(
         &self,
         session: &Session,
@@ -887,7 +902,8 @@ impl PackedPrefill {
         let start = session.position;
         let last = rows - 1;
         let last_partial = (&self.partial, last * WIDTH * 4);
-        let draft = session.active_dspark().zip(self.draft_taps.as_ref());
+        let draft = session.active_dspark();
+        let captured = self.draft_taps.as_ref().filter(|_| draft.is_some() || session.external_draft);
         gpu.one(
             "ink_packed_embedding",
             &[&session.embedding, &session.embed_norm, &self.partial, &self.tokens],
@@ -914,7 +930,7 @@ impl PackedPrefill {
                 );
             }
             if let Some(tap) = DRAFT_TAPS.iter().position(|&i| i == index) {
-                if let Some((_, features)) = draft {
+                if let Some(features) = captured {
                     gpu.one("ink_packed_draft_tap", &[&self.partial, features], tap as u32, (WIDTH / 128, rows), 128);
                 }
                 if session.capture_draft_features {
@@ -1119,7 +1135,7 @@ impl PackedPrefill {
                 trace.packed_partial(gpu, index, &self.partial);
             }
         }
-        if let Some((draft, taps)) = draft {
+        if let Some(taps) = captured {
             gpu.phase(PrefillPhase::Other);
             self.mix(
                 gpu,
@@ -1142,11 +1158,13 @@ impl PackedPrefill {
                 WIDTH / 4,
             );
             gpu.one("ink_packed_draft_hidden", &[&self.mlp, taps], (), (WIDTH / 128, rows), 128);
-            if gpu.runtime.packed_draft_commit && !gpu.runtime.exact_prefill {
-                draft.commit_rows(gpu, taps, start, rows, [&self.mixed, &self.mlp, &self.k]);
-            } else {
-                for row in 0..rows {
-                    draft.commit_from(gpu, (taps, row * 4 * WIDTH * 2), start + row);
+            if let Some(draft) = draft {
+                if gpu.runtime.packed_draft_commit && !gpu.runtime.exact_prefill {
+                    draft.commit_rows(gpu, taps, start, rows, [&self.mixed, &self.mlp, &self.k]);
+                } else {
+                    for row in 0..rows {
+                        draft.commit_from(gpu, (taps, row * 4 * WIDTH * 2), start + row);
+                    }
                 }
             }
         }

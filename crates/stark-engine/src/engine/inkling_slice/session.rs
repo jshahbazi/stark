@@ -79,6 +79,16 @@ const PREFILL_COMMAND_ROWS: usize = 8;
 const BATCHED_PREFILL_ROWS: usize = 64;
 const M5_PREFILL_ROWS: usize = 128;
 const DRAFT_TAPS: [usize; 3] = [5, 23, 41];
+pub const DRAFT_FEATURE_WORDS: usize = (DRAFT_TAPS.len() + 1) * WIDTH;
+
+enum ExternalFeatures {
+    Packed(usize),
+    Lanes(usize),
+    Verified {
+        rows: usize,
+        kept: usize,
+    },
+}
 
 const PHYSICAL: [usize; 48] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 6, 7, 8,
@@ -92,6 +102,7 @@ pub struct Snapshot {
     context: usize,
     position: usize,
     dspark: bool,
+    external_draft: bool,
     source_text: bool,
     prefill_rows: usize,
     state: Vec<Buffer>,
@@ -119,6 +130,8 @@ pub struct Session {
     draft_features: Buffer,
     dspark: Option<Dspark>,
     dspark_enabled: bool,
+    external_draft: bool,
+    external_features: Option<ExternalFeatures>,
     verifier: Option<verify_state::VerifyWorkspace>,
     source_verifier: bool,
     capture_draft_features: bool,
@@ -210,6 +223,8 @@ impl Session {
             draft_features: zeroed(device, 4 * WIDTH * 2)?,
             dspark: None,
             dspark_enabled: false,
+            external_draft: false,
+            external_features: None,
             verifier: None,
             source_verifier: false,
             layers,
@@ -611,6 +626,58 @@ impl Session {
     pub fn reset(&mut self) {
         self.position = 0;
         self.features_ready = false;
+        self.external_features = None;
+    }
+
+    /// Capture every committed source-text row for an independent drafter.
+    /// Positions and any derived draft state are owned by the caller.
+    pub fn set_external_draft(
+        &mut self,
+        enabled: bool,
+    ) -> Result<()> {
+        if self.position != 0 || enabled && (self.dspark_enabled || !self.source_text_ready()) {
+            return Err("Inkling external draft requires source text mode at a request boundary");
+        }
+        self.external_draft = enabled;
+        self.external_features = None;
+        Ok(())
+    }
+
+    /// Append up to the last `limit` rows of BF16 taps from the most recent
+    /// committed command, in absolute token order. Rejected rows are excluded.
+    pub fn append_external_draft_features(
+        &self,
+        limit: usize,
+        output: &mut Vec<u16>,
+    ) -> Result<()> {
+        let append_lanes = |lanes: &PrefillLanes, rows, kept, output: &mut Vec<u16>| {
+            for taps in lanes.verify_taps(self, rows).take(kept).skip(kept.saturating_sub(limit)) {
+                let words =
+                    unsafe { std::slice::from_raw_parts(taps.contents().as_ptr().cast::<u16>(), DRAFT_FEATURE_WORDS) };
+                output.extend_from_slice(words);
+            }
+        };
+        match self.external_features.as_ref() {
+            Some(&ExternalFeatures::Packed(rows)) => self
+                .packed_prefill
+                .as_ref()
+                .ok_or("Inkling external packed capture unavailable")?
+                .append_draft_features(rows, limit, output),
+            Some(&ExternalFeatures::Lanes(rows)) => {
+                let lanes = self.prefill_lanes.as_ref().ok_or("Inkling external lane capture unavailable")?;
+                append_lanes(lanes, rows, rows, output);
+                Ok(())
+            },
+            Some(&ExternalFeatures::Verified {
+                rows,
+                kept,
+            }) => {
+                let workspace = self.verifier.as_ref().ok_or("Inkling external verifier capture unavailable")?;
+                append_lanes(&workspace.lanes, rows, kept, output);
+                Ok(())
+            },
+            None => Err("Inkling external capture has no committed rows"),
+        }
     }
 
     /// Choose whether subsequent forwards retain the current token's target taps.
@@ -684,7 +751,7 @@ impl Session {
         if self.position != 0 {
             return Err("Inkling DSpark mode must be selected before prefill");
         }
-        if enabled && self.dspark.is_none() {
+        if enabled && (self.dspark.is_none() || self.external_draft) {
             return Err("Inkling DSpark weights are unavailable");
         }
         self.dspark_enabled = enabled;
@@ -846,7 +913,7 @@ impl Session {
     }
 
     fn check_image_mode(&self) -> Result<()> {
-        if self.dspark_enabled {
+        if self.dspark_enabled || self.external_draft {
             return Err("Inkling image requests require draft mode to be disabled");
         }
         Ok(())
@@ -857,8 +924,31 @@ impl Session {
         tokens: &[u32],
         readout: bool,
     ) -> Result<()> {
+        if self.external_draft && !(self.source_verifier && self.runtime.source_text_active) {
+            return Err("Inkling external draft capture requires an active source verifier");
+        }
+        let rows = tokens.len();
         let result = self.encode_append(tokens, readout, None);
-        self.finish_append(result, tokens.len())
+        self.finish_append(result, rows)?;
+        if self.external_draft {
+            self.external_features = Some(if self.packed_append(rows).is_some() {
+                ExternalFeatures::Packed(rows)
+            } else {
+                ExternalFeatures::Lanes(rows)
+            });
+        }
+        Ok(())
+    }
+
+    fn packed_append(
+        &self,
+        rows: usize,
+    ) -> Option<&PackedPrefill> {
+        self.packed_prefill.as_ref().filter(|packed| {
+            rows >= packed.min_command_rows(&self.runtime)
+                && (!(self.dspark_enabled || self.external_draft)
+                    || self.runtime.source_text_active && packed.captures_all_draft_taps())
+        })
     }
 
     fn encode_append(
@@ -867,10 +957,7 @@ impl Session {
         readout: bool,
         profile: Option<&mut PrefillTiming>,
     ) -> Result<Timing> {
-        if let Some(packed) = &self.packed_prefill
-            && tokens.len() >= packed.min_command_rows(&self.runtime)
-            && (self.active_dspark().is_none() || self.runtime.source_text_active && packed.captures_all_draft_taps())
-        {
+        if let Some(packed) = self.packed_append(tokens.len()) {
             packed.upload(tokens);
             return execute_with_profile(&self.runtime, profile, |gpu| packed.encode(self, gpu, tokens.len(), readout));
         }
@@ -885,16 +972,18 @@ impl Session {
         }
         execute_with_profile(&self.runtime, profile, |gpu| {
             let dspark = self.active_dspark();
+            let external = self
+                .external_draft
+                .then(|| self.prefill_lanes.as_ref().expect("source lanes reserved").verify_taps(self, tokens.len()));
             for (index, &token) in tokens.iter().enumerate() {
                 let last = index + 1 == tokens.len();
                 let position = self.position + index;
-                self.encode_token(
-                    gpu,
-                    TokenInput::Text(token),
-                    position,
-                    readout && last,
-                    dspark.is_some() || self.capture_draft_features && last,
-                );
+                let features = if let Some(taps) = &external {
+                    taps.clone().nth(index)
+                } else {
+                    (dspark.is_some() || self.capture_draft_features && last).then_some(&self.draft_features)
+                };
+                self.encode_token(gpu, TokenInput::Text(token), position, readout && last, features);
                 if let Some(draft) = dspark {
                     draft.commit(gpu, &self.draft_features, position);
                 }
@@ -919,7 +1008,7 @@ impl Session {
             }
             for (index, &embedding) in embeddings.iter().enumerate() {
                 let last = index + 1 == embeddings.len();
-                self.encode_token(gpu, TokenInput::Image(embedding), self.position + index, readout && last, false);
+                self.encode_token(gpu, TokenInput::Image(embedding), self.position + index, readout && last, None);
             }
         });
         self.finish_append(result, embeddings.len())?;
@@ -956,10 +1045,9 @@ impl Session {
         input: TokenInput<'_>,
         position: usize,
         readout: bool,
-        features: bool,
+        features: Option<&Buffer>,
     ) {
         let flow = &self.flow;
-        let features = features.then_some(&self.draft_features);
         gpu.phase(PrefillPhase::Other);
         self.encode_embedding(gpu, flow, input);
         let mut blocks = 0;
@@ -1171,6 +1259,7 @@ impl Session {
             context: self.context,
             position: self.position,
             dspark: self.dspark_enabled,
+            external_draft: self.external_draft,
             source_text: self.runtime.source_text_active,
             prefill_rows: self.prefill_batch_rows(),
             state,
@@ -1206,6 +1295,7 @@ impl Session {
             || self.context < snapshot.position
             || (require_room && self.context == snapshot.position)
             || self.dspark_enabled != snapshot.dspark
+            || self.external_draft != snapshot.external_draft
             || self.runtime.source_text_active != snapshot.source_text
             || self.prefill_batch_rows() != snapshot.prefill_rows
         {
@@ -1217,6 +1307,7 @@ impl Session {
         }
         self.position = snapshot.position;
         self.features_ready = false;
+        self.external_features = None;
         Ok(())
     }
 
