@@ -188,6 +188,10 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [GLM Flash, Flint and recent-model tool assessment](../archive/runs/2026-11-07-glm-flint-tool-qualification.md) · Archived run, 2026-11-07
 - [Guided native and recurrent model coverage](../archive/runs/2026-11-08-guided-native-hybrid-coverage.md) · Archived run, 2026-11-08
 
+## Hy4 Flash
+
+- [AngelSlim Q3_K on the published Metal runtimes](2026-11-25-hy4-gguf-metal-trial.md) · External compatibility trial, 2026-11-25
+
 ## Gemma and OLMo
 
 - [Gemma 4 E2B/E4B: text with image support loaded](../benchmarks/2026-11-09-gemma4-image-text-parity.md) · Benchmark, 2026-11-09
