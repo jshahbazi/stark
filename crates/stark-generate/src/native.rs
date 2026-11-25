@@ -12,6 +12,7 @@ use stark_engine::{
     backends::metal::Metal,
     engine::{
         Engine,
+        context::{self, ContextSizing},
         language_model::{
             LanguageModel,
             dense_mtp::{DenseMtpError, DenseMtpRound, DenseMtpSession},
@@ -110,6 +111,7 @@ fn disabled_dense_mtp_stats() -> Value {
 
 pub(crate) struct NativeBackend {
     model: NativeModel,
+    context_sizing: Option<ContextSizing>,
     idle_engine: Option<std::sync::Arc<Engine<Metal>>>,
     vocab_size: usize,
     eos_token_ids: Vec<u32>,
@@ -147,6 +149,37 @@ macro_rules! dense_model_call {
 }
 
 impl NativeModel {
+    fn max_context_length(&self) -> Option<u32> {
+        match self {
+            Self::Text(model) => model.max_context_length(),
+            Self::Vision(model) => model.max_context_length(),
+            Self::Gemma4Vision(model) => model.max_context_length(),
+            Self::Gemma3Vision(model) => model.max_context_length(),
+        }
+    }
+
+    fn context_sizing(&self) -> Result<Option<ContextSizing>, &'static str> {
+        let Some(limit) = self.max_context_length() else {
+            return Ok(None);
+        };
+        let budget = context::current_memory_budget(context::metal_memory_headroom());
+        ContextSizing::fit_loaded(limit, limit, budget, |capacity| {
+            let input = (capacity - 1).min(context::LOAD_PREFILL_PROBE_TOKENS);
+            let output = capacity - input;
+            let ordinary = match self {
+                Self::Text(model) => model.generation_memory_bytes_with_text_prefix(input, capacity, output),
+                Self::Vision(model) => model.decoder_text_prefix_memory_bytes(input, capacity, output),
+                Self::Gemma4Vision(model) => model.decoder_text_prefix_memory_bytes(input, capacity, output),
+                Self::Gemma3Vision(model) => model.decoder_text_prefix_memory_bytes(input, capacity, output),
+            }?;
+            if self.has_dense_mtp() {
+                Some(ordinary.max(self.dense_generation_memory_bytes(input, capacity, output)?))
+            } else {
+                Some(ordinary)
+            }
+        })
+    }
+
     fn text_execution_graph(&self) -> &'static str {
         match self {
             Self::Vision(model) => model.text_execution_graph(),
@@ -503,9 +536,11 @@ impl NativeBackend {
         };
         #[cfg(not(feature = "gemma4-assistant-staging"))]
         let gemma4_assistant = None;
+        let context_sizing = model.context_sizing()?;
         Ok(Self {
             idle_engine: matches!(&model, NativeModel::Text(_)).then(|| engine.clone()),
             model,
+            context_sizing,
             vocab_size,
             eos_token_ids,
             cancellation,
@@ -591,12 +626,10 @@ impl GenerationBackend for NativeBackend {
         self.vocab_size
     }
     fn max_context_length(&self) -> Option<u32> {
-        match &self.model {
-            NativeModel::Text(model) => model.max_context_length(),
-            NativeModel::Vision(model) => model.max_context_length(),
-            NativeModel::Gemma4Vision(model) => model.max_context_length(),
-            NativeModel::Gemma3Vision(model) => model.max_context_length(),
-        }
+        self.context_sizing.map(|sizing| sizing.context_tokens).or_else(|| self.model.max_context_length())
+    }
+    fn context_sizing_metadata(&self) -> Option<Value> {
+        self.context_sizing.map(|sizing| serde_json::json!(sizing))
     }
     fn automatic_context_length(
         &self,

@@ -13,6 +13,7 @@ use stark_engine::{
     backends::metal::Metal,
     engine::{
         Engine,
+        context::{self, ContextSizing, largest_fitting_context},
         hybrid::activity::InferenceActivity,
         inkling_slice::{
             DepthPlanner, INKLING_IMAGE_TOKEN as IMAGE_TOKEN, ImageEmbeddings, MAX_VERIFY_ROWS, Session, Snapshot,
@@ -51,7 +52,6 @@ const SOURCE_PROMPT_SUFFIX: usize = 4;
 const GREEDY_DEFAULT_DRAFTS: u32 = 3;
 const SAMPLED_DEFAULT_DRAFTS: u32 = 2;
 const INITIAL_CONTEXT: usize = 4352;
-const LOAD_CONTEXT_MEMORY_PERCENT: usize = 85;
 const CONTEXT_ALLOCATION_ROWS: usize = 1024;
 const OUTPUT_RESERVE_TOKENS: usize = 8192;
 const SHORT_MTP_VERIFICATION: &str = "inkling-dspark-short-target-draw-v1";
@@ -87,15 +87,6 @@ struct PendingDraft<'a> {
     transaction: Verification<'a>,
     proposals: Vec<u32>,
     consumed: usize,
-}
-
-#[derive(serde::Serialize)]
-struct ContextSizing {
-    checkpoint_context_tokens: u32,
-    engine_context_tokens: u32,
-    memory_context_tokens: u32,
-    context_tokens: u32,
-    memory_budget_bytes: usize,
 }
 
 #[derive(serde::Serialize)]
@@ -279,45 +270,6 @@ fn require_active(
     }
 }
 
-fn largest_fitting_context(
-    minimum: u32,
-    maximum: u32,
-    budget: usize,
-    bytes_for_context: impl Fn(usize) -> usize,
-) -> Option<u32> {
-    let fits = |context| bytes_for_context(context as usize) <= budget;
-    if minimum > maximum || !fits(minimum) {
-        return None;
-    }
-    let mut low = minimum;
-    let mut high = maximum;
-    while low < high {
-        let candidate = low + (high - low).div_ceil(2);
-        if fits(candidate) {
-            low = candidate;
-        } else {
-            high = candidate - 1;
-        }
-    }
-    Some(low)
-}
-
-fn pinned_context(
-    memory_context: u32,
-    model_context: u32,
-    engine_context: u32,
-) -> Option<u32> {
-    let scaled = (u64::from(memory_context) * LOAD_CONTEXT_MEMORY_PERCENT as u64 / 100) as u32;
-    let rows = CONTEXT_ALLOCATION_ROWS as u32;
-    let rounded = if scaled < rows {
-        scaled
-    } else {
-        scaled - scaled % rows
-    };
-    let selected = rounded.min(model_context).min(engine_context);
-    (selected >= 2).then_some(selected)
-}
-
 fn rounded_capacity(
     required: usize,
     maximum: usize,
@@ -326,7 +278,7 @@ fn rounded_capacity(
 }
 
 fn current_context_memory_budget(target: &Session) -> usize {
-    context_memory_budget(target, inference_memory_budget(available_memory_bytes().unwrap_or(0)))
+    context::current_memory_budget(Some(target.metal_memory_headroom_bytes()))
 }
 
 fn context_memory_budget(
@@ -440,32 +392,27 @@ impl InklingBackend {
         let memory_budget_bytes = current_context_memory_budget(&target);
         // Find the memory-derived length independently of the checkpoint and
         // device bounds, so the margin does not shorten a model that fits.
-        let memory_context_tokens = largest_fitting_context(2, u32::MAX, memory_budget_bytes, |context| {
-            let workspace = if source_grid {
-                Session::source_global_workspace_bytes(context)
-                    .saturating_sub(Session::source_global_workspace_bytes(INITIAL_CONTEXT))
-            } else {
-                0
-            };
-            target.live_context_bytes(context)
-                + workspace
-                + Session::prefix_snapshot_bytes(context, target.has_dspark())
-        })
-        .ok_or("resource_budget_exceeded")?;
-        let context_tokens = pinned_context(memory_context_tokens, artifact.context_limit, engine_limit)
+        let context_sizing =
+            ContextSizing::fit(artifact.context_limit, engine_limit, u32::MAX, memory_budget_bytes, |context| {
+                let context = context as usize;
+                let workspace = if source_grid {
+                    Session::source_global_workspace_bytes(context)
+                        .saturating_sub(Session::source_global_workspace_bytes(INITIAL_CONTEXT))
+                } else {
+                    0
+                };
+                target
+                    .live_context_bytes(context)
+                    .checked_add(workspace)?
+                    .checked_add(Session::prefix_snapshot_bytes(context, target.has_dspark()))
+            })
             .ok_or("resource_budget_exceeded")?;
         Ok(Self {
             tokenizer: artifact.tokenizer,
             config_sha256: artifact.config_sha256,
             layout: artifact.layout,
             target,
-            context_sizing: ContextSizing {
-                checkpoint_context_tokens: artifact.context_limit,
-                engine_context_tokens: engine_limit,
-                memory_context_tokens,
-                context_tokens,
-                memory_budget_bytes,
-            },
+            context_sizing,
             context_allocation: None,
             cancellation,
             sampler: ProbabilityMapper::default(),
@@ -724,7 +671,8 @@ impl InklingBackend {
             return resident_fit;
         }
         largest_fitting_context(minimum, maximum, budget, |context| {
-            reserve_bytes(context, false) + self.target.live_context_bytes(context)
+            let context = context as usize;
+            reserve_bytes(context, false).checked_add(self.target.live_context_bytes(context))
         })
         .max(resident_fit)
     }
@@ -1393,15 +1341,6 @@ mod tests {
     }
 
     #[test]
-    fn load_margin_applies_before_model_and_device_limits() {
-        assert_eq!(pinned_context(500_000, 1_048_576, 1_048_576), Some(424_960));
-        assert_eq!(pinned_context(1_500_000, 1_048_576, 1_048_576), Some(1_048_576));
-        assert_eq!(pinned_context(1_500_000, 1_048_576, 786_432), Some(786_432));
-        assert_eq!(pinned_context(20, 1_048_576, 1_048_576), Some(17));
-        assert_eq!(pinned_context(2, 1_048_576, 1_048_576), None);
-    }
-
-    #[test]
     fn allocation_rounding_is_small_and_respects_the_logical_context() {
         assert_eq!(rounded_capacity(27 + 96, 786_432), 1024);
         assert_eq!(rounded_capacity(27 + OUTPUT_RESERVE_TOKENS, 786_432), 9216);
@@ -1483,7 +1422,7 @@ mod tests {
 
     #[test]
     fn fitting_context_respects_the_loaded_ceiling_and_current_budget() {
-        let bytes_for_context = |context| context * 64;
+        let bytes_for_context = |context: u32| Some(context as usize * 64);
         let loaded = largest_fitting_context(2, 131_072, 100_000 * 64, bytes_for_context).unwrap();
         assert_eq!(loaded, 100_000);
         assert_eq!(largest_fitting_context(60_001, loaded, 131_072 * 64, bytes_for_context), Some(loaded));

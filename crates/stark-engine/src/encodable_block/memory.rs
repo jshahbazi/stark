@@ -423,20 +423,12 @@ pub fn automatic_context(
     memory_budget_bytes: usize,
     mut estimate: impl FnMut(u32) -> Option<MemoryEstimate>,
 ) -> Option<u32> {
-    let mut low = input_tokens.checked_add(1)?;
-    if low > maximum || estimate(low)?.total_bytes()? > memory_budget_bytes {
-        return None;
-    }
-    let mut high = maximum;
-    while low < high {
-        let middle = low + (high - low).div_ceil(2);
-        if estimate(middle).and_then(|value| value.total_bytes()).is_some_and(|bytes| bytes <= memory_budget_bytes) {
-            low = middle;
-        } else {
-            high = middle - 1;
-        }
-    }
-    Some(low)
+    crate::engine::context::largest_fitting_context(
+        input_tokens.checked_add(1)?,
+        maximum,
+        memory_budget_bytes,
+        |context| estimate(context)?.total_bytes(),
+    )
 }
 
 #[cfg(test)]

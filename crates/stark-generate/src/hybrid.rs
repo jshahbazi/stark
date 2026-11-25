@@ -9,9 +9,12 @@ use std::{
 };
 
 use rayon::prelude::*;
-use stark_engine::engine::hybrid::{
-    Model, MtpRoundOptions, NativeSampling, PrefixSnapshot, PreparedHybridImage, finite_guard, mtp_lookup, mtp_policy,
-    profile,
+use stark_engine::engine::{
+    context::{self, ContextSizing},
+    hybrid::{
+        Model, MtpRoundOptions, NativeSampling, PrefixSnapshot, PreparedHybridImage, finite_guard, mtp_lookup,
+        mtp_policy, profile,
+    },
 };
 
 use crate::{
@@ -79,6 +82,7 @@ fn native_sampling(options: &GenerationOptions) -> Option<NativeSampling> {
 
 pub(crate) struct HybridBackend {
     model: Model,
+    context_sizing: Option<ContextSizing>,
     cancellation: Option<CancelSignal>,
     profile_output: Option<ProfileOutput>,
     profile_mode: Option<AggregateProfileMode>,
@@ -404,8 +408,10 @@ impl HybridBackend {
         if profile_output.is_some() {
             profile::enable(true);
         }
+        let context_sizing = model.context_sizing(context::current_memory_budget(context::metal_memory_headroom()))?;
         Ok(Self {
             model,
+            context_sizing,
             cancellation,
             profile_output,
             profile_mode,
@@ -815,7 +821,10 @@ impl GenerationBackend for HybridBackend {
         self.model.vocab_size()
     }
     fn max_context_length(&self) -> Option<u32> {
-        Some(self.model.max_context_length())
+        Some(self.context_sizing.map_or_else(|| self.model.max_context_length(), |sizing| sizing.context_tokens))
+    }
+    fn context_sizing_metadata(&self) -> Option<serde_json::Value> {
+        self.context_sizing.map(|sizing| serde_json::json!(sizing))
     }
     fn automatic_context_length(
         &self,
