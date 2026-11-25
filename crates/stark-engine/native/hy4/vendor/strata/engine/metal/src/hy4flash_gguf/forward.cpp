@@ -378,8 +378,12 @@ struct Forward::Impl {
         return covered && es.type[kUp] == gate && es.type[kDown] == ref::Q4_K;
     }
 
+    MoeMm mm_mode() const {
+        return pf.routed_half ? MoeMm::F16 : moe_mm_mode();
+    }
+
     MoeMmTile mm_tile() const {
-        return moe_mm_tile(moe_mm_mode());
+        return moe_mm_tile(mm_mode());
     }
 
     /// Does ordinal `o` run the GEMM for a window of T?  The encoder and at_cut must agree, so both ask here.
@@ -392,7 +396,7 @@ struct Forward::Impl {
         const std::pair<int, int> k{gu_type, d_type};
         auto it = moemm_.find(k);
         if (it == moemm_.end()) {
-            const MoeMm md = moe_mm_mode();
+            const MoeMm md = mm_mode();
             const MoeMmTile t = mm_tile();
             // one running sum unless the mode asks for a sum per K step
             mtl::Constants c;
@@ -606,7 +610,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     // Assess the same routed blocks the forward encoder runs. The draft
     // block has BF16 experts and uses its own graph, so it cannot force the
     // target to keep GEMV scratch or split its routed plan.
-    mm_supported = c.supports_metal4() && moe_mm_mode() != MoeMm::Off;
+    mm_supported = c.supports_metal4() && mm_mode() != MoeMm::Off;
     int covered = 0;
     int target_ordinals = 0;
     for (const auto& layer : mm.geo.layers) {
@@ -1001,8 +1005,7 @@ std::string Forward::Impl::alloc() {
                        : " (a layer the GEMM does not cover keeps the GEMV sub-batch)";
             std::fprintf(stderr, "  prefill moe    grouped GEMM %s: tile %dx%d, sub-batch %d of %d, %u tiles a (sub-batch, "
                         "chunk) list\n                 scratch h %.0f + ye %.0f MB, lists + grids %.2f MB%s\n",
-                        pf.grouped_k_quant ? "f32" :
-                            strata_hy4_flash_metal::prefill_moe_mm_name(),
+                        pf.routed_half ? "f16" : strata_hy4_flash_metal::prefill_moe_mm_name(),
                         tm, mm_tile().tn, msub, tcap, mm_cap,
                         (double) (ent * expert_ff * 4) / 1e6, (double) (ent * latent * 4) / 1e6,
                         (double) (mm_tiles.bytes + mm_ind.bytes) / 1e6,
@@ -1089,24 +1092,30 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     }
 
     // ---- attention pre-mix
-    stage(tm.pf_attention_ms);
+    stage(tm.pf_attention_misc_ms);
     hc_pre(ds, b, *resid, 0, T, b.t[W_ATTN_NORM], &anorm, eps);   // + attn_norm(cur) -> anorm
 
     // ---- MLA
+    stage(tm.pf_attention_dense_ms);
     const gguf::Tensor* qa = b.t[W_Q_A];
     gv(qa).append(ds, m->dense, qa->offset, anorm, (uint32_t) n_embd, q_resid, (uint32_t) m->geo.q_lora_rank, 0, uT);
+    stage(tm.pf_attention_misc_ms);
     rms(ds, q_resid, 0, (uint32_t) m->geo.q_lora_rank, b.t[W_Q_A_NORM], q_resid, 0,
         (uint32_t) m->geo.q_lora_rank, (uint32_t) m->geo.q_lora_rank, T, eps);
+    stage(tm.pf_attention_dense_ms);
     const gguf::Tensor* qbw = b.t[W_Q_B];
     gv(qbw).append(ds, m->dense, qbw->offset, q_resid, (uint32_t) m->geo.q_lora_rank, qb, H * (uint32_t) qk, 0, uT);
+    stage(tm.pf_attention_misc_ms);
     rope(ds, qb, H, (uint32_t) qk, (uint32_t) (qk - rope_dim), H * (uint32_t) qk, b.tscale, T);
     // q_abs = wk_b[h] . q_nope[h], every head in one dispatch (grid.y = head, bitwise the per-head dispatches it
     // replaces - gemv.metal's note on function constants 10-12); then the rotated tail is copied in beside it
+    stage(tm.pf_attention_dense_ms);
     const gguf::Tensor* kb = b.t[W_K_B];
     const uint32_t nope = (uint32_t) (qk - rope_dim);
     const size_t kb_head = (size_t) kv_lora * ref::row_bytes(kb->type, (int) nope);
     gvh(kb->type, nope, (uint32_t) kv_lora, GemvHeads{(uint32_t) kb_head, (uint32_t) qk, (uint32_t) kv_w})
         .append_heads(ds, m->dense, kb->offset, qb, H * (uint32_t) qk, Q, H * (uint32_t) kv_w, 0, uT, H);
+    stage(tm.pf_attention_misc_ms);
     {
         ElemArgs a{(uint32_t) rope_dim, (uint32_t) qk, 0, (uint32_t) kv_w};
         elem(ds, p_copy,
@@ -1121,10 +1130,12 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         }
     }
     // the shared key: rope on its tail, the latent normed, both into the f16 cache
+    stage(tm.pf_attention_dense_ms);
     const gguf::Tensor* kva = b.t[W_KV_A];
     gv(kva).append(ds, m->dense, kva->offset, anorm, (uint32_t) n_embd, kvp, (uint32_t) kv_w, 0, uT);
     // rope on the tail, rms on the latent, both stores: one dispatch (hy4_flash_attn.metal hy4_flash_kv_finish, bitwise the
     // hy4_flash_rope_norm + hy4_flash_rmsnorm + 2 x hy4_flash_store_half it replaces)
+    stage(tm.pf_attention_misc_ms);
     const size_t kv_row = (size_t) b.kv_off + (size_t) p0 * (size_t) kv_w;
     {
         mtl::Dispatch d;
@@ -1150,13 +1161,17 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     // ---- the indexer, on the sparse blocks
     uint32_t n_pool = 0;
     if (b.has_indexer) {
+        stage(tm.pf_attention_dense_ms);
         const gguf::Tensor* ikw = b.t[W_IK];
         gv(ikw).append(ds, m->dense, ikw->offset, anorm, (uint32_t) n_embd, ik, (uint32_t) idx_dim, 0, uT);
+        stage(tm.pf_attention_index_ms);
         rms(ds, ik, 0, (uint32_t) idx_dim, b.t[W_IK_NORM], ik, 0, (uint32_t) idx_dim, (uint32_t) idx_dim, T, eps);
+        stage(tm.pf_attention_dense_ms);
         const gguf::Tensor* cv = b.t[W_ICV];
         const gguf::Tensor* cg = b.t[W_ICG];
         gv(cv).append(ds, m->dense, cv->offset, ik, (uint32_t) idx_dim, iv, (uint32_t) idx_dim, 0, uT);
         gv(cg).append(ds, m->dense, cg->offset, ik, (uint32_t) idx_dim, ig, (uint32_t) idx_dim, 0, uT);
+        stage(tm.pf_attention_index_ms);
         const size_t irow = (size_t) b.idx_off + (size_t) p0 * 3ull * (size_t) idx_dim;
         ElemArgs ia{(uint32_t) idx_dim, (uint32_t) idx_dim, 0, 3u * (uint32_t) idx_dim};
         elem(ds, p_store_half, {mtl::Arg::B(iv), mtl::Arg::B(idxc, 2 * irow), mtl::Arg::V(ia), mtl::Arg::B(badflag)},
@@ -1198,13 +1213,17 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
             mtl::require_fit(d, "hy4_flash_indexer_kpool");
             ds.push_back(d);
         }
+        stage(tm.pf_attention_dense_ms);
         const gguf::Tensor* iqb = b.t[W_IQ_B];
         gv(iqb).append(ds, m->dense, iqb->offset, q_resid, (uint32_t) m->geo.q_lora_rank, iq,
                        (uint32_t) (idx_heads * idx_dim), 0, uT);
+        stage(tm.pf_attention_index_ms);
         rope(ds, iq, (uint32_t) idx_heads, (uint32_t) idx_dim, (uint32_t) (idx_dim - rope_dim),
              (uint32_t) (idx_heads * idx_dim), b.tscale, T);
+        stage(tm.pf_attention_dense_ms);
         const gguf::Tensor* ip = b.t[W_IPROJ];
         gv(ip).append(ds, m->dense, ip->offset, anorm, (uint32_t) n_embd, iwraw, (uint32_t) idx_heads, 0, uT);
+        stage(tm.pf_attention_index_ms);
         {
             IdxWeightArgs a{(uint32_t) idx_heads, (uint32_t) idx_heads, (uint32_t) idx_heads,
                             std::sqrt((float) (idx_dim * idx_heads))};
@@ -1277,6 +1296,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     // scratch (its softmax is online), so neither `sc` nor the sub-batch loop below applies to it.
     // PER BLOCK, not max_heads: the kernel stores 8-row blocks of 32 heads, so a block whose head count is not a
     // multiple of 32 keeps the decode attention (its last partial block would write the next token's rows).
+    stage(tm.pf_attention_mla_ms);
     const bool attn_mma = pf_mma_ok && T > Forward::kMaxWindow && H % 32 == 0;
     for (int t0 = 0; t0 < T; t0 += (attn_mma ? T : asub)) {
         const uint32_t nt = (uint32_t) std::min(attn_mma ? T : asub, T - t0);
@@ -1320,6 +1340,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     }
 
     // kqv = wv_b[h] . o[h]
+    stage(tm.pf_attention_dense_ms);
     const gguf::Tensor* vb = b.t[W_V_B];
     const size_t vb_head = (size_t) v_mla * ref::row_bytes(vb->type, kv_lora);
     gvh(vb->type, (uint32_t) kv_lora, (uint32_t) v_mla,
@@ -1327,13 +1348,16 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         .append_heads(ds, m->dense, vb->offset, attn_o, H * (uint32_t) kv_lora, kqv, H * (uint32_t) v_mla, 0, uT, H);
     const gguf::Tensor* ag = b.t[W_AGATE];
     gv(ag).append(ds, m->dense, ag->offset, anorm, (uint32_t) n_embd, gproj, H * (uint32_t) v_mla, 0, uT);
+    stage(tm.pf_attention_misc_ms);
     {
         ElemArgs a{H * (uint32_t) v_mla, H * (uint32_t) v_mla, H * (uint32_t) v_mla, H * (uint32_t) v_mla};
         elem(ds, p_gate_mul, {mtl::Arg::B(kqv), mtl::Arg::B(gproj), mtl::Arg::B(gated), mtl::Arg::V(a)}, a.n, T,
              "hy4_flash_gate_mul");
     }
+    stage(tm.pf_attention_dense_ms);
     const gguf::Tensor* ao = b.t[W_AOUT];
     gv(ao).append(ds, m->dense, ao->offset, gated, H * (uint32_t) v_mla, attn_y, (uint32_t) n_embd, 0, uT);
+    stage(tm.pf_attention_misc_ms);
     rms(ds, attn_y, 0, (uint32_t) n_embd, b.t[W_POST_ATTN], attn_out, 0, (uint32_t) n_embd, (uint32_t) n_embd, T,
         eps);
     hc_post(ds, attn_out, *resid, post_a, hc_mid, T);
@@ -2529,7 +2553,11 @@ std::string Forward::prefill(const int32_t* all_tokens, int p0, int T, const Pre
         im.encode_block(ds, cuts, b, *in, *out, T, want_dump, false, stage_profile);
         im.tm.pf_encode_ms += (mtl::now_s() - t_enc) * 1e3;
         const double g = im.cx->run_graph_seg(ds, cuts, im.cut_wait, cut_tramp, &im, stage_profile) * 1e3;
-        if (profile.sampled) ++im.tm.pf_profiled_blocks;
+        if (profile.sampled) {
+            ++im.tm.pf_profiled_blocks;
+            im.tm.pf_attention_ms = im.tm.pf_attention_dense_ms + im.tm.pf_attention_index_ms +
+                                    im.tm.pf_attention_mla_ms + im.tm.pf_attention_misc_ms;
+        }
         im.tm.pf_gpu_ms += g;
         if (im.tm.pf_block_ms.size() != im.blk.size()) im.tm.pf_block_ms.assign(im.blk.size(), 0.0);
         im.tm.pf_block_ms[l] += g;

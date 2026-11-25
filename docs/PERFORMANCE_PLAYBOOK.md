@@ -837,6 +837,8 @@ Increasing the streamed Hy4 group from 1,024 to 4,096 rows lowered software expe
 
 On the Hy4 4K repeat, mapped expert admission was followed by a stalled first prompt and 65,461 MiB of observed system swap. GPU budget admission alone did not predict first-use residency. At normal memory pressure, streamed stage sampling placed attention and index work at 6.57 s and routed experts at 5.31 s, with 0.10 s of expert read waits. Only 21% of grouped tiles were eligible for the smaller F32 descriptor and the candidate showed no prefill gain. A bounded 36 GB streamed arena reduced software expert reads 21% on first use and 37% warm, with decode at 17.20 and 23.58 tok/s against 14.49 and 16.39 tok/s for the initial 28 GB pair. Keep first-use and warm requests separate, observe system swap and measure the rate with stage sampling off. Exclude invalid command timestamps and report their count. [Hy4 profiling, tile and expert arena attempts](model-experiments/2026-11-25-hy4-prefill-decode-profile.md)
 
+Separating dense projection and attention cost on the same Hy4 artifact measured 3.36 s dense, 2.03 s MLA and 0.06 s IndexPool and selection. Routed experts took 4.71 s. Dense F16 staging ran within prefill control drift and was removed. Retesting grouped F16 with streamed banks and one fixed 4,096-row chunk delivered 19–33% higher prefill throughput and matched the 64 reference IDs. Two repeat-demand retention trials at the same 36 GB capacity improved second-request decode 8–12%, with no first-request gain. Reducing speculative expert reads 12–21% by narrowing read-ahead returned under 2% decode speed. Count both reads and verify wall time before treating a traffic reduction as a throughput win. [Hy4 precision and cache follow-up](model-experiments/2026-11-25-hy4-dense-prefill-expert-retention.md)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |
@@ -921,6 +923,7 @@ The [experiment selection table](#choose-a-performance-experiment) links the GLM
 | 2026-11-25 | [Inkling cross-drafter recovery][ink-draft-cross], [runner-up replay][ink-draft-selector] and [live paired timings][ink-runner-live] | First-miss coverage, time per correction and the cost of displacing a correct third choice |
 | 2026-11-25 | [Flash Next three-slot MTP runner-up][flash-runner] | Exact branch commits, paired prose and coding results, and comparison with shipped adaptive MTP |
 | 2026-11-25 | [Hy4-flash 4K prefill and decode attribution](model-experiments/2026-11-25-hy4-prefill-decode-profile.md) | Mapped first-use swap, prefill encoder stages, rejected smaller expert tile and bounded streamed arena sensitivity |
+| 2026-11-25 | [Hy4-flash routed prefill and expert retention](model-experiments/2026-11-25-hy4-dense-prefill-expert-retention.md) | Attention decomposition, opt-in F16 routed operands and warm decode retention, rejected dense F16 and narrower read-ahead |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 

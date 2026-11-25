@@ -93,6 +93,14 @@ record](model-experiments/2026-11-25-hy4-prefill-decode-profile.md) covers the
 observed benefit and remaining qualification. The verification and worker
 gates remain artifact-specific.
 
+`STARK_HY4_PREFILL_ROUTED_HALF=1` selects F16 operands with F32 accumulation
+for eligible grouped routed experts. Dense projections and the small
+decode and verification windows keep their existing paths.
+`STARK_HY4_STREAM_DEMAND_RETENTION=1` enables bounded repeat-demand retention
+with streamed storage. Both are opt-in. The diagnostic rates apply to the
+36 GB arena and 4,096-row prefill geometry. [Routed precision and
+retention record](model-experiments/2026-11-25-hy4-dense-prefill-expert-retention.md)
+
 ## Image qualification
 
 The [execution catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json) contains two passed schema-2 records for BF16 `Qwen/Qwen3.5-0.8B`: the developer worker `5fc92516…` and Developer ID signed worker `741a3ea7…`. Both use Metal on an Apple M5 Max with 40 GPU cores, Apple GPU family 1010 and MXU enabled, running macOS 26.7.1. Each record binds all five artifact-file hashes, the exact full executable hash, and its source-bound evidence: [developer execution](archive/runs/2026-10-26-qwen35-image-execution.md) and [signed-worker execution](archive/runs/2026-10-27-qwen35-signed-worker.md).

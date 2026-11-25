@@ -125,6 +125,15 @@ impl Hy4Backend {
         };
         let profile_prefill = verify_switch("STARK_HY4_PROFILE_PREFILL", "invalid_hy4_prefill_profile", false)?;
         let larger_arena = verify_switch("STARK_HY4_STREAM_ARENA_36GB", "invalid_hy4_stream_arena", false)?;
+        let demand_retention =
+            verify_switch("STARK_HY4_STREAM_DEMAND_RETENTION", "invalid_hy4_stream_demand_retention", false)?;
+        let routed_half = verify_switch("STARK_HY4_PREFILL_ROUTED_HALF", "invalid_hy4_prefill_routed_half", false)?;
+        if routed_half && !grouped {
+            return Err("invalid_hy4_prefill_routed_half");
+        }
+        if demand_retention && !matches!(storage, ExpertStorage::Streamed) {
+            return Err("invalid_hy4_stream_demand_retention");
+        }
         let native = Session::load(
             path,
             path,
@@ -135,6 +144,8 @@ impl Hy4Backend {
                 gpu_plan,
                 profile_prefill,
                 larger_arena,
+                demand_retention,
+                routed_half,
             },
         )?;
         source.verify_unchanged()?;
@@ -146,10 +157,11 @@ impl Hy4Backend {
             "supports_mxu": identity.supports_mxu,
             "expert_storage": if native.mapped_experts() { "mapped" } else { "streamed" },
             "grouped_prefill_requested": grouped,
-            "grouped_prefill_operands": if grouped { "f32" } else { "off" },
+            "grouped_prefill_operands": if routed_half { "f16" } else if grouped { "f32" } else { "off" },
             "gpu_expert_plan": gpu_plan && native.mapped_experts(),
             "prefill_chunk_tokens": chunk,
             "prefill_stage_profile_requested": profile_prefill,
+            "streamed_expert_demand_retention": demand_retention,
             "streamed_expert_arena_bytes": native.arena_bytes(),
         });
         Ok(Self {

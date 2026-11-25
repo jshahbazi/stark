@@ -45,11 +45,12 @@ struct StarkHy4 {
 
 extern "C" int stark_hy4_open(const char* model, const char* projector, const char* pack, int context, int chunk,
                                int storage, int grouped, int gpu_plan, int profile_prefill, int larger_arena,
+                               int demand_retention, int routed_half,
                                StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
                                uint64_t* arena_bytes) noexcept {
     *output = nullptr;
     try {
-        if ((chunk != 1024 && chunk != 4096) || (larger_arena && storage != 1)) return 1;
+        if ((chunk != 1024 && chunk != 4096) || ((larger_arena || demand_retention) && storage != 1)) return 1;
         auto session = std::make_unique<StarkHy4>();
         auto& s = *session;
         s.metal.lock_safe_math();
@@ -64,6 +65,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         prefill.grouped_k_quant = grouped != 0;
         prefill.mapped_gpu_plan = gpu_plan != 0;
         prefill.profile_stages = profile_prefill != 0;
+        prefill.routed_half = routed_half != 0;
         if (!s.forward.open(s.model, s.metal, pack, prefill).empty()) return 4;
         if (!s.mtp.open(s.model, s.metal, s.forward.library(), 1024, pack).empty()) return 5;
         if (!s.vision.build(s.metal, s.forward.library()).empty()) return 3;
@@ -93,6 +95,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
             }
             arena.arena = std::min(arena.arena, arena.gpu_room - future);
             if (arena.arena <= 0 || !make_arena(s.model, s.metal, arena, "", slots + 64).empty()) return 6;
+            s.model.stream.set_demand_retention(demand_retention != 0);
             for (int c = 0; c < s.model.stream.n_classes(); ++c) {
                 if (s.model.stream.class_slots(c) < slots) return 6;
             }
@@ -297,5 +300,9 @@ extern "C" StarkHy4Stats stark_hy4_stats(StarkHy4* session) noexcept {
         schedule.n_dis - schedule_base.n_dis,
         schedule_base.invalid_gpu_spans - session->request_start_invalid_spans,
         schedule.invalid_gpu_spans - schedule_base.invalid_gpu_spans,
+        graph.pf_attention_dense_ms / 1e3 - base.prefill_attention_dense_seconds,
+        graph.pf_attention_index_ms / 1e3 - base.prefill_attention_index_seconds,
+        graph.pf_attention_mla_ms / 1e3 - base.prefill_attention_mla_seconds,
+        graph.pf_attention_misc_ms / 1e3 - base.prefill_attention_misc_seconds,
     };
 }

@@ -53,11 +53,16 @@ struct StarkHy4Stats {
     uint64_t decode_dispatches;
     uint64_t prefill_invalid_gpu_spans;
     uint64_t decode_invalid_gpu_spans;
+    double prefill_attention_dense_seconds;
+    double prefill_attention_index_seconds;
+    double prefill_attention_mla_seconds;
+    double prefill_attention_misc_seconds;
 };
 
 extern "C" {
 int stark_hy4_open(const char* model, const char* projector, const char* pack, int context, int chunk,
                    int storage, int grouped, int gpu_plan, int profile_prefill, int larger_arena,
+                   int demand_retention, int routed_half,
                    StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
                    uint64_t* arena_bytes) noexcept;
 void stark_hy4_close(StarkHy4* session) noexcept;

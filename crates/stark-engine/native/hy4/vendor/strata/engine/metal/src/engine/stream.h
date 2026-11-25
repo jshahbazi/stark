@@ -119,6 +119,8 @@ public:
     // The read-aheads queue behind the demand reads (urgent first), so they start as soon as an I/O thread
     // is free instead of after the whole wait.  Off by default: Qwen keeps its order; hy4-flash turns it on.
     void set_ahead_before_wait(bool on) { ahead_early_ = on; }
+    // Set before the first window. Protect experts seen on repeated decode demand.
+    void set_demand_retention(bool enabled) { demand_retention_ = enabled; }
     // How many handshakes a slot stays safe from eviction after the GPU was handed it.  0 - the default - means the
     // cut handshake IS the fence: `run_graph_seg` signals its shared event only after everything encoded before the
     // cut has run, so by the time at_layer(l + 1) is entered the GPU has finished layer l's expert matmuls and those
@@ -199,14 +201,18 @@ private:
     struct Lay { uint64_t g, gs, u, us, d, ds; int cls; };
     // `mode` is what the arena was doing when this slot's read was submitted: 0 the initial fill, 1 a decode
     // window, 2 a prompt chunk.  It is what lets the decode-only byte counter exist (arena_byte_hit_rate).
-    struct Slot { int16_t layer = -1; int16_t e = -1; int prev = -1, next = -1; bool pre = false; uint8_t mode = 0; int left = 0; uint64_t pin = 0; std::atomic<int> state{0}; };  // 0 idle, 1 queued, 2 reading
-    struct Cls { uint64_t pages = 0; int n = 0; int base = 0; int head = -1, tail = -1; };  // slot range [base, base+n)
+    struct Slot { int16_t layer = -1; int16_t e = -1; int prev = -1, next = -1; bool pre = false; uint8_t mode = 0; int left = 0; uint64_t pin = 0; std::atomic<int> state{0}; bool decode_touched = false, retained = false; };  // 0 idle, 1 queued, 2 reading
+    struct Lru { int head = -1, tail = -1; };
+    struct Cls { uint64_t pages = 0; int n = 0; int base = 0; Lru recent, retained; int retained_count = 0, retained_limit = 0; };  // slot range [base, base+n)
     struct Job { int slot; int layer, e, part; };   // part: slice * split_ + piece
     void lru_unlink(int s);
     void lru_front(int s);
     void lru_back(int s);
+    void lru_insert_front(int s, Lru& list);
+    void touch_decode(int s);
+    void clear_retention(int s);
     int cls_of(int s) const;
-    int victim(int cls);
+    int victim(int cls, bool allow_retained = true);
     bool read_part(int slot, int l, int e, int part);
     void cancel_slot(int s);
     void promote_slot(int s);
@@ -249,7 +255,7 @@ private:
     int nio_ = 6, pre_k_ = 10, pre_k2_ = 0, split_ = 2;
     int nl_ = 0;         // expert ordinals of this model (48 for Qwen, 41 for hy4-flash's trunk), from open()
     int fence_lag_ = 0;  // set_fence_lag
-    bool prefetch_ = true, fake_ = false, pre_mru_ = false, ahead_early_ = false;
+    bool prefetch_ = true, fake_ = false, pre_mru_ = false, ahead_early_ = false, demand_retention_ = false;
     // begin_layer -> finish_layer
     int pend_l_ = -1, pend_T_ = 0;
     bool pend_prompt_ = false, pend_fake_ = false, pend_any_miss_ = false, pend_ahead_now_ = false;

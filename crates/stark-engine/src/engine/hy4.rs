@@ -95,6 +95,10 @@ pub struct DraftStats {
     pub decode_dispatches: u64,
     pub prefill_invalid_gpu_spans: u64,
     pub decode_invalid_gpu_spans: u64,
+    pub prefill_attention_dense_seconds: f64,
+    pub prefill_attention_index_seconds: f64,
+    pub prefill_attention_mla_seconds: f64,
+    pub prefill_attention_misc_seconds: f64,
 }
 
 pub struct Options {
@@ -104,6 +108,8 @@ pub struct Options {
     pub gpu_plan: bool,
     pub profile_prefill: bool,
     pub larger_arena: bool,
+    pub demand_retention: bool,
+    pub routed_half: bool,
 }
 
 unsafe extern "C" {
@@ -118,6 +124,8 @@ unsafe extern "C" {
         gpu_plan: c_int,
         profile_prefill: c_int,
         larger_arena: c_int,
+        demand_retention: c_int,
+        routed_half: c_int,
         session: *mut *mut c_void,
         vision: *mut VisionGeometry,
         mapped: *mut c_int,
@@ -198,6 +206,8 @@ impl Session {
                 c_int::from(options.gpu_plan),
                 c_int::from(options.profile_prefill),
                 c_int::from(options.larger_arena),
+                c_int::from(options.demand_retention),
+                c_int::from(options.routed_half),
                 &mut inner,
                 &mut vision,
                 &mut mapped,

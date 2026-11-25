@@ -309,7 +309,8 @@ int ExpertStream::cls_of(int s) const {   // the class ranges are contiguous
 
 void ExpertStream::lru_unlink(int s) {
     Slot& x = slots_[(size_t) s];
-    Cls& k = cls_[(size_t) cls_of(s)];
+    Cls& c = cls_[(size_t) cls_of(s)];
+    Lru& k = x.retained ? c.retained : c.recent;
     if (x.prev >= 0) slots_[(size_t) x.prev].next = x.next; else k.head = x.next;
     if (x.next >= 0) slots_[(size_t) x.next].prev = x.prev; else k.tail = x.prev;
     x.prev = x.next = -1;
@@ -317,8 +318,9 @@ void ExpertStream::lru_unlink(int s) {
 
 void ExpertStream::lru_back(int s) {
     lru_unlink(s);
-    Cls& k = cls_[(size_t) cls_of(s)];
+    Cls& c = cls_[(size_t) cls_of(s)];
     Slot& x = slots_[(size_t) s];
+    Lru& k = x.retained ? c.retained : c.recent;
     x.prev = k.tail;
     x.next = -1;
     if (k.tail >= 0) slots_[(size_t) k.tail].next = s;
@@ -328,7 +330,11 @@ void ExpertStream::lru_back(int s) {
 
 void ExpertStream::lru_front(int s) {
     lru_unlink(s);
-    Cls& k = cls_[(size_t) cls_of(s)];
+    Cls& c = cls_[(size_t) cls_of(s)];
+    lru_insert_front(s, slots_[(size_t) s].retained ? c.retained : c.recent);
+}
+
+void ExpertStream::lru_insert_front(int s, Lru& k) {
     Slot& x = slots_[(size_t) s];
     x.next = k.head;
     x.prev = -1;
@@ -337,21 +343,51 @@ void ExpertStream::lru_front(int s) {
     if (k.tail < 0) k.tail = s;
 }
 
-int ExpertStream::victim(int ci) {
+void ExpertStream::touch_decode(int s) {
+    Slot& x = slots_[(size_t) s];
+    Cls& c = cls_[(size_t) cls_of(s)];
+    if (x.decode_touched && !x.retained && c.retained_limit > 0) {
+        if (c.retained_count == c.retained_limit) clear_retention(c.retained.tail);
+        lru_unlink(s);
+        x.retained = true;
+        ++c.retained_count;
+        lru_insert_front(s, c.retained);
+    } else {
+        x.decode_touched = true;
+        lru_front(s);
+    }
+}
+
+void ExpertStream::clear_retention(int s) {
+    Slot& x = slots_[(size_t) s];
+    x.decode_touched = false;
+    if (x.retained) {
+        Cls& c = cls_[(size_t) cls_of(s)];
+        lru_unlink(s);
+        x.retained = false;
+        --c.retained_count;
+        lru_insert_front(s, c.recent);
+    }
+}
+
+int ExpertStream::victim(int ci, bool allow_retained) {
     Cls& k = cls_[(size_t) ci];
     // Not evictable: a slot with a read queued or running (state != 0, its bytes are being written), and a slot the
     // GPU was handed within the last fence_lag_ + 1 handshakes (stream.h: set_fence_lag).
-    for (int s = k.tail; s >= 0; s = slots_[(size_t) s].prev)
-        if (slots_[(size_t) s].state.load() == 0 && slots_[(size_t) s].pin + (uint64_t) fence_lag_ < stamp_) {
+    for (int tail : {k.recent.tail, allow_retained ? k.retained.tail : -1}) {
+        for (int s = tail; s >= 0; s = slots_[(size_t) s].prev) {
             Slot& x = slots_[(size_t) s];
+            if (x.state.load() != 0 || x.pin + (uint64_t) fence_lag_ >= stamp_) continue;
             if (x.layer >= 0) {
                 const int key = x.layer * NE + x.e;
                 where_[(size_t) key] = -1;
                 smap_.as<uint32_t>()[key] = 0xFFFFFFFFu;
             }
             x.layer = x.e = -1;
+            clear_retention(s);
             return s;
         }
+    }
     return -1;
 }
 
@@ -437,6 +473,7 @@ void ExpertStream::cancel_slot(int s) {
     for (auto it = pre_q_.begin(); it != pre_q_.end();) it = it->slot == s ? pre_q_.erase(it) : it + 1;
     where_[(size_t) (x.layer * NE + x.e)] = -1;
     x.layer = x.e = -1;
+    clear_retention(s);
     x.state = 0;
     x.pre = false;
     x.left = 0;
@@ -558,8 +595,11 @@ bool ExpertStream::make_arena(mtl::Context& cx, uint64_t budget, const std::stri
             slots_[(size_t) s].prev = s == k.base ? -1 : s - 1;
             slots_[(size_t) s].next = s + 1 == k.base + k.n ? -1 : s + 1;
         }
-        k.head = k.n ? k.base : -1;
-        k.tail = k.n ? k.base + k.n - 1 : -1;
+        k.recent.head = k.n ? k.base : -1;
+        k.recent.tail = k.n ? k.base + k.n - 1 : -1;
+        k.retained = {};
+        k.retained_count = 0;
+        k.retained_limit = k.n - k.n / 4;
     }
     mode_ = 0;   // the initial fill: its bytes belong to neither decode nor a prompt (arena_byte_hit_rate)
     for (int i = 0; i < nio_; ++i) io_.emplace_back([this] { io_main(); });
@@ -640,13 +680,15 @@ bool ExpertStream::make_arena(mtl::Context& cx, uint64_t budget, const std::stri
         std::unique_lock<std::mutex> g(mu_);
         if (stopped)   // the slots not filled stay unused (their pages never touched), all but min_slots of each class
             for (size_t c = 0; c < cls_.size(); ++c) {
-                const Cls& k = cls_[c];
+                Cls& k = cls_[c];
                 for (int s = std::max(next_free[c], k.base + std::min(min_slots, k.n)); s < k.base + k.n; ++s) {
                     lru_unlink(s);
                     retired_[(size_t) s] = 1;
                     retired_bytes += k.pages * PAGE;
                     ++nretired;
                 }
+                const int active = std::max(next_free[c] - k.base, std::min(min_slots, k.n));
+                k.retained_limit = active - active / 4;
             }
         // the LRU order = the rank order (best at the front)
         for (size_t i = done; i-- > 0;) lru_front(where_[(size_t) (fill[i].first * NE + fill[i].second)]);
@@ -730,12 +772,15 @@ void ExpertStream::ahead(int ln, int T, const float* pred, int K) {
         for (int j = 0; j < np; ++j) {
             const int key = ln * NE + pw[j].second;
             const int s0 = where_[(size_t) key];
-            if (s0 >= 0) { lru_front(s0); continue; }
-            const int s = victim(lay_[(size_t) ln].cls);
+            if (s0 >= 0) {
+                if (!demand_retention_) lru_front(s0);
+                continue;
+            }
+            const int s = victim(lay_[(size_t) ln].cls, !demand_retention_);
             if (s < 0) break;
             submit(s, ln, pw[j].second, false);
             slots_[(size_t) s].pin = stamp_;
-            if (pre_mru_) lru_front(s);
+            if (pre_mru_ && !demand_retention_) lru_front(s);
             else lru_back(s);
             ++pre_issued_;
             any = true;
@@ -827,7 +872,8 @@ void ExpertStream::begin_layer(int l, int T, int topk, const int32_t* ids, const
                     promote_slot(s);   // a queued read-ahead becomes urgent
                     wait.push_back(s);
                 }
-                if (!(prompt && x.pre)) lru_front(s);   // a prompt's streamed experts stay at the LRU tail
+                if (demand_retention_ && !prompt) touch_decode(s);
+                else if (!(prompt && x.pre) && !x.retained) lru_front(s);   // a prompt's streamed experts stay at the LRU tail
                 x.pre = false;
                 continue;
             }
@@ -840,7 +886,8 @@ void ExpertStream::begin_layer(int l, int T, int topk, const int32_t* ids, const
             }
             submit(s, l, e, true);
             slots_[(size_t) s].pin = stamp_;
-            if (!prompt) lru_front(s);
+            if (demand_retention_ && !prompt) touch_decode(s);
+            else if (!prompt) lru_front(s);
             wait.push_back(s);
             any_miss = true;
         }
@@ -975,6 +1022,7 @@ void ExpertStream::hold_region(bool hold) {
                 smap_.as<uint32_t>()[key] = 0xFFFFFFFFu;
             }
             x.layer = x.e = -1;
+            clear_retention(s);
             x.pre = false;
             x.state = 3;
         }
@@ -1035,13 +1083,19 @@ std::string ExpertStream::check_invariants() const {
     for (int c = 0; c < (int) cls_.size(); ++c) {   // the LRU of each class: a list, no cycle, only its own slots
         const Cls& k = cls_[(size_t) c];
         int n = 0, prev = -1;
-        for (int s = k.head; s >= 0; s = slots_[(size_t) s].next) {
-            if (slots_[(size_t) s].prev != prev) return "the LRU of class " + std::to_string(c) + " is not doubly linked";
-            if (cls_of(s) != c) return "a slot of another class is in the LRU of class " + std::to_string(c);
-            prev = s;
-            if (++n > k.n) return "the LRU of class " + std::to_string(c) + " has a cycle";
+        for (const Lru* list : {&k.retained, &k.recent}) {
+            prev = -1;
+            for (int s = list->head; s >= 0; s = slots_[(size_t) s].next) {
+                const Slot& x = slots_[(size_t) s];
+                if (x.prev != prev) return "the LRU of class " + std::to_string(c) + " is not doubly linked";
+                if (cls_of(s) != c || x.retained != (list == &k.retained))
+                    return "a slot is in the wrong LRU of class " + std::to_string(c);
+                prev = s;
+                if (++n > k.n) return "the LRU of class " + std::to_string(c) + " has a cycle";
+            }
+            if (prev != list->tail) return "the tail of class " + std::to_string(c) + " is not the last slot of its LRU";
+            if (list == &k.retained && n != k.retained_count) return "the retained list has an incorrect slot count";
         }
-        if (prev != k.tail) return "the tail of class " + std::to_string(c) + " is not the last slot of its LRU";
     }
     return {};
 }
