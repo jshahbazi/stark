@@ -42,7 +42,7 @@ use crate::kernels::gdn::{
     gated_rmsnorm_with_rounding as gated_rmsnorm, gdn_chunk_staging_shapes,
     gdn_prefill_capture_key_value,
     gdn_prefill_mid_with_layout_midpoint_resume as gdn_prefill_mid_resume,
-    gdn_step_gated_fused_with_layout as gdn_step_gated_fused, gdn_verify_gated_exact,
+    gdn_step_gated_fused_with_layout as gdn_step_gated_fused,
 };
 use crate::kernels::hc::stock::{
     InjectionInputKind, PendingHcWrite, inject_after_read as hc_inject_bf16,
@@ -160,6 +160,8 @@ pub(super) enum BatchMode<'p> {
     Verify { params: &'p SamplingParams, step0: usize },
     /// Candidate verifier: complete readouts and recurrent captures only.
     VerifyHost,
+    /// Last physical row shares the prefix before the primary at `depth`.
+    VerifyHostFork { depth: usize },
 }
 
 /// One image of a prompt: its placeholder span and the tower's merged rows.
@@ -639,6 +641,84 @@ fn row_copy<'t>(
         dst_offset: 0,
         len: rows * row_bytes,
     });
+    Ok(())
+}
+
+/// Copies one row of a head-major cache tensor inside the current compute pass.
+fn copy_head_row(
+    pass: &ComputePass<'_>,
+    src: &Tensor,
+    src_row: usize,
+    dst: &Tensor,
+    dst_row: usize,
+) -> Result<()> {
+    ensure!(
+        src.shape().len() == 3
+            && dst.shape().len() == 3
+            && src.shape()[0] == dst.shape()[0]
+            && src.shape()[2] == dst.shape()[2]
+            && src.dtype() == dst.dtype()
+            && src_row < src.shape()[1]
+            && dst_row < dst.shape()[1],
+        "head cache row geometry"
+    );
+    let row_bytes = src.shape()[2] * src.dtype().size();
+    let (src_buffer, src_base) = src.binding();
+    let (dst_buffer, dst_base) = dst.binding();
+    for head in 0..src.shape()[0] {
+        pass.copy_buffer(
+            &src_buffer,
+            src_base + (head * src.shape()[1] + src_row) * row_bytes,
+            &dst_buffer,
+            dst_base + (head * dst.shape()[1] + dst_row) * row_bytes,
+            row_bytes,
+        )?;
+    }
+    Ok(())
+}
+
+fn copy_matrix_row(
+    pass: &ComputePass<'_>,
+    src: &Tensor,
+    src_row: usize,
+    dst: &Tensor,
+    dst_row: usize,
+) -> Result<()> {
+    ensure!(
+        src.shape().len() == 2
+            && dst.shape().len() == 2
+            && src.shape()[1] == dst.shape()[1]
+            && src.dtype() == dst.dtype()
+            && src_row < src.shape()[0]
+            && dst_row < dst.shape()[0],
+        "matrix cache row geometry"
+    );
+    let row_bytes = src.shape()[1] * src.dtype().size();
+    let (src_buffer, src_base) = src.binding();
+    let (dst_buffer, dst_base) = dst.binding();
+    pass.copy_buffer(
+        &src_buffer,
+        src_base + src_row * row_bytes,
+        &dst_buffer,
+        dst_base + dst_row * row_bytes,
+        row_bytes,
+    )
+}
+
+fn copy_kv_row(
+    pass: &ComputePass<'_>,
+    src: &KvCache,
+    src_row: usize,
+    dst: &KvCache,
+    dst_row: usize,
+) -> Result<()> {
+    ensure!(src.kv().format()? == dst.kv().format()?, "cache row format mismatch");
+    copy_head_row(pass, &src.values, src_row, &dst.values, dst_row)?;
+    match (&src.scales, &dst.scales) {
+        (Some(src), Some(dst)) => copy_head_row(pass, src, src_row, dst, dst_row)?,
+        (None, None) => {}
+        _ => anyhow::bail!("cache row scale mismatch"),
+    }
     Ok(())
 }
 
@@ -1587,6 +1667,7 @@ impl PrefillScratch {
 /// and PLE) so the conv windows can be rewound.
 pub(super) struct Capture {
     exact: bool,
+    sibling_depth: Option<usize>,
     pub(super) mid: Option<Tensor>,
     /// Exact passes: `[m, C]` convolved q/k/v, `[m, H]` a and b rows.
     pub(super) replay: Option<(Tensor, Tensor, Tensor)>,
@@ -1847,9 +1928,31 @@ impl Qwen4ExpModel {
         tokens: &[u32],
         hist: [u32; 2],
     ) -> Result<()> {
+        self.stage_ngram_packet(w, p, tokens, hist, None)
+    }
+
+    pub(super) fn stage_ngram_packet(
+        &self,
+        w: &PleWeights,
+        p: &PleScratch,
+        tokens: &[u32],
+        hist: [u32; 2],
+        sibling_depth: Option<usize>,
+    ) -> Result<()> {
         let hasher = self.hasher.as_ref().expect("PLE weights without hasher");
         let mut ids = Vec::with_capacity(tokens.len() * hasher.heads());
-        hasher.ids(tokens, hist, &mut ids);
+        if let Some(depth) = sibling_depth {
+            ensure!(depth > 0 && depth + 1 < tokens.len(), "invalid sibling depth");
+            let last = tokens.len() - 1;
+            hasher.ids(&tokens[..last], hist, &mut ids);
+            hasher.ids(
+                &tokens[last..],
+                NgramHasher::advance(hist, &tokens[..depth]),
+                &mut ids,
+            );
+        } else {
+            hasher.ids(tokens, hist, &mut ids);
+        }
         match &w.table {
             NgramTable::Resident(_) => p.ids.write_bytes(bytemuck::cast_slice(&ids)),
             NgramTable::Paged(table) => {
@@ -2620,8 +2723,22 @@ impl Qwen4ExpModel {
         let (h, g) = (cfg.hidden_size, cfg.hc_count);
         let pos = state.pos;
         let conv_slot = state.conv_slot;
-        let verify = matches!(mode, BatchMode::Verify { .. } | BatchMode::VerifyHost);
-        let profile_exact = matches!(mode, BatchMode::VerifyHost);
+        let sibling_depth = match mode {
+            BatchMode::VerifyHostFork { depth } => {
+                ensure!(
+                    !cfg.official_mlx_rounding()
+                        && depth > 0
+                        && depth + 1 < m
+                        && m <= 4,
+                    "invalid Lily fork geometry"
+                );
+                Some(depth)
+            }
+            _ => None,
+        };
+        let profile_exact =
+            matches!(mode, BatchMode::VerifyHost | BatchMode::VerifyHostFork { .. });
+        let verify = profile_exact || matches!(mode, BatchMode::Verify { .. });
         pass.set_label(if verify { "verify" } else { "prefill" });
         self.set_cache_position(verify.then_some(pos));
         if !verify && m > GATED_PREFILL_ROWS {
@@ -2644,7 +2761,9 @@ impl Qwen4ExpModel {
         let spec = if verify { s.spec.as_ref() } else { None };
         let vision = match mode {
             BatchMode::Prefill { vision, .. } => vision,
-            BatchMode::Verify { .. } | BatchMode::VerifyHost => None,
+            BatchMode::Verify { .. }
+            | BatchMode::VerifyHost
+            | BatchMode::VerifyHostFork { .. } => None,
         };
         let checkpoint = match mode {
             BatchMode::Prefill { checkpoint, .. } => checkpoint,
@@ -2699,7 +2818,7 @@ impl Qwen4ExpModel {
             };
             let capture = match (spec, lstate) {
                 (Some(sp), LayerState::Gdn { .. }) => {
-                    let exact = matches!(mode, BatchMode::VerifyHost);
+                    let exact = profile_exact;
                     // Exact passes keep no per-row states: the final state
                     // goes to the shadow and the rows' recurrence inputs to
                     // the replay rows (replay rollback). The legacy pass
@@ -2732,6 +2851,7 @@ impl Qwen4ExpModel {
                         .transpose()?;
                     Some(Capture {
                         exact,
+                        sibling_depth,
                         mid,
                         replay,
                         state_out: exact.then(|| sp.gdn_shadow[gdn_index].clone()),
@@ -2744,7 +2864,8 @@ impl Qwen4ExpModel {
                     })
                 }
                 (Some(sp), LayerState::Attn { .. }) => Some(Capture {
-                    exact: matches!(mode, BatchMode::VerifyHost),
+                    exact: profile_exact,
+                    sibling_depth,
                     mid: None,
                     replay: None,
                     state_out: None,
@@ -2838,11 +2959,13 @@ impl Qwen4ExpModel {
                     self.mtp_catch_up(ctx, &pass, mtp, mst, pos, s, ps, rope, images)?;
                 }
             }
-            BatchMode::Verify { .. } | BatchMode::VerifyHost => {
+            BatchMode::Verify { .. }
+            | BatchMode::VerifyHost
+            | BatchMode::VerifyHostFork { .. } => {
                 let sp = s.spec.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("verify pass without spec scratch")
                 })?;
-                if matches!(mode, BatchMode::VerifyHost) {
+                if profile_exact {
                     pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
                     self.hc_read_verify_exact(
                         ctx,
@@ -2870,7 +2993,7 @@ impl Qwen4ExpModel {
                     m,
                 )?;
                 let logits = prefix_rows(&sp.logits, m)?;
-                if matches!(mode, BatchMode::VerifyHost) {
+                if profile_exact {
                     pass.profile_stage(crate::metal::stage_profile::Phase::Head)?;
                     quant::gemv_quant_logits_rows_decode_exact(
                         ctx,
@@ -2993,6 +3116,7 @@ impl Qwen4ExpModel {
                 capture.and_then(|c| c.ple_conv_in.as_ref()),
                 checkpoint_ple,
                 capture.is_some_and(|c| c.exact),
+                capture.and_then(|c| c.sibling_depth),
             )?;
         }
 
@@ -3038,8 +3162,18 @@ impl Qwen4ExpModel {
                         anyhow::bail!("exact verify requires text rotary positions");
                     };
                     self.attn_verify_exact(
-                        ctx, pass, w, s, ps, k_cache, v_cache, idx_keys, blk_keys, pos,
+                        ctx,
+                        pass,
+                        w,
+                        s,
+                        ps,
+                        k_cache,
+                        v_cache,
+                        idx_keys,
+                        blk_keys,
+                        pos,
                         delta,
+                        capture.and_then(|c| c.sibling_depth),
                     )?;
                 } else {
                     self.attn_batched(
@@ -3424,6 +3558,7 @@ impl Qwen4ExpModel {
         conv_capture: Option<&Tensor>,
         checkpoint: Option<(usize, &Tensor)>,
         exact: bool,
+        sibling_depth: Option<usize>,
     ) -> Result<()> {
         let cfg = &self.config;
         let ple = cfg.ple.as_ref().expect("PLE weights without PLE config");
@@ -3506,7 +3641,7 @@ impl Qwen4ExpModel {
                 window,
             )?;
         } else {
-            ple::ple_conv1d_prefill_with_rounding(
+            ple::ple_conv1d_prefill_tree(
                 ctx,
                 pass,
                 &pst.conv_windows[conv_slot],
@@ -3517,6 +3652,7 @@ impl Qwen4ExpModel {
                 hyper,
                 ple.ngram_size,
                 self.config.official_mlx_rounding(),
+                sibling_depth,
             )?;
         }
         pass.level_barrier(&[hyper, &pst.conv_windows[1 - conv_slot]])
@@ -3624,6 +3760,11 @@ impl Qwen4ExpModel {
                 && w.in_proj.out_features().is_multiple_of(2)
         });
         let exact = capture.is_some_and(|c| c.exact);
+        ensure!(
+            capture.is_none_or(|c| c.sibling_depth.is_none())
+                || fused_capture.is_some(),
+            "fork requires Lily Q4 GDN projection"
+        );
         if exact {
             pass.profile_stage(if fused_capture.is_some() {
                 Phase::GdnInputProjectionConv
@@ -3646,6 +3787,7 @@ impl Qwen4ExpModel {
                 &w.conv_w,
                 qkv_conv,
                 Some(&c.conv_in),
+                c.sibling_depth,
             )?;
             pass.level_barrier(&[
                 &ps.qkv,
@@ -3724,12 +3866,11 @@ impl Qwen4ExpModel {
         self.trace_stage(ctx, pass, layer_index, "gdn_b", gate_b, ps.m)?;
         self.trace_stage(ctx, pass, layer_index, "gdn_conv", qkv_conv, ps.m)?;
         if let Some(capture) = capture.filter(|c| c.exact) {
-            let state_out = capture
-                .state_out
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("exact GDN verify without a state output"))?;
+            let state_out = capture.state_out.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("exact GDN verify without a state output")
+            })?;
             pass.profile_stage(Phase::GdnRecurrenceNorm)?;
-            gdn_verify_gated_exact(
+            crate::kernels::gdn::gdn_verify_gated_exact_tree(
                 ctx,
                 pass,
                 qkv_conv,
@@ -3746,6 +3887,7 @@ impl Qwen4ExpModel {
                 cfg.linear_num_key_heads,
                 cfg.rms_norm_eps,
                 self.gdn_gate,
+                capture.sibling_depth,
             )?;
             pass.level_barrier(&[&ps.gdn_gated, state_out])?;
             self.trace_stage(ctx, pass, layer_index, "gdn_gated", &ps.gdn_gated, ps.m)?;
@@ -3813,6 +3955,72 @@ impl Qwen4ExpModel {
         project_mat(ctx, pass, &ps.gdn_gated, &w.out_proj, &ps.branch_out, &s.dequant)
     }
 
+    /// Promote the accepted runner-up leaf from its physical last row to its
+    /// logical sequence position. The verify pass stored its K with the
+    /// logical rotary position already applied; only the cache slot moves.
+    pub(super) fn relocate_sibling_kv(
+        &self,
+        ctx: &MetalContext,
+        state: &DecodeState,
+        pos_before: usize,
+        last_offset: usize,
+        depth: usize,
+    ) -> Result<()> {
+        let physical = pos_before
+            .checked_add(last_offset)
+            .ok_or_else(|| anyhow::anyhow!("sibling physical position overflow"))?;
+        let logical = pos_before
+            .checked_add(depth)
+            .ok_or_else(|| anyhow::anyhow!("sibling logical position overflow"))?;
+        ensure!(
+            logical < self.config.indexer.dense_limit(),
+            "runner-up relocation is supported only inside the dense attention window"
+        );
+        ensure!(
+            physical < state.capacity,
+            "sibling physical row exceeds cache capacity"
+        );
+        if physical == logical {
+            return Ok(());
+        }
+        let ratio = self.config.indexer.compress_ratio;
+        let pass = ctx.begin_concurrent()?;
+        pass.set_label("promote-sibling-attention-cache");
+        for (weights, layer_state) in self.weights.layers.iter().zip(&state.layers) {
+            if let (
+                Mixer::Attn(w),
+                LayerState::Attn { k_cache, v_cache, idx_keys, blk_keys },
+            ) = (&weights.mixer, layer_state)
+            {
+                copy_kv_row(&pass, k_cache, physical, k_cache, logical)?;
+                copy_kv_row(&pass, v_cache, physical, v_cache, logical)?;
+                copy_matrix_row(&pass, idx_keys, physical, idx_keys, logical)?;
+                if (logical + 1).is_multiple_of(ratio) {
+                    let block = logical / ratio;
+                    pass.level_barrier(&[idx_keys])?;
+                    qsa::qsa_block_keys_with_rounding(
+                        ctx,
+                        &pass,
+                        idx_keys,
+                        &w.indexer.k_norm,
+                        blk_keys,
+                        ratio,
+                        block,
+                        1,
+                        self.config.rotary_dim(),
+                        self.config.rope_parameters.rope_theta,
+                        self.config.rms_norm_eps,
+                        Rope::Delta(state.rope_delta),
+                        self.config.norm_weight_bias(),
+                        self.config.official_mlx_rounding(),
+                    )?;
+                }
+            }
+        }
+        pass.commit_wait()?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn attn_verify_exact(
         &self,
@@ -3827,6 +4035,7 @@ impl Qwen4ExpModel {
         blk_keys: &Tensor,
         pos: usize,
         delta: i64,
+        sibling_depth: Option<usize>,
     ) -> Result<()> {
         let cfg = &self.config;
         let (m, nq, hd) = (ps.m, cfg.num_attention_heads, cfg.head_dim);
@@ -3881,6 +4090,38 @@ impl Qwen4ExpModel {
                     delta,
                     cfg.norm_weight_bias(),
                     true,
+                )?;
+            }
+        } else if let Some(depth) = sibling_depth {
+            let last = m - 1;
+            let nkv = cfg.num_key_value_heads;
+            // Last physical row follows the sibling's logical rotary position.
+            for (first, count, logical) in [(0, last, 0), (last, 1, depth)] {
+                let phase = delta + logical as i64 - first as i64;
+                q_norm_rope_split_decode_rows(
+                    ctx,
+                    pass,
+                    &ps.qg.view(first * nq * 2 * hd, &[count, nq * 2 * hd])?,
+                    &w.q_norm,
+                    &ps.q.view(first * nq * hd, &[count, nq, hd])?,
+                    &ps.gate.view(first * nq * hd, &[count, nq, hd])?,
+                    rot,
+                    pos + first,
+                    theta,
+                    eps,
+                    phase,
+                )?;
+                k_norm_rope_scatter_decode_rows(
+                    ctx,
+                    pass,
+                    &ps.k_new.view(first * nkv * hd, &[count, nkv, hd])?,
+                    &w.k_norm,
+                    k_cache,
+                    rot,
+                    pos + first,
+                    theta,
+                    eps,
+                    phase,
                 )?;
             }
         } else {
@@ -3942,7 +4183,9 @@ impl Qwen4ExpModel {
         // Sparse rows use independent prefill scratch, so all short queries
         // can share the same dependency levels without changing split plans.
         let dense_rows = idx.dense_limit().saturating_sub(pos).min(m);
-        for row in 0..dense_rows {
+        // Fork admission requires the entire packet to fit the dense window.
+        let primary_rows = dense_rows - usize::from(sibling_depth.is_some());
+        for row in 0..primary_rows {
             let at = pos + row;
             let query = ps.q.view(row * nq * hd, &[nq, hd])?;
             let output = ps.attn_o.view(row * nq * hd, &[nq, hd])?;
@@ -3959,6 +4202,39 @@ impl Qwen4ExpModel {
             )?;
             // The following dense row reuses the ordinary partials.
             pass.level_barrier(&[])?;
+        }
+        if let Some(depth) = sibling_depth {
+            let leaf = m - 1;
+            let nkv = cfg.num_key_value_heads;
+            let at = pos + depth;
+            // All primary queries have consumed their cache entries. Install
+            // the leaf at its logical slot for ordinary dense decode, then
+            // restore the primary. Both take the original quantization path.
+            let write_row = |source: usize| -> Result<()> {
+                let key = ps.k_new.view(source * nkv * hd, &[1, nkv, hd])?;
+                let value = ps.v_new.view(source * nkv * hd, &[1, nkv, hd])?;
+                k_norm_rope_scatter_decode_rows(
+                    ctx, pass, &key, &w.k_norm, k_cache, rot, at, theta, eps, delta,
+                )?;
+                scatter_kv(ctx, pass, v_cache, &value, at)?;
+                pass.level_barrier(&[])
+            };
+            write_row(leaf)?;
+            let query = ps.q.view(leaf * nq * hd, &[nq, hd])?;
+            let output = ps.attn_o.view(leaf * nq * hd, &[nq, hd])?;
+            sdpa_decode(
+                ctx,
+                pass,
+                &query,
+                k_cache,
+                v_cache,
+                &output,
+                at + 1,
+                self.attn_scale,
+                Some((&s.sdpa_partials, &s.sdpa_stats)),
+            )?;
+            pass.level_barrier(&[])?;
+            write_row(depth)?;
         }
         let sparse_rows = m - dense_rows;
         if sparse_rows > 0 {

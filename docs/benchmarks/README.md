@@ -400,6 +400,8 @@ materially, so the [power-mode study](QWEN38_POWER_MODES_2026_10_29.md) does not
 isolate a causal mode effect. All 60 outputs match their references, the
 77–80 tok/s target remains unmet, and the original preferences are restored.
 
+The [Flash Next three-slot MTP runner-up experiment](../model-experiments/2026-11-25-flashnext-mtp-runner-up.md) reports short-prompt, held-out worker results. The candidate reached 68.10 tok/s on prose and 96.04 tok/s on coding, versus 83.04 and 98.29 for the shipped adaptive schedule.
+
 ## Host request latency
 
 **Native chat-template isolation (2026-11-03).** A fresh Rust helper reduces

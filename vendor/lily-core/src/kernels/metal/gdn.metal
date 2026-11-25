@@ -242,7 +242,8 @@ kernel void gdn_verify_gated_exact(device const bfloat* qkv [[buffer(0)]],
 // writing to a separate buffer; rollback reruns this same kernel from that
 // state over the accepted rows only (replay), which reproduces ordinary
 // decode's state bytes for every accepted prefix.
-kernel void gdn_verify_gated_exact_register(device const bfloat* qkv [[buffer(0)]],
+template <bool FORK>
+kernel void stark_gdn_verify_rows(device const bfloat* qkv [[buffer(0)]],
                                            device const bfloat* a [[buffer(1)]],
                                            device const bfloat* b [[buffer(2)]],
                                            device const float* a_log [[buffer(3)]],
@@ -258,7 +259,7 @@ kernel void gdn_verify_gated_exact_register(device const bfloat* qkv [[buffer(0)
                                            constant float& scale [[buffer(13)]],
                                            constant float& eps [[buffer(14)]],
                                            constant uint& gate_act [[buffer(15)]],
-                                           uint h [[threadgroup_position_in_grid]],
+                                           uint2 group [[threadgroup_position_in_grid]],
                                            uint tid [[thread_index_in_threadgroup]],
                                            uint sg [[simdgroup_index_in_threadgroup]],
                                            uint lane [[thread_index_in_simdgroup]]) {
@@ -269,6 +270,11 @@ kernel void gdn_verify_gated_exact_register(device const bfloat* qkv [[buffer(0)
     threadgroup float gates[4];
     threadgroup float norm_part[DIM / 32];
     threadgroup float inv_rms;
+    const uint h = group.x;
+    const bool leaf = FORK && group.y == 1;
+    const uint rows = FORK ? (M & 65535u) : M;
+    const uint depth = M >> 16;
+    const uint length = FORK ? (leaf ? depth + 1 : rows - 1) : rows;
     const uint C = (2 * HK + H) * DIM;
     const uint hk = h / (H / HK);
     device const float* st = state_in + (ulong)h * DIM * DIM;
@@ -276,7 +282,8 @@ kernel void gdn_verify_gated_exact_register(device const bfloat* qkv [[buffer(0)
     for (uint k0 = 0; k0 < DIM; ++k0) {
         column[k0] = st[k0 * DIM + tid];
     }
-    for (uint row = 0; row < M; ++row) {
+    for (uint step = 0; step < length; ++step) {
+        const uint row = leaf && step == depth ? rows - 1 : step;
         device const bfloat* raw = qkv + (ulong)row * C;
         float qv = float(raw[hk * DIM + tid]);
         float kv = float(raw[(HK + hk) * DIM + tid]);
@@ -351,14 +358,31 @@ kernel void gdn_verify_gated_exact_register(device const bfloat* qkv [[buffer(0)
         const ulong at = ((ulong)row * H + h) * DIM + tid;
         const float gate = float(z[at]);
         const float act = gate_activation(gate, gate_act);
-        out[at] = bfloat(norm_w[tid] * rv * inv_rms * act);
+        if (!leaf || step == depth) {
+            out[at] = bfloat(norm_w[tid] * rv * inv_rms * act);
+        }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
+    if (leaf) return;
     device float* final_state = state_out + (ulong)h * DIM * DIM;
     for (uint k0 = 0; k0 < DIM; ++k0) {
         final_state[k0 * DIM + tid] = column[k0];
     }
 }
+
+template [[host_name("gdn_verify_gated_exact_register")]] kernel void
+stark_gdn_verify_rows<false>(
+    device const bfloat*, device const bfloat*, device const bfloat*, device const float*,
+    device const bfloat*, device const float*, device const bfloat*, device const float*,
+    device bfloat*, device float*, constant uint&, constant uint&, constant uint&,
+    constant float&, constant float&, constant uint&, uint2, uint, uint, uint);
+
+template [[host_name("stark_gdn_verify_fork")]] kernel void
+stark_gdn_verify_rows<true>(
+    device const bfloat*, device const bfloat*, device const bfloat*, device const float*,
+    device const bfloat*, device const float*, device const bfloat*, device const float*,
+    device bfloat*, device float*, constant uint&, constant uint&, constant uint&,
+    constant float&, constant float&, constant uint&, uint2, uint, uint, uint);
 
 // Normalizes q/k rows for the register scan.
 kernel void gdn_qk_l2norm(device const bfloat* qkv   [[buffer(0)]],  // [M, C]

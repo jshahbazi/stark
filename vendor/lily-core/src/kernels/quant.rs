@@ -400,6 +400,7 @@ pub(crate) fn gemv_q4_gdn_conv_rows_exact(
     conv_w: &Tensor,
     conv_out: &Tensor,
     capture: Option<&Tensor>,
+    sibling_depth: Option<usize>,
 ) -> Result<()> {
     let (n, k) = check_quant(w)?;
     ensure!(w.bits == 4 && n.is_multiple_of(2), "GDN rows require Q4 row pairs");
@@ -437,11 +438,16 @@ pub(crate) fn gemv_q4_gdn_conv_rows_exact(
     let (ib, io) = window_in.binding();
     let (ob, oo) = window_out.binding();
     ensure!(!(std::ptr::eq(ib, ob) && io == oo), "GDN rows windows must be distinct");
-    let kernel = match m {
-        1 => "stark_q4_gdn_conv_rows_m1",
-        2 => "stark_q4_gdn_conv_rows_m2",
-        3 => "stark_q4_gdn_conv_rows_m3",
-        4 => "stark_q4_gdn_conv_rows_m4",
+    if let Some(depth) = sibling_depth {
+        ensure!(capture.is_some() && depth > 0 && depth + 1 < m, "invalid fork depth");
+    }
+    let kernel = match (m, sibling_depth) {
+        (3, Some(_)) => "stark_q4_gdn_conv_rows_m3_fork",
+        (4, Some(_)) => "stark_q4_gdn_conv_rows_m4_fork",
+        (1, None) => "stark_q4_gdn_conv_rows_m1",
+        (2, None) => "stark_q4_gdn_conv_rows_m2",
+        (3, None) => "stark_q4_gdn_conv_rows_m3",
+        (4, None) => "stark_q4_gdn_conv_rows_m4",
         _ => unreachable!(),
     };
     let pipeline = ctx.pipeline(kernel, GDN_ROWS_SOURCE, MslVersion::V3_1)?;
@@ -468,7 +474,7 @@ pub(crate) fn gemv_q4_gdn_conv_rows_exact(
             &u32_bytes(c),
             &u32_bytes(v),
             &u32_bytes(h),
-            &u32_bytes(usize::from(capture.is_some())),
+            &u32_bytes(sibling_depth.unwrap_or(usize::from(capture.is_some()))),
             &u32_bytes(4),
         ],
         Grid::Threadgroups { groups: (n / 2, 1, 1), threadgroup: (32, 1, 1) },

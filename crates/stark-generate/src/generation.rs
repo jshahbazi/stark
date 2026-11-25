@@ -38,11 +38,13 @@ pub(crate) struct MtpScheduling {
     pub adaptive: bool,
     /// `"mtp_lookup": true`: prompt-lookup proposals when the output copies.
     pub lookup: bool,
+    /// Give one of three verifier slots to the draft head's runner-up.
+    pub self_correction: bool,
 }
 
 impl MtpScheduling {
     pub fn is_default(self) -> bool {
-        !self.adaptive && !self.lookup
+        !self.adaptive && !self.lookup && !self.self_correction
     }
 
     pub fn policy(self) -> &'static str {
@@ -158,6 +160,8 @@ enum Request {
         mtp_policy: Option<String>,
         #[serde(default, deserialize_with = "present_value")]
         mtp_lookup: Option<bool>,
+        #[serde(default)]
+        mtp_self_correction: bool,
         #[serde(default)]
         stop_token_ids: Vec<u32>,
         #[serde(default)]
@@ -619,6 +623,9 @@ pub(crate) trait GenerationBackend {
     fn supports_mtp_scheduling(&self) -> bool {
         false
     }
+    fn supports_mtp_self_correction(&self) -> bool {
+        false
+    }
     /// The round schedule for a request with MTP on that names neither
     /// `mtp_policy` nor `mtp_lookup`. Fixed with lookup off unless the loaded
     /// model qualified another one; requires scheduling support.
@@ -878,6 +885,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         &self,
         policy: Option<String>,
         lookup: Option<bool>,
+        self_correction: bool,
         explicit_drafts: bool,
         drafts: &mut u32,
     ) -> Result<MtpScheduling, &'static str> {
@@ -896,6 +904,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         let scheduling = MtpScheduling {
             adaptive,
             lookup: lookup.unwrap_or(defaults.lookup),
+            self_correction,
         };
         if scheduling.is_default() {
             return Ok(scheduling);
@@ -904,6 +913,9 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             return Err("invalid_generation_request");
         }
         if !self.backend.supports_mtp_scheduling() {
+            return Err("mtp_not_supported");
+        }
+        if self_correction && !self.backend.supports_mtp_self_correction() {
             return Err("mtp_not_supported");
         }
         if adaptive && !explicit_drafts {
@@ -936,6 +948,14 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             return Err("invalid_generation_request");
         }
         self.resolve_mtp(None, Some(options.mtp_drafts))?;
+        if options.mtp_scheduling.self_correction
+            && (options.mtp_drafts != 3
+                || options.mtp_scheduling.adaptive
+                || options.mtp_scheduling.lookup
+                || !matches!(options.sampling, Sampling::Greedy {}))
+        {
+            return Err("invalid_generation_request");
+        }
         if !options.mtp_scheduling.is_default() && (options.mtp_drafts == 0 || !self.backend.supports_mtp_scheduling())
         {
             return Err("invalid_generation_request");
@@ -1115,6 +1135,9 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     fields.insert(name.to_owned(), expected);
                 }
             }
+            if options.mtp_scheduling.self_correction {
+                fields.insert("self_correction".into(), json!(true));
+            }
             if effective_drafts != requested_drafts {
                 fields.insert("requested_drafts".to_owned(), json!(requested_drafts));
                 fields.insert("fallback_reason".to_owned(), json!("unsupported_sampling"));
@@ -1254,6 +1277,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 mtp_drafts,
                 mtp_policy,
                 mtp_lookup,
+                mtp_self_correction,
                 stop_token_ids,
                 stream,
                 stop,
@@ -1262,8 +1286,13 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             } => {
                 let cache_scope = self.resolve_cache_scope(cache_scope)?;
                 let mut drafts = self.resolve_default_mtp(mtp, mtp_drafts, &sampling)?;
-                let mtp_scheduling =
-                    self.resolve_mtp_scheduling(mtp_policy, mtp_lookup, mtp_drafts.is_some(), &mut drafts)?;
+                let mtp_scheduling = self.resolve_mtp_scheduling(
+                    mtp_policy,
+                    mtp_lookup,
+                    mtp_self_correction,
+                    mtp_drafts.is_some(),
+                    &mut drafts,
+                )?;
                 let options = GenerationOptions {
                     context_tokens,
                     max_new_tokens,
@@ -1643,6 +1672,9 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         readiness["mtp"]["default_policy"] = json!(worker.default_mtp_scheduling.policy());
         readiness["mtp"]["default_lookup"] = json!(worker.default_mtp_scheduling.lookup);
         readiness["mtp"]["lookup"] = json!(true);
+        if worker.backend.supports_mtp_self_correction() {
+            readiness["mtp"]["self_correction"] = json!(true);
+        }
     }
     if worker.media.is_some() && worker.backend.supports_images() {
         let identity = worker
@@ -1902,6 +1934,9 @@ mod tests {
         }
         fn supports_mtp_scheduling(&self) -> bool {
             self.mtp_scheduling
+        }
+        fn supports_mtp_self_correction(&self) -> bool {
+            self.mtp_scheduling && self.mtp.is_some_and(|caps| caps.max_drafts >= 3)
         }
         fn default_mtp_scheduling(&self) -> MtpScheduling {
             self.default_scheduling
@@ -2416,15 +2451,18 @@ mod tests {
                 MtpScheduling::default(),
                 MtpScheduling {
                     adaptive: true,
-                    lookup: false
+                    lookup: false,
+                    self_correction: false,
                 },
                 MtpScheduling {
                     adaptive: true,
-                    lookup: true
+                    lookup: true,
+                    self_correction: false,
                 },
                 MtpScheduling {
                     adaptive: false,
-                    lookup: true
+                    lookup: true,
+                    self_correction: false,
                 },
             ]
         );
@@ -2453,9 +2491,46 @@ mod tests {
         assert_eq!(worker.backend.generation_calls, calls + 1);
     }
 
+    #[test]
+    fn runner_up_requires_greedy_fixed_three_slots_and_is_request_scoped() {
+        let mut candidate = standard();
+        candidate["mtp_drafts"] = json!(3);
+        candidate["mtp_policy"] = json!("fixed");
+        candidate["mtp_lookup"] = json!(false);
+        candidate["mtp_self_correction"] = json!(true);
+        let mut unsupported = mtp_worker(3, 2);
+        assert_eq!(post(&mut unsupported, candidate.clone())["error"], "mtp_not_supported");
+        let mut worker = scheduled_default_worker();
+        assert_eq!(readiness(&mut worker)["mtp"]["self_correction"], true);
+        for (key, value, error) in [
+            ("mtp_drafts", json!(2), "invalid_generation_request"),
+            ("mtp_drafts", json!(0), "invalid_generation_request"),
+            ("mtp_policy", json!("adaptive"), "invalid_generation_request"),
+            ("mtp_lookup", json!(true), "invalid_generation_request"),
+            ("sampling", json!({"mode":"stochastic","temperature":0.6}), "invalid_generation_request"),
+            ("mtp_self_correction", Value::Null, "invalid_request"),
+        ] {
+            let mut invalid = candidate.clone();
+            invalid[key] = value;
+            assert_eq!(post(&mut worker, invalid)["error"], error, "{key}");
+        }
+        assert_eq!(worker.backend.generation_calls, 0);
+        let reply = post(&mut worker, candidate.clone());
+        assert_eq!(reply["mtp"]["self_correction"], true);
+        assert_eq!(reply["mtp"]["policy"], "fixed");
+        assert_eq!(reply["mtp"]["lookup"], false);
+        assert!(worker.backend.scheduling_requests.last().unwrap().self_correction);
+        candidate["mtp_self_correction"] = json!(false);
+        let control = post(&mut worker, candidate);
+        assert!(control.get("error").is_none());
+        assert!(control["mtp"].get("self_correction").is_none());
+        assert_eq!(worker.backend.scheduling_requests.last(), Some(&MtpScheduling::default()));
+    }
+
     const ADAPTIVE_LOOKUP: MtpScheduling = MtpScheduling {
         adaptive: true,
         lookup: true,
+        self_correction: false,
     };
 
     /// A scheduling backend whose loaded model defaults to the adaptive
@@ -2519,6 +2594,7 @@ mod tests {
                 MtpScheduling {
                     adaptive: false,
                     lookup: true,
+                    self_correction: false,
                 },
                 (json!("fixed"), json!(true)),
             ),
@@ -2528,6 +2604,7 @@ mod tests {
                 MtpScheduling {
                     adaptive: true,
                     lookup: false,
+                    self_correction: false,
                 },
                 (json!("adaptive"), json!(false)),
             ),
@@ -2543,6 +2620,7 @@ mod tests {
                 MtpScheduling {
                     adaptive: false,
                     lookup: true,
+                    self_correction: false,
                 },
                 (json!("fixed"), json!(true)),
             ),
@@ -2552,6 +2630,7 @@ mod tests {
                 MtpScheduling {
                     adaptive: true,
                     lookup: false,
+                    self_correction: false,
                 },
                 (json!("adaptive"), json!(false)),
             ),

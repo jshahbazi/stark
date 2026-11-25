@@ -4,6 +4,61 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// Monotone integer ranks preserve every finite IEEE comparison, including ties
+// between signed zeros, independently of the GPU's denormal handling.
+static inline uint runner_rank(uint bits) {
+    if ((bits << 1) == 0) bits = 0;
+    return (bits >> 31) ? ~bits : (bits ^ 0x80000000u);
+}
+
+kernel void stark_runner_partial(
+    device const uint* logits [[buffer(0)]],
+    device const uint* primary [[buffer(1)]],
+    device uint2* parts [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    constant uint& groups [[buffer(4)]],
+    uint g [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup uint2 local_best[8];
+    uint rank = 0, id = 0xffffffffu;
+    for (uint i = g * 256 + tid; i < count; i += groups * 256) {
+        uint r = runner_rank(logits[i]);
+        if (i != primary[0] && (r > rank || (r == rank && i < id))) {
+            rank = r;
+            id = i;
+        }
+    }
+    uint best = simd_max(rank);
+    uint first = simd_min(rank == best ? id : 0xffffffffu);
+    if (lane == 0) local_best[sg] = uint2(best, first);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        uint2 p = local_best[0];
+        for (uint i = 1; i < 8; ++i) {
+            uint2 q = local_best[i];
+            if (q.x > p.x || (q.x == p.x && q.y < p.y)) p = q;
+        }
+        parts[g] = p;
+    }
+}
+
+kernel void stark_runner_finish(
+    device const float* logits [[buffer(0)]],
+    device const uint* primary [[buffer(1)]],
+    device const uint2* parts [[buffer(2)]],
+    device uint* out [[buffer(3)]],
+    constant uint& groups [[buffer(4)]]) {
+    uint2 p = parts[0];
+    for (uint i = 1; i < groups; ++i) {
+        uint2 q = parts[i];
+        if (q.x > p.x || (q.x == p.x && q.y < p.y)) p = q;
+    }
+    out[0] = p.y;
+    out[1] = as_type<uint>(logits[primary[0]] - logits[p.y]);
+}
+
 kernel void stark_reject_nonfinite_readout_f32(
     device const uint* logits_bits [[buffer(0)]],
     device atomic_uint* next_token [[buffer(1)]],

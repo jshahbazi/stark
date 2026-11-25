@@ -63,6 +63,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ### Speculation, draft policy and verification
 
+- [Flash Next three-slot MTP runner-up on held-out prose and coding](2026-11-25-flashnext-mtp-runner-up.md) · Experiment, 2026-11-25
 - [Flash Next Lily one-draft recommendation study](../benchmarks/2026-11-15-flashnext-lily-one-draft-default.md) · Benchmark, 2026-11-15
 - [Lily long coding response comparison](../benchmarks/2026-11-15-lily-long-coding-response.md) · Benchmark, 2026-11-15
 - [Lily projection reuse with a very long public benchmark input](../benchmarks/2026-11-15-lily-long-context-infinitebench.md) · Benchmark, 2026-11-15

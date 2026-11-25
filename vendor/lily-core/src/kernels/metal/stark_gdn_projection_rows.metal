@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Stark private candidate: exact short Q4 projection/convolution/scatter.
 // quant.metal and stark_packed_rows.metal precede this source.
-template <uint M>
+template <uint M, bool FORK>
 static inline void stark_q4_gdn_conv_rows_body(
     device const uint* codes, device const bfloat* scales,
     device const bfloat* biases, device const bfloat* input,
@@ -29,6 +29,15 @@ static inline void stark_q4_gdn_conv_rows_body(
             win[t] = float(window_in[channel * taps + t]);
         }
         for (uint m = 0; m < M; ++m) {
+            if (FORK && m + 1 == M) {
+                // The leaf follows rows [0, depth), regardless of its physical slot.
+                const uint depth = capture_enabled;
+                for (uint t = 0; t < taps; ++t) {
+                    const uint src = depth + t;
+                    win[t] = src < taps ? float(window_in[channel * taps + src])
+                                        : float(bfloat(sums[src - taps]));
+                }
+            }
             const bfloat projected = bfloat(sums[m]);
             qkv[(ulong)m * C + channel] = projected;
             if (capture_enabled != 0) {
@@ -72,7 +81,7 @@ static inline void stark_q4_gdn_conv_rows_body(
     }
 }
 
-#define STARK_GDN_PROJECTION_ROWS(NAME, M) \
+#define STARK_GDN_PROJECTION_ROWS(NAME, M, FORK) \
 kernel void NAME( \
     device const uint* codes [[buffer(0)]], \
     device const bfloat* scales [[buffer(1)]], \
@@ -96,12 +105,14 @@ kernel void NAME( \
     constant uint& KD [[buffer(19)]], \
     uint group [[threadgroup_position_in_grid]], \
     uint lane [[thread_index_in_threadgroup]]) { \
-    stark_q4_gdn_conv_rows_body<M>( \
+    stark_q4_gdn_conv_rows_body<M, FORK>( \
         codes, scales, biases, input, qkv, z, a, b, window_in, window_out, \
         conv_w, conv_out, capture, K, GS, C, V, H, KD, capture_enabled, group, lane); \
 }
-STARK_GDN_PROJECTION_ROWS(stark_q4_gdn_conv_rows_m1, 1)
-STARK_GDN_PROJECTION_ROWS(stark_q4_gdn_conv_rows_m2, 2)
-STARK_GDN_PROJECTION_ROWS(stark_q4_gdn_conv_rows_m3, 3)
-STARK_GDN_PROJECTION_ROWS(stark_q4_gdn_conv_rows_m4, 4)
+STARK_GDN_PROJECTION_ROWS(stark_q4_gdn_conv_rows_m1, 1, false)
+STARK_GDN_PROJECTION_ROWS(stark_q4_gdn_conv_rows_m2, 2, false)
+STARK_GDN_PROJECTION_ROWS(stark_q4_gdn_conv_rows_m3, 3, false)
+STARK_GDN_PROJECTION_ROWS(stark_q4_gdn_conv_rows_m4, 4, false)
+STARK_GDN_PROJECTION_ROWS(stark_q4_gdn_conv_rows_m3_fork, 3, true)
+STARK_GDN_PROJECTION_ROWS(stark_q4_gdn_conv_rows_m4_fork, 4, true)
 #undef STARK_GDN_PROJECTION_ROWS

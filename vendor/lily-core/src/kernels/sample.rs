@@ -459,6 +459,39 @@ pub fn argmax_chain_f32(
     reject_nonfinite_readout_f32(ctx, pass, logits, flag)
 }
 
+/// Returns the best distinct ID after the ordinary primary and its logit gap.
+pub(crate) fn runner_up_f32(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    logits: &Tensor,
+    scratch: &SamplerScratch,
+    primary: &Tensor,
+    output: &Tensor,
+) -> Result<()> {
+    let count = logits.numel();
+    ensure!(count >= 2 && output.numel() == 2, "invalid runner-up dimensions");
+    let groups = ARGMAX_GROUPS;
+    let partials = &scratch.argmax_partials;
+    let partial =
+        ctx.pipeline("stark_runner_partial", FINITE_SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &partial,
+        &[logits.binding(), primary.binding(), partials.binding()],
+        &[&u32_bytes(count), &u32_bytes(groups)],
+        Grid::Threadgroups { groups: (groups, 1, 1), threadgroup: (256, 1, 1) },
+    )?;
+    pass.level_barrier(&[partials])?;
+    let finish =
+        ctx.pipeline("stark_runner_finish", FINITE_SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &finish,
+        &[logits.binding(), primary.binding(), partials.binding(), output.binding()],
+        &[&u32_bytes(groups)],
+        Grid::Threads { grid: (1, 1, 1), threadgroup: (1, 1, 1) },
+    )?;
+    pass.level_barrier(&[output, logits, partials])
+}
+
 /// The draft head's draw of one proposal: as [`sample_f32`], and under a
 /// sampler that samples the kept distribution goes to `dist` for the
 /// verify pass. Greedy proposals (an argmax) export nothing: the verify
@@ -527,6 +560,127 @@ mod stark_finite_tests {
             }
         }
         best as u32
+    }
+
+    #[test]
+    #[ignore = "requires a physical Apple Silicon Metal device"]
+    fn runner_up_matches_host_first_distinct_max_and_half_probability_gate()
+    -> Result<()> {
+        let ctx = MetalContext::new()?;
+        let mut checked = 0;
+        let mut state = 13_579u32;
+        let mut run_size = |count: usize| -> Result<()> {
+            let scratch = SamplerScratch::new(&ctx, count)?;
+            let backing = Tensor::zeros(&ctx, &[count + 2], DType::F32)?;
+            let logits = backing.view(1, &[count])?;
+            let words = Tensor::zeros(&ctx, &[6], DType::U32)?;
+            let primary = words.view(1, &[1])?;
+            let status = words.view(2, &[1])?;
+            let pair = words.view(3, &[2])?;
+            let mut values = vec![0.0f32; count];
+            let mut run = |values: &[f32]| -> Result<()> {
+                let invalid = !values.iter().all(|v| v.is_finite());
+                let first = host_first_max(values) as usize;
+                let mut second = usize::from(first == 0);
+                for (i, &value) in values.iter().enumerate() {
+                    if i != first && value > values[second] {
+                        second = i;
+                    }
+                }
+                let gap = values[first] - values[second];
+                let padding = 0xfeed_face;
+                let mut padded = vec![f32::NAN; count + 2];
+                padded[1..=count].copy_from_slice(values);
+                backing.write_bytes(bytemuck::cast_slice(&padded))?;
+                words.write_bytes(bytemuck::cast_slice(&[
+                    padding,
+                    first as u32,
+                    0,
+                    padding,
+                    padding,
+                    padding,
+                ]))?;
+                let pass = ctx.begin_concurrent()?;
+                // A tiny primary is recomputed by the policy on the host.
+                // Supplying its exact ID here isolates the runner reduction.
+                if invalid || values[first].to_bits() & 0x7f80_0000 != 0 {
+                    argmax_chain_f32(
+                        &ctx, &pass, &logits, &scratch, &primary, &status,
+                    )?;
+                }
+                runner_up_f32(&ctx, &pass, &logits, &scratch, &primary, &pair)?;
+                pass.commit_wait()?;
+                let actual = words.to_u32()?;
+                let actual_gap = f32::from_bits(actual[4]);
+                ensure!(
+                    actual[0] == padding && actual[5] == padding,
+                    "runner-up output extent"
+                );
+                if invalid {
+                    ensure!(actual[2] == u32::MAX, "runner-up nonfinite flag");
+                    ensure!(
+                        (actual[1] as usize) < count
+                            && (actual[3] as usize) < count
+                            && actual[1] != actual[3],
+                        "runner-up nonfinite ID bounds"
+                    );
+                    checked += 1;
+                    return Ok(());
+                }
+                ensure!(
+                    actual[1] == first as u32 && actual[2] == 0,
+                    "runner-up primary selection"
+                );
+                ensure!(actual[3] == second as u32, "runner-up distinct selection");
+                ensure!(
+                    (actual_gap <= std::f32::consts::LN_2)
+                        == (gap <= std::f32::consts::LN_2),
+                    "runner-up gate"
+                );
+                if gap.is_normal() || gap.is_infinite() {
+                    ensure!(actual_gap == gap, "runner-up score gap");
+                }
+                checked += 1;
+                Ok(())
+            };
+            for value in &mut values {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *value = ((state >> 9) % 256) as f32 - 135.0;
+            }
+            run(&values)?;
+            for extreme in [-f32::MAX, -0.0, f32::from_bits(1), f32::MAX] {
+                values.fill(extreme);
+                run(&values)?;
+            }
+            values.fill(-f32::MAX);
+            values[count - 1] = f32::MAX;
+            run(&values)?;
+            for (i, value) in values.iter_mut().enumerate() {
+                *value = [-0.0, 0.0, -f32::from_bits(2), f32::from_bits(1)][i % 4];
+            }
+            run(&values)?;
+            let threshold = std::f32::consts::LN_2.to_bits();
+            for bits in [threshold - 1, threshold, threshold + 1] {
+                values.fill(-12.0);
+                values[count - 1] = f32::from_bits(bits);
+                values[count / 3] = 0.0;
+                run(&values)?;
+            }
+            for value in
+                [f32::NAN, f32::from_bits(u32::MAX), f32::NEG_INFINITY, f32::INFINITY]
+            {
+                values.fill(value);
+                run(&values)?;
+                values[count / 2] = 1.0;
+                run(&values)?;
+            }
+            Ok(())
+        };
+        for count in [2, 3, 255, 256, 257, 16_383, 16_385, 248_320] {
+            run_size(count)?;
+        }
+        println!("runner_up_rank_and_gate_cases={checked}");
+        Ok(())
     }
 
     #[test]

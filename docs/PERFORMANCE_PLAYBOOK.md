@@ -1,6 +1,6 @@
 # Performance playbook
 
-What to try when making a model family faster on Stark, in roughly the order to try it, with what each idea returned on Qwen3.8-Flash-Next ("Lily"). Compiled 2026-11-19 and updated 2026-11-23 from the records listed at the end.
+What to try when making a model family faster on Stark, in roughly the order to try it, with what each idea returned on Qwen3.8-Flash-Next ("Lily"). Compiled 2026-11-19 and updated 2026-11-25 from the records listed at the end.
 
 This page summarizes records; it is not one. Every number was measured on a named artifact, build, workload and host, and keeps that scope. Nothing here qualifies another artifact, and where this page and a dated record differ, the record is right. A technique that paid on Lily has to be measured again on the next family. One that failed on Lily failed for a stated reason, and the reason is the thing to check before trying it again.
 
@@ -371,6 +371,10 @@ A 4-gram index over the prompt and committed output proposes the tokens that fol
 Lily's limit is 3. A plan for 8 is in the [depth policy record][depth]. It is deferred: at Lily's row cost a fourth head draft does not pay, and the GDN input projection kernel exists only for 1 to 4 rows with a cost that climbs at rows 3 and 4. Deeper limits would mainly help lookup rounds, which pay no draft steps.
 
 The desktop app is bounded lower still. Its paged-residency memory profile for the pinned artifact allows two drafts, and raising that needs a memory qualification ([schedule gate][gate]).
+
+#### Spending one slot on the head's second choice
+
+On the M5 Max, a fixed-three Lily verifier using a low-margin sibling recovered 72 prose misses while displacing 46 correct third tokens. Coding recovered and displaced 33 each. Across 12 held-out prompts per domain, useful decode changed +1.13% on prose and +0.12% on coding versus fixed three. Both paired intervals included zero. The shipped adaptive policy reached 83.04 and 98.29 tok/s against 68.10 and 96.04 for the sibling. Keep the adaptive policy for this artifact. The fork was exercised in the dense attention window on short greedy requests. [Full-model checks and paired results](model-experiments/2026-11-25-flashnext-mtp-runner-up.md)
 
 ### 6. Prefix and state reuse
 

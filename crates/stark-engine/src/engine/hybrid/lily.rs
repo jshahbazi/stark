@@ -587,6 +587,10 @@ impl LilyModel {
         self.mtp_capabilities().is_some()
     }
 
+    pub fn supports_mtp_self_correction(&self) -> bool {
+        self.model.max_drafts() >= 3 && self.model.supports_runner_up(0, 3)
+    }
+
     pub fn mtp_capabilities(&self) -> Option<super::MtpCapabilities> {
         let max_drafts = self.model.max_drafts();
         (max_drafts > 0).then(|| super::MtpCapabilities {
@@ -1039,9 +1043,21 @@ impl LilyModel {
             self.reset();
             return Err(error);
         }
+        let self_correction = options.self_correction;
+        if self_correction
+            && (drafts != 3
+                || !options.greedy
+                || !sampler.device_greedy_drafts()
+                || options.policy != super::mtp_policy::MtpPolicy::Fixed
+                || options.lookup.is_some()
+                || !self.supports_mtp_self_correction())
+        {
+            return Err(Error::Invalid("MTP runner-up requires fixed greedy three-slot Lily MTP"));
+        }
         self.last_full_readout = None;
         self.last_greedy = None;
-        let schedule = (!options.is_default()).then(|| {
+        self.mtp_stats.self_correction = self_correction.then(super::SiblingStats::default);
+        let schedule = (!self_correction && !options.is_default()).then(|| {
             let table = super::mtp_policy::CostTable::LILY_Q4_XL_LILYMERGE_01;
             let lookup =
                 options.lookup.map(|(context, newline)| super::mtp_lookup::PromptLookup::new(context, newline));
@@ -1053,8 +1069,11 @@ impl LilyModel {
         if let Some(schedule) = &schedule {
             self.mtp_stats.schedule = Some(schedule.stats());
         }
+        let runner_up_capacity = self.scratch_capacity.min(self.state.capacity()).min(self.max_context);
         Ok(MtpDecode {
             schedule,
+            self_correction,
+            runner_up_capacity,
             model: &self.model,
             context: &self.context,
             state: &mut self.state,
@@ -1345,6 +1364,8 @@ pub struct MtpDecode<'a> {
     /// Opt-in depth planner and prompt-lookup index; `None` runs `drafts`
     /// head drafts every round.
     schedule: Option<Box<super::mtp_policy::RoundScheduler>>,
+    self_correction: bool,
+    runner_up_capacity: usize,
 }
 
 impl MtpDecode<'_> {
@@ -1475,13 +1496,19 @@ impl MtpDecode<'_> {
         let gpu_busy_before = gpu_busy_snapshot();
         // The verify graph is encoded while the last draft pass runs. Greedy
         // drafts may chain on the device; they are recorded as point masses.
+        let mut sibling = None;
+        let eligible = self.self_correction
+            && self.model.supports_runner_up(self.state.pos, count)
+            && self.state.pos.saturating_add(count.min(2) + 2) <= self.runner_up_capacity;
         let proposals_result = if let super::mtp_policy::RoundPlan::Lookup(tokens) = &plan {
             self.undrafted_proposals(tokens.clone(), cap).map(|proposals| (proposals, None))
         } else if count > 0 {
             let sampler = &mut *self.sampler;
             let device_greedy = sampler.device_greedy_drafts();
-            self.model
-                .draft_host_encoding_verify(
+            let drafted = if eligible {
+                self.model.draft_host_with_runner_up(self.context, self.state, self.scratch, self.pending, count)
+            } else {
+                self.model.draft_host_encoding_verify(
                     self.context,
                     self.state,
                     self.scratch,
@@ -1492,13 +1519,15 @@ impl MtpDecode<'_> {
                         sampler.draft(logits).map_err(|_| std::io::Error::other("MTP draft selection failed").into())
                     },
                 )
-                .map_err(|_| Error::Invalid("MTP draft failed"))
-                .and_then(|drafted| {
-                    if drafted.device_selected {
-                        drafted.proposals.iter().try_for_each(|&token| sampler.draft_point_mass(token))?;
-                    }
-                    Ok((drafted.proposals, Some(drafted.verify)))
-                })
+            };
+            drafted.map_err(|_| Error::Invalid("MTP draft failed")).and_then(|drafted| {
+                sibling = drafted.sibling;
+                if drafted.device_selected {
+                    let primary_count = drafted.proposals.len() - usize::from(sibling.is_some());
+                    drafted.proposals[..primary_count].iter().try_for_each(|&token| sampler.draft_point_mass(token))?;
+                }
+                Ok((drafted.proposals, Some(drafted.verify)))
+            })
         } else {
             Ok((Vec::new(), None))
         };
@@ -1516,7 +1545,7 @@ impl MtpDecode<'_> {
             None => self.model.verify_host_batched(self.context, self.state, self.scratch, self.pending, &proposals),
         };
         record_gpu_busy_delta("qwen.mtp.verify.gpu_busy", gpu_busy_before);
-        let verified = verified_result.map_err(|error| {
+        let mut verified = verified_result.map_err(|error| {
             if profile::enabled() {
                 // Classify only fixed diagnostic guards. Never emit the
                 // framework error, request data, or an exception dump.
@@ -1539,26 +1568,59 @@ impl MtpDecode<'_> {
         profile::record("qwen.mtp.verify", elapsed, 0);
         record_gpu_profile_for(true);
         let mut accepted = 0;
+        let primary_count = proposals.len() - usize::from(sibling.is_some());
+        let mut first_miss = None;
+        let mut sibling_hit = false;
+        let mut truncated = false;
         {
             let _scope = profile::Scope::new("qwen.mtp.target_sampling");
             // Rows are borrowed and validated as they are consumed; rows
             // after the first rejection are never read.
-            for i in 0..verified.rows() {
+            for i in 0..=primary_count {
                 let readout = verified.row(i).map_err(|_| Error::Invalid("MTP verify failed"))?;
-                let proposal = proposals.get(i).copied();
+                let proposal = proposals[..primary_count].get(i).copied();
                 let token = self.sampler.target(readout, proposal)?;
                 if token as usize >= self.model.config.vocab_size {
                     return Err(Error::Invalid("MTP target output ID"));
                 }
                 self.queue.push_back(token);
-                if proposal != Some(token) {
-                    break;
+                if proposal == Some(token) {
+                    accepted += 1;
+                    continue;
                 }
-                accepted += 1;
+                if proposal.is_some() {
+                    first_miss = Some(i + 1);
+                }
+                if let Some((depth, discarded)) = sibling {
+                    truncated = i == primary_count && discarded == Some(token);
+                    if i == primary_count && discarded.is_some_and(|tail| tail != token) {
+                        first_miss = Some(primary_count + 1);
+                    }
+                    if i + 1 == depth && proposals.last() == Some(&token) {
+                        accepted += 1;
+                        sibling_hit = true;
+                        // The primary miss finished the sampler's round. The
+                        // sibling is a verified leaf with a fresh exact bonus draw.
+                        self.sampler.begin_round();
+                        let leaf =
+                            verified.row(verified.rows() - 1).map_err(|_| Error::Invalid("MTP sibling readout"))?;
+                        let bonus = self.sampler.target(leaf, None)?;
+                        if bonus as usize >= self.model.config.vocab_size {
+                            return Err(Error::Invalid("MTP sibling bonus ID"));
+                        }
+                        self.queue.push_back(bonus);
+                    }
+                }
+                break;
             }
         }
         let started = Instant::now();
         let gpu_busy_before = gpu_busy_snapshot();
+        if sibling_hit {
+            self.model
+                .select_host_sibling(self.context, self.state, self.scratch, &mut verified)
+                .map_err(|_| Error::Invalid("MTP sibling promotion failed"))?;
+        }
         let finish_result = self.model.finish_host_verify(self.context, self.state, self.scratch, &verified, accepted);
         record_gpu_busy_delta("qwen.mtp.finish.gpu_busy", gpu_busy_before);
         finish_result.map_err(|_| Error::Invalid("MTP rollback failed"))?;
@@ -1569,6 +1631,19 @@ impl MtpDecode<'_> {
         self.stats.proposed += proposals.len();
         self.stats.accepted += accepted;
         self.stats.verified_rows += proposals.len() + 1;
+        if let Some(stats) = &mut self.stats.self_correction {
+            stats.eligible_rounds += usize::from(eligible);
+            stats.first_misses += usize::from(first_miss.is_some());
+            if let Some((depth, discarded)) = sibling {
+                stats.packed_rounds += 1;
+                stats.primary_tail_truncated += usize::from(discarded.is_some());
+                stats.runner_up_depth[depth - 1] += 1;
+                stats.runner_up_offered_at_miss += usize::from(first_miss == Some(depth));
+                stats.sibling_hits += usize::from(sibling_hit);
+                stats.hits_by_depth[depth - 1] += usize::from(sibling_hit);
+                stats.primary_tail_would_hit += usize::from(truncated);
+            }
+        }
         if let Some(schedule) = &mut self.schedule {
             schedule.observe(&plan, accepted, self.queue.iter().copied(), round_started.elapsed().as_secs_f64());
             self.stats.schedule = Some(schedule.stats());
@@ -2134,6 +2209,132 @@ mod tests {
         probabilities
     }
 
+    /// Force each packet shape and every committed prefix. Print only
+    /// aggregate equality evidence for the supplied private checkpoint.
+    #[stark_test]
+    #[ignore]
+    fn private_checkpoint_runner_up_matches_serial() {
+        let path = std::env::var_os("STARK_TEST_MODEL_PATH").expect("private model fixture path");
+        let path = Path::new(&path);
+        let tokenizer = tokenizers::Tokenizer::from_file(path.join("tokenizer.json"))
+            .unwrap_or_else(|_| panic!("private tokenizer failed"));
+        let input = tokenizer
+            .encode("Consider three different alternatives for today.", false)
+            .unwrap_or_else(|_| panic!("private fixture tokenization failed"))
+            .get_ids()
+            .to_vec();
+        assert!(input.len() >= 4);
+        let mut model = LilyModel::load_with_options(path, true, true).unwrap();
+        let prefill = |model: &mut LilyModel| {
+            model.reset();
+            model.set_mtp_enabled(true).unwrap();
+            for &token in &input[..input.len() - 1] {
+                model.ingest(token).unwrap();
+            }
+            model.step(*input.last().unwrap()).unwrap();
+        };
+        fn head_readout(
+            model: &mut LilyModel,
+            pending: u32,
+        ) -> Vec<f32> {
+            let mut row = Vec::new();
+            model
+                .model
+                .draft_host(&model.context, &mut model.state, &mut model.scratch, pending, 1, &mut |values| {
+                    row.extend_from_slice(values);
+                    Ok(0)
+                })
+                .unwrap();
+            row
+        }
+        fn compare(
+            expected: &[f32],
+            actual: &[f32],
+            stage: &str,
+            depth: usize,
+            rows: usize,
+            keep: usize,
+        ) {
+            let different = expected.iter().zip(actual).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            assert!(
+                expected.len() == actual.len() && different == 0,
+                "stage={stage} depth={depth} rows={rows} keep={keep} unequal={different}"
+            );
+        }
+        let mut checked = 0;
+        for (rows, depth) in [(3, 1), (4, 1), (4, 2)] {
+            let packet = &input[..rows];
+            for promote in [false, true] {
+                let mut path = packet[..rows - 1].to_vec();
+                if promote {
+                    path.truncate(depth);
+                    path.push(packet[rows - 1]);
+                }
+                // Test early stop after every output in a packed round,
+                // including state already restored to its longest prefix.
+                for keep in 0..path.len() {
+                    prefill(&mut model);
+                    let expected = path.iter().map(|&t| model.step(t).unwrap()).collect::<Vec<_>>();
+                    prefill(&mut model);
+                    for &token in &path[..=keep] {
+                        model.step(token).unwrap();
+                    }
+                    let expected_head = head_readout(&mut model, input[0]);
+                    let expected_next = model.step(input[0]).unwrap();
+                    prefill(&mut model);
+                    model
+                        .model
+                        .advance_head_host(&model.context, &mut model.state, &mut model.scratch, packet[0])
+                        .unwrap();
+                    let mut verified = model
+                        .model
+                        .verify_host_packet(
+                            &model.context,
+                            &mut model.state,
+                            &mut model.scratch,
+                            packet[0],
+                            &packet[1..],
+                            Some(depth),
+                        )
+                        .unwrap();
+                    for (i, expected_row) in expected.iter().enumerate() {
+                        let row = if promote && i == depth {
+                            rows - 1
+                        } else {
+                            i
+                        };
+                        compare(expected_row, verified.row(row).unwrap(), "verify", depth, rows, keep);
+                        checked += 1;
+                    }
+                    if promote {
+                        model
+                            .model
+                            .select_host_sibling(&model.context, &model.state, &model.scratch, &mut verified)
+                            .unwrap();
+                    }
+                    model
+                        .model
+                        .finish_host_verify(&model.context, &mut model.state, &model.scratch, &verified, path.len() - 1)
+                        .unwrap();
+                    if keep + 1 < path.len() {
+                        model
+                            .model
+                            .finish_host_verify(&model.context, &mut model.state, &model.scratch, &verified, keep)
+                            .unwrap();
+                    }
+                    assert_eq!(model.state.pos, input.len() + keep + 1);
+                    let actual_head = head_readout(&mut model, input[0]);
+                    compare(&expected_head, &actual_head, "head", depth, rows, keep);
+                    checked += 1;
+                    let next = model.step(input[0]).unwrap();
+                    compare(&expected_next, &next, "continuation", depth, rows, keep);
+                    checked += 1;
+                }
+            }
+        }
+        println!("runner_up_exact_readouts={checked}");
+    }
+
     /// Full readouts stay in memory. Only numeric aggregate error/counts leave
     /// this ignored, explicitly supplied checkpoint control.
     #[stark_test]
@@ -2624,6 +2825,7 @@ mod tests {
             proposals: VecDeque::new(),
         };
         let options = MtpRoundOptions {
+            self_correction: false,
             policy: mtp_policy::MtpPolicy::Adaptive,
             greedy: true,
             lookup: None,

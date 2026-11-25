@@ -13,7 +13,7 @@ use super::spec::Rollback;
 use crate::engine::DecodeStateApi;
 use crate::kernels::{
     Rope,
-    sample::{CHAIN_ARGMAX_TINY, SamplingParams, argmax_chain_f32},
+    sample::{CHAIN_ARGMAX_TINY, SamplingParams, argmax_chain_f32, runner_up_f32},
 };
 use crate::metal::{BlitCopy, EncodedPass, MetalContext};
 use crate::moe_ffn::{prefix_rows, project_mat};
@@ -35,6 +35,7 @@ pub struct HostVerification {
     pos_before: usize,
     hist_before: Option<[u32; 2]>,
     tokens: Vec<u32>,
+    sibling_depth: Option<usize>,
 }
 
 impl HostVerification {
@@ -82,6 +83,7 @@ pub struct EncodedVerification<'a> {
     /// verify swaps them with the spec scratch's shadow (replay rollback),
     /// so an encoding is only valid against the states current at encode.
     gdn_states: Vec<usize>,
+    sibling_depth: Option<usize>,
 }
 
 /// Identities of every GDN layer's current recurrent state buffer.
@@ -103,6 +105,8 @@ pub struct HostDrafts<'a> {
     /// The device selected the proposals as greedy argmaxes; the sampler saw
     /// no draft readout and must record each proposal as a point mass.
     pub device_selected: bool,
+    /// Logical depth and the discarded primary tail for a packed fork.
+    pub sibling: Option<(usize, Option<u32>)>,
 }
 
 impl Qwen4ExpModel {
@@ -117,8 +121,27 @@ impl Qwen4ExpModel {
         pending: u32,
         drafts: &[u32],
     ) -> Result<HostVerification> {
+        self.verify_host_packet(ctx, state, s, pending, drafts, None)
+    }
+
+    /// Verify externally supplied candidates using the same packet geometry
+    /// as the greedy policy. The last input names the sibling when present.
+    pub fn verify_host_packet(
+        &self,
+        ctx: &MetalContext,
+        state: &mut DecodeState,
+        s: &mut Scratch,
+        pending: u32,
+        drafts: &[u32],
+        sibling_depth: Option<usize>,
+    ) -> Result<HostVerification> {
+        ensure!(
+            sibling_depth.is_none() || self.supports_runner_up(state.pos, drafts.len()),
+            "unsupported sibling packet"
+        );
         self.prepare_host_verification(ctx, state, s, drafts.len() + 1)?;
-        let encoded = self.encode_host_verification(ctx, state, s, drafts.len() + 1)?;
+        let encoded =
+            self.encode_host_packet(ctx, state, s, drafts.len() + 1, sibling_depth)?;
         self.verify_host_encoded(state, s, pending, drafts, encoded)
     }
 
@@ -151,6 +174,17 @@ impl Qwen4ExpModel {
         s: &Scratch,
         rows: usize,
     ) -> Result<EncodedVerification<'a>> {
+        self.encode_host_packet(ctx, state, s, rows, None)
+    }
+
+    fn encode_host_packet<'a>(
+        &self,
+        ctx: &'a MetalContext,
+        state: &DecodeState,
+        s: &Scratch,
+        rows: usize,
+        sibling_depth: Option<usize>,
+    ) -> Result<EncodedVerification<'a>> {
         let capacity =
             s.prefill.as_ref().ok_or_else(|| anyhow::anyhow!("candidate scratch"))?;
         ensure!(
@@ -161,7 +195,14 @@ impl Qwen4ExpModel {
             "invalid candidate verification state"
         );
         let ps = capacity.rows(rows)?;
-        let pass = self.encode_batch(ctx, state, s, &ps, BatchMode::VerifyHost)?;
+        let mode = match sibling_depth {
+            Some(depth) => {
+                ensure!(depth > 0 && depth + 1 < rows, "invalid sibling depth");
+                BatchMode::VerifyHostFork { depth }
+            }
+            None => BatchMode::VerifyHost,
+        };
+        let pass = self.encode_batch(ctx, state, s, &ps, mode)?;
         Ok(EncodedVerification {
             pass,
             rows,
@@ -170,6 +211,7 @@ impl Qwen4ExpModel {
             capacity: state.capacity(),
             scratch_ids: capacity.ids.identity(),
             gdn_states: gdn_state_identities(state),
+            sibling_depth,
         })
     }
 
@@ -215,7 +257,7 @@ impl Qwen4ExpModel {
             &ps.ple,
             &state.ple,
         ) {
-            self.stage_ngram(w, p, &tokens, pst.hist)?;
+            self.stage_ngram_packet(w, p, &tokens, pst.hist, encoded.sibling_depth)?;
         }
         let pos_before = state.pos;
         let hist_before = state.ple.as_ref().map(|p| p.hist);
@@ -223,7 +265,8 @@ impl Qwen4ExpModel {
         // The pass wrote every GDN layer's final state into the shadow and
         // left the pre-verify state in place: make the final states current
         // and keep the pre-verify ones for replay rollback.
-        let sp = s.spec.as_mut().ok_or_else(|| anyhow::anyhow!("candidate captures"))?;
+        let sp =
+            s.spec.as_mut().ok_or_else(|| anyhow::anyhow!("candidate captures"))?;
         state.swap_gdn_shadow(sp)?;
         state.pos += m;
         state.conv_slot = 1 - state.conv_slot;
@@ -239,6 +282,7 @@ impl Qwen4ExpModel {
             pos_before,
             hist_before,
             tokens,
+            sibling_depth: encoded.sibling_depth,
         };
         verified.values()?;
         Ok(verified)
@@ -361,16 +405,113 @@ impl Qwen4ExpModel {
         // Grow first: the verify graph is encoded before its turn.
         self.prepare_host_verification(ctx, state, s, drafts + 1)?;
         if device_greedy
-            && let Some((proposals, verify)) =
-                self.draft_device_greedy(ctx, state, s, first, drafts)?
+            && let Some(drafted) =
+                self.draft_device_greedy(ctx, state, s, first, drafts, false)?
         {
-            return Ok(HostDrafts { proposals, verify, device_selected: true });
+            return Ok(drafted);
         }
         let (proposals, verify) =
             self.draft_host_steps(ctx, state, s, first, drafts, sample, true)?;
         let verify =
             verify.ok_or_else(|| anyhow::anyhow!("candidate verification missing"))?;
-        Ok(HostDrafts { proposals, verify, device_selected: false })
+        Ok(HostDrafts { proposals, verify, device_selected: false, sibling: None })
+    }
+
+    /// Short-context greedy experiment. The last slot is assigned to the
+    /// first retained position where the runner-up has at least half the
+    /// primary's probability. Up to three slots are available, including an
+    /// otherwise unused slot on an output-capped one- or two-primary round.
+    pub fn draft_host_with_runner_up<'a>(
+        &self,
+        ctx: &'a MetalContext,
+        state: &mut DecodeState,
+        s: &mut Scratch,
+        first: u32,
+        drafts: usize,
+    ) -> Result<HostDrafts<'a>> {
+        ensure!(
+            state.pos > 0 && (first as usize) < self.config.vocab_size,
+            "invalid host draft input"
+        );
+        ensure!(self.supports_runner_up(state.pos, drafts), "invalid runner-up round");
+        self.prepare_host_verification(ctx, state, s, drafts.min(2) + 2)?;
+        if let Some(drafted) =
+            self.draft_device_greedy(ctx, state, s, first, drafts, true)?
+        {
+            return Ok(drafted);
+        }
+        // As on the ordinary greedy route, retry a flushed primary on the
+        // host. This route also ranks the runner-up with exact IEEE comparisons.
+        let mut runners = Vec::new();
+        let mut select = |values: &[f32]| {
+            let (mut first, mut second) = (0, 1);
+            if values[second] > values[first] {
+                std::mem::swap(&mut first, &mut second);
+            }
+            for id in 2..values.len() {
+                if values[id] > values[first] {
+                    second = first;
+                    first = id;
+                } else if values[id] > values[second] {
+                    second = id;
+                }
+            }
+            runners.push((second as u32, values[first] - values[second]));
+            Ok(first as u32)
+        };
+        let (proposals, verify) =
+            self.draft_host_steps(ctx, state, s, first, drafts, &mut select, true)?;
+        self.pack_host_drafts(
+            ctx,
+            state,
+            s,
+            proposals,
+            verify.unwrap(),
+            &runners[..drafts.min(2)],
+        )
+    }
+
+    pub fn supports_runner_up(&self, pos: usize, drafts: usize) -> bool {
+        !self.config.official_mlx_rounding()
+            && (1..=MAX_DRAFTS).contains(&drafts)
+            && pos.saturating_add(drafts.min(2) + 2)
+                <= self.config.indexer.dense_limit()
+    }
+
+    fn pack_host_drafts<'a>(
+        &self,
+        ctx: &'a MetalContext,
+        state: &DecodeState,
+        s: &Scratch,
+        mut proposals: Vec<u32>,
+        mut verify: EncodedVerification<'a>,
+        runners: &[(u32, f32)],
+    ) -> Result<HostDrafts<'a>> {
+        let mut sibling = None;
+        for (i, &(runner, gap)) in runners.iter().enumerate() {
+            ensure!(
+                (runner as usize) < self.config.vocab_size
+                    && runner != proposals[i]
+                    && gap >= 0.0,
+                "invalid runner-up output"
+            );
+            if gap <= std::f32::consts::LN_2 {
+                let discarded =
+                    if proposals.len() == MAX_DRAFTS { proposals.pop() } else { None };
+                sibling = Some((i + 1, discarded));
+                proposals.push(runner);
+                drop(verify);
+                verify = self.encode_host_packet(
+                    ctx,
+                    state,
+                    s,
+                    proposals.len() + 1,
+                    Some(i + 1),
+                )?;
+                break;
+            }
+        }
+        Ok(HostDrafts { proposals, verify, device_selected: true, sibling })
     }
 
     /// The device chain of [`Self::draft_host_encoding_verify`]. `None`
@@ -382,7 +523,8 @@ impl Qwen4ExpModel {
         s: &Scratch,
         first: u32,
         drafts: usize,
-    ) -> Result<Option<(Vec<u32>, EncodedVerification<'a>)>> {
+        runner_up: bool,
+    ) -> Result<Option<HostDrafts<'a>>> {
         let mtp =
             self.weights.mtp.as_ref().ok_or_else(|| anyhow::anyhow!("no MTP head"))?;
         let mst = state.mtp.as_ref().ok_or_else(|| anyhow::anyhow!("no MTP state"))?;
@@ -445,6 +587,16 @@ impl Qwen4ExpModel {
                 &sp.draft_tokens.view(i, &[1])?,
                 &sp.mtp_ids.view(1 + i, &[1])?,
             )?;
+            if runner_up && i < 2 {
+                runner_up_f32(
+                    ctx,
+                    &pass,
+                    &row,
+                    &s.sampler,
+                    &sp.draft_tokens.view(i, &[1])?,
+                    &sp.verify_tokens.view(2 * i, &[2])?,
+                )?;
+            }
         }
         s.sync.signal_done(&pass)?;
         let pass = pass.end()?;
@@ -470,7 +622,14 @@ impl Qwen4ExpModel {
                 && proposals.iter().all(|&t| (t as usize) < vocab),
             "invalid host draft output"
         );
-        Ok(Some((proposals, encoded)))
+        let mut runners = Vec::new();
+        if runner_up {
+            let words = sp.verify_tokens.view(0, &[2 * drafts.min(2)])?.to_u32()?;
+            runners.extend(
+                words.chunks_exact(2).map(|pair| (pair[0], f32::from_bits(pair[1]))),
+            );
+        }
+        Ok(Some(self.pack_host_drafts(ctx, state, s, proposals, encoded, &runners)?))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -542,7 +701,10 @@ impl Qwen4ExpModel {
         first: u32,
     ) -> Result<()> {
         ensure!(state.spec.is_none() && state.pos > 0, "invalid head advance state");
-        ensure!((first as usize) < self.config.vocab_size, "invalid head advance input");
+        ensure!(
+            (first as usize) < self.config.vocab_size,
+            "invalid head advance input"
+        );
         state.ensure_capacity(ctx, state.pos + 1)?;
         self.ensure_prefill_scratch(ctx, s, 1, state.capacity())?;
         let s = &*s;
@@ -609,7 +771,11 @@ impl Qwen4ExpModel {
         // scratch's shadow: finish_host_verify replays the committed rows
         // from it.
         let slot = state.conv_slot;
-        let shadows = &s.spec.as_ref().ok_or_else(|| anyhow::anyhow!("no verify captures"))?.gdn_shadow;
+        let shadows = &s
+            .spec
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no verify captures"))?
+            .gdn_shadow;
         let mut copies = Vec::new();
         let mut gdn_index = 0;
         for layer in &state.layers {
@@ -624,7 +790,10 @@ impl Qwen4ExpModel {
                 let shadow = shadows
                     .get(gdn_index)
                     .ok_or_else(|| anyhow::anyhow!("GDN shadow count"))?;
-                ensure!(shadow.byte_len() == recurrent.byte_len(), "GDN shadow geometry");
+                ensure!(
+                    shadow.byte_len() == recurrent.byte_len(),
+                    "GDN shadow geometry"
+                );
                 copies.push(BlitCopy {
                     src: recurrent,
                     src_offset: 0,
@@ -661,10 +830,65 @@ impl Qwen4ExpModel {
             pos_before,
             hist_before,
             tokens,
+            sibling_depth: None,
         };
         // The serial reference keeps validating every row up front.
         let _ = verified.logits()?;
         Ok(verified)
+    }
+
+    /// Promote the fork leaf's capture rows to its logical depth. Every
+    /// possible early-stop prefix is now contiguous for ordinary rollback.
+    pub fn select_host_sibling(
+        &self,
+        ctx: &MetalContext,
+        state: &DecodeState,
+        s: &Scratch,
+        verified: &mut HostVerification,
+    ) -> Result<()> {
+        let depth = verified
+            .sibling_depth
+            .ok_or_else(|| anyhow::anyhow!("missing sibling depth"))?;
+        let last = verified.rows - 1;
+        ensure!(
+            depth > 0
+                && depth < last
+                && state.pos == verified.pos_before + verified.rows,
+            "invalid sibling promotion"
+        );
+        let sp =
+            s.spec.as_ref().ok_or_else(|| anyhow::anyhow!("no verify captures"))?;
+        let capacity =
+            s.prefill.as_ref().ok_or_else(|| anyhow::anyhow!("no verify scratch"))?;
+        let mut captures = vec![capacity.hyper.clone()];
+        captures.extend(sp.conv_in.iter().cloned());
+        captures.extend(sp.ple_conv_in.iter().cloned());
+        for layer in 0..sp.gdn_replay.len() {
+            let (qkv, a, b) = sp.replay_rows(
+                layer,
+                verified.rows,
+                self.config.gdn_conv_channels(),
+                self.config.linear_num_value_heads,
+            )?;
+            captures.extend([qkv, a, b]);
+        }
+        let copies = captures
+            .iter()
+            .map(|rows| {
+                let width = rows.shape()[1] * rows.dtype().size();
+                BlitCopy {
+                    src: rows,
+                    src_offset: last * width,
+                    dst: rows,
+                    dst_offset: depth * width,
+                    len: width,
+                }
+            })
+            .collect::<Vec<_>>();
+        ctx.blit_copy(&copies)?;
+        self.relocate_sibling_kv(ctx, state, verified.pos_before, last, depth)?;
+        verified.tokens[depth] = verified.tokens[last];
+        Ok(())
     }
 
     /// Keeps `accepted` proposals plus the pending input, restores recurrent
@@ -681,6 +905,7 @@ impl Qwen4ExpModel {
         let m = verified.tokens.len();
         ensure!(
             accepted < m
+                && (verified.sibling_depth.is_none() || accepted + 1 < m)
                 && state.pos > verified.pos_before
                 && state.pos <= verified.pos_before + m,
             "invalid host verify rollback"

@@ -571,6 +571,7 @@ impl HybridBackend {
             let budget = (options.context_tokens as usize - input.len()).min(options.max_new_tokens as usize);
             // Opt-in scheduling; the default options take the fixed path.
             let round_options = MtpRoundOptions {
+                self_correction: options.mtp_scheduling.self_correction,
                 policy: if options.mtp_scheduling.adaptive {
                     mtp_policy::MtpPolicy::Adaptive
                 } else {
@@ -1030,6 +1031,9 @@ impl GenerationBackend for HybridBackend {
         self.model.supports_mtp_scheduling()
             && self.model.mtp_capabilities().is_some_and(|caps| caps.sampling == "exact-rejection-v1")
     }
+    fn supports_mtp_self_correction(&self) -> bool {
+        self.model.supports_mtp_self_correction()
+    }
     fn default_mtp_drafts(&self) -> u32 {
         self.model.default_mtp_drafts()
     }
@@ -1041,6 +1045,7 @@ impl GenerationBackend for HybridBackend {
         MtpScheduling {
             adaptive: schedule.policy == mtp_policy::MtpPolicy::Adaptive,
             lookup: schedule.lookup,
+            self_correction: false,
         }
     }
     fn effective_mtp_drafts(

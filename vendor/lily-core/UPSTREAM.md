@@ -630,6 +630,17 @@ kernels and Stark's kernel style.
   where device and host comparisons may differ, and the existing nonfinite
   readout guard. A flagged chain is discarded and the host reruns the round.
 
+Stark's optional three-slot greedy runner-up experiment extends the dense
+host verifier with a final sibling row. Its Metal reduction in
+`stark_finite_readout.metal` returns the best distinct ID and the score
+gap. The shared verifier uses the logical parent for the sibling's n-gram,
+position, attention, convolution and recurrent state. On a sibling match
+the host promotes the leaf KV and captured replay inputs to its logical
+position before ordinary rollback and head catch-up. The full-model
+control compares the packet's readouts and rolled-back continuation
+against serial decode. Changes use Stark-local bridging code and the
+existing Apache-2.0 Lily operators.
+
 Lily's Apache-2.0 attribution applies to the modified files. Exactness
 evidence (kernel byte tests, the private real-model verify and rollback
 control and end-to-end output hashes) is recorded in the attempt records.

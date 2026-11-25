@@ -92,7 +92,7 @@ kernel void ple_gate_value_bf16(device const bfloat* key   [[buffer(0)]],  // [r
 // Dilated causal depthwise conv over x[M, C] (kernel KD, dilation DIL), then
 // hyper[m, c] += base[m, c] + silu(conv). The window holds the S = (KD-1)*DIL
 // inputs before the chunk, oldest first; win_out receives the post-chunk window.
-template<bool CAPTURE>
+template<bool CAPTURE, bool FORK = false>
 static inline void ple_conv1d_prefill_bf16_body(
         device const bfloat* win_in,
         device bfloat*       win_out,
@@ -113,6 +113,13 @@ static inline void ple_conv1d_prefill_bf16_body(
         win[s] = float(win_in[c * S + s]);
     }
     for (uint m = 0; m < M; ++m) {
+        if (FORK && m + 1 == M) {
+            const uint depth = capture_after;
+            for (uint s = 0; s < S; ++s) {
+                const uint src = depth + s;
+                win[s] = src < S ? float(win_in[c * S + src]) : float(x[(ulong)(src - S) * C + c]);
+            }
+        }
         const float xc = float(x[(ulong)m * C + c]);
         float acc = xc * float(w[(KD - 1) * C + c]);
         for (uint t = 0; t + 1 < KD; ++t) {
@@ -151,6 +158,17 @@ kernel void ple_conv1d_prefill_bf16(device const bfloat* win_in  [[buffer(0)]], 
                                     uint c [[thread_position_in_grid]]) {
     ple_conv1d_prefill_bf16_body<false>(
         win_in, win_out, x, w, base, hyper, nullptr, C, KD, DIL, M, 0, c);
+}
+
+kernel void stark_ple_conv1d_prefill_fork(
+        device const bfloat* win_in [[buffer(0)]], device bfloat* win_out [[buffer(1)]],
+        device const bfloat* x [[buffer(2)]], device const bfloat* w [[buffer(3)]],
+        device const bfloat* base [[buffer(4)]], device bfloat* hyper [[buffer(5)]],
+        constant uint& C [[buffer(6)]], constant uint& KD [[buffer(7)]],
+        constant uint& DIL [[buffer(8)]], constant uint& packed_rows [[buffer(9)]],
+        uint c [[thread_position_in_grid]]) {
+    ple_conv1d_prefill_bf16_body<false, true>(win_in, win_out, x, w, base, hyper,
+        nullptr, C, KD, DIL, packed_rows & 65535u, packed_rows >> 16, c);
 }
 
 kernel void stark_ple_conv1d_prefill_bf16_capture(

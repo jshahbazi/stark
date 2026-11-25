@@ -228,6 +228,7 @@ Reply: `{"text":"...","token_count":N}`. An empty vector is valid. The whole vec
 | `mtp_drafts` | Optional explicit draft count, default 0. Nonzero values must fit the loaded model's `max_drafts`. Retained for advanced callers and benchmarks. Supply either `mtp` or `mtp_drafts`; supplying both, including `false` and `0`, is invalid. |
 | `mtp_policy` | Optional, `"fixed"` or `"adaptive"`. Only on backends whose readiness `mtp` object lists `policies`. When omitted on a request with MTP on, the loaded model's readiness `default_policy` applies: `"adaptive"` on the pinned Lily Q4-XL artifact, `"fixed"` elsewhere. `"fixed"` opts out. See [MTP round scheduling](#mtp-round-scheduling). |
 | `mtp_lookup` | Optional boolean. `true` allows prompt-lookup proposals. When omitted on a request with MTP on, the loaded model's readiness `default_lookup` applies: `true` on the pinned Lily Q4-XL artifact, `false` elsewhere. `false` opts out. Same availability as `mtp_policy`. |
+| `mtp_self_correction` | Optional experiment, default `false`. When readiness advertises `mtp.self_correction`, select `true` with greedy sampling, `mtp_drafts: 3`, `mtp_policy: "fixed"` and `mtp_lookup: false` to give the MTP runner-up a verifier slot on eligible rounds. |
 | `stop_token_ids` | Optional, at most 256 distinct token IDs below `vocab_size`. Added to the model's EOS IDs; a model EOS cannot be removed. |
 | `stop` | Optional, at most four non-empty strings of at most 1,024 characters each. See [Stop sequences](#stop-sequences). |
 | `stream` | Optional boolean, default `false`. See [Streaming](#streaming). |
@@ -391,6 +392,12 @@ fixed policy) produced for the same seed; greedy output does not change.
   round runs whenever the index proposes; under the adaptive policy it runs
   when its expected rate is at least the head plan's. The index lives only in
   the decode stream and is never logged.
+- `"mtp_self_correction": true` selects the three-slot runner-up experiment
+  for this request. The reply acknowledges it in `mtp.self_correction`,
+  `mtp.policy` and `mtp.lookup`. The aggregate `mtp.stats.self_correction`
+  counts eligible rounds, forks, sibling hits, and lost primary continuations.
+  The ordinary
+  three-draft control uses the same settings with this selector omitted.
 
 An adaptive or lookup selector needs MTP enabled; with MTP off it is
 `invalid_generation_request`, as is an unknown policy, and `null` is invalid.
@@ -402,10 +409,8 @@ reproducible but differs from the fixed schedule, as it does between draft
 counts, and under the adaptive policy it also depends on the planner's cost
 table. The prefix-reuse key is unchanged and does not include the schedule:
 the retained snapshot is captured during prompt prefill, before any round
-runs. A request whose effective schedule is the fixed policy with lookup off,
-including an explicit opt-out or the kill switch on the pinned artifact, keeps
-the existing acknowledgement schema. Any other effective schedule, whether the
-request selected it or the model default supplied it, adds `policy` and
+runs. The fixed policy with lookup and self-correction off keeps the existing
+acknowledgement schema. Adaptive depth and lookup add `policy` and
 `lookup`, and `stats.schedule` with `policy`, `lookup`, `limit`,
 `head_rounds_by_depth` and `head_round_seconds_by_depth` (indexed by draft
 count), `lookup_rounds`, `lookup_proposed`, `lookup_accepted`,

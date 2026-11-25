@@ -171,7 +171,7 @@ pub fn gdn_verify_gated_exact(
     eps: f32,
     gate_act: GdnGate,
 ) -> Result<()> {
-    gdn_verify_gated_exact_kernel(
+    gdn_verify_gated_exact_tree(
         ctx,
         pass,
         qkv,
@@ -188,17 +188,17 @@ pub fn gdn_verify_gated_exact(
         num_k_heads,
         eps,
         gate_act,
-        GDN_VERIFY_KERNEL,
+        None,
     )
 }
 
 /// The shipped exact verify recurrence kernel.
 const GDN_VERIFY_KERNEL: &str = "gdn_verify_gated_exact_register";
 
-/// [`gdn_verify_gated_exact`] through a kernel with its bindings (timing and
-/// byte controls).
+/// A linear verify scan, or two parallel scans sharing the same input state.
+/// The fork scan emits the physical last row after its logical parent.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn gdn_verify_gated_exact_kernel(
+pub(crate) fn gdn_verify_gated_exact_tree(
     ctx: &MetalContext,
     pass: &ComputePass<'_>,
     qkv: &Tensor,
@@ -215,7 +215,7 @@ pub(crate) fn gdn_verify_gated_exact_kernel(
     num_k_heads: usize,
     eps: f32,
     gate_act: GdnGate,
-    kernel: &'static str,
+    sibling_depth: Option<usize>,
 ) -> Result<()> {
     let heads = a_log.numel();
     let rows = check_verify_gated(
@@ -236,6 +236,15 @@ pub(crate) fn gdn_verify_gated_exact_kernel(
         state_out.dtype() == DType::F32 && state_out.numel() == state_in.numel(),
         "invalid GDN verify output state"
     );
+    let kernel = if let Some(depth) = sibling_depth {
+        ensure!(
+            depth > 0 && depth + 1 < rows && rows <= 4,
+            "invalid fork recurrence geometry"
+        );
+        "stark_gdn_verify_fork"
+    } else {
+        GDN_VERIFY_KERNEL
+    };
     let pipeline = ctx.pipeline(kernel, SOURCE, MslVersion::V3_1)?;
     pass.dispatch_at(
         &pipeline,
@@ -252,14 +261,17 @@ pub(crate) fn gdn_verify_gated_exact_kernel(
             state_out.binding(),
         ],
         &[
-            &u32_bytes(rows),
+            &u32_bytes(rows | (sibling_depth.unwrap_or(0) << 16)),
             &u32_bytes(heads),
             &u32_bytes(num_k_heads),
             &scale.to_ne_bytes(),
             &eps.to_ne_bytes(),
             &u32_bytes(gate_act as usize),
         ],
-        Grid::Threadgroups { groups: (heads, 1, 1), threadgroup: (GDN_HEAD_DIM, 1, 1) },
+        Grid::Threadgroups {
+            groups: (heads, if sibling_depth.is_some() { 2 } else { 1 }, 1),
+            threadgroup: (GDN_HEAD_DIM, 1, 1),
+        },
     )
 }
 

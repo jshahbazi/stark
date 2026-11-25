@@ -184,6 +184,7 @@ fn fused_gdn_projection_rows_match_decode_and_all_rollback_prefixes() -> Result<
                             &conv_w.value,
                             &conv_out.value,
                             capture_enabled.then_some(&capture.value),
+                            None,
                         )?;
                         pass.level_barrier(&[
                             &qkv.value,
@@ -515,6 +516,7 @@ fn streaming_route(
                 conv_w,
                 &output.conv,
                 Some(&output.capture),
+                None,
             )?;
         } else {
             gemv_quant_rows_decode_exact(ctx, &pass, w, input, &output.stack)?;

@@ -28,6 +28,8 @@ Use each comparison within its recorded checkpoint, build, workload and host con
 
 For bottleneck selection, the [November round profile](2026-11-19-lily-mtp-round-profile.md) attributes 86% of a sampled two-draft round to verification, with about 5.7 ms of GPU time per added row. [Shared-expert rows](2026-11-19-lily-moe-verify-rows.md) tied gate/up and slowed down/combine. [Hyper-connection row reuse](2026-11-19-lily-hc-verify-rows.md) gave component-only savings below full-model resolution. A faster GDN input projection passed 288 synthetic cases and changed real-model output values. See the [verify-row decisions](../PERFORMANCE_PLAYBOOK.md#making-verify-rows-cheaper) and [Sushi comparison of published records](../benchmarks/2026-11-19-sushi-flashnext-lily-assessment.md).
 
+On 24 short held-out prose and coding prompts, spending one of three greedy verifier slots on a runner-up gave +1.13% and +0.12% relative to fixed three. Both paired intervals included zero. Shipped adaptive MTP was faster on the pooled throughput of each domain. [Three-slot MTP experiment](2026-11-25-flashnext-mtp-runner-up.md)
+
 ## Prefix reuse, prefill, startup and idle latency
 
 | Artifact and change | Metric and workload | Baseline → candidate | Decision and evidence |

@@ -174,6 +174,8 @@ pub trait MtpSampler {
 /// draft count with head drafts only.
 #[derive(Default)]
 pub struct MtpRoundOptions {
+    /// Greedy fixed-width experiment assigning one verifier slot to a runner-up.
+    pub self_correction: bool,
     pub policy: mtp_policy::MtpPolicy,
     /// Selects the greedy or sampled cost table.
     pub greedy: bool,
@@ -184,8 +186,24 @@ pub struct MtpRoundOptions {
 
 impl MtpRoundOptions {
     pub fn is_default(&self) -> bool {
-        self.policy == mtp_policy::MtpPolicy::Fixed && self.lookup.is_none()
+        self.policy == mtp_policy::MtpPolicy::Fixed && self.lookup.is_none() && !self.self_correction
     }
+}
+
+/// Aggregate counts for the three-slot greedy sibling policy.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct SiblingStats {
+    pub eligible_rounds: usize,
+    pub packed_rounds: usize,
+    pub sibling_hits: usize,
+    pub primary_tail_truncated: usize,
+    /// A fork's retained primary path was fully accepted and the discarded
+    /// primary would also have been accepted by the target.
+    pub primary_tail_would_hit: usize,
+    pub first_misses: usize,
+    pub runner_up_offered_at_miss: usize,
+    pub runner_up_depth: [usize; 2],
+    pub hits_by_depth: [usize; 2],
 }
 
 /// Aggregate request counters. No token, logit or probability data is retained.
@@ -201,6 +219,8 @@ pub struct MtpStats {
     /// Present only for requests that selected adaptive depth or lookup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schedule: Option<mtp_policy::MtpScheduleStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub self_correction: Option<SiblingStats>,
 }
 
 /// Explicit device target-draw policy for the staged GLM native stream.
@@ -1203,6 +1223,15 @@ impl Model {
         false
     }
 
+    pub fn supports_mtp_self_correction(&self) -> bool {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return Self::pinned_lily_q4_xl_artifact(self.image_artifact.as_ref())
+                && model.supports_mtp_self_correction();
+        }
+        false
+    }
+
     /// Line-break ids of the loaded tokenizer, for the prompt-lookup gate.
     pub fn newline_tokens(&self) -> mtp_lookup::NewlineTokens {
         mtp_lookup::NewlineTokens::from_tokenizer(&self.tokenizer, self.vocab_size)
@@ -1218,6 +1247,9 @@ impl Model {
         sampler: &'a mut dyn MtpSampler,
         options: MtpRoundOptions,
     ) -> Result<Box<dyn Iterator<Item = Result<u32>> + 'a>> {
+        if options.self_correction && !self.supports_mtp_self_correction() {
+            return Err(Error::Unsupported("MTP runner-up unavailable for this artifact"));
+        }
         if options.is_default() {
             return self.mtp_decode(first, remaining, drafts, sampler);
         }

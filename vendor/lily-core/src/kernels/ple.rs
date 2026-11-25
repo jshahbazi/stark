@@ -167,6 +167,35 @@ pub fn ple_conv1d_prefill_with_rounding(
     dilation: usize,
     official_mlx: bool,
 ) -> Result<()> {
+    ple_conv1d_prefill_tree(
+        ctx,
+        pass,
+        window_in,
+        window_out,
+        x,
+        w,
+        base,
+        hyper,
+        dilation,
+        official_mlx,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ple_conv1d_prefill_tree(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    window_in: &Tensor,
+    window_out: &Tensor,
+    x: &Tensor,
+    w: &Tensor,
+    base: &Tensor,
+    hyper: &Tensor,
+    dilation: usize,
+    official_mlx: bool,
+    sibling_depth: Option<usize>,
+) -> Result<()> {
     ple_conv1d_prefill_with_checkpoint(
         ctx,
         pass,
@@ -179,6 +208,7 @@ pub fn ple_conv1d_prefill_with_rounding(
         dilation,
         official_mlx,
         None,
+        sibling_depth,
     )
 }
 
@@ -208,6 +238,7 @@ pub(crate) fn ple_conv1d_prefill_capture(
         dilation,
         false,
         Some((capture_after, snapshot)),
+        None,
     )
 }
 
@@ -224,6 +255,7 @@ fn ple_conv1d_prefill_with_checkpoint(
     dilation: usize,
     official_mlx: bool,
     checkpoint: Option<(usize, &Tensor)>,
+    sibling_depth: Option<usize>,
 ) -> Result<()> {
     ensure!(x.shape().len() == 2, "x must be [M, C]");
     let (m, c) = (x.shape()[0], x.shape()[1]);
@@ -295,7 +327,13 @@ fn ple_conv1d_prefill_with_checkpoint(
             Grid::Threads { grid: (c, 1, 1), threadgroup: (TG.min(c), 1, 1) },
         )
     } else {
-        let (name, source) = if official_mlx {
+        let (name, source) = if let Some(depth) = sibling_depth {
+            ensure!(
+                !official_mlx && depth > 0 && depth + 1 < m && m <= 4,
+                "invalid PLE fork geometry"
+            );
+            ("stark_ple_conv1d_prefill_fork", SOURCE)
+        } else if official_mlx {
             ("ple_conv1d_prefill_bf16_mlx", OFFICIAL_SOURCE)
         } else {
             ("ple_conv1d_prefill_bf16", SOURCE)
@@ -311,7 +349,12 @@ fn ple_conv1d_prefill_with_checkpoint(
                 base.binding(),
                 hyper.binding(),
             ],
-            &[&u32_bytes(c), &u32_bytes(kd), &u32_bytes(dilation), &u32_bytes(m)],
+            &[
+                &u32_bytes(c),
+                &u32_bytes(kd),
+                &u32_bytes(dilation),
+                &u32_bytes(m | (sibling_depth.unwrap_or(0) << 16)),
+            ],
             Grid::Threads { grid: (c, 1, 1), threadgroup: (TG.min(c), 1, 1) },
         )
     }
