@@ -7,7 +7,7 @@
 | Registered and executed | 2026-11-25, Codex |
 | Kind | External runtime build, artifact admission and functional compatibility |
 | Scope | AngelSlim Q3_K on Apple Silicon. Native Stark qualification remains a separate attempt. |
-| State | Builds and structural checks completed. Full-model trial resource-deferred while weights transfer. |
+| State | Artifact verified and full-model smoke completed. Both engines passed text with built-in drafting after the Strata setup repair. |
 | Acceptance | Load the two hash-verified shards and BF16 projector. Complete greedy text with exactly 4,096 input tokens on the same fixture, using one loaded runtime at a time. Check the short known-answer case first. |
 | Use | External reference for native implementation and differential tests |
 | Related work | [Native Stark plan](../MODEL_RESEARCH.md#research-proposals-with-no-stark-timing) · [Experiment ledger](README.md) |
@@ -49,7 +49,34 @@ Stark source base for this record is `e0e6916d8e966597ed904c36f01068ad70bac28d`.
 | Strata model-free tests and header scan | The Hy4 geometry fixture and Metal host-side expert tile test passed. The pinned parser accepted the mixed Q3_K/Q4_K expert layout, the BF16 draft layer and the 120,832-entry Engram map from the shard headers. | Structural evidence. |
 | Shared artifact transfer | The original Xet process stopped advancing when the host slept. Two sample reads at the end of the retained prefixes matched the pinned publisher URLs. | Continue by HTTP range from the retained prefixes. Require all three full SHA-256 digests before running inference. |
 | Download recovery | The resumed Xet stream and a fresh current-client Xet download failed to advance in the observed retry windows. HTTP range recovery advanced after restart, with approximately 45 GiB received out of 145.67 GiB at the checkpoint. | The local runner proceeds from transfer to full digest verification and then to the serialized smoke tests. |
+| Final transfer restart | The range worker stopped with 7.69 GiB left. A restart reused all completed ranges and finished the transfer at 16:22 EST. All three files matched the published sizes and digests. | One verified payload shared by both runners. |
+| Strata with built-in drafting | The initial process exited with status 2 before readiness. An independent startup probe reproduced the failure to create `derived/model/mtp_experts_q8_0.bin.part` because its parent directory was missing. | The direct launcher needs the writable output directory. See the follow-up below. |
 
 ## Correctness, performance and decision
 
-The BF16 projector matches its full published digest. The Q3_K and Engram shard digests, runtime loads, generation, image outcomes and operating memory are pending. Model-free tests and header acceptance establish the candidate code paths. The record contains no numerical or performance qualification.
+With the projector loaded, llama.cpp and Strata generated identical token sequences on both greedy text fixtures with drafting off. llama.cpp reproduced both token sequences with drafting on, accepted 41 of 42 drafts on the 4K request and passed both image color checks. Strata image input was outside this trial.
+
+| Runtime and draft mode | 4K prompt time | 64-token decode time | Greedy output |
+| --- | ---: | ---: | --- |
+| llama.cpp, off | 7.344 s | 1.692 s | 64 tokens |
+| llama.cpp, depth two | 7.428 s | 1.012 s | Exact token hash match |
+| Strata, off | 22.410 s | 4.411 s | Exact token hash match |
+
+These are smoke timings from one run per arm with a repeated synthetic fixture. The llama.cpp server used a 256-row microbatch and Strata used a 512-row prefill chunk. The run supplies no production throughput comparison, memory envelope, prefix reuse, tool, sampled generation or native Stark qualification. The low-level llama.cpp stderr classifier matched the word `truncated`; both responses passed the harness check for full requested output without the API truncation flag.
+
+Private artifact and smoke aggregate receipt SHA-256 values are `53b25c7b5bebe4362fac82ee7f5bc0df2776913138fb4133f2c33a4594ea8135` and `7c7313ca58345fe779de989f057f785e1e247dbe2ccc3f9a5f6b5e449ef33285`. The trial harness SHA-256 is `5d9373b16222a553c64395a14f9c3ec035542bb628041e6cf1c0aa50c116030b`.
+
+## 20261125-HY4METAL-02 · Strata draft startup repair
+
+The direct launcher computes the derived expert path from the GGUF directory. Created its parent `derived/model` and reran the four arms with the same executables, payload, context and harness. The Strata draft worker generated its 3,850,375,168-byte Q8_0 expert file and reached readiness with the projector loaded. Its derived file SHA-256 is `9c56e5ca221668726c7dda47da71389b5637dfb21aeca6c6a7653ab56de21b68`.
+
+All four workers exited cleanly. An independent check of the receipt found matching input and output token hashes across all eight text cases, with positive draft activity on both engines when enabled. Both llama.cpp image checks passed again. Strata accepted 41 of 43 proposals on the 4K fixture. llama.cpp accepted 41 of 42.
+
+| Runtime and draft mode | 4K prompt time | 64-token decode time |
+| --- | ---: | ---: |
+| llama.cpp, off | 7.047 s | 1.721 s |
+| llama.cpp, depth two | 7.332 s | 1.049 s |
+| Strata, off | 23.028 s | 4.588 s |
+| Strata, depth two | 23.432 s | 2.477 s |
+
+This establishes external greedy text smoke parity for the pinned Q3_K artifact, with the projector loaded and drafting off or on. Scope and timing limitations follow the first attempt. Strata image requests, sampled behavior and native Stark support remain unqualified. The rerun aggregate receipt SHA-256 is `990b4eb5ee10f21e9f59dae1b9221a47920640600ac93428c5927f497af00e09`.

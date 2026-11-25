@@ -2,7 +2,7 @@
 
 [Look up research and speed changes by model](../MODEL_RESEARCH.md), including benchmark comparisons and branch-only attempts. The [source index](source-index.md) groups individual reports by family and topic.
 
-- [20261125-HY4METAL-01 · AngelSlim Q3_K on Metal](2026-11-25-hy4-gguf-metal-trial.md) records the pinned llama.cpp and Strata GGUF compatibility trial on an M5 Max.
+- [20261125-HY4METAL-01 and -02 · AngelSlim Q3_K on Metal](2026-11-25-hy4-gguf-metal-trial.md) records the pinned llama.cpp and Strata GGUF trial, exact greedy token matches with drafting on and off, and the Strata draft startup repair.
 
 - [20261124-INKBUDGET-01 through -03 · Inkling 2 Mini thinking budget](../archive/runs/2026-11-24-inkling-thinking-budget.md) tracks the reasoning limit and answer reserve with DSpark on and off, and the adoption of the 1,024-token Playground default.
 
