@@ -1,0 +1,1705 @@
+{
+  "schema": "inkling-live-dflash2-benchmark-v1",
+  "run": "20261124-191753-inkling-2-mini",
+  "manif_sha256": "557f4287de3cd66174e7dae4f85501882142d39de7be3b4c64eaaf4f810299ba",
+  "repo_base": "84428bc8edbaf8f63ad80c294f8f6aa2aaf27f4e",
+  "standard": {
+    "deviations": [],
+    "eligible": true
+  },
+  "sessions": {
+    "allow_busy_host": false,
+    "cache_tag_base": "inkbench",
+    "layout": "blocks",
+    "mlx_force_mtp": false,
+    "probe_runs": null,
+    "reasoning": "off",
+    "repeats": 3,
+    "sessions": [
+      "probe",
+      "prefill"
+    ],
+    "stark_drafts": "engine",
+    "stark_effort_aliases": {},
+    "stark_min_context": 4352,
+    "warmups": 1
+  },
+  "host": {
+    "start": {
+      "chip": "Apple M5 Max",
+      "hardware_model": "Mac17,7",
+      "memory_bytes": 137438953472,
+      "power": {
+        "batteries": [
+          {
+            "percent": 100,
+            "state": "finishing charge"
+          }
+        ],
+        "on_ac": true,
+        "source": "AC Power"
+      },
+      "process_thermal_state": 1,
+      "competing_processes": []
+    },
+    "finish": {
+      "chip": "Apple M5 Max",
+      "hardware_model": "Mac17,7",
+      "memory_bytes": 137438953472,
+      "power": {
+        "batteries": [
+          {
+            "percent": 95,
+            "state": "charging"
+          }
+        ],
+        "on_ac": true,
+        "source": "AC Power"
+      },
+      "process_thermal_state": 1,
+      "competing_processes": []
+    },
+    "warnings": [
+      "power adapter negotiated 94 W of a rated 140 W",
+      "process thermal state 1 at start (0 is nominal)"
+    ]
+  },
+  "harness_sha256": "3ed848df648763dee8c795a58c588b6cf35e7fd2ea3d7ccee1546050c48d79b4",
+  "benchmark_profile_sha256": "a8540d22e9b4eb7a28edfc072822647e260225f0b8e8e136206bc30174f037c5",
+  "scoreboard": {
+    "stark-original": {
+      "eligible": true,
+      "reasons": []
+    },
+    "mlx-original": {
+      "eligible": true,
+      "reasons": []
+    },
+    "stark-original-dflash2": {
+      "eligible": true,
+      "reasons": []
+    }
+  },
+  "prefill_ids_match": true,
+  "failed_arms": [],
+  "arms": {
+    "stark-original": {
+      "artifact_fingerprint": "52a50c387b87113ae31c316bf453efbe7b61f9a8f3eff7ef91ea9acba8d69f35",
+      "binary_sha256": "7fa947a0189585c966d6217a381dbf61b555bd77cac16028a3cb60c921a52897",
+      "quality": "pass",
+      "best": {
+        "any": [
+          107.51501811599225,
+          "context_4k"
+        ],
+        "cold_prefix": [
+          107.51501811599225,
+          "context_4k"
+        ]
+      }
+    },
+    "mlx-original": {
+      "artifact_fingerprint": "dbf0f8e77613463f9a05ae94cbcd9cfba5a4fa15fcef6c5b7d25614dc9c61963",
+      "binary_sha256": "05983e1278d6253d3648ddaa2514ec2a2f73ff3f617d41412d18334759991392",
+      "quality": "not applicable",
+      "best": {
+        "any": [
+          93.82056000962169,
+          "context_8k"
+        ],
+        "cold_prefix": [
+          93.82056000962169,
+          "context_8k"
+        ]
+      }
+    },
+    "stark-original-dflash2": {
+      "artifact_fingerprint": "52a50c387b87113ae31c316bf453efbe7b61f9a8f3eff7ef91ea9acba8d69f35",
+      "binary_sha256": "ae2c3925d077b67cf969497d08ea7016883ea088c370fe6e08335c2cdd5660c0",
+      "quality": "pass",
+      "best": {
+        "any": [
+          109.4614468800336,
+          "context_8k_ceiling"
+        ],
+        "cold_prefix": [
+          99.73903966597078,
+          "context_16k"
+        ]
+      }
+    }
+  },
+  "cells": {
+    "decode": {
+      "stark-original": {
+        "stats": {
+          "median": 86.76910241257039,
+          "min": 84.50689426306016,
+          "max": 90.15734072444596,
+          "n": 9
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          71
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "3"
+          ],
+          "engine_reports": 9,
+          "proposed": 1779,
+          "accepted": 948,
+          "acceptance": 0.5328836424957841
+        },
+        "paired_vs_reference": {
+          "median": 0.9950116777986795,
+          "min": 0.9872958257713249,
+          "max": 1.04453843893027,
+          "n": 3,
+          "wins": 1,
+          "standing": "unresolved"
+        },
+        "tokens_per_step_median": 2.26,
+        "ttft_ms": {
+          "median": 265,
+          "min": 248,
+          "max": 268,
+          "n": 9
+        }
+      },
+      "stark-original-dflash2": {
+        "stats": {
+          "median": 84.88198034500894,
+          "min": 80.7873762892057,
+          "max": 88.90706727908189,
+          "n": 9
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          71
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "7"
+          ],
+          "engine_reports": 9,
+          "proposed": 3501,
+          "accepted": 1204,
+          "acceptance": 0.3439017423593259
+        },
+        "paired_vs_reference": {
+          "median": 0.9949474352000475,
+          "min": 0.9416229075489883,
+          "max": 0.9971700167666814,
+          "n": 3,
+          "wins": 0,
+          "standing": "behind"
+        },
+        "tokens_per_step_median": 2.74,
+        "ttft_ms": {
+          "median": 273,
+          "min": 258,
+          "max": 275,
+          "n": 9
+        },
+        "paired_vs_dspark": {
+          "median": 0.9525235243798117,
+          "min": 0.9463435742102985,
+          "max": 1.0100012486000762,
+          "n": 3,
+          "wins": 1,
+          "standing": "unresolved"
+        }
+      },
+      "mlx-original": {
+        "stats": {
+          "median": 87.88561659802626,
+          "min": 77.48124784301048,
+          "max": 89.69266626096223,
+          "n": 9
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          71
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [],
+          "engine_drafts": [],
+          "engine_reports": 0,
+          "proposed": 0,
+          "accepted": 0,
+          "acceptance": null
+        },
+        "paired_vs_reference": null,
+        "tokens_per_step_median": 1.73,
+        "ttft_ms": {
+          "median": 285,
+          "min": 283,
+          "max": 312,
+          "n": 9
+        }
+      }
+    },
+    "sustained_decode": {
+      "stark-original": {
+        "stats": {
+          "median": 86.25710419485792,
+          "min": 80.26042404559037,
+          "max": 90.29230487124889,
+          "n": 9
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          72
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "3"
+          ],
+          "engine_reports": 9,
+          "proposed": 1917,
+          "accepted": 951,
+          "acceptance": 0.49608763693270735
+        },
+        "paired_vs_reference": {
+          "median": 1.0496620492528212,
+          "min": 1.0216331830579062,
+          "max": 1.09142408060249,
+          "n": 3,
+          "wins": 3,
+          "standing": "ahead"
+        },
+        "tokens_per_step_median": 2.26,
+        "ttft_ms": {
+          "median": 271,
+          "min": 249,
+          "max": 412,
+          "n": 9
+        }
+      },
+      "stark-original-dflash2": {
+        "stats": {
+          "median": 83.03603994789405,
+          "min": 78.09742364256508,
+          "max": 89.15244755244755,
+          "n": 9
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          72
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "7"
+          ],
+          "engine_reports": 9,
+          "proposed": 3580,
+          "accepted": 1189,
+          "acceptance": 0.33212290502793296
+        },
+        "paired_vs_reference": {
+          "median": 1.0104649427674792,
+          "min": 1.003287991292718,
+          "max": 1.082837528604119,
+          "n": 3,
+          "wins": 3,
+          "standing": "ahead"
+        },
+        "tokens_per_step_median": 2.7,
+        "ttft_ms": {
+          "median": 276,
+          "min": 255,
+          "max": 437,
+          "n": 9
+        },
+        "paired_vs_dspark": {
+          "median": 0.9626574033868867,
+          "min": 0.9192467063204992,
+          "max": 1.0599083375140759,
+          "n": 3,
+          "wins": 1,
+          "standing": "unresolved"
+        }
+      },
+      "mlx-original": {
+        "stats": {
+          "median": 82.1760720569617,
+          "min": 79.97992471769135,
+          "max": 86.54239242474536,
+          "n": 9
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          72
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [],
+          "engine_drafts": [],
+          "engine_reports": 0,
+          "proposed": 0,
+          "accepted": 0,
+          "acceptance": null
+        },
+        "paired_vs_reference": null,
+        "tokens_per_step_median": 1.55,
+        "ttft_ms": {
+          "median": 309,
+          "min": 286,
+          "max": 320,
+          "n": 9
+        }
+      }
+    },
+    "spec_novel": {
+      "stark-original": {
+        "stats": {
+          "median": 69.18444517062696,
+          "min": 66.10546186749201,
+          "max": 73.13081686145898,
+          "n": 9
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          40
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "3"
+          ],
+          "engine_reports": 9,
+          "proposed": 2083,
+          "accepted": 798,
+          "acceptance": 0.3831012962073932
+        },
+        "paired_vs_reference": {
+          "median": 0.9403141686742847,
+          "min": 0.899198935425992,
+          "max": 0.9496752934752394,
+          "n": 3,
+          "wins": 0,
+          "standing": "behind"
+        },
+        "tokens_per_step_median": 1.88,
+        "ttft_ms": {
+          "median": 238,
+          "min": 234,
+          "max": 244,
+          "n": 9
+        }
+      },
+      "stark-original-dflash2": {
+        "stats": {
+          "median": 79.25532581129482,
+          "min": 77.55355183435906,
+          "max": 82.88847840335929,
+          "n": 9
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          40
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "7"
+          ],
+          "engine_reports": 9,
+          "proposed": 3602,
+          "accepted": 1185,
+          "acceptance": 0.32898389783453635
+        },
+        "paired_vs_reference": {
+          "median": 1.075112307263264,
+          "min": 1.0610522199416126,
+          "max": 1.0769296090117473,
+          "n": 3,
+          "wins": 3,
+          "standing": "ahead"
+        },
+        "tokens_per_step_median": 2.59,
+        "ttft_ms": {
+          "median": 247,
+          "min": 245,
+          "max": 249,
+          "n": 9
+        },
+        "paired_vs_dspark": {
+          "median": 1.132084107746976,
+          "min": 1.1284018206782442,
+          "max": 1.1976544528509212,
+          "n": 3,
+          "wins": 3,
+          "standing": "ahead"
+        }
+      },
+      "mlx-original": {
+        "stats": {
+          "median": 73.59378472658402,
+          "min": 72.79866968525234,
+          "max": 74.90320487173267,
+          "n": 9
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          40
+        ],
+        "cached_tokens": [
+          9
+        ],
+        "drafting": {
+          "requested": [],
+          "engine_drafts": [],
+          "engine_reports": 0,
+          "proposed": 0,
+          "accepted": 0,
+          "acceptance": null
+        },
+        "paired_vs_reference": null,
+        "tokens_per_step_median": 1.19,
+        "ttft_ms": {
+          "median": 165,
+          "min": 163,
+          "max": 166,
+          "n": 9
+        }
+      }
+    },
+    "context_512": {
+      "stark-original": {
+        "stats": {
+          "median": 82.20064412393832,
+          "min": 80.66421393039982,
+          "max": 82.64951395531018,
+          "n": 3
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          498
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "3"
+          ],
+          "engine_reports": 3,
+          "proposed": 658,
+          "accepted": 327,
+          "acceptance": 0.4969604863221885
+        },
+        "paired_vs_reference": {
+          "median": 1.0233763887743204,
+          "min": 1.00542795715894,
+          "max": 1.0660289739597413,
+          "n": 3,
+          "wins": 3,
+          "standing": "ahead"
+        },
+        "tokens_per_step_median": 2.31,
+        "ttft_ms": {
+          "median": 474,
+          "min": 471,
+          "max": 486,
+          "n": 3
+        }
+      },
+      "stark-original-dflash2": {
+        "stats": {
+          "median": 78.25484911169313,
+          "min": 73.40019143376993,
+          "max": 81.03854885279144,
+          "n": 3
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          498
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "7"
+          ],
+          "engine_reports": 3,
+          "proposed": 1197,
+          "accepted": 397,
+          "acceptance": 0.3316624895572264
+        },
+        "paired_vs_reference": {
+          "median": 0.9753967620392174,
+          "min": 0.9138130685640228,
+          "max": 1.0452504431113736,
+          "n": 3,
+          "wins": 1,
+          "standing": "unresolved"
+        },
+        "tokens_per_step_median": 2.59,
+        "ttft_ms": {
+          "median": 487,
+          "min": 468,
+          "max": 498,
+          "n": 3
+        },
+        "paired_vs_dspark": {
+          "median": 0.9701309328968906,
+          "min": 0.8929393706830391,
+          "max": 0.9805084745762713,
+          "n": 3,
+          "wins": 0,
+          "standing": "behind"
+        }
+      },
+      "mlx-original": {
+        "stats": {
+          "median": 80.22873578961786,
+          "min": 77.53026979023879,
+          "max": 80.3229828493391,
+          "n": 3
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          498
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [],
+          "engine_drafts": [],
+          "engine_reports": 0,
+          "proposed": 0,
+          "accepted": 0,
+          "acceptance": null
+        },
+        "paired_vs_reference": null,
+        "tokens_per_step_median": 1.64,
+        "ttft_ms": {
+          "median": 454,
+          "min": 454,
+          "max": 457,
+          "n": 3
+        }
+      }
+    },
+    "context_4k": {
+      "stark-original": {
+        "stats": {
+          "median": 107.51501811599225,
+          "min": 104.16083658590472,
+          "max": 109.28252437686402,
+          "n": 3
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          4019
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "3"
+          ],
+          "engine_reports": 3,
+          "proposed": 528,
+          "accepted": 382,
+          "acceptance": 0.7234848484848485
+        },
+        "paired_vs_reference": {
+          "median": 1.222692052402306,
+          "min": 1.174955936863294,
+          "max": 1.273440993031214,
+          "n": 3,
+          "wins": 3,
+          "standing": "ahead"
+        },
+        "tokens_per_step_median": 3.05,
+        "ttft_ms": {
+          "median": 2103,
+          "min": 2087,
+          "max": 2130,
+          "n": 3
+        }
+      },
+      "stark-original-dflash2": {
+        "stats": {
+          "median": 97.8674527061624,
+          "min": 94.95039003235725,
+          "max": 98.48153978975168,
+          "n": 3
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          4019
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "7"
+          ],
+          "engine_reports": 3,
+          "proposed": 842,
+          "accepted": 449,
+          "acceptance": 0.5332541567695962
+        },
+        "paired_vs_reference": {
+          "median": 1.094976139094538,
+          "min": 1.0710601808962465,
+          "max": 1.1664456931012719,
+          "n": 3,
+          "wins": 3,
+          "standing": "ahead"
+        },
+        "tokens_per_step_median": 3.05,
+        "ttft_ms": {
+          "median": 2079,
+          "min": 2072,
+          "max": 2117,
+          "n": 3
+        },
+        "paired_vs_dspark": {
+          "median": 0.9115747640337803,
+          "min": 0.8955453149001535,
+          "max": 0.9159793814432992,
+          "n": 3,
+          "wins": 0,
+          "standing": "behind"
+        }
+      },
+      "mlx-original": {
+        "stats": {
+          "median": 88.65084495336596,
+          "min": 84.42873969375736,
+          "max": 89.3786167679337,
+          "n": 3
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          4019
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [],
+          "engine_drafts": [],
+          "engine_reports": 0,
+          "proposed": 0,
+          "accepted": 0,
+          "acceptance": null
+        },
+        "paired_vs_reference": null,
+        "tokens_per_step_median": 2.37,
+        "ttft_ms": {
+          "median": 2022,
+          "min": 2017,
+          "max": 2035,
+          "n": 3
+        }
+      }
+    },
+    "context_8k": {
+      "stark-original": {
+        "stats": {
+          "median": 103.25189954351478,
+          "min": 98.16227592168065,
+          "max": 104.65651902427041,
+          "n": 3
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          8252
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "3"
+          ],
+          "engine_reports": 3,
+          "proposed": 549,
+          "accepted": 381,
+          "acceptance": 0.6939890710382514
+        },
+        "paired_vs_reference": {
+          "median": 1.0527175224449383,
+          "min": 1.0428078816524753,
+          "max": 1.115496635423381,
+          "n": 3,
+          "wins": 3,
+          "standing": "ahead"
+        },
+        "tokens_per_step_median": 3.05,
+        "ttft_ms": {
+          "median": 3989,
+          "min": 3956,
+          "max": 4026,
+          "n": 3
+        }
+      },
+      "stark-original-dflash2": {
+        "stats": {
+          "median": 93.72378800309845,
+          "min": 86.36207232491907,
+          "max": 97.0654907158518,
+          "n": 3
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          8252
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "7"
+          ],
+          "engine_reports": 3,
+          "proposed": 890,
+          "accepted": 442,
+          "acceptance": 0.4966292134831461
+        },
+        "paired_vs_reference": {
+          "median": 0.9989685415807227,
+          "min": 0.8722265652682928,
+          "max": 1.040955315490246,
+          "n": 3,
+          "wins": 1,
+          "standing": "unresolved"
+        },
+        "tokens_per_step_median": 3,
+        "ttft_ms": {
+          "median": 3977,
+          "min": 3953,
+          "max": 4003,
+          "n": 3
+        },
+        "paired_vs_dspark": {
+          "median": 0.8955370279548797,
+          "min": 0.8364211477632175,
+          "max": 0.9888268156424579,
+          "n": 3,
+          "wins": 0,
+          "standing": "behind"
+        }
+      },
+      "mlx-original": {
+        "stats": {
+          "median": 93.82056000962169,
+          "min": 93.24654888777627,
+          "max": 99.01334786604957,
+          "n": 3
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          8252
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [],
+          "engine_drafts": [],
+          "engine_reports": 0,
+          "proposed": 0,
+          "accepted": 0,
+          "acceptance": null
+        },
+        "paired_vs_reference": null,
+        "tokens_per_step_median": 3.1,
+        "ttft_ms": {
+          "median": 3908,
+          "min": 3889,
+          "max": 3992,
+          "n": 3
+        }
+      }
+    },
+    "context_16k": {
+      "stark-original": {
+        "stats": {
+          "median": 101.00422832980973,
+          "min": 88.02524354597777,
+          "max": 106.17662072485963,
+          "n": 3
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          16335
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "3"
+          ],
+          "engine_reports": 3,
+          "proposed": 529,
+          "accepted": 382,
+          "acceptance": 0.722117202268431
+        },
+        "paired_vs_reference": {
+          "median": 1.0892367878457543,
+          "min": 1.0030517017559015,
+          "max": 1.1960443007696275,
+          "n": 3,
+          "wins": 3,
+          "standing": "ahead"
+        },
+        "tokens_per_step_median": 3.1,
+        "ttft_ms": {
+          "median": 7547,
+          "min": 7470,
+          "max": 7550,
+          "n": 3
+        }
+      },
+      "stark-original-dflash2": {
+        "stats": {
+          "median": 99.73903966597078,
+          "min": 91.13152300348963,
+          "max": 101.2277104368365,
+          "n": 3
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          16335
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "7"
+          ],
+          "engine_reports": 3,
+          "proposed": 828,
+          "accepted": 454,
+          "acceptance": 0.5483091787439613
+        },
+        "paired_vs_reference": {
+          "median": 1.0755929032380829,
+          "min": 1.0384478991473831,
+          "max": 1.140296473191382,
+          "n": 3,
+          "wins": 3,
+          "standing": "ahead"
+        },
+        "tokens_per_step_median": 3.31,
+        "ttft_ms": {
+          "median": 7530,
+          "min": 7460,
+          "max": 7540,
+          "n": 3
+        },
+        "paired_vs_dspark": {
+          "median": 0.9874739039665971,
+          "min": 0.9533898305084745,
+          "max": 1.0352885073915117,
+          "n": 3,
+          "wins": 1,
+          "standing": "unresolved"
+        }
+      },
+      "mlx-original": {
+        "stats": {
+          "median": 88.77315050666381,
+          "min": 87.75743403045362,
+          "max": 92.72935825971464,
+          "n": 3
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          16335
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [],
+          "engine_drafts": [],
+          "engine_reports": 0,
+          "proposed": 0,
+          "accepted": 0,
+          "acceptance": null
+        },
+        "paired_vs_reference": null,
+        "tokens_per_step_median": 2.91,
+        "ttft_ms": {
+          "median": 7905,
+          "min": 7867,
+          "max": 7935,
+          "n": 3
+        }
+      }
+    },
+    "prefill_repeated": {
+      "stark-original": {
+        "stats": {
+          "median": 2231.0432569974555,
+          "min": 2204.676892129746,
+          "max": 2260.376385666409,
+          "n": 9
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          8768
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "3"
+          ],
+          "engine_reports": 9,
+          "proposed": 45,
+          "accepted": 45,
+          "acceptance": 1.0
+        },
+        "paired_vs_reference": {
+          "median": 1.0179671457905544,
+          "min": 0.9807302231237324,
+          "max": 1.0211195928753183,
+          "n": 3,
+          "wins": 2,
+          "standing": "unresolved"
+        },
+        "tokens_per_step_median": null,
+        "ttft_ms": {
+          "median": 3930,
+          "min": 3879,
+          "max": 3977,
+          "n": 9
+        }
+      },
+      "stark-original-dflash2": {
+        "stats": {
+          "median": 2227.0764541529084,
+          "min": 2204.1226747109104,
+          "max": 2256.885456885457,
+          "n": 9
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          8768
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "7"
+          ],
+          "engine_reports": 9,
+          "proposed": 54,
+          "accepted": 54,
+          "acceptance": 1.0
+        },
+        "paired_vs_reference": {
+          "median": 1.0073660147320296,
+          "min": 0.9775082132928988,
+          "max": 1.023463402193318,
+          "n": 3,
+          "wins": 2,
+          "standing": "unresolved"
+        },
+        "tokens_per_step_median": null,
+        "ttft_ms": {
+          "median": 3937,
+          "min": 3885,
+          "max": 3978,
+          "n": 9
+        },
+        "paired_vs_dspark": {
+          "median": 0.9967146828405359,
+          "min": 0.9895859791719583,
+          "max": 1.0022953328232593,
+          "n": 3,
+          "wins": 1,
+          "standing": "unresolved"
+        }
+      },
+      "mlx-original": {
+        "stats": {
+          "median": 2210.791729702471,
+          "min": 2173.5250371839365,
+          "max": 2325.112702201008,
+          "n": 9
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "failed": 0,
+          "short_output": 0,
+          "no_rate": 0
+        },
+        "input_tokens": [
+          8768
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [],
+          "engine_drafts": [],
+          "engine_reports": 0,
+          "proposed": 0,
+          "accepted": 0,
+          "acceptance": null
+        },
+        "paired_vs_reference": null,
+        "tokens_per_step_median": null,
+        "ttft_ms": {
+          "median": 3966,
+          "min": 3771,
+          "max": 4034,
+          "n": 9
+        }
+      }
+    },
+    "prefill_8800_client": {
+      "stark-original": {
+        "stats": {
+          "median": 2324.9884483371375,
+          "min": 2259.8964851440332,
+          "max": 2355.2089309520743,
+          "n": 3
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "invalid": 0
+        },
+        "input_tokens": [
+          8800
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "3"
+          ],
+          "engine_reports": 3,
+          "proposed": 28,
+          "accepted": 10,
+          "acceptance": 0.35714285714285715
+        },
+        "paired_vs_reference": {
+          "median": 0.9716495739514046,
+          "min": 0.9630821116088139,
+          "max": 0.9817245640723183,
+          "n": 3,
+          "wins": 0,
+          "standing": "behind"
+        },
+        "tokens_per_step_median": null,
+        "ttft_ms": null
+      },
+      "stark-original-dflash2": {
+        "stats": {
+          "median": 2354.9416962943274,
+          "min": 2336.9653259561505,
+          "max": 2377.7301525886664,
+          "n": 3
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "invalid": 0
+        },
+        "input_tokens": [
+          8800
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "7"
+          ],
+          "engine_reports": 3,
+          "proposed": 42,
+          "accepted": 9,
+          "acceptance": 0.21428571428571427
+        },
+        "paired_vs_reference": {
+          "median": 0.9849293564571653,
+          "min": 0.9641231117387884,
+          "max": 1.0230132775585632,
+          "n": 3,
+          "wins": 1,
+          "standing": "unresolved"
+        },
+        "tokens_per_step_median": null,
+        "ttft_ms": null,
+        "paired_vs_dspark": {
+          "median": 1.0226847166871949,
+          "min": 0.9922539335019637,
+          "max": 1.0420573295171245,
+          "n": 3,
+          "wins": 2,
+          "standing": "unresolved"
+        }
+      },
+      "mlx-original": {
+        "stats": {
+          "median": 2414.1123797360124,
+          "min": 2301.965915744937,
+          "max": 2423.928331871904,
+          "n": 3
+        },
+        "level": "server, client-timed",
+        "excluded": {
+          "invalid": 0
+        },
+        "input_tokens": [
+          8800
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [],
+          "engine_reports": 0,
+          "proposed": 0,
+          "accepted": 0,
+          "acceptance": null
+        },
+        "paired_vs_reference": null,
+        "tokens_per_step_median": null,
+        "ttft_ms": null
+      }
+    },
+    "prefill_8800_native": {
+      "stark-original": {
+        "stats": {
+          "median": 2326.4771874371286,
+          "min": 2261.2919171661183,
+          "max": 2356.7146509284635,
+          "n": 3
+        },
+        "level": "server, engine phase time",
+        "excluded": {
+          "invalid": 0
+        },
+        "input_tokens": [
+          8800
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "3"
+          ],
+          "engine_reports": 3,
+          "proposed": 28,
+          "accepted": 10,
+          "acceptance": 0.35714285714285715
+        },
+        "paired_vs_reference": {
+          "median": 0.971841701257288,
+          "min": 0.9632732529412089,
+          "max": 0.9819102536264296,
+          "n": 3,
+          "wins": 0,
+          "standing": "behind"
+        },
+        "tokens_per_step_median": null,
+        "ttft_ms": null
+      },
+      "stark-original-dflash2": {
+        "stats": {
+          "median": 2356.4380031944743,
+          "min": 2338.442779342741,
+          "max": 2379.340537391018,
+          "n": 3
+        },
+        "level": "server, engine phase time",
+        "excluded": {
+          "invalid": 0
+        },
+        "input_tokens": [
+          8800
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [
+            "7"
+          ],
+          "engine_reports": 3,
+          "proposed": 42,
+          "accepted": 9,
+          "acceptance": 0.21428571428571427
+        },
+        "paired_vs_reference": {
+          "median": 0.9851612178636369,
+          "min": 0.9643069041362077,
+          "max": 1.0232250952682582,
+          "n": 3,
+          "wins": 1,
+          "standing": "unresolved"
+        },
+        "tokens_per_step_median": null,
+        "ttft_ms": null,
+        "paired_vs_dspark": {
+          "median": 1.0227224879914358,
+          "min": 0.9922468884476429,
+          "max": 1.0420759855488249,
+          "n": 3,
+          "wins": 2,
+          "standing": "unresolved"
+        }
+      },
+      "mlx-original": {
+        "stats": {
+          "median": 2415.1788501690285,
+          "min": 2302.9517298700425,
+          "max": 2424.9984826536484,
+          "n": 3
+        },
+        "level": "server, engine phase time",
+        "excluded": {
+          "invalid": 0
+        },
+        "input_tokens": [
+          8800
+        ],
+        "cached_tokens": [
+          0
+        ],
+        "drafting": {
+          "requested": [
+            "engine_default"
+          ],
+          "engine_drafts": [],
+          "engine_reports": 0,
+          "proposed": 0,
+          "accepted": 0,
+          "acceptance": null
+        },
+        "paired_vs_reference": null,
+        "tokens_per_step_median": null,
+        "ttft_ms": null
+      }
+    }
+  },
+  "draft_sources_sha256": {
+    "actual_worker": "7fa947a0189585c966d6217a381dbf61b555bd77cac16028a3cb60c921a52897",
+    "operator_profile": "c2c45e3de6dcae5b4af10cd6fd54918e5c759946668c4ba08c9f930cac0f57d7",
+    "companion": "0028e946661b800a80436009f566f898d03552d37e511a21171660f590f18ada",
+    "dflash_weights": "217980ab00d116693fa5946df7bbfd967caf5fac1f529afd541fbd470ddb54ee",
+    "draft_config": "d094e435eb939e01fca6297f637c5af35e3da4b552f8e1ab0a181cd278a1cefa",
+    "reference_mlx": "2f8598eaca4cb814e63ea69e791c1bdf55ba82280bfd299f9141906356b7cb87",
+    "quality_probe": "a496199e7203fef84c3bb8bf91a6ccaa9a55fa36875c8f9f50d47b9c883d0cd6"
+  },
+  "native_checks": {
+    "dspark": {
+      "worker_ready": 6,
+      "output_tokens": 20825,
+      "enabled_requests": 183,
+      "proposed": 21617,
+      "accepted": 12067
+    },
+    "dflash2": {
+      "worker_ready": 6,
+      "output_tokens": 20825,
+      "enabled_requests": 183,
+      "proposed": 36463,
+      "accepted": 15288
+    },
+    "same_key_and_output_hash": 183,
+    "dspark_total": 183,
+    "dflash2_total": 183
+  },
+  "implementation_commit": "04e448991f88a079957c411127167cf14ab30416",
+  "width_screen": {
+    "receipt_sha256": "8595cd81c3a7c884f481fb1e453115338f0d4bbe5fb28f6a94dfc722220e8c3c",
+    "cases": {
+      "coding": {
+        "3": {
+          "decode_seconds": [
+            2.158345542,
+            2.259289042
+          ],
+          "accepted": [
+            124,
+            124
+          ]
+        },
+        "7": {
+          "decode_seconds": [
+            2.111001333,
+            2.159838125
+          ],
+          "accepted": [
+            136,
+            136
+          ]
+        },
+        "sampled_matches_off": true
+      },
+      "sustained": {
+        "3": {
+          "decode_seconds": [
+            2.392413292,
+            2.40010375
+          ],
+          "accepted": [
+            122,
+            122
+          ]
+        },
+        "7": {
+          "decode_seconds": [
+            2.378142167,
+            2.412138083
+          ],
+          "accepted": [
+            133,
+            133
+          ]
+        }
+      },
+      "prose": {
+        "3": {
+          "decode_seconds": [
+            2.527364416,
+            2.5260005
+          ],
+          "accepted": [
+            119,
+            119
+          ]
+        },
+        "7": {
+          "decode_seconds": [
+            2.431985042,
+            2.441281875
+          ],
+          "accepted": [
+            130,
+            130
+          ]
+        }
+      },
+      "context4k": {
+        "3": {
+          "decode_seconds": [
+            2.121463917,
+            2.174612667
+          ],
+          "accepted": [
+            131,
+            131
+          ]
+        },
+        "7": {
+          "decode_seconds": [
+            2.095180792,
+            2.058724917
+          ],
+          "accepted": [
+            149,
+            149
+          ]
+        },
+        "sampled_matches_off": true
+      }
+    }
+  },
+  "image_smoke": {
+    "passed": true,
+    "ready_mtp_default_drafts": 7,
+    "mtp_on_equals_off": true,
+    "follow_up_reused_input_tokens": 2048,
+    "reuse_equals_cold": true,
+    "image_request": {
+      "completed": true,
+      "error": null,
+      "drafting": false
+    },
+    "after_image_reused_input_tokens": 0,
+    "after_image_equals_cold": true
+  },
+  "target_quality": {
+    "corpus": {
+      "inputs": 10,
+      "kind": "natural-text",
+      "rows": 2580,
+      "sha256": "2725101b05260f0a9a8648937f75686c04c0d72349485027c92ce19f500e36dc",
+      "window": 256
+    },
+    "metrics": {
+      "kl_reference_to_candidate": {
+        "max": 2.0828002112136623,
+        "mean": 0.010817792867616728,
+        "unit": "nats"
+      },
+      "next_token_accuracy": {
+        "candidate": 0.7356589147286822,
+        "reference": 0.7364341085271318
+      },
+      "next_token_logprob_abs_change_mean": 0.07137955705524449,
+      "top1_agreement": {
+        "all": 0.9558139534883721,
+        "strata": [
+          {
+            "agreement": 0.9922440537745605,
+            "reference_top1_probability_min": 0.5,
+            "rows": 1934
+          },
+          {
+            "agreement": 0.9992836676217765,
+            "reference_top1_probability_min": 0.9,
+            "rows": 1396
+          }
+        ]
+      }
+    },
+    "verdict": "pass",
+    "criteria": {
+      "accuracy_shortfall_limit_points": 2.0,
+      "accuracy_shortfall_points": 0.07751937984495916,
+      "confident_agreement": 0.9922440537745605,
+      "confident_agreement_floor": 0.98,
+      "confident_probability": 0.5,
+      "confident_rows": 1934,
+      "pooled_inputs": 10,
+      "pooled_rows": 2580,
+      "reference_accuracy": 0.7364341085271318,
+      "reference_accuracy_floor": 0.1
+    }
+  },
+  "prefix_validation": {
+    "receipt_sha256": "19cec2f7db549a0e743dfe5b83a8a4a9a52a32b815f001bd5460544032c421cc",
+    "incompatible_width_attempt_log_sha256": "03d2548202024b0be69cacfee4150d775739b3a64e4e82d924566a045790d5b7",
+    "passed": true,
+    "explicit_drafts": 3,
+    "greedy_profile_drafts": 7,
+    "chunk_tokens": 2048,
+    "checks": 45,
+    "successful": 45,
+    "matched_fresh": 45,
+    "matched_baseline": 45,
+    "matched_reuse_rule": 45,
+    "follow_ups_reuse": true,
+    "invalidations": {
+      "error_reply": true,
+      "unscoped_request": true,
+      "reset_cache": true,
+      "image_operation": true,
+      "cancellation": true,
+      "tokenize_decode": true
+    }
+  }
+}

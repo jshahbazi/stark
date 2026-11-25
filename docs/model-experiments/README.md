@@ -2,6 +2,8 @@
 
 [Look up research and speed changes by model](../MODEL_RESEARCH.md), including benchmark comparisons and branch-only attempts. The [source index](source-index.md) groups individual reports by family and topic.
 
+- [20261124-INKDRAFT-02 · Live DFlash 2 on the original Inkling server benchmark](../benchmarks/2026-11-24-inkling-mini-live-dflash2.md) records the fixed-width screen, worker correctness and same-run DSpark and MLX-Serve comparisons.
+
 - [20261124-INKDRAFT-01 · DFlash 2 and DSpark on identical Inkling continuations](2026-11-24-inkling-mini-dflash2-traces.md) records fixed-width proposal acceptance and native M5 Max verifier timing on four prompts from the standard benchmark.
 
 - [20261124-INKBUDGET-01 through -03 · Inkling 2 Mini thinking budget](../archive/runs/2026-11-24-inkling-thinking-budget.md) tracks the reasoning limit and answer reserve with DSpark on and off, and the adoption of the 1,024-token Playground default.

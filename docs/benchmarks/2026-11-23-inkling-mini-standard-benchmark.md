@@ -87,6 +87,16 @@ These final-build figures differ slightly on every input from the earlier quanti
 
 Five of the nine standard rows on the default pair are unresolved: one or more blocks disagreed. The one standing gap is novel prose, about 14 percent behind, which the owner set aside when optimization stopped; on that row Stark drafts 1.85 tokens per round at about 0.39 acceptance against MLX-Serve's mostly plain steps. MLX-Serve 8-bit's repeated-sentence prefill median (1,664.7 tok/s) was lower here than in the earlier single-repeat runs (1,909 to 2,220), so the 1.13 standing on that row depends on this run's MLX-Serve rate; the exact 8,800-ID prefill row, unresolved at 0.96, is the matched prefill cell. This record is the current Inkling 2 Mini comparison and supersedes the single-repeat engine-matrix runs 1 to 5 ([engine matrix](2026-11-22-inkling-mini-engine-matrix.md)) as the standing; their measurements are unchanged.
 
+### November 24 follow-up on the original checkpoint
+
+The same three-block server benchmark was rerun on the M5 Max with DSpark, MLX-Serve and live DFlash 2. Each row gives client-timed median decode tokens/s. All three rows below were measured in the same run. [Full comparison, prefill and paired ratios](2026-11-24-inkling-mini-live-dflash2.md)
+
+| Engine and drafter | Initial coding | Sustained coding | Novel prose | 512 | 4K | 8K | 16K |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Stark · DSpark | 86.8 | 86.3 | 69.2 | 82.2 | 107.5 | 103.3 | 101.0 |
+| MLX-Serve · default | 87.9 | 82.2 | 73.6 | 80.2 | 88.7 | 93.8 | 88.8 |
+| Stark · DFlash 2, seven proposals | 84.9 | 83.0 | 79.3 | 78.3 | 97.9 | 93.7 | 99.7 |
+
 ## Follow-up, 2026-11-23
 
 The branch was merged into `main` as `2bab5129` with one further commit, `76638e3f` (lint and format fixes in the engine module and the worker), made by another session after this run. This result, its gates and its quality result belong to the build from `7e73e180`; they were not re-run on the merged tree ([session audit](../model-experiments/2026-11-23-inkling-mini-session-audit.md#13-after-the-session-merge-and-a-lint-commit-that-the-gates-did-not-cover)).
