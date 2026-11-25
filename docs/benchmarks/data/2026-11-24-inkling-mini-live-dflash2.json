@@ -1508,14 +1508,32 @@
       "output_tokens": 20825,
       "enabled_requests": 183,
       "proposed": 21617,
-      "accepted": 12067
+      "accepted": 12067,
+      "rounds": 8588,
+      "rounds_by_draft_depth": [
+        66,
+        594,
+        2761,
+        5167
+      ]
     },
     "dflash2": {
       "worker_ready": 6,
       "output_tokens": 20825,
       "enabled_requests": 183,
       "proposed": 36463,
-      "accepted": 15288
+      "accepted": 15288,
+      "rounds": 5368,
+      "rounds_by_draft_depth": [
+        44,
+        37,
+        31,
+        37,
+        49,
+        28,
+        77,
+        5065
+      ]
     },
     "same_key_and_output_hash": 183,
     "dspark_total": 183,
