@@ -2,7 +2,15 @@
 
 [Look up research and speed changes by model](../MODEL_RESEARCH.md), including benchmark comparisons and branch-only attempts. The [source index](source-index.md) groups individual reports by family and topic.
 
+- [20261125-CTX-01 · Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) records the engine policy, artifact-bound checks and retained per-request admission.
+
 - [20261124-INKBUDGET-01 through -03 · Inkling 2 Mini thinking budget](../archive/runs/2026-11-24-inkling-thinking-budget.md) tracks the reasoning limit and answer reserve with DSpark on and off, and the adoption of the 1,024-token Playground default.
+
+- [20261124-INKCTX-01 · Inkling 2 Mini load-time context and live memory admission](2026-11-24-inkling-mini-memory-context.md) records the 131,072-token cap on M5 Max, matched serial and DSpark output, reuse of 118,784 tokens, image invalidation, automatic planning, and stable advertised context through a managed OpenCode grant.
+
+- [20261124-INKCTX-02 · Inkling 2 Mini request-sized context allocation](2026-11-24-inkling-mini-request-context.md) records stable memory-derived windows, managed OpenCode allocation sizes, exact decode growth, prefix reuse across a resize at 248,399 input tokens, and image invalidation.
+
+- [20261124-INKCTX-03 · Inkling 2 Mini tool-loop cache diagnostic](2026-11-24-inkling-mini-tool-loop-cache.md) reproduces a repeated tool call with zero reused tokens and matches the warm output exactly after reusing 49,152 tokens.
 
 - [Inkling 2 Mini decode toward 80 tok/s, attempts 79–110](2026-11-22-inkling-mini-decode-80.md) records worker repeats, verifier kernel and scheduling experiments, dense and FP4 layout screens, the MLX-Serve comparison, exact and sparse vocabulary readout, and DSpark ranking, K/V sharing, mask reuse and layer ablation.
 

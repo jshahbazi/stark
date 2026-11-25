@@ -3301,6 +3301,7 @@ class Desktop:
         on_progress=None,
         estimate_key=None,
         cache_scope=None,
+        fit_output_to_context=False,
     ):
         with self.lock:
             if epoch is not None and epoch != self.epoch:
@@ -3482,6 +3483,8 @@ class Desktop:
                     raise APIError(503, str(error), "automatic_output_unavailable") from None
             if maximum < 1:
                 raise DesktopError("Conversation is full. Start a new conversation and try again.")
+        elif fit_output_to_context and context_capacity_known and count < context:
+            maximum = min(maximum, context - count)
         if thinking_budget_tokens is not None and maximum < MIN_THINKING_BUDGET_OUTPUT_TOKENS:
             raise DesktopError("Leave at least four output tokens when Thinking Budget is enabled.")
         if count + maximum > context:
@@ -3926,7 +3929,13 @@ class Desktop:
                 stop=request["stop"],
                 mtp_drafts=drafts,
             )
-            cache_scope = self.api_cache_scope(getattr(cancelled, "cache_principal", None))
+            principal = getattr(cancelled, "cache_principal", None)
+            cache_scope = self.api_cache_scope(principal)
+            # OpenCode sizes explicit output from a client-side prompt estimate.
+            # Fit that ceiling to the rendered token count for verified OpenCode grants.
+            fit_output_to_context = (
+                cache_scope is not None and isinstance(principal[1], str) and principal[1].startswith("opencode.")
+            )
             self.status("generating", "Generating for an app…", epoch)
         # A random per-request identifier lets the app fence progress without
         # receiving client identities, credentials or request content.
@@ -3966,6 +3975,7 @@ class Desktop:
                 on_progress=on_progress,
                 estimate_key=estimate_key,
                 cache_scope=cache_scope,
+                fit_output_to_context=fit_output_to_context,
             )
             with self.lock:
                 if epoch != self.epoch or self.worker is not worker or self.active_model != identifier:

@@ -631,6 +631,12 @@ pub(crate) trait GenerationBackend {
     fn loaded_memory_metadata(&self) -> Option<Value> {
         None
     }
+    fn context_sizing_metadata(&self) -> Option<Value> {
+        None
+    }
+    fn context_allocation_metadata(&self) -> Option<Value> {
+        None
+    }
     /// Resolve sampling support before prefix planning and generation. Backends
     /// may fall back to serial, and the reply reports the effective selection.
     fn effective_mtp_drafts(
@@ -1082,6 +1088,9 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             "timing_method":"first-token-wall-clock-v1"});
         if report_reuse {
             reply["reused_input_tokens"] = json!(reused);
+        }
+        if let Some(allocation) = self.backend.context_allocation_metadata() {
+            reply["context_allocation"] = allocation;
         }
         if self.backend.mtp_capabilities() != self.mtp {
             return Err("invalid_generation_output");
@@ -1629,6 +1638,9 @@ pub(crate) fn run_lines<B: GenerationBackend>(
     }
     if let Some(memory) = worker.backend.loaded_memory_metadata() {
         readiness["loaded_memory"] = memory;
+    }
+    if let Some(sizing) = worker.backend.context_sizing_metadata() {
+        readiness["context_sizing"] = sizing;
     }
     readiness["mtp"] = match worker.mtp {
         Some(capabilities) => json!({"supported":true,"max_drafts":capabilities.max_drafts,

@@ -32,6 +32,8 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ## Qwen3.8-Flash-Next and Lily
 
+- [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
+
 ### Native decode, kernels and engine comparisons
 
 - [Flash-Next expert gate/up and shared-down experiment](../benchmarks/2026-11-07-flashnext-moe-projections.md) · Benchmark, 2026-11-07
@@ -113,6 +115,8 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Qwen3.8 Beginner memory admission](../archive/runs/2026-11-08-qwen-guided-memory.md) · Archived run, 2026-11-08
 
 ## Dense Qwen, Qwen MoE and GGUF
+
+- [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
 
 ### Qwen3.8 27B, catalog admission and image parity
 
@@ -217,6 +221,8 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ## Inkling 2 Mini
 
+- [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
+
 ### References, native milestones and follow-up
 
 - [Original-checkpoint implementation plan](../INKLING_2_MINI_PLAN.md)
@@ -228,6 +234,9 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 ### Benchmarks and experiment records
 
 - [Opt-in cumulative thinking budget](../archive/runs/2026-11-24-inkling-thinking-budget.md) · Experiment, 2026-11-24
+- [Load-time context and live memory admission](2026-11-24-inkling-mini-memory-context.md) · Experiment, 2026-11-24, attempt 20261124-INKCTX-01
+- [Request-sized context allocation](2026-11-24-inkling-mini-request-context.md) · Experiment, 2026-11-24, attempt 20261124-INKCTX-02
+- [Tool-loop cache diagnostic](2026-11-24-inkling-mini-tool-loop-cache.md) · Experiment, 2026-11-24, attempt 20261124-INKCTX-03
 - [M5 Max original and Unsloth baselines](../benchmarks/2026-11-20-inkling-mini-m5-max.md) · Benchmark, 2026-11-20
 - [First milestone and real-weight NVFP4](2026-11-20-inkling-mini-milestone-1.md) · Experiment, 2026-11-20
 - [Native decode slice](../benchmarks/2026-11-21-inkling-mini-native-slice.md) · Benchmark, 2026-11-21
@@ -336,6 +345,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ## Shared runtime, catalog and image qualification
 
+- [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
 - [Image-support work: findings, failed attempts and remaining qualification](2026-11-08-image-support-retrospective.md) · Experiment, 2026-11-08
 - [Resource ceilings and installed-app recovery](2026-11-09-resource-admission.md) · Experiment, 2026-11-09
 - [Catalogue family admission](2026-11-10-catalog-family-admission.md) · Experiment, 2026-11-10

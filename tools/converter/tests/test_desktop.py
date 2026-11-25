@@ -1538,6 +1538,59 @@ def test_api_context_rejection_keeps_loaded_worker(desktop, model):
 
 
 @pytest.mark.parametrize("stream", [False, True])
+def test_managed_opencode_fits_the_output_ceiling_to_the_rendered_prompt(desktop, model, stream):
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    identifier = running(desktop, model)
+    desktop.api_context = 30  # The synthetic worker renders 20 prompt tokens.
+    desktop.start_api("a" * 64, port=0)
+    api = desktop.api
+    api.grant_client("opencode.fixture", "b" * 64, 120, api.api_session)
+    api.grant_client("openwork.fixture", "c" * 64, 120, api.api_session)
+    url = f"http://127.0.0.1:{desktop.api_port}/v1/chat/completions"
+
+    def send(key, maximum):
+        payload = {
+            "model": identifier,
+            "messages": [{"role": "user", "content": "Synthetic prompt"}],
+            "max_completion_tokens": maximum,
+            "stream": stream,
+        }
+        prepared = Request(
+            url,
+            data=json.dumps(payload).encode(),
+            headers={"Authorization": "Bearer " + key * 64, "Content-Type": "application/json"},
+        )
+        try:
+            with urlopen(prepared, timeout=5) as response:
+                body = response.read()
+        except HTTPError as error:
+            with error:
+                assert error.code == 400
+                return json.load(error)["error"]["code"]
+        if stream:
+            assert b"data: [DONE]" in body
+        else:
+            assert "choices" in json.loads(body)
+        return None
+
+    try:
+        with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+            assert send("b", 18) is None
+            assert send("b", 8) is None
+            assert send("a", 18) == "context_length_exceeded"
+            assert send("c", 18) == "context_length_exceeded"
+            desktop.api_context = 20
+            assert send("b", 18) == "context_length_exceeded"
+        generated = [call.args[0] for call in request.call_args_list if call.args[0]["operation"] == "generate"]
+        assert [frame["max_new_tokens"] for frame in generated] == [10, 8]
+        assert all(frame["context_tokens"] == 30 for frame in generated)
+    finally:
+        api.close()
+
+
+@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("overflow", ["ascii", "utf8", "template"])
 def test_http_worker_request_overflow_preserves_model_and_allows_retry(desktop, model, stream, overflow, monkeypatch):
     from urllib.error import HTTPError

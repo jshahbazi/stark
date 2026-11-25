@@ -78,6 +78,9 @@ const MID: usize = 1152;
 const KV: usize = 1024;
 const LOCAL: usize = 1024;
 const CAPACITY: usize = 4352;
+/// Pinned Inkling 2 Mini checkpoint context limit. The worker also validates
+/// this against the authenticated model configuration before selecting it.
+const MAX_M5_CONTEXT: usize = 1_048_576;
 const HEADS: usize = 24;
 const START: usize = 4096;
 
@@ -322,6 +325,7 @@ struct Stream<'a> {
     nvfp4_dots: usize,
     defer_expert_merge: bool,
     mxfp8_dots: usize,
+    deferred_error: Option<&'static str>,
     profile: Option<(&'a ProtocolObject<dyn MTLCommandBuffer>, &'a mut PrefillTiming)>,
 }
 
@@ -1664,9 +1668,14 @@ fn execute_prepared_with_submit(
         nvfp4_dots: 0,
         defer_expert_merge: false,
         mxfp8_dots: 0,
+        deferred_error: None,
         profile: profile.map(|profile| (&*command, profile)),
     };
     encode(&mut gpu);
+    if let Some(error) = gpu.deferred_error {
+        gpu.encoder.take().ok_or("Inkling timestamped encoder allocation failed")?.end_encoding();
+        return Err(error);
+    }
     gpu.encoder.take().ok_or("Inkling timestamped encoder allocation failed")?.end_encoding();
     if let Some((_, profile)) = gpu.profile.as_mut() {
         profile.before_submit(gpu.dispatches);
