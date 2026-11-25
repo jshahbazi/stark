@@ -372,6 +372,19 @@ Lily's limit is 3. A plan for 8 is in the [depth policy record][depth]. It is de
 
 The desktop app is bounded lower still. Its paged-residency memory profile for the pinned artifact allows two drafts, and raising that needs a memory qualification ([schedule gate][gate]).
 
+#### When a drafter proposes more rows than the target can verify at once
+
+The useful measure is **wall time per emitted token**. On one Inkling comparison, a stronger drafter needed 37.5% fewer round starts for the same outputs. It won on prose and lost on several coding workloads. Four design choices explain how a runtime can spend that saving. [Measured server results](https://github.com/jshahbazi/stark/blob/a83752f22aec2139769ab8efae0d6b7729732dd1/docs/benchmarks/2026-11-24-inkling-mini-live-dflash2.md)
+
+| Design choice | Performance tradeoff |
+| --- | --- |
+| Choose verification depth independently of draft width | A block drafter may generate all candidates for a fixed cost. Checking a shorter prefix saves target work. The useful depth depends on the chance of reaching each position and the measured cost of the next verifier call. |
+| Verify a wide block in one pass or split it conditionally | One pass can amortize weight reads and dispatches. A split avoids the second pass when an early proposal fails. On one 4K trace, only 22 of 42 rounds reached the second call. That frequency determines how much a wider kernel can save. [Verifier replay](https://github.com/jshahbazi/stark/blob/a83752f22aec2139769ab8efae0d6b7729732dd1/docs/model-experiments/2026-11-24-inkling-mini-dflash2-traces.md) |
+| Keep draft features and cache updates on the GPU | Passing committed feature rows through a host process adds copies and synchronization. Separate transfer time from draft compute before estimating the benefit of sharing device buffers. |
+| Spend spare verifier rows on alternative continuations | A sibling candidate can rescue a round when the first choice fails. Its value depends on how often it recovers useful tokens and what an extra row costs. Committing a branch must restore the target state for that path and discard sibling state. [Splash implementation](https://github.com/incoai/splash/blob/2afc7337aacc044722fa95e4cb3da75c281a19a8/runtime/model/Runtime.cpp#L2541-L2591) |
+
+Native round counts and target-call counts answer different questions because one round can span several calls. Recording both alongside draft, transfer, verification and commit time makes the cost visible. A quick bound is to compare verifier time alone per emitted token with the entire time budget implied by the desired throughput.
+
 ### 6. Prefix and state reuse
 
 This does not change tok/s. It removes most of the prefill before the first token of a follow-up turn, which is what chat and agent users wait for.
