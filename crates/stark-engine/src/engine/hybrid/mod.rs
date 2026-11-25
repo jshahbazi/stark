@@ -338,6 +338,7 @@ pub struct Model {
     tokenizer: Arc<Tokenizer>,
     vocab_size: usize,
     max_context: u32,
+    checkpoint_context: u32,
     eos: Vec<u32>,
     image_artifact: Option<image::artifact::ImageArtifact>,
     mtp_schedule_default: MtpScheduleDefault,
@@ -421,7 +422,7 @@ impl Model {
             .and_then(Value::as_u64)
             .filter(|n| *n > 0 && *n <= 1_000_000)
             .ok_or(Error::Invalid("vocabulary size"))? as usize;
-        let max_context = text
+        let checkpoint_context = text
             .get("max_position_embeddings")
             .and_then(Value::as_u64)
             .filter(|n| *n > 0 && *n <= u32::MAX as u64)
@@ -468,7 +469,7 @@ impl Model {
             }
             #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
             {
-                let context = max_context.min(32_768);
+                let context = checkpoint_context.min(32_768);
                 let canonical = path.canonicalize()?;
                 let mut options = glm_exl3::LoadOptions::new(context as usize);
                 options.prefix_reuse = cfg!(stark_glm_exl3_prefix_available);
@@ -506,7 +507,7 @@ impl Model {
                 if model.vocab_size() != vocab_size || model.position() != 0 {
                     return Err(Error::Invalid("mixed precision metadata mismatch"));
                 }
-                let context = max_context.min(model.max_context() as u32);
+                let context = checkpoint_context.min(model.max_context() as u32);
                 (Forward::Lily(Box::new(model)), context)
             }
             #[cfg(not(all(feature = "metal", target_os = "macos")))]
@@ -524,7 +525,7 @@ impl Model {
                 Some("qwen4_exp") => Forward::Qwen(qwen::QwenModel::new(weights, &outer)?),
                 _ => return Err(Error::Unsupported("architecture")),
             };
-            (forward, max_context)
+            (forward, checkpoint_context)
         };
         if let Some(artifact) = &image_artifact {
             artifact.unchanged(path)?;
@@ -534,6 +535,7 @@ impl Model {
             tokenizer,
             vocab_size,
             max_context,
+            checkpoint_context,
             eos,
             image_artifact,
             mtp_schedule_default: MtpScheduleDefault::default(),
@@ -700,6 +702,7 @@ impl Model {
                 tokenizer,
                 vocab_size,
                 max_context,
+                checkpoint_context: architecture.max_position_embeddings,
                 eos,
                 image_artifact: None,
                 mtp_schedule_default: MtpScheduleDefault::default(),
@@ -719,6 +722,27 @@ impl Model {
     }
     pub fn max_context_length(&self) -> u32 {
         self.max_context
+    }
+
+    /// Estimate a cold text request under the loaded family's memory policy.
+    pub fn context_sizing(
+        &self,
+        memory_budget_bytes: usize,
+    ) -> std::result::Result<Option<super::context::ContextSizing>, &'static str> {
+        #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+        if matches!(self.forward, Forward::GlmExl3(_)) {
+            // The bridge's context is admitted as part of its native load.
+            return Ok(None);
+        }
+        super::context::ContextSizing::fit_loaded(
+            self.checkpoint_context,
+            self.max_context,
+            memory_budget_bytes,
+            |context| {
+                let input = (context - 1).min(super::context::LOAD_PREFILL_PROBE_TOKENS);
+                self.generation_memory_bytes(context, input, true)
+            },
+        )
     }
 
     /// Allocation admission uses the loaded execution family and cache policy.

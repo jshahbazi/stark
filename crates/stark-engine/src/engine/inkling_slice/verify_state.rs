@@ -420,6 +420,7 @@ impl VerifyWorkspace {
             nvfp4_dots: 0,
             defer_expert_merge: false,
             mxfp8_dots: 0,
+            deferred_error: None,
             profile: None,
         };
         gpu.one(

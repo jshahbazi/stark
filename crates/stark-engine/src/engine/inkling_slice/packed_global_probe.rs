@@ -7,10 +7,14 @@ use super::*;
 
 /// Base key capacity, covered by the load-time source reserve. Non-source
 /// requests and contexts up to this extent keep exactly this size.
-pub(super) const MAX_KEYS: usize = 4352;
-/// Largest key capacity of the context-sized workspace. It equals the
-/// session's maximum M5 context; the per-head mask is then 957.0 MiB.
-pub(super) const MAX_CONTEXT_KEYS: usize = 32_768;
+pub(super) const MAX_KEYS: usize = CAPACITY;
+
+#[cfg(test)]
+#[stark_engine_macros::stark_test]
+fn explicit_reference_mask_has_separate_geometry() {
+    assert!(reference_mask_supported(CAPACITY, usize::MAX));
+    assert!(!reference_mask_supported(MAX_M5_CONTEXT, usize::MAX));
+}
 /// Reference query tile, bounded by the explicit mask's size.
 const TILE: usize = 256;
 /// Default (mask-free) query tile. Each query row still visits the same key
@@ -20,10 +24,24 @@ const TILE: usize = 256;
 const FAST_TILE: usize = 1024;
 const MAX_QUERIES: usize = TILE + 63;
 const MAX_FAST_QUERIES: usize = FAST_TILE + 63;
+const MAX_MASK_ELEMENTS: u64 = u32::MAX as u64 + 1;
 
 /// F32 per-head relative mask bytes for one query tile over `keys` keys.
 pub(super) const fn mask_bytes(keys: usize) -> usize {
     HEADS * MAX_QUERIES * keys * size_of::<f32>()
+}
+
+/// Whether the optional full F32 reference mask fits both Metal's per-buffer
+/// limit and the 32-bit flattened element indexing in its diagnostic shader.
+pub(super) fn reference_mask_supported(
+    keys: usize,
+    buffer_limit: usize,
+) -> bool {
+    let Some(elements) = HEADS.checked_mul(MAX_QUERIES).and_then(|rows| rows.checked_mul(keys)) else {
+        return false;
+    };
+    (elements as u64) <= MAX_MASK_ELEMENTS
+        && elements.checked_mul(size_of::<f32>()).is_some_and(|bytes| bytes <= buffer_limit)
 }
 
 /// F32 key and value staging bytes for `keys` keys.
@@ -43,7 +61,7 @@ pub(super) const fn workspace_bytes(keys: usize) -> usize {
 /// Key capacity that serves a context. It never falls below the default so
 /// contexts within the default extent keep the default buffers.
 pub(super) fn capacity_for(context: usize) -> usize {
-    context.clamp(MAX_KEYS, MAX_CONTEXT_KEYS)
+    context.clamp(MAX_KEYS, MAX_M5_CONTEXT)
 }
 const STEEL: &str = "steel_attention_float32_bq64_bk32_bd128_bv128_wm4_wn1_maskfloat32";
 /// Stark derivative of STEEL that computes the relative bias in the kernel.
@@ -162,13 +180,16 @@ impl GlobalProbe {
     fn reference_mask(
         &self,
         device: &Device,
-    ) -> Buffer {
+    ) -> Result<Buffer> {
         let mut mask = self.mask.borrow_mut();
         let bytes = mask_bytes(self.capacity);
-        if mask.as_ref().is_none_or(|buffer| buffer.length() < bytes) {
-            *mask = Some(zeroed(device, bytes).expect("Inkling reference global mask allocation"));
+        if !reference_mask_supported(self.capacity, device.max_buffer_length()) {
+            return Err("Inkling exact global-attention mask exceeds its diagnostic buffer limit");
         }
-        mask.as_ref().expect("allocated above").clone()
+        if mask.as_ref().is_none_or(|buffer| buffer.length() < bytes) {
+            *mask = Some(zeroed(device, bytes)?);
+        }
+        Ok(mask.as_ref().expect("allocated above").clone())
     }
 
     /// Reallocate the key-extent buffers for the context-sized workspace.
@@ -185,7 +206,12 @@ impl GlobalProbe {
         if keys == self.capacity {
             return Ok(());
         }
-        if !(MAX_KEYS..=MAX_CONTEXT_KEYS).contains(&keys) || mask_bytes(keys) > device.max_buffer_length() {
+        let per_buffer_bytes = keys.checked_mul(KV).and_then(|elements| elements.checked_mul(size_of::<f32>()));
+        let shader_stride = keys.checked_mul(KV);
+        if !(MAX_KEYS..=MAX_M5_CONTEXT).contains(&keys)
+            || per_buffer_bytes.is_none_or(|bytes| bytes > device.max_buffer_length())
+            || shader_stride.is_none_or(|elements| elements > i32::MAX as usize)
+        {
             return Err("Inkling source global workspace exceeds the supported key capacity");
         }
         self.capacity = 0;
@@ -266,6 +292,17 @@ impl GlobalProbe {
         let extent = start + rows;
         assert!(extent <= self.capacity && extent <= visit.capacity);
         let reference = gpu.runtime.exact_prefill || gpu.runtime.global_mask_reference;
+        let mask = if reference {
+            match self.reference_mask(&gpu.runtime.device) {
+                Ok(mask) => Some(mask),
+                Err(error) => {
+                    gpu.deferred_error = Some(error);
+                    return;
+                },
+            }
+        } else {
+            None
+        };
         gpu.phase(PrefillPhase::GlobalPacking);
         gpu.one(
             if reference {
@@ -305,18 +342,17 @@ impl GlobalProbe {
             }
             let relative = [queries as u32, keys as u32, offset as u32, 0];
             if reference {
-                let mask = self.reference_mask(&gpu.runtime.device);
                 gpu.phase(PrefillPhase::GlobalMask);
                 gpu.one(
                     "ink_global_probe_mask",
-                    &[&packed.table, &packed.sink, &mask],
+                    &[&packed.table, &packed.sink, mask.as_ref().expect("reference mask allocated")],
                     relative,
                     (keys.div_ceil(128), HEADS * queries),
                     128,
                 );
             }
             gpu.phase(PrefillPhase::GlobalAttention);
-            self.encode_matrix(gpu, packed, extent, offset, queries, keys, relative);
+            self.encode_matrix(gpu, packed, extent, offset, queries, keys, relative, mask.as_ref());
             gpu.phase(PrefillPhase::GlobalGate);
             gpu.one(
                 if reference {
@@ -342,6 +378,7 @@ impl GlobalProbe {
         queries: usize,
         keys: usize,
         relative: [u32; 4],
+        mask: Option<&Buffer>,
     ) {
         let Some(encoder) = &gpu.encoder else {
             return;
@@ -386,7 +423,7 @@ impl GlobalProbe {
         if reference {
             encoder.set_compute_pipeline_state(&self.pipelines[alignments]);
             encoder.set_bytes(NonNull::from(&mask_strides).cast(), size_of_val(&mask_strides), 5);
-            encoder.set_buffer(Some(&self.reference_mask(&gpu.runtime.device)), 0, 6);
+            encoder.set_buffer(Some(mask.expect("reference mask allocated")), 0, 6);
         } else {
             // The same F32 bias values, computed from the table and sink;
             // BF16 operands as stored.
