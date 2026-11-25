@@ -4,6 +4,8 @@
 
 - [20261125-INKREP-01 through -03 · Inkling 2 Mini repeated reasoning and tool calls](../archive/runs/2026-11-25-inkling-repetition.md) compares text-only, live OpenCode and recorded tool-result replays with the original 45-call search loop.
 
+- [20261125-INKREP-04 through -06 · Inkling 2 Mini weight edits for repeated OpenCode searches](../archive/runs/2026-11-25-inkling-weight-edit.md) tests three edits to the same vocabulary row. The strongest changed the command at three incident positions and repeated two constituent searches late in the streak.
+
 - [20261124-INKBUDGET-01 through -03 · Inkling 2 Mini thinking budget](../archive/runs/2026-11-24-inkling-thinking-budget.md) tracks the reasoning limit and answer reserve with DSpark on and off, and the adoption of the 1,024-token Playground default.
 
 - [Inkling 2 Mini decode toward 80 tok/s, attempts 79–110](2026-11-22-inkling-mini-decode-80.md) records worker repeats, verifier kernel and scheduling experiments, dense and FP4 layout screens, the MLX-Serve comparison, exact and sparse vocabulary readout, and DSpark ranking, K/V sharing, mask reuse and layer ablation.

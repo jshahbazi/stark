@@ -77,3 +77,5 @@ Two model-only requests tested whether a short reconstruction could reproduce th
 | 5 | 8,210 | 694 | Returned text and stopped. |
 
 The historical loop is confirmed. Neither abbreviated history regenerated its next identical call. A weight-edit validation needs a baseline that reproduces the call and controls on which repeated searches are appropriate. No candidate weight edit was tested. A [separate synthetic cache experiment](https://github.com/jshahbazi/stark/blob/c5113a38c0faf415cec16d78e701e28e94383ef9/docs/model-experiments/2026-11-24-inkling-mini-tool-loop-cache.md) elicited a repeated call both with and without prefix reuse on its own fixture. Frozen-history aggregate receipt SHA-256 `adea741fbaa4e27b324c9d6aa455e2d999fc449a4d95f54bac4679e70d9e6b20`.
+
+The [follow-up weight-edit trial](2026-11-25-inkling-weight-edit.md) tested changes to the vocabulary projection on separate copies of the installed checkpoint.
