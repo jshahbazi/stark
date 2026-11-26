@@ -289,3 +289,31 @@ scheduling. These totals price stages for investigation.
 | Retried reverse control pressure stop | `52ca71b4da7ff407529c517062cd9eff91d50f5f21a789d338404bedcd37052c` |
 | Retried packed requests | `2905ecac95f8d861f2afe0949f3d82335432e99e212f9fbe95c809fc555b2e44` |
 | 16K mapped stage sample | `8617f834e429d77bbf02eb36673c68f1d49b51e67874adf1431820359910a071` |
+
+### Reduce long-window prefill workspace and test paired gate rows
+
+The [HY4FRAG-27 executable](2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-27--screen-smaller-routed-staging-and-group-local-dense-packing)
+used 1,024-row prefill chunks and a 17,408-position context cap.
+All completed K2 requests matched the pinned 192 output IDs and the
+earlier draft counts. Observed pressure stayed at level 1 with no
+swap growth on the three completed workers.
+
+| Arm in run order | Decode tok/s | Catch-up s | Target verify s | Receipt SHA-256 |
+| --- | ---: | ---: | ---: | --- |
+| Control, compiler detected | No timing | | | `f72bb38be977db5c8fd3bf601fd3369025e9ac8bf515318ff3ab2c8da56712d6` |
+| Packed cache and paired gate output rows | 28.04 | 0.066 | 6.346 | `e84ae21916c8496180d85bb6dedb64b0b7190ed24bf7ee7f0ce91d26d8611dc7` |
+| Packed cache | 45.25 | 0.066 | 3.760 | `e39b9024a0ca3eb0f346449b414156cbcb2b26ac3bfe158914c1c52eccf4bc56` |
+| Control retry | 42.97 | 0.214 | 3.826 | `8ae8e62c335d85e0fa35add36d83ddbff5e0dd3b928ef8618e5b28af436627ce` |
+
+The rejected first control detected a separate Metal compiler at
+admission. Both the packed cache and retried control reported nominal
+thermal state and zero contenders. Draft catch-up fell by 0.148 s, a
+second scoped pair with the same direction as the 4,096-row chunk
+comparison. The packed cache rate still trails 49.47 at 16K.
+
+Pairing adjacent output rows of Q3_K and Q4_K gate/up products keeps
+the eight-lane FMA and reduction order, and halves repeated logical
+activation loads for three verifier rows. This arm moved from fair
+to nominal thermal state. Its draft phase stayed within 6 ms of the
+packed-only arm and target verification cost rose by 2.586 s. Remove
+the pairing and keep the existing gate geometry.
