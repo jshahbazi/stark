@@ -861,6 +861,10 @@ Removing duplicate route capture in Hy4's verifier gave no clear 4K depth-four r
 
 For long decode, profile the verifier separately from prefill and compare both wall and stage samples. The Hy4 32K depth-two profile measured 2.20 s in target host cuts, 1.17 s in routed products, 1.04 s in dense attention projections, and 0.23 s in IndexPool over 192 outputs. Reusing the F32 prefill score kernel changed the 32K output and stayed out. [Hy4 32K verifier profile and score screen](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-06--reuse-the-prefill-indexpool-scorer-in-long-verification)
 
+Expand large packed projections once when the direct tensor-view product repays packing. On Hy4, the Q8_0 attention gate and output account for 73% of the multiply work across the seven trunk attention projections. Reusing Inkling's device-view product with F16 operands and F32 accumulation improved first 4K prefill 5.5–7.3% and warm prefill 2.4–7.0% in its bracket. Charge the extra 224 MiB at 4K and keep the path opt-in. [Hy4 direct device views](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-07--use-direct-tensor-views-for-the-dense-attention-gate-and-output)
+
+The source-order grouped IndexPool scorer matched the Hy4 control on 192 outputs at each long rung. After host cuts, its 16K and 32K decode costs each moved by less than 3%, and build activity started during the grouped arm. Leave the scorer unchanged and prioritize expert waits. At a 5,120-position cap, live memory admitted a 50 GB arena and refused 52 GB. [Hy4 arena and grouped IndexPool screens](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-08--screen-larger-arena-admission-at-a-5120-position-cap)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |

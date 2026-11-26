@@ -76,6 +76,7 @@ struct Prefill {
     bool routed_half = false;       ///< Stage grouped expert GEMM operands as F16, keeping F32 accumulation
     bool routed_fragments = false;  ///< Use gathered F16 tensor fragments for packed grouped experts
     bool dense_packed = false;      ///< Read packed Q8_0 attention projections into prefill tensor fragments
+    bool dense_device_views = false; ///< Expand gate/output operands once for direct F16 tensor views
     bool tensor_mla = false;        ///< Use multi-query tensor attention for contiguous prefill ranges
     bool grouped_k_quant = false;   ///< Q3_K/Q4_K gate/up with Q4_K down, on Metal 4
     /// A WRONG DECISION, ON PURPOSE, IN THE PREFILL PATH ONLY (HY4_FLASH_PREFILL_PROBE), so that
@@ -144,6 +145,7 @@ public:
 
     static constexpr int kMaxWindow = 8;        ///< a decode window
     static constexpr int kSelCap = 2051;        ///< the widest selection a query may have
+    static size_t dense_device_scratch_bytes(const Geometry& geo, int tokens);
 
     /// Forgets the caches and the positions.  Call before a new sequence.
     ///

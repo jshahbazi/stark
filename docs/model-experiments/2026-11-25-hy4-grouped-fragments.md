@@ -269,3 +269,98 @@ IndexPool optimization can address a portion of the gap. The largest
 measured time budgets are streamed-expert stalls, routed expert products,
 and attention projections. Profile receipt SHA-256
 `1c0f172794d61f39f5298d1a807cab3f293704b41fc407c4f4a622513b46d433`.
+
+## 20261125-HY4FRAG-07 · Use direct tensor views for the dense attention gate and output
+
+The candidate expands each of these two packed Q8_0 weights and its
+activation once per projection. It reuses Stark's Inkling device-view
+matmul with F16 operands and F32 accumulation in K64 steps. The
+page-rounded workspace reaches 224 MiB at 4,096 rows and is charged at
+admission. The candidate applies to supported shapes from 512 prefill
+rows. Decode uses the original projections.
+
+The 40 GB, 8,192-position, image-loaded 4K depth-two bracket used grouped
+expert fragments. Every result matched the 64 reference output IDs.
+All arm-entry host snapshots were clear of named competing processes.
+
+| Arm in run order | First prefill tok/s | Warm prefill tok/s |
+| --- | ---: | ---: |
+| Device views first | 507.44 | 539.02 |
+| Packed control | 480.92 | 503.92 |
+| Device views last | 516.24 | 515.91 |
+
+First-use prefill improved 5.5–7.3% and warm prefill 2.4–7.0% against
+the intervening control.
+
+The candidate supplied by the Sol agent has patch SHA-256
+`984796db355c980bddab208308f98d2ada6e4da369ba1e5bba1e93765af4e46a`.
+The full patch on `57c102c86` is
+`f7edbe8c492a38e8945693f25416e737fcacd37f5753bbd87ef1cebda7f9a062`.
+Locked offline Rust 1.98.1 release binary SHA-256
+`c6a9336f052add8a63389bc8242a35a43fef3d4ad865687915dcf2177cf81fc4`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Device views first | `e3d759ac1f3eb77891664d59ebc8709dec570f2d1a5830ccf76d5484178f8c59` |
+| Packed control | `b03026c160d6aff2e84eaffe6337802ca99d29bc61b245d4ebfa5c71f23641e8` |
+| Device views last | `2ff74b5cdf5e94a8f54918ed491e7962a1b89932ee6f50f85c56c41d44c42141` |
+
+The same build agreed on all 13 teacher-forced rows at 552–840 input
+positions, with eight actual next tokens correct in each arm. It passed
+both original-projector image requests with zero draft proposals, and
+the image, invalid image, and cancellation cache transitions. The
+depth-four prefix reused 4,096 tokens and matched the fresh output.
+Changing depth or context reused zero tokens and produced the same
+continuation. Retain `STARK_HY4_PREFILL_DENSE_DEVICE_VIEWS=1` as an
+opt-in alongside packed dense projections.
+
+| Validation receipt | SHA-256 |
+| --- | --- |
+| Teacher-forced top-1 | `e2e04f9d7f66ef5cf4cb8418c6115ae7c245cbfceffd6fa3a4dd7cf3a3fc7409` |
+| Images and cancellation | `dc4d73215fe55117cb714f869badb211ddef761467ff72ca68b8d8d270c5bd32` |
+| Depth-four prefix and exact-fit context | `567ddb6f0f296cae8545e7fda4f4d21a14873a6cae8edf9ffc00ab932564fb40` |
+
+## 20261125-HY4FRAG-08 · Screen larger arena admission at a 5,120-position cap
+
+With device views and the private grouped IndexPool candidate disabled,
+the HY4FRAG-07 worker refused a 52 GB arena under the live memory guard.
+It admitted 49.998 GB at 5,120 positions. A depth-two request at
+30.05 tok/s preceded three depth-four requests at 47.42, 49.35 and
+49.48 tok/s. Every request matched all 64 reference IDs. The larger
+arena did not reproduce the earlier 50.48 tok/s observation.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| 52 GB capacity refusal | `82fb5f940cd66b288a184c79373522924cbaf3ce52cc5524ac2be008e5071c20` |
+| 50 GB depth-four repeats | `7e398fc7d5cd34572e5c0c34ef688e8a6e2a1a9bcc8f11ab9c261a8a830328f5` |
+
+## 20261125-HY4FRAG-09 · Score eight IndexPool keys per threadgroup at source order
+
+The second IndexPool candidate stages each query for eight pools, with
+one SIMD group per key. The four lane products, shuffle reductions, and
+ascending F32 head accumulation use the original order. It was tested
+in both the target and NextN scorer from 2,048 completed pools. The
+HY4FRAG-07 worker used a 48 GB arena, 34,816-position cap and K2 with
+the dense device views off. Both arms matched all 192 output IDs and
+both draft counters for each long input.
+
+| Input | Control tok/s | Grouped tok/s | Host cuts, control / grouped s |
+| --- | ---: | ---: | ---: |
+| 16K | 31.67 | 28.40 | 1.64 / 2.27 |
+| 32K | 29.47 | 30.57 | 1.66 / 1.55 |
+
+Both arms began without a named competing process. A separate compile
+job started during the grouped arm. After subtracting host cuts, the
+grouped change moved by less than 3% in either direction. The data
+support source-order parity on these inputs and give no basis to keep
+the kernel. The control also completed the 75-token TypeScript prompt
+at 34.76 tok/s over 192 outputs.
+
+Private kernel SHA-256
+`a0d8829545f9e050085774bc53617a67f7f97202027f6f53cb0417449a2c96a4`.
+Harness SHA-256 `b96a8bea3dc0ff76142248f16ac4b18196c95589c012c9ba309cbfde83a6945a`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| 48 GB long control | `6c6456602b170277c69df7f5f45abd237dd1b1a2bd45c2bbe3df39d4c712cb0f` |
+| 48 GB grouped scores | `ef54c001fe7657abd050eee3323ad53f3d6f66a8868eddaf74b333c68f67fdca` |

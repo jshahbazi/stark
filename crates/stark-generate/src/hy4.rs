@@ -160,11 +160,16 @@ impl Hy4Backend {
         let routed_fragments =
             verify_switch("STARK_HY4_PREFILL_ROUTED_FRAGMENTS", "invalid_hy4_prefill_routed_fragments", false)?;
         let dense_packed = verify_switch("STARK_HY4_PREFILL_DENSE_PACKED", "invalid_hy4_prefill_dense_packed", false)?;
+        let dense_device_views =
+            verify_switch("STARK_HY4_PREFILL_DENSE_DEVICE_VIEWS", "invalid_hy4_prefill_dense_device_views", false)?;
         let tensor_mla = verify_switch("STARK_HY4_PREFILL_TENSOR_MLA", "invalid_hy4_prefill_tensor_mla", false)?;
         let resident_token_embeddings =
             verify_switch("STARK_HY4_EMBEDDINGS_RESIDENT", "invalid_hy4_embeddings_resident", false)?;
         if routed_half && !grouped {
             return Err("invalid_hy4_prefill_routed_half");
+        }
+        if dense_device_views && !dense_packed {
+            return Err("invalid_hy4_prefill_dense_device_views");
         }
         if routed_fragments && !(routed_half && grouped) {
             return Err("invalid_hy4_prefill_routed_fragments");
@@ -189,6 +194,7 @@ impl Hy4Backend {
                 routed_half,
                 routed_fragments,
                 dense_packed,
+                dense_device_views,
                 resident_token_embeddings,
                 tensor_mla,
                 max_drafts,
@@ -210,6 +216,7 @@ impl Hy4Backend {
             "prefill_chunk_tokens": chunk,
             "prefill_stage_profile_requested": profile_prefill,
             "prefill_dense_packed_requested": dense_packed,
+            "prefill_dense_device_views_requested": dense_device_views,
             "prefill_tensor_mla_requested": tensor_mla,
             "token_embeddings_resident": resident_token_embeddings,
             "streamed_expert_demand_retention": demand_retention,

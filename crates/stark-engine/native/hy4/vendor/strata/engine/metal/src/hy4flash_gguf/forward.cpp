@@ -281,6 +281,7 @@ struct Forward::Impl {
     AttnPipes attn_range, attn_sel;   // attn.h: the score row, the softmax, PV
     mtl::Pipeline attn_pf_range, attn_pf_sel;   // the prefill MMA attention (hy4_flash_attn_pf.metal), prompt chunks only
     mtl::Pipeline attn_pf_tensor;
+    mtl::Pipeline p_dense_pack, p_dense_device;
     bool pf_mma_ok = false, pf_mma_idx_ok = false;
     std::map<std::array<uint64_t, 4>, DenseGemvF32> gemv_;
     std::map<std::array<uint64_t, 6>, DenseGemvF32> gemvh_;   // per-head weights, one dispatch for all heads
@@ -291,6 +292,7 @@ struct Forward::Impl {
     // scratch, one window wide
     mtl::Buffer hcA, hcB, hc_eng, hc_mid, flat, mixes_a, mixes_f, pre_a, post_a, pre_f, post_f, cur;
     mtl::Buffer anorm, fnorm, fout;   // attn_norm / ffn_norm / ffn_out: three nodes gate 1's neighbours look at
+    mtl::Buffer dense_device_scratch;
     mtl::Buffer q_resid, qb, Q, qpe, kpe, attn_o, kqv, gproj, gated, attn_y, attn_out, kvp, kvn, sc, pos_b, rope_pos;
     mtl::Buffer ik, iv, ig, iq, iwraw, iw, pool32, score, sel, nsel;
     mtl::Buffer mlogits, ids, rw, pred, pred2, rdown, xp, hbuf, hp, ye, mlat, upo, shg, shu, sha, sho, ffn_sum;
@@ -455,6 +457,35 @@ struct Forward::Impl {
         for (size_t i = 1; i < t->shape.size(); ++i) rows *= t->shape[i];
         return gv(t->type, n_in, (uint32_t) rows, attention);
     }
+    void append_attention_gate_or_output(std::vector<mtl::Dispatch>& ds, const gguf::Tensor* w,
+                                         const mtl::Buffer& input, uint32_t n_in, const mtl::Buffer& output,
+                                         uint32_t n_out, uint32_t n_tok) {
+        if (!pf.dense_device_views || n_tok < 512 || w->type != ref::Q8_0 || n_in % 64 || n_out % 64) {
+            gv(w, true).append(ds, m->dense, w->offset, input, n_in, output, n_out, 0, n_tok);
+            return;
+        }
+        const size_t weight_bytes = sizeof(uint16_t) * size_t(n_in) * n_out;
+        const size_t input_bytes = sizeof(uint16_t) * size_t(n_in) * n_tok;
+        if (weight_bytes + input_bytes > dense_device_scratch.bytes)
+            throw std::runtime_error("Hy4 dense device view scratch is too small");
+        MmArgs args{n_in, n_out, n_tok, (uint32_t) ref::row_bytes(w->type, (int) n_in), n_in, n_out};
+        mtl::Dispatch d;
+        d.p = &p_dense_pack;
+        d.args = {mtl::Arg::B(m->dense, w->offset), mtl::Arg::B(input), mtl::Arg::B(dense_device_scratch),
+                  mtl::Arg::B(dense_device_scratch, weight_bytes), mtl::Arg::V(args)};
+        d.grid[0] = (uint32_t) ((size_t(n_in) * (n_tok + n_out) / 4 + 255) / 256);
+        d.tg[0] = 256;
+        mtl::require_fit(d, "stark_hy4_dense_pack_device");
+        ds.push_back(d);
+
+        d.p = &p_dense_device;
+        d.args = {mtl::Arg::B(dense_device_scratch, weight_bytes), mtl::Arg::B(dense_device_scratch),
+                  mtl::Arg::B(output), mtl::Arg::V(args)};
+        d.grid[0] = n_out / 64;
+        d.grid[1] = (n_tok + 127) / 128;
+        mtl::require_fit(d, "stark_hy4_dense_device_views");
+        ds.push_back(d);
+    }
     const MoeF32& moe(int gu_type, int d_type) {
         const std::pair<int, int> k{gu_type, d_type};
         auto it = moe_.find(k);
@@ -582,7 +613,9 @@ struct Forward::Impl {
     bool split = false, big_in = false;     ///< two scratch sets; the prompt's is the one in the members now
     std::vector<mtl::Buffer> big;           ///< the set that is NOT in the members
     std::vector<mtl::Buffer*> scratch_ptrs() {
-        return {&hcA, &hcB, &hc_eng, &hc_mid, &flat, &mixes_a, &mixes_f, &pre_a, &post_a, &pre_f, &post_f, &cur, &anorm, &fnorm, &fout, &q_resid, &qb, &Q, &qpe, &kpe, &attn_o, &kqv, &gproj, &gated, &attn_y, &attn_out, &kvp, &kvn, &sc, &pos_b, &rope_pos, &ik, &iv, &ig, &iq, &iwraw, &iw, &score, &sel, &nsel, &mlogits, &ids, &rw, &pred, &pred2, &rdown, &xp, &hbuf, &hp, &ye, &mlat, &upo, &shg, &shu, &sha, &sho, &ffn_sum, &dg, &du, &da, &eng_rows, &eng_valid, &eng_any, &eng_r, &eng_kv, &eng_dot, &eng_gate, &eng_delta};
+        std::vector<mtl::Buffer*> buffers{&hcA, &hcB, &hc_eng, &hc_mid, &flat, &mixes_a, &mixes_f, &pre_a, &post_a, &pre_f, &post_f, &cur, &anorm, &fnorm, &fout, &q_resid, &qb, &Q, &qpe, &kpe, &attn_o, &kqv, &gproj, &gated, &attn_y, &attn_out, &kvp, &kvn, &sc, &pos_b, &rope_pos, &ik, &iv, &ig, &iq, &iwraw, &iw, &score, &sel, &nsel, &mlogits, &ids, &rw, &pred, &pred2, &rdown, &xp, &hbuf, &hp, &ye, &mlat, &upo, &shg, &shu, &sha, &sho, &ffn_sum, &dg, &du, &da, &eng_rows, &eng_valid, &eng_any, &eng_r, &eng_kv, &eng_dot, &eng_gate, &eng_delta};
+        if (pf.dense_device_views) buffers.push_back(&dense_device_scratch);
+        return buffers;
     }
     static bool scratch_split_on() {
         const char* e = stark::hy4::vendor_option("HY4_FLASH_SCRATCH_SPLIT");
@@ -612,6 +645,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     if (pf.routed_fragments && (!pf.routed_half || !pf.grouped_k_quant || !c.supports_metal4()))
         return "packed expert fragments need the grouped F16 Metal 4 prefill path";
     if (pf.dense_packed && !c.supports_metal4()) return "packed attention prefill needs Metal 4";
+    if (pf.dense_device_views && !pf.dense_packed) return "dense device views need packed prefill";
     if (pf.tensor_mla && !c.supports_metal4()) return "tensor MLA prefill needs Metal 4";
     // The sub-batch sizes are clamped to [kMaxWindow, tcap]: a decode window must fit in ONE sub-batch of each
     // stage, or the "prefill is bitwise decode" claim would rest on a path decode never takes.
@@ -674,6 +708,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
                              "control and its output is WRONG ON PURPOSE (goal §1)\n", mut.name.c_str());
     auto kernel_files = strata_hy4_flash_metal::hy4_flash_kernel_files(mm_supported);
     if (pf.dense_packed) kernel_files.emplace_back("stark_hy4_flash_dense_packed.metal");
+    if (pf.dense_device_views) kernel_files.emplace_back("stark_hy4_flash_dense_device.metal");
     if (pf.tensor_mla) kernel_files.emplace_back("stark_hy4_flash_mla_prefill.metal");
     if (pf.routed_fragments) kernel_files.emplace_back("stark_hy4_flash_moe_fragments.metal");
     lib = cx->compile(kernel_files, strata_hy4_flash_metal::hy4_flash_prelude(), false);
@@ -747,6 +782,10 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     p_add_row = cx->pipeline(lib, "hy4_flash_add_row");
     p_add = cx->pipeline(lib, "hy4_flash_add_f32");
     p_gate_mul = cx->pipeline(lib, "hy4_flash_gate_mul");
+    if (pf.dense_device_views) {
+        p_dense_pack = cx->pipeline(lib, "stark_hy4_dense_pack_device");
+        p_dense_device = cx->pipeline(lib, "stark_hy4_dense_device_views");
+    }
     p_eng_rows = cx->pipeline(lib, "hy4_flash_engram_rows");
     p_eng_gate = cx->pipeline(lib, "hy4_flash_engram_gate");
     p_eng_delta = cx->pipeline(lib, "hy4_flash_engram_delta");
@@ -854,9 +893,23 @@ std::string Forward::Impl::resolve() {
     return missing;
 }
 
+size_t Forward::dense_device_scratch_bytes(const Geometry& geo, int tokens) {
+    if (tokens < 512) return 0;
+    int heads = 0;
+    for (int i = 0; i < geo.trunk_blocks; ++i) heads = std::max(heads, geo.block(i).n_heads);
+    const size_t hidden = geo.hidden_dim, projected = size_t(heads) * geo.v_head_dim;
+    const size_t bytes = sizeof(uint16_t) * (hidden * projected + size_t(tokens) * std::max(hidden, projected));
+    constexpr size_t page = 16384;
+    return (bytes + page - 1) / page * page;
+}
+
 /// The scratch a run of `Tm` positions needs (attention sub-batch `as`, MoE sub-batch `ms`), from allocator `get`.
 /// Every buffer here is written before it is read within one window or chunk, so it carries no state between runs.
 void Forward::Impl::alloc_scratch(int Tm, int as, int ms, const std::function<mtl::Buffer(size_t)>& get) {
+    if (pf.dense_device_views) {
+        const size_t bytes = Forward::dense_device_scratch_bytes(m->geo, Tm);
+        dense_device_scratch = bytes ? get(bytes) : mtl::Buffer{};
+    }
     auto f32 = [&](size_t n) { return get(4 * n); };
     const size_t n_pool_max = (size_t) ctx / (size_t) idx_kpool + 1;
     const int cols = m->geo.engram_heads;
@@ -1395,7 +1448,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         GemvHeads{(uint32_t) vb_head, (uint32_t) kv_lora, (uint32_t) v_mla})
         .append_heads(ds, m->dense, vb->offset, attn_o, H * (uint32_t) kv_lora, kqv, H * (uint32_t) v_mla, 0, uT, H);
     const gguf::Tensor* ag = b.t[W_AGATE];
-    gv(ag, true).append(ds, m->dense, ag->offset, anorm, (uint32_t) n_embd, gproj, H * (uint32_t) v_mla, 0, uT);
+    append_attention_gate_or_output(ds, ag, anorm, (uint32_t) n_embd, gproj, H * (uint32_t) v_mla, uT);
     stage(tm.pf_attention_misc_ms);
     {
         ElemArgs a{H * (uint32_t) v_mla, H * (uint32_t) v_mla, H * (uint32_t) v_mla, H * (uint32_t) v_mla};
@@ -1404,7 +1457,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     }
     stage(tm.pf_attention_dense_ms);
     const gguf::Tensor* ao = b.t[W_AOUT];
-    gv(ao, true).append(ds, m->dense, ao->offset, gated, H * (uint32_t) v_mla, attn_y, (uint32_t) n_embd, 0, uT);
+    append_attention_gate_or_output(ds, ao, gated, H * (uint32_t) v_mla, attn_y, (uint32_t) n_embd, uT);
     stage(tm.pf_attention_misc_ms);
     rms(ds, attn_y, 0, (uint32_t) n_embd, b.t[W_POST_ATTN], attn_out, 0, (uint32_t) n_embd, (uint32_t) n_embd, T,
         eps);

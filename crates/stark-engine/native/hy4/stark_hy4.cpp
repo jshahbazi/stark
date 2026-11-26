@@ -93,7 +93,7 @@ struct StarkHy4 {
 extern "C" int stark_hy4_open(const char* model, const char* projector, const char* pack, int chunk,
                                int storage, int grouped, int gpu_plan, int profile_prefill, uint64_t arena_bytes_requested,
                                int demand_retention, int routed_half, int dense_packed, int resident_token_embeddings,
-                               int tensor_mla, int max_drafts, int routed_fragments,
+                               int tensor_mla, int max_drafts, int routed_fragments, int dense_device_views,
                                uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
                                StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
                                uint64_t* arena_bytes) noexcept {
@@ -118,7 +118,8 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         // The prompt may need a standalone workspace when it cannot borrow expert slots. Its score
         // rows grow with context and are included in context_memory. Reserve the fixed planes, the
         // draft expert pool and fixed draft scratch, and the largest supported image before fitting.
-        const double future = 2.0 * kGiB * (chunk / 1024.0) + s.vision.reserved_bytes();
+        const size_t dense_view_bytes = dense_device_views ? Forward::dense_device_scratch_bytes(geo, chunk) : 0;
+        const double future = 2.0 * kGiB * (chunk / 1024.0) + s.vision.reserved_bytes() + dense_view_bytes;
         constexpr double draft_and_decode_reserve = 3.0 * kGiB;
         const auto initial = plan_arena(s.model, s.metal);
         const double workspace = future + draft_and_decode_reserve;
@@ -146,6 +147,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         prefill.routed_half = routed_half != 0;
         prefill.routed_fragments = routed_fragments != 0;
         prefill.dense_packed = dense_packed != 0;
+        prefill.dense_device_views = dense_device_views != 0;
         prefill.tensor_mla = tensor_mla != 0;
         if (!s.forward.open(s.model, s.metal, pack, prefill).empty()) return 4;
         if (!s.mtp.open(s.model, s.metal, s.forward.library(), 1024, pack).empty()) return 5;
