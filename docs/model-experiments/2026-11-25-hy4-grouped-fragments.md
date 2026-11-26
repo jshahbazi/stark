@@ -1396,3 +1396,41 @@ Hy4 executable and harness have SHA-256
 `b0b5d3345779ddc9c4aaba7c4aa038c07b449e0dcf7a8537e6f4532dfaf1dd0d`,
 `86b191fd0c40b42fb9a42b4e143a83ab0789a2a17385f151f1e572c9280611eb`,
 and `3dc12a87e73e003feec7d88a0dd75c9c8c7fb49878f6c0ab5ccaa5a455b68e9e`.
+
+## 20261126-HY4FRAG-28 · Combine the two dense tensor products
+
+The candidate replaces two 16 × 32 × 64 products with one
+32 × 32 × 64 product on the existing K64 device views. It keeps the
+packed F16 operands, F32 accumulation, dispatch grid and scratch
+allocation. Offline checks matched 306,140 input coordinates and
+covered nonoverlapping output tiles across 19 row counts.
+
+All four 5,120-position workers used the 40 GB streamed arena, original
+projector, 4,096-row chunks and K2. All eight complete 4K requests
+matched the 64 reference IDs. Thermal snapshots stayed nominal and
+no named contenders were present.
+
+| Order and arm | First use tok/s | Warm tok/s | Receipt SHA-256 |
+| --- | ---: | ---: | --- |
+| 1. Existing products | 444.25 | 473.70 | `dabc136ef00bbd719378f65eeaf389632e434927f95b34d4668d9184bece0b85` |
+| 2. Combined product | 573.64 | 497.71 | `bda6b4f147f05d2cffa37547dcbc4fa0fb217f75d19c0838ac78ab8a25fb5476` |
+| 3. Combined product | 585.04 | 509.72 | `103e2e6f2e4b09633e7e398b7a1d2ef6e193766c4dfcadf38c122cd339c00af4` |
+| 4. Existing products | 573.90 | 499.66 | `f2b57cf5df3c16fdd949a81299cba5b738fec4c7b31ded1b607251cfa72be885` |
+
+The opening control's first GPU span was 8.653 s against 6.887 s in the
+closing control. The candidate's first GPU spans, 6.889 and 6.747 s,
+were close to the closing control. Separate attribution measured
+1.788/1.749 s in dense attention projections for the combined product
+against 1.542/1.955 s with the existing products. Each request sampled
+42 blocks and matched the reference. The gain failed to reproduce
+across timing conditions. Keep the two existing products.
+
+The private source diff on `4fb3b10dc` includes the subsequently
+adopted packed cache path. Its SHA-256, the isolated Rust 1.98.1
+release executable SHA-256 and harness SHA-256 are
+`605d59683bd2c8cfbb3f4bad4eec262de29107a0e2c799c681c79c866752ed0e`,
+`c5f82fd7a290d18480b3ce922b4fe42baeef94063831b0ee2b9a0e4ba1196d2c`,
+and `846cc698dba05bab7566f33a74cc01d05982961929379573d2ea3e9079558d94`.
+The combined and existing product profile receipt hashes are
+`c3d0ce3683c39c01a8f5d1e634d670ab23f3693e7c81c4b417a577fbc723444e`
+and `513272308dfa6e2537e5010f7a4417f6ed37f641fbee9560066dc7732a51ddc6`.

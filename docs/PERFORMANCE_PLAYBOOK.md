@@ -905,7 +905,11 @@ Keep a fast draft-cache path inside the existing target verifier. Hy4's rebuilt 
 
 Check whether a shared-weight variant removes reads or only repeated conversion. Hy4 already loads each packed Q8 unit once. Sharing its byte expansion across three or four rows doubled the AIR working arrays per lane, left short code within drift, and slowed 16K from 45.75 to 44.00 tok/s. Output and draft counts matched. Keep the Q8 pairs. [Hy4 full-width Q8 screen](model-experiments/2026-11-25-hy4-decode-cache-construction.md#20261126-hy4nextn-08--share-q8-byte-expansion-across-three-and-four-verifier-rows)
 
+Use total verify time when pricing a lower draft depth. With Hy4's rebuilt packed draft cache, K1 needed 103 target rounds at 16K while K2 needed 79. K1 used less draft and target time per round. Its median paired throughput ratio was 0.921 against K2, with exact output. Retain K2 for this workflow. [Hy4 one-draft bracket](model-experiments/2026-11-25-hy4-decode-cache-construction.md#20261126-hy4nextn-09--check-one-draft-on-the-rebuilt-16k-worker)
+
 Price staging occupancy against extra barriers. Halving Hy4's routed K staging dropped threadgroup memory from 18 to 10 KiB with the same K16 products. First-use prefill stayed inside control drift and warm prefill stayed flat. A group-local dense layout gave small first-use gains and lower warm rates as thermal state changed. Keep the adopted K64 layouts. [Hy4 staging and packing screen](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-27--screen-smaller-routed-staging-and-group-local-dense-packing)
+
+Price larger tensor products against a closing control. Combining two M16 Hy4 dense products into one M32 product kept exact output. The opening control measured 444.25 tok/s and the closing control measured 573.90, near both candidate first-use rates. Dense stage attribution moved in opposite directions across first and warm passes. Keep the existing products. [Hy4 combined dense product screen](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261126-hy4frag-28--combine-the-two-dense-tensor-products)
 
 
 ## Ideas not yet tried

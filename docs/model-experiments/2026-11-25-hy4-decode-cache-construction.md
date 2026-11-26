@@ -389,3 +389,29 @@ executable, and harness have SHA-256
 `1c224e86c7a46a4e7da3b137a3f3ffc23af5b9659ee24fb71bf269153a0993d0`,
 `4c73bd4e5da9242d5c9183d3775bc1f1aee7d7121896816a4f9ba298932cecf4`,
 and `61c22b485cc191b51058be50077e2b9a5cbf3e0620f4c7c26b6411ee999cbf41`.
+
+## 20261126-HY4NEXTN-09 · Check one draft on the rebuilt 16K worker
+
+One loaded worker used the adopted packed draft cache, resident target
+and draft banks, original projector, 1,024-row prefill chunks and a
+17,408-position cap. It alternated K2, K1, K1 and K2 on the pinned
+16K prompt. Every request matched 192 output IDs and used zero prefix
+reuse. The host went from nominal to fair with zero contenders.
+Observed pressure was level 1 and swap stayed at 140 MiB.
+
+| Arm in order | Decode tok/s | Target verify s | Draft s | Accepted / proposed / rounds |
+| --- | ---: | ---: | ---: | ---: |
+| K2 first | 45.74 | 3.759 | 0.416 | 112 / 156 / 79 |
+| K1 first | 42.68 | 4.199 | 0.275 | 88 / 103 / 103 |
+| K1 repeat | 42.09 | 4.249 | 0.288 | 88 / 103 / 103 |
+| K2 repeat | 46.36 | 3.745 | 0.374 | 112 / 156 / 79 |
+
+One draft reduced time per target round and required 24 additional
+rounds. The median of the paired K1/K2 rates was 0.921. Keep K2 for
+this long fixture and defer the 32K K1 repeat. The 46.36 tok/s repeat
+is the highest measured 16K result and leaves 3.11 tok/s to the goal.
+
+The rebuilt executable, harness and bracket receipt have SHA-256
+`84e9dce6da7820e02b0993e93f13eac5d0974619dcf320355c7e539a27360310`,
+`aa42853ff32588aa0f73529dc65039ec1e49379815c15ae671e154db097f56e3`,
+and `51c4b378ab4f28829e0d4f1d16a8dfef054b10273c603e3422130ddb8c3e102d`.
