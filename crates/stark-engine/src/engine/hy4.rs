@@ -112,6 +112,7 @@ pub struct Options {
     pub demand_retention: bool,
     pub routed_half: bool,
     pub dense_packed: bool,
+    pub resident_token_embeddings: bool,
     pub context_limit: Option<u32>,
 }
 
@@ -189,6 +190,7 @@ unsafe extern "C" {
         demand_retention: c_int,
         routed_half: c_int,
         dense_packed: c_int,
+        resident_token_embeddings: c_int,
         select_context: unsafe extern "C" fn(*const ContextMemory, *mut c_void) -> u32,
         sizing: *mut c_void,
         session: *mut *mut c_void,
@@ -278,6 +280,7 @@ impl Session {
                 c_int::from(options.demand_retention),
                 c_int::from(options.routed_half),
                 c_int::from(options.dense_packed),
+                c_int::from(options.resident_token_embeddings),
                 select_context,
                 ptr::from_mut(&mut selection).cast(),
                 &mut inner,

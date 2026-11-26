@@ -113,6 +113,11 @@ uses F16 operands and F32 accumulation. The [context ladder and projection
 record](model-experiments/2026-11-25-hy4-context-ladder.md) covers the measured
 4K comparison and the 32K prompt.
 
+`STARK_HY4_EMBEDDINGS_RESIDENT=1` loads the original packed Q8_0 token
+embedding table into the dense allocation. Target and NextN share the table.
+The extra 394 MB is counted before context sizing. See the [NextN cache
+construction experiment](model-experiments/2026-11-25-hy4-decode-cache-construction.md).
+
 ## Image qualification
 
 The [execution catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json) contains two passed schema-2 records for BF16 `Qwen/Qwen3.5-0.8B`: the developer worker `5fc92516…` and Developer ID signed worker `741a3ea7…`. Both use Metal on an Apple M5 Max with 40 GPU cores, Apple GPU family 1010 and MXU enabled, running macOS 26.7.1. Each record binds all five artifact-file hashes, the exact full executable hash, and its source-bound evidence: [developer execution](archive/runs/2026-10-26-qwen35-image-execution.md) and [signed-worker execution](archive/runs/2026-10-27-qwen35-signed-worker.md).

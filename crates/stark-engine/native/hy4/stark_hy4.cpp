@@ -89,7 +89,7 @@ struct StarkHy4 {
 
 extern "C" int stark_hy4_open(const char* model, const char* projector, const char* pack, int chunk,
                                int storage, int grouped, int gpu_plan, int profile_prefill, uint64_t arena_bytes_requested,
-                               int demand_retention, int routed_half, int dense_packed,
+                               int demand_retention, int routed_half, int dense_packed, int resident_token_embeddings,
                                uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
                                StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
                                uint64_t* arena_bytes) noexcept {
@@ -100,7 +100,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         auto session = std::make_unique<StarkHy4>();
         auto& s = *session;
         s.metal.lock_safe_math();
-        if (!open(s.model, model, 0, true).empty()) return 1;
+        if (!open(s.model, model, 0, true, resident_token_embeddings != 0).empty()) return 1;
         const auto& geo = s.model.geo;
         if (geo.vocab_size != kVocab || geo.hidden_dim != 3072 || geo.idx_kpool <= 0 || geo.idx_key_dim <= 0 ||
             geo.kv_a_width <= 0 || geo.max_context < 2 || geo.trunk_blocks < 1 ||

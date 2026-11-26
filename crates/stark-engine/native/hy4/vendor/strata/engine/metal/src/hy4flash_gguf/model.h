@@ -83,7 +83,9 @@ struct Model {
 ///
 /// `with_mtp` keeps the MTP block's DENSE tensors resident (238 MB of BF16 here); its routed experts
 /// stay out either way - they are `*_exps` and the MTP module reads them itself (mtp.h).
-std::string open(Model& m, const std::string& shard1, int32_t max_context, bool with_mtp = false);
+/// `resident_token_embeddings` loads the shared packed table with the dense weights.
+std::string open(Model& m, const std::string& shard1, int32_t max_context, bool with_mtp = false,
+                 bool resident_token_embeddings = false);
 
 /// Reads the dense tensors into one resident buffer (F_NOCACHE preads on 4 threads) and rewrites their offsets.
 /// Must run after `open`.  Returns "" or the problem.

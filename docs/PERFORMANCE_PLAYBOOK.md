@@ -841,6 +841,12 @@ Separating dense projection and attention cost on the same Hy4 artifact measured
 
 Follow a failed staged dense prefill change with an operand-reuse test on the same projection shapes. On Hy4 Q3_K, direct Q8_0 weight fragments with F16 operands and F32 accumulation improved warm 4K K2 prefill from 354–356 to 406 tok/s in one bracket with exact generated IDs. It stays opt-in. At 32K, measure the draft cache construction inside decode before changing round scheduling. The 192-token native code diagnostic spent 3.14 of 9.43 decode seconds in NextN catch-up and 1.79 s in target host cuts within verification. Decode file caching produced 31.33 tok/s on a warm 4K repeat against controls at 28.84 and 32.76. It was removed. [Hy4 context ladder and projection bracket](model-experiments/2026-11-25-hy4-context-ladder.md)
 
+When the draft cache rereads a token embedding table per row, compare residency before changing projection arithmetic. Keeping the 394 MB packed table resident cut Hy4 Q3_K NextN catch-up at 16K from 0.413–1.522 s to 0.207 s in a same-build worker bracket, with exact outputs and 28.08 tok/s decode against 23.22–27.46. The closing control shows why a first-run comparison would overstate the gain. The resident table stays opt-in. Batched draft-cache GEMMs and history writes stayed inside control drift. Sixteen-head fused verify MLA slightly shortened 16K verification and changed the short coding output. [Hy4 NextN and verify bracket](model-experiments/2026-11-25-hy4-decode-cache-construction.md)
+
+Size the expert arena and the context together. On the final Hy4 Q3_K build at 8,192 positions, one 4K K2 repeat per size measured 32.29, 42.76 and 43.83 tok/s at 28, 40 and 48 GB. Each first request and warm repeat produced the same 64 reference tokens. The 48 GB arm had 0.923 GB of context budget on that load. A larger cache can improve the repeat and lower the window the worker admits. Record requested and allocated sizes, advertised capacity, pressure, and first and warm results. [Hy4 arena comparison](model-experiments/2026-11-25-hy4-decode-cache-construction.md#20261125-hy4nextn-03--final-resident-build)
+
+Reprofile after landing a different operand path. With packed projections, grouped routed half and resident embeddings, Hy4 Q3_K's separate 4K K2 stage sample attributed 2.45 s to routed experts, 2.06 s to attention projections, 1.88 s to MLA and 0.06 s to expert waits. Use the sampled budget to choose the next kernel. The 743.2 tok/s target allows 5.51 s for the whole fixture. [Remaining Hy4 prefill budget](model-experiments/2026-11-25-hy4-decode-cache-construction.md#20261125-hy4nextn-05--remaining-4k-prefill-budget)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |
@@ -927,6 +933,7 @@ The [experiment selection table](#choose-a-performance-experiment) links the GLM
 | 2026-11-25 | [Hy4-flash 4K prefill and decode attribution](model-experiments/2026-11-25-hy4-prefill-decode-profile.md) | Mapped first-use swap, prefill encoder stages, rejected smaller expert tile and bounded streamed arena sensitivity |
 | 2026-11-25 | [Hy4-flash routed prefill and expert retention](model-experiments/2026-11-25-hy4-dense-prefill-expert-retention.md) | Attention decomposition, opt-in F16 routed operands and warm decode retention, rejected dense F16 and narrower read-ahead |
 | 2026-11-25 | [Hy4-flash context ladder and packed Q8_0 prefill](model-experiments/2026-11-25-hy4-context-ladder.md) | Matched-input ladder through 32K, NextN catch-up attribution, retained packed Q8_0 projections and rejected decode file caching |
+| 2026-11-25 | [Hy4-flash NextN cache construction and verify attention](model-experiments/2026-11-25-hy4-decode-cache-construction.md) | Resident packed token embeddings, rejected cache MMA, history batching and fused verifier attention |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 

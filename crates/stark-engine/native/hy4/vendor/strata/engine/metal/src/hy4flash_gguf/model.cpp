@@ -42,7 +42,8 @@ uint64_t plan_dense(const Model& m, int32_t* n_tensors) {
 
 }  // namespace
 
-std::string open(Model& m, const std::string& shard1, int32_t max_context, bool with_mtp) {
+std::string open(Model& m, const std::string& shard1, int32_t max_context, bool with_mtp,
+                 bool resident_token_embeddings) {
     m.shard1_path = shard1;
 
     // ---- the geometry, from BOTH shards' metadata.  The Engram table's TensorInfo comes from whichever shard
@@ -88,7 +89,7 @@ std::string open(Model& m, const std::string& shard1, int32_t max_context, bool 
         if (std::find(m.skipped.begin(), m.skipped.end(), t.name) == m.skipped.end()) m.skipped.push_back(t.name);
     };
     const char* er = stark::hy4::vendor_option("HY4_FLASH_EMBD_RESIDENT");
-    if (er == nullptr || std::atoi(er) == 0)
+    if (!resident_token_embeddings && (er == nullptr || std::atoi(er) == 0))
         if (const gguf::Tensor* te = m.tensors.find("token_embd.weight")) to_file(*te);
     const char* mq = stark::hy4::vendor_option("HY4_FLASH_MTP_QUANT");
     if (with_mtp && (mq == nullptr || std::strcmp(mq, "bf16") != 0))
