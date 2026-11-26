@@ -7,9 +7,11 @@
 // running maximum and sum, the partial output rescaled when the maximum moves).  The prefill tolerance allows both
 // (prefill-consistency is a KL / top-1 judgement for prefill).
 //
-// PRECISION.  Every matrix operand is fp32 and every product accumulates in fp32: the cache's half K / V rows are
-// widened to fp32 (exactly) when they are staged in threadgroup memory, Q and the weights P are fp32.  Nothing is
-// rounded to a narrower type.
+// PRECISION. The baseline uses F32 Q and probabilities and the cache's original F16 K/V.
+// The compensated selected-cell experiment decomposes Q and probabilities into narrow
+// operands with F32 accumulation, following the approach in Sushi v1.8.1's
+// src/hy4flash/hy4_attn.zig (b7b7975cc017acba1b4c0877d65543c4c5a4a381).
+// This specialization uses F16 pieces to keep Stark's original F16 cache values.
 //
 // TILING (hy4_flash_mla_pf5, NSG = 32 simdgroups = 1024 threads).  One threadgroup = one position t and 32 heads (they
 // share the key rows, MLA).  A tile is 64 keys, gathered through `sel` for a sparse block:
@@ -32,28 +34,39 @@
 #define HY4_FLASH_PF_DV 512
 
 // ---- the attention -------------------------------------------------------------------------------------------------
-template <int NSG>
+template <int NSG, bool Compensated = false>
 kernel void hy4_flash_mla_pf5(device const float* q [[buffer(0)]], device const half* kv [[buffer(1)]],
                         device const float* sinks [[buffer(2)]], device const int* sel [[buffer(3)]],
                         device const int* n_sel [[buffer(4)]], device const int* pos [[buffer(5)]],
                         device float* o [[buffer(6)]], constant Hy4FlashAttnArgs& a [[buffer(7)]],
                         uint3 tgp [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]],
                         ushort sg [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
-    constexpr int KT = 64, DC = 64, NT = NSG * 32;
+    constexpr int KT = 64, DC = 64, NT = NSG * 32, PV_KT = 16;
     constexpr int VB = 64 / NSG;          // 8-dim output blocks a simdgroup
     constexpr int SB = 32 / NSG;          // score blocks a simdgroup
     constexpr int TPR = NSG;              // softmax threads a head row
     constexpr int KPT = KT / TPR;         // keys a softmax thread
     threadgroup float st[HY4_FLASH_PF_HB * KT];
-    threadgroup uchar stage[16384];
+    // The compensated specialization stages three FP16 query components and
+    // the original FP16 key tile. This is 20,480 bytes versus 16,384 bytes on
+    // the reference specialization. The same allocation is reused for V and
+    // the two FP16 probability components after QK has finished.
+    threadgroup uchar stage[Compensated ? 20480 : 16384];
     threadgroup float* qs = (threadgroup float*)stage;
-    threadgroup half* ks = (threadgroup half*)(stage + 8192);
+    threadgroup half* qlo = (threadgroup half*)stage;
+    threadgroup half* qmid = qlo + HY4_FLASH_PF_HB * DC;
+    threadgroup half* qhi = qmid + HY4_FLASH_PF_HB * DC;
+    constexpr int k_offset = Compensated ? 3 * HY4_FLASH_PF_HB * DC * sizeof(half) : 8192;
+    threadgroup half* ks = (threadgroup half*)(stage + k_offset);
     threadgroup half* vs = (threadgroup half*)stage;
+    threadgroup half* p_hi = Compensated ? vs + PV_KT * HY4_FLASH_PF_DV : nullptr;
+    threadgroup half* p_lo = Compensated ? p_hi + HY4_FLASH_PF_HB * PV_KT : nullptr;
     threadgroup float dg[4 * 64];
     threadgroup float rm[HY4_FLASH_PF_HB], rl[HY4_FLASH_PF_HB];
     threadgroup int kid[KT];
     threadgroup int moved[HY4_FLASH_PF_HB];   // per ROW: the row's own softmax leader writes it, so no two
                                        // simdgroups write one word (a head row is one simdgroup here)
+    threadgroup float q_rescale[HY4_FLASH_PF_HB];
 
     const uint t = tgp.x;
     const uint h0 = tgp.y * HY4_FLASH_PF_HB;
@@ -71,6 +84,26 @@ kernel void hy4_flash_mla_pf5(device const float* q [[buffer(0)]], device const 
     for (uint i = tid; i < 4 * 64; i += NT) dg[i] = 0.0f;
     if (tid < HY4_FLASH_PF_HB) moved[tid] = 0;
 
+    if constexpr (Compensated) {
+        // Scale each row by an exact power of two before FP16 splitting. This
+        // keeps the largest component near one without changing the dot
+        // product's mathematical scale; the inverse is restored after QK.
+        const int row = int(tid) / 32;
+        const int qlane = int(tid) % 32;
+        float local_max = 0.0f;
+        if (row < int(nh)) {
+            for (int d = qlane; d < HY4_FLASH_PF_DQK; d += 32)
+                local_max = max(local_max, abs(qt[ulong(row) * HY4_FLASH_PF_DQK + d]));
+        }
+        local_max = simd_max(local_max);
+        if (qlane == 0) {
+            int exponent = 0;
+            frexp(local_max, exponent);
+            q_rescale[row] = ldexp(1.0f, clamp(exponent, -126, 127));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
     simdgroup_float8x8 acc[4][VB];
     for (int i = 0; i < 4; ++i)
         for (int j = 0; j < VB; ++j) acc[i][j] = simdgroup_float8x8(0.0f);
@@ -86,10 +119,26 @@ kernel void hy4_flash_mla_pf5(device const float* q [[buffer(0)]], device const 
         for (int b = 0; b < SB; ++b) s[b] = simdgroup_float8x8(0.0f);
         for (int d0 = 0; d0 < HY4_FLASH_PF_DQK; d0 += DC) {
             threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint i = tid; i < HY4_FLASH_PF_HB * DC / 4; i += NT) {
-                const uint r = i / (DC / 4), c = i % (DC / 4);
-                *((threadgroup float4*)(qs + r * DC) + c) =
-                    r < nh ? *((device const float4*)(qt + (ulong)r * HY4_FLASH_PF_DQK + d0) + c) : float4(0.0f);
+            if constexpr (Compensated) {
+                for (uint i = tid; i < HY4_FLASH_PF_HB * DC / 4; i += NT) {
+                    const uint r = i / (DC / 4), c = i % (DC / 4);
+                    const float4 x = r < nh
+                        ? *((device const float4*)(qt + (ulong)r * HY4_FLASH_PF_DQK + d0) + c) / q_rescale[r]
+                        : float4(0.0f);
+                    const half4 h = half4(x);
+                    const float4 residual = x - float4(h);
+                    const half4 m = half4(residual);
+                    const half4 l = half4(residual - float4(m));
+                    *((threadgroup half4*)(qhi + r * DC) + c) = h;
+                    *((threadgroup half4*)(qmid + r * DC) + c) = m;
+                    *((threadgroup half4*)(qlo + r * DC) + c) = l;
+                }
+            } else {
+                for (uint i = tid; i < HY4_FLASH_PF_HB * DC / 4; i += NT) {
+                    const uint r = i / (DC / 4), c = i % (DC / 4);
+                    *((threadgroup float4*)(qs + r * DC) + c) =
+                        r < nh ? *((device const float4*)(qt + (ulong)r * HY4_FLASH_PF_DQK + d0) + c) : float4(0.0f);
+                }
             }
             for (uint i = tid; i < KT * DC / 4; i += NT) {
                 const uint r = i / (DC / 4), c = i % (DC / 4);
@@ -101,11 +150,21 @@ kernel void hy4_flash_mla_pf5(device const float* q [[buffer(0)]], device const 
             for (int b = 0; b < SB; ++b) {
                 const int blk = sg * SB + b, hb = blk / 8, kb = blk % 8;
                 for (int d = 0; d < DC; d += 8) {
-                    simdgroup_float8x8 qa;
                     simdgroup_half8x8 k8;
-                    simdgroup_load(qa, qs + (8 * hb) * DC + d, DC);
                     simdgroup_load(k8, ks + (8 * kb) * DC + d, DC, ulong2(0, 0), true);
-                    simdgroup_multiply_accumulate(s[b], qa, k8, s[b]);
+                    if constexpr (Compensated) {
+                        simdgroup_half8x8 qa;
+                        simdgroup_load(qa, qlo + (8 * hb) * DC + d, DC);
+                        simdgroup_multiply_accumulate(s[b], qa, k8, s[b]);
+                        simdgroup_load(qa, qmid + (8 * hb) * DC + d, DC);
+                        simdgroup_multiply_accumulate(s[b], qa, k8, s[b]);
+                        simdgroup_load(qa, qhi + (8 * hb) * DC + d, DC);
+                        simdgroup_multiply_accumulate(s[b], qa, k8, s[b]);
+                    } else {
+                        simdgroup_float8x8 qa;
+                        simdgroup_load(qa, qs + (8 * hb) * DC + d, DC);
+                        simdgroup_multiply_accumulate(s[b], qa, k8, s[b]);
+                    }
                 }
             }
         }
@@ -121,7 +180,9 @@ kernel void hy4_flash_mla_pf5(device const float* q [[buffer(0)]], device const 
             float mx = m;
             for (int i = 0; i < KPT; ++i) {
                 const int k = sub * KPT + i;
-                sv[i] = kid[k] >= 0 ? st[r * KT + k] * a.kq_scale : -INFINITY;
+                float score = st[r * KT + k];
+                if constexpr (Compensated) score *= q_rescale[r];
+                sv[i] = kid[k] >= 0 ? score * a.kq_scale : -INFINITY;
                 mx = max(mx, sv[i]);
             }
             for (ushort off = TPR / 2; off > 0; off >>= 1) mx = max(mx, simd_shuffle_xor(mx, off));
@@ -155,24 +216,45 @@ kernel void hy4_flash_mla_pf5(device const float* q [[buffer(0)]], device const 
                 }
             }
         }
-        for (int k0 = 0; k0 < KT; k0 += 16) {
+        for (int k0 = 0; k0 < KT; k0 += PV_KT) {
             if (j0 + k0 >= n) break;
             threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint i = tid; i < 16 * (HY4_FLASH_PF_DV / 4); i += NT) {
+            for (uint i = tid; i < PV_KT * (HY4_FLASH_PF_DV / 4); i += NT) {
                 const uint r = i / (HY4_FLASH_PF_DV / 4), c = i % (HY4_FLASH_PF_DV / 4);
                 const int cell = kid[k0 + r];
                 *((threadgroup half4*)(vs + r * HY4_FLASH_PF_DV) + c) =
                     cell >= 0 ? *((device const half4*)(kv + (ulong)cell * a.kv_stride) + c) : half4(0.0h);
             }
+            if constexpr (Compensated) {
+                for (uint i = tid; i < HY4_FLASH_PF_HB * PV_KT; i += NT) {
+                    const uint r = i / PV_KT, c = i % PV_KT;
+                    const float p = st[r * KT + k0 + c];
+                    const half hi = half(p);
+                    p_hi[i] = hi;
+                    p_lo[i] = half(p - float(hi));
+                }
+            }
             threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (int kk = 0; kk < 16; kk += 8)
+            for (int kk = 0; kk < PV_KT; kk += 8)
                 for (int i = 0; i < 4; ++i) {
-                    simdgroup_float8x8 pm;
-                    simdgroup_load(pm, st + (8 * i) * KT + k0 + kk, KT);
-                    for (int j = 0; j < VB; ++j) {
-                        simdgroup_half8x8 vm;
-                        simdgroup_load(vm, vs + kk * HY4_FLASH_PF_DV + dv0 + 8 * j, HY4_FLASH_PF_DV);
-                        simdgroup_multiply_accumulate(acc[i][j], pm, vm, acc[i][j]);
+                    if constexpr (Compensated) {
+                        simdgroup_half8x8 pm_low, pm_high;
+                        simdgroup_load(pm_low, p_lo + (8 * i) * PV_KT + kk, PV_KT);
+                        simdgroup_load(pm_high, p_hi + (8 * i) * PV_KT + kk, PV_KT);
+                        for (int j = 0; j < VB; ++j) {
+                            simdgroup_half8x8 vm;
+                            simdgroup_load(vm, vs + kk * HY4_FLASH_PF_DV + dv0 + 8 * j, HY4_FLASH_PF_DV);
+                            simdgroup_multiply_accumulate(acc[i][j], pm_low, vm, acc[i][j]);
+                            simdgroup_multiply_accumulate(acc[i][j], pm_high, vm, acc[i][j]);
+                        }
+                    } else {
+                        simdgroup_float8x8 pm;
+                        simdgroup_load(pm, st + (8 * i) * KT + k0 + kk, KT);
+                        for (int j = 0; j < VB; ++j) {
+                            simdgroup_half8x8 vm;
+                            simdgroup_load(vm, vs + kk * HY4_FLASH_PF_DV + dv0 + 8 * j, HY4_FLASH_PF_DV);
+                            simdgroup_multiply_accumulate(acc[i][j], pm, vm, acc[i][j]);
+                        }
                     }
                 }
         }
@@ -191,6 +273,7 @@ kernel void hy4_flash_mla_pf5(device const float* q [[buffer(0)]], device const 
     }
 }
 template [[host_name("hy4_flash_mla_pf5_s32")]] kernel decltype(hy4_flash_mla_pf5<32>) hy4_flash_mla_pf5<32>;
+template [[host_name("hy4_flash_mla_pf5_compensated_s32")]] kernel decltype(hy4_flash_mla_pf5<32, true>) hy4_flash_mla_pf5<32, true>;
 
 // ---- the indexer's score for a prefill chunk, on simdgroup matrices ------------------------------------------------
 // score[t][g] = sum_h max(iq[t][h] . pool[g], 0) * w[t][h]   (-inf for a pool that ends past the token's position)

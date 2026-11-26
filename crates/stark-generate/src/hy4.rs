@@ -161,7 +161,7 @@ impl Hy4Backend {
         let chunk = match std::env::var("STARK_HY4_PREFILL_CHUNK").as_deref() {
             Ok("1024") => PREFILL_CHUNK,
             Ok("4096") => 4096,
-            Err(std::env::VarError::NotPresent) if streamed_prefill => 4096,
+            Err(std::env::VarError::NotPresent) if tuned => 4096,
             Err(std::env::VarError::NotPresent) => PREFILL_CHUNK,
             _ => return Err("invalid_hy4_prefill_chunk"),
         };
@@ -216,6 +216,11 @@ impl Hy4Backend {
             prefill_arena && dense_device_views,
         )?;
         let tensor_mla = verify_switch("STARK_HY4_PREFILL_TENSOR_MLA", "invalid_hy4_prefill_tensor_mla", tuned)?;
+        let compensated_sparse_mla = verify_switch(
+            "STARK_HY4_PREFILL_COMPENSATED_SPARSE_MLA",
+            "invalid_hy4_prefill_compensated_sparse_mla",
+            false,
+        )?;
         let resident_token_embeddings =
             verify_switch("STARK_HY4_EMBEDDINGS_RESIDENT", "invalid_hy4_embeddings_resident", tuned)?;
         let resident_draft_experts =
@@ -258,6 +263,7 @@ impl Hy4Backend {
                 resident_draft_experts,
                 draft_head_q5,
                 tensor_mla,
+                compensated_sparse_mla,
                 max_drafts,
                 context_limit,
             },
@@ -326,6 +332,7 @@ impl Hy4Backend {
             "prefill_dense_device_views_requested": options.dense_device_views,
             "prefill_dense_ffn_device_views_requested": options.dense_ffn_device_views,
             "prefill_tensor_mla_requested": options.tensor_mla,
+            "prefill_compensated_sparse_mla_requested": options.compensated_sparse_mla,
             "token_embeddings_resident": options.resident_token_embeddings,
             "draft_experts_resident": options.resident_draft_experts,
             "draft_head_format": native.draft_head_format(),

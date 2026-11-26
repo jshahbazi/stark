@@ -123,6 +123,7 @@ pub struct Options {
     pub resident_draft_experts: bool,
     pub draft_head_q5: bool,
     pub tensor_mla: bool,
+    pub compensated_sparse_mla: bool,
     pub max_drafts: usize,
     pub context_limit: Option<u32>,
 }
@@ -203,6 +204,7 @@ unsafe extern "C" {
         dense_packed: c_int,
         resident_token_embeddings: c_int,
         tensor_mla: c_int,
+        compensated_sparse_mla: c_int,
         max_drafts: c_int,
         routed_fragments: c_int,
         dense_device_views: c_int,
@@ -308,6 +310,7 @@ impl Session {
                 c_int::from(options.dense_packed),
                 c_int::from(options.resident_token_embeddings),
                 c_int::from(options.tensor_mla),
+                c_int::from(options.compensated_sparse_mla),
                 options.max_drafts as c_int,
                 c_int::from(options.routed_fragments),
                 c_int::from(options.dense_device_views),

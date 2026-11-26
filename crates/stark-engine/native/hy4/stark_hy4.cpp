@@ -93,7 +93,8 @@ struct StarkHy4 {
 extern "C" int stark_hy4_open(const char* model, const char* projector, const char* pack, int chunk,
                                int storage, int grouped, int gpu_plan, int profile_prefill, uint64_t arena_bytes_requested,
                                int demand_retention, int routed_half, int dense_packed, int resident_token_embeddings,
-                               int tensor_mla, int max_drafts, int routed_fragments, int dense_device_views,
+                               int tensor_mla, int compensated_sparse_mla, int max_drafts, int routed_fragments,
+                               int dense_device_views,
                                int dense_ffn_device_views, int resident_draft_experts, int draft_head_q5,
                                uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
                                StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
@@ -161,6 +162,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         prefill.dense_device_views = dense_device_views != 0;
         prefill.dense_ffn_device_views = dense_ffn_device_views != 0;
         prefill.tensor_mla = tensor_mla != 0;
+        prefill.compensated_sparse_mla = compensated_sparse_mla != 0;
         if (!s.forward.open(s.model, s.metal, pack, prefill).empty()) return 4;
         const bool resident_nextn = resident_draft_experts != 0;
         if (!s.mtp.open(s.model, s.metal, s.forward.library(), 1024, pack, resident_nextn,
