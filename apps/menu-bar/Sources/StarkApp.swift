@@ -842,6 +842,12 @@ struct FamilyModelCatalog {
             } else { familyID = nil }
         }
 
+        /// The pinned Hy4 GGUF streams weights, so its file size is not a comparable memory estimate.
+        var hasComparableMemoryEstimate: Bool {
+            !(familyID == "hy4_flash" && repo == "AngelSlim/Hy4-flash-GGUF" &&
+              revision == "c50d4dd30be42f2b91138e5731de0e2f32ad56b2" && quantization == "Q3_K")
+        }
+
         /// Whether the weights alone fit the guide's memory budget: 85% of physical
         /// memory with 2 GiB held back. Context and working state need more, so
         /// this only rules out models that are clearly too large.
@@ -4077,7 +4083,8 @@ struct ModelsView: View {
                     busy: engine.busy, showsRepositoryLink: group.items.count > 1,
                     downloadProgress: engine.retainedCatalogDownloadProgress(for: item),
                     score: item.referenceScore?.score(for: catalogSort),
-                    exceedsMemory: !item.fits(physicalMemory: ProcessInfo.processInfo.physicalMemory)) {
+                    exceedsMemory: item.hasComparableMemoryEstimate &&
+                        !item.fits(physicalMemory: ProcessInfo.processInfo.physicalMemory)) {
                         engine.installCatalogItem(id: item.id)
                     }
             }

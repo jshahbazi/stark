@@ -2299,6 +2299,21 @@ extension EngineController {
                   catalog.items.first(where: { $0.id == "unscored" })?.referenceScore == nil,
                   catalog.items.first(where: { $0.id == "huge" })?.fits(physicalMemory: memory) == false,
                   catalog.items.first(where: { $0.id == "huge" })?.fits(physicalMemory: nil) == true else { return false }
+            var hy4Raw = groupedCatalogItem("hy4", repo: "AngelSlim/Hy4-flash-GGUF", name: "Hy4-flash AngelSlim Q3_K",
+                                            group: "7", groupName: "Hy4-flash-GGUF", publisher: "AngelSlim",
+                                            size: "64.8B", quantization: "Q3_K")
+            hy4Raw["family_id"] = "hy4_flash"
+            hy4Raw["revision"] = "c50d4dd30be42f2b91138e5731de0e2f32ad56b2"
+            hy4Raw["weight_bytes"] = Int64(156_415_403_072)
+            guard let hy4 = FamilyModelCatalog.Item(hy4Raw),
+                  !hy4.hasComparableMemoryEstimate,
+                  !hy4.fits(physicalMemory: UInt64(8) * 1024 * 1024 * 1024) else {
+                return false
+            }
+            hy4Raw["revision"] = String(repeating: "b", count: 40)
+            guard let otherHy4Revision = FamilyModelCatalog.Item(hy4Raw),
+                  otherHy4Revision.hasComparableMemoryEstimate,
+                  !otherHy4Revision.fits(physicalMemory: UInt64(8) * 1024 * 1024 * 1024) else { return false }
             // Hiding unsupported rows removes exactly those that cannot be downloaded, whatever their score.
             let supported = CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: true)
             guard supported.map(\.id) == ["unscored", "mid", "best-full", "best-small", "huge", "coder"],

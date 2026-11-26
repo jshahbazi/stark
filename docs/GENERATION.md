@@ -63,11 +63,12 @@ applied before allocation. The worker always loads the projector. Image requests
 use target-only generation and invalidate the preceding text prefix. [Flexible
 window verification](model-experiments/2026-11-25-hy4-context-ladder.md#20261126-hy4ladder-05--verify-flexible-windows-on-the-measured-profiles)
 
-In a Hy4-enabled desktop build, choose **Catalog → Hy4-flash → Hy4-flash AngelSlim Q3_K**.
+In a Hy4-enabled desktop build, choose **Manage Models → Model Catalog → Hy4-flash → Hy4-flash AngelSlim Q3_K**.
 Stark downloads the pinned split GGUF and BF16 projector, verifies their hashes,
 and prepares the Tencent metadata before adding the model to the library. Allow
 about 150 GiB of free disk space for the weights and the first-run draft sidecar.
 Select the installed model in Playground to load it for chat.
+[Packaged install and generation check](model-experiments/2026-11-26-hy4-desktop-catalog.md)
 
 ### Prepare a local copy from source
 
