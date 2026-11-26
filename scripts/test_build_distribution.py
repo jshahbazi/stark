@@ -1045,6 +1045,8 @@ class BundleConstructionTests(unittest.TestCase):
                     ]
                     if name == "stark-score":
                         expected.extend(["--features", "optimized"])
+                    elif name == "stark-generate":
+                        expected.extend(["--features", "hy4"])
                     self.assertEqual(invocation, expected)
                     self.assertEqual(
                         (bundle / "libexec" / name).read_bytes(), name.encode()

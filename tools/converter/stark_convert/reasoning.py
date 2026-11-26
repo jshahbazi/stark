@@ -5,6 +5,7 @@ import hashlib
 from .api_tools import GLM53_TEMPLATE_SHA256
 from .inkling_prepare import TEMPLATE_SHA as INKLING_TEMPLATE_SHA
 from .template_compat import template_program_sha256
+from .vision_runtime import _HY4_METADATA_HASHES
 
 # Same source-bound GLM program as api_tools: zai-org/GLM-5.3-Flash
 # metadata revision 04c4e9e95c5da8862dced7e5056455116f83a7e0.
@@ -30,6 +31,10 @@ def reasoning_options(codec, *, thinking=False, effort=None):
             if effort is not None and effort not in {"low", "high", "max"}:
                 raise ValueError("This model does not support the requested reasoning effort.")
             return {"reasoning_effort": effort or ("high" if thinking else "none")}
+        if digest == _HY4_METADATA_HASHES["template_sha256"]:
+            if effort is not None and effort not in {"high", "max"}:
+                raise ValueError("This model supports only high or disabled reasoning.")
+            return {"reasoning_effort": "high" if thinking or effort is not None else "no_think"}
         glm = isinstance(source, str) and (
             digest == GLM53_TEMPLATE_SHA256 or template_program_sha256(source) == _GLM53_PROGRAM
         )

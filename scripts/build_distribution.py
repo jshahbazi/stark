@@ -281,7 +281,7 @@ def build_native(bundle: Path, cargo: str, environment: dict[str, str]) -> None:
     libexec.mkdir(parents=True)
     for name, features in (
         ("stark-score", ["--features", "optimized"]),
-        ("stark-generate", []),
+        ("stark-generate", ["--features", "hy4"]),
         ("stark-template", []),
         ("stark-decide", []),
     ):
@@ -1124,7 +1124,7 @@ def build(options: argparse.Namespace) -> Path:
                 "python": PYTHON_VERSION,
                 "macos": macos,
                 "scoring_features": ["optimized"],
-                "generation_features": ["metal"],
+                "generation_features": ["metal", "hy4"],
                 "native_builds_separate": True,
                 "macosx_deployment_target": MIN_MACOS,
             },

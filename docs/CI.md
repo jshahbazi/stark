@@ -46,7 +46,7 @@ The `CI completed` gate accepts the Rust jobs as skipped only when `changes` suc
 
 ## What CI does and does not cover
 
-**Product code.** Both inference workers are built, linted with Clippy at `-D warnings`, and tested with synthetic inputs; the generation worker's process isolation is checked by a Python harness. The portable `stark-template` evaluator is built, unit-tested and checked with Clippy in the Linux repository job before the converter suite. Converter tests use the native evaluator and Hugging Face offline mode; installed-package checks copy the release helper beside the temporary environment's Python executable. Standalone and app builds include the helper, verify its fixed self-test protocol and render synthetic data after relocation. Installer, app builder, signer, updater and release-version scripts run their unit tests. The C process reaper is compiled with warnings as errors and exercised on Linux and macOS.
+**Product code.** Both inference workers are built, linted with Clippy at `-D warnings`, and tested with synthetic inputs; the macOS generation worker uses the `hy4` feature and its process isolation is checked by a Python harness. The portable `stark-template` evaluator is built, unit-tested and checked with Clippy in the Linux repository job before the converter suite. Converter tests use the native evaluator and Hugging Face offline mode; installed-package checks copy the release helper beside the temporary environment's Python executable. Standalone and app builds include the helper, verify its fixed self-test protocol and render synthetic data after relocation. Installer, app builder, signer, updater and release-version scripts run their unit tests. The C process reaper is compiled with warnings as errors and exercised on Linux and macOS.
 
 **Engine unit tests.** The `engine-unit` job compiles the default `cpu,metal` target with `nightly-2026-10-01`, then runs the suite under `crates/stark-engine/unit` with `--no-default-features --features cpu,grammar` (the suite needs `custom_test_frameworks`). The compile check preserves coverage of the default native target; the hosted test command avoids requiring a Metal context because macOS 26 hosted runners currently fail with `CannotCreateResidencySet`. On a physical Apple silicon Mac with working Metal residency, run the full native command from [Contributing](../CONTRIBUTING.md#engine-tests) to exercise the kernel comparisons between Metal and the CPU reference backend in `src/backends/cpu`. The ignored tests that read a converted model from `STARK_TEST_MODEL_PATH` do not run in CI; run them locally as described in [Contributing](../CONTRIBUTING.md#engine-tests). See the [failed hosted run](https://github.com/jshahbazi/stark/actions/runs/40227058178/job/121270551189) for the current runner limitation.
 
@@ -165,9 +165,9 @@ cargo test --locked -p stark-generate --no-default-features
 cargo build --release --locked -p stark-score --features optimized
 cargo clippy --release --locked -p stark-score --all-targets --features optimized -- -D warnings
 cargo test --release --locked -p stark-score --features optimized -- --test-threads=1
-cargo build --release --locked -p stark-generate
-cargo clippy --release --locked -p stark-generate --all-targets -- -D warnings
-cargo test --release --locked -p stark-generate -- --test-threads=1
+cargo build --release --locked -p stark-generate --features hy4
+cargo clippy --release --locked -p stark-generate --all-targets --features hy4 -- -D warnings
+cargo test --release --locked -p stark-generate --features hy4 -- --test-threads=1
 cargo +nightly-2026-10-01 test --locked -p stark-engine --features cpu,metal --no-run
 cargo +nightly-2026-10-01 test --locked -p stark-engine --no-default-features --features cpu,grammar -- --test-threads=1
 mkdir -p runtime

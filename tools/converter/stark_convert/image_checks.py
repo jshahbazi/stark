@@ -20,6 +20,7 @@ import psutil
 from . import inkling_prepare
 from ._build_metadata import file_hash
 from .media import ImageData
+from .reasoning import reasoning_options
 from .vision_runtime import (
     _ARTIFACT_HASHES,
     CONFIGURED_FAMILY_PROFILE,
@@ -29,6 +30,7 @@ from .vision_runtime import (
     GEMMA4_31B_FAMILY_PROFILE,
     GEMMA4_E4B_FAMILY_PROFILE,
     GEMMA4_FAMILY_PROFILE,
+    HY4_VISION_PROFILE,
     _current_os_version,
     artifact_image_family,
     family_image_input_contract,
@@ -85,6 +87,11 @@ def preflight_family_memory(model: Path, config: dict) -> None:
 
         retained = prepared_image_identity(model)
         if retained is not None:
+            if retained.get("family_profile") == HY4_VISION_PROFILE:
+                # The Hy4 worker performs live load-time context fitting and
+                # operation-specific Metal admission. A generic retained-weight
+                # estimate would describe neither its streamed nor resident profile.
+                return
             from .hybrid_image_memory import retained_check_headroom, retained_check_memory
 
             try:
@@ -235,6 +242,7 @@ def check_identity(worker) -> dict:
         "chat.py",
         "vision_runtime.py",
         "hybrid_vision.py",
+        "hy4_prepare.py",
         "hybrid_image_memory.py",
         "media.py",
         "_build_metadata.py",
@@ -470,6 +478,7 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
                 return True
         codec, template = load_template(worker.model_path, expected_hashes=worker.image_input)
         inkling = identity["family_profile"] == inkling_prepare.VISION_PROFILE
+        hy4 = identity["family_profile"] == HY4_VISION_PROFILE
         context, maximum = min(context, 2048), min(maximum, 192 if inkling else 8)
         options = {"context_tokens": context, "max_new_tokens": maximum, "sampling": {"mode": "greedy"}}
         worker._verification_deadline = time.monotonic() + min(worker.timeout, 120)
@@ -478,12 +487,11 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
             content = (
                 [{"type": "image"}, {"type": "text", "text": "Describe the image briefly."}] if image else "Hello."
             )
-            thinking = {"reasoning_effort": "none"} if inkling else {"enable_thinking": False}
             return template.render(
                 messages=[{"role": "user", "content": content}],
                 tools=None,
                 add_generation_prompt=True,
-                **thinking,
+                **reasoning_options(codec, thinking=False),
                 bos_token=codec.get("bos_token") or "",
                 eos_token=codec.get("eos_token") or "",
             )
@@ -524,7 +532,7 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
                 GEMMA4_12B_FAMILY_PROFILE,
                 GEMMA4_26B_FAMILY_PROFILE,
             }
-            expected_image_tokens = 256 if gemma else 64
+            expected_image_tokens = 256 if gemma else 72 if hy4 else 64
             expected_delta = expected_image_tokens + 1 if gemma else expected_image_tokens - 1
             if identity["family_profile"] == inkling_prepare.VISION_PROFILE:
                 # The 256px fixture pads to seven 40px cells on each axis.

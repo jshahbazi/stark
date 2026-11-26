@@ -4,12 +4,25 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace strata::hy4_flash {
 
+static FILE* private_dump_file(const std::string& path) {
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
+    if (fd < 0) return nullptr;
+    struct stat st {};
+    if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && ::fchmod(fd, 0600) == 0 && ::ftruncate(fd, 0) == 0) {
+        if (FILE* file = ::fdopen(fd, "wb")) return file;
+    }
+    ::close(fd);
+    return nullptr;
+}
+
 std::string Dump::open(const std::string& dir, const std::vector<int32_t>& tokens) {
-    if (::mkdir(dir.c_str(), 0755) != 0) {
+    if (::mkdir(dir.c_str(), 0700) != 0) {
         struct stat st {};
         if (::stat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) return "cannot create the dump directory " + dir;
     }
@@ -76,7 +89,7 @@ void Dump::add_whole(const std::string& name, const char* type, std::vector<int6
 std::string Dump::close() {
     if (dir_.empty()) return {};
     const std::string mpath = dir_ + "/manifest.txt";
-    FILE* mf = std::fopen(mpath.c_str(), "w");
+    FILE* mf = private_dump_file(mpath);
     if (mf == nullptr) return "cannot write " + mpath;
     std::fprintf(mf, "# dump_reference v3 (TAB-separated): file\ttype\tne0\tne1\tne2\tne3\tbytes\tname\n");
     std::fprintf(mf, "# engine strata_hy4_flash_metal (plan P1.4): the same node names and shapes as the reference's dump\n");
@@ -110,7 +123,7 @@ std::string Dump::close() {
         char file[320];
         std::snprintf(file, sizeof file, "%s.bin", name.c_str());
         const std::string path = dir_ + "/" + file;
-        FILE* f = std::fopen(path.c_str(), "wb");
+        FILE* f = private_dump_file(path);
         if (f == nullptr) {
             err = "cannot write " + path;
             break;

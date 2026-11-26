@@ -3,6 +3,7 @@
 
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <unistd.h>
 
@@ -240,9 +241,16 @@ std::string snap_save(const std::string& path, const SnapBinding& b, const std::
     // open and truncate the same `.part` inode, and one could rename it while the other still held it open -
     // publishing a zero-byte file that the other then kept writing into.  rename(2) within one directory is
     // atomic, so an interrupted save leaves no file whose header passes.
-    const std::string tmp = path + ".part." + std::to_string((long) ::getpid());
-    std::FILE* f = std::fopen(tmp.c_str(), "wb");
-    if (f == nullptr) return "prefill snapshot: cannot write " + tmp + ": " + std::strerror(errno);
+    std::string tmp = path + ".part.XXXXXX";
+    const int fd = ::mkstemp(tmp.data());
+    if (fd < 0) return "prefill snapshot: cannot create temporary for " + path + ": " + std::strerror(errno);
+    std::FILE* f = ::fdopen(fd, "wb");
+    if (f == nullptr) {
+        const int cause = errno;
+        ::close(fd);
+        std::remove(tmp.c_str());
+        return "prefill snapshot: cannot write " + tmp + ": " + std::strerror(cause);
+    }
     const uint32_t n_slices = (uint32_t) slices.size();
     bool ok = wr(f, kMagic, sizeof kMagic) && wr_binding(f, b) && wr_str(f, digest) && wr(f, &n_slices, 4);
     for (const SnapSlice& s : slices) ok = ok && wr_str(f, s.name) && wr(f, &s.bytes, 8);

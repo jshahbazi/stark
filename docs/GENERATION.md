@@ -48,7 +48,7 @@ finishes before cancellation resets the request and clears its prefix state.
 
 With `--image`, the CLI reads one regular local file with a 4 MiB limit and accepts PNG or JPEG signatures. The first user turn contains an image placeholder followed by its text. Later turns keep that placeholder in the conversation and resubmit the same owned image bytes for each fresh request; `/reset` clears the conversation and attaches the image to the next first turn. The image stays in process memory between turns. Each request uses the [private staging and transaction lifecycle](#prepared-image-operations). A worker without passing image evidence and an invalid image produce fixed, path-free errors. See the [CLI implementation](../tools/converter/stark_convert/chat.py) and [private image staging](../tools/converter/stark_convert/media.py).
 
-## AngelSlim Hy4 Flash Q3_K trial
+## AngelSlim Hy4 Flash Q3_K
 
 On Apple Silicon, the `hy4` feature runs the original Q3_K split GGUF and BF16
 projector in the generation worker. It uses the Strata Metal graph and Stark's
@@ -62,6 +62,14 @@ the worker request budget. `STARK_HY4_CONTEXT_LIMIT` is an optional upper bound
 applied before allocation. The worker always loads the projector. Image requests
 use target-only generation and invalidate the preceding text prefix. [Flexible
 window verification](model-experiments/2026-11-25-hy4-context-ladder.md#20261126-hy4ladder-05--verify-flexible-windows-on-the-measured-profiles)
+
+In a Hy4-enabled desktop build, choose **Catalog → Hy4-flash → Hy4-flash AngelSlim Q3_K**.
+Stark downloads the pinned split GGUF and BF16 projector, verifies their hashes,
+and prepares the Tencent metadata before adding the model to the library. Allow
+about 150 GiB of free disk space for the weights and the first-run draft sidecar.
+Select the installed model in Playground to load it for chat.
+
+### Prepare a local copy from source
 
 Put the two verified Q3_K shards and their original BF16 projector in one
 local directory. Prepare that directory and build the worker from the source
@@ -80,7 +88,7 @@ file fingerprints around model load, so moving the files to another filesystem
 or replacing a shard calls for rerunning preparation.
 The first worker load builds a reusable Q8_0 draft-expert sidecar in the model
 directory. Allow 3.6 GiB of writable space there. The normal worker image
-transaction is available when launched with `--vision-staging-root`. The trial
+transaction is available when launched with `--vision-staging-root`. The native worker
 has its own worker and artifact evidence in the
 [Hy4 Q3_K record](model-experiments/2026-11-25-hy4-native-q3-k.md).
 

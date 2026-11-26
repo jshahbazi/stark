@@ -46,8 +46,17 @@ def test_fixed_native_sources_have_a_bound_plan_or_explicit_exclusion():
     # only; the two quantized catalog choices are also deliberately excluded.
     # Inkling's 8-bit default is selected in Model Catalog while its prompt
     # performance and resident-memory profile are being qualified; the original
-    # is a preparation choice for reference work.
-    unprofiled = {"ripple-q8", "ripple-q4-k-m", "ripple-bf16", native_catalog.INKLING_CHOICE, "inkling2-mini-original"}
+    # is a preparation choice for reference work. Hy4's 146 GiB catalog artifact
+    # has no bounded guided memory/storage plan and remains manual Model Catalog
+    # installation only.
+    unprofiled = {
+        "ripple-q8",
+        "ripple-q4-k-m",
+        "ripple-bf16",
+        native_catalog.INKLING_CHOICE,
+        "inkling2-mini-original",
+        native_catalog.HY4_CHOICE,
+    }
     assert unprofiled <= set(hybrid.SOURCES)
     assert {recipe.native_choice for recipe in recipes} == set(hybrid.SOURCES) - unprofiled
     assert len({recipe.id for recipe in recipes}) == len(recipes)

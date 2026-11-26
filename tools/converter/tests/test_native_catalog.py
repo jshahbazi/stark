@@ -5,7 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from stark_convert import desktop as desktop_module
-from stark_convert import hybrid_prepare, native_catalog
+from stark_convert import hybrid_prepare, model_catalog, native_catalog
 from stark_convert.desktop import Desktop
 
 
@@ -29,6 +29,46 @@ def test_inkling_catalog_binds_original_target_and_draft_to_default_vision_mode(
         "mtp.safetensors",
     ]
     assert native_catalog.source_choice(family, item) == choice
+
+
+def test_hy4_catalog_binds_exact_split_source_and_image_projector():
+    family = native_catalog.HY4_FAMILY_ID
+    choice = native_catalog.HY4_CHOICE
+    [item] = native_catalog.catalog_items(family)
+    source = hybrid_prepare.SOURCES[choice]
+    assert item["name"] == "Hy4-flash AngelSlim Q3_K"
+    assert item["repo"] == "AngelSlim/Hy4-flash-GGUF"
+    assert item["revision"] == "c50d4dd30be42f2b91138e5731de0e2f32ad56b2"
+    assert item["quantization"] == "Q3_K"
+    assert item["weight_bytes"] == source["weight_bytes"] == 156_415_403_072
+    assert item["artifact_modes"] == ["vision-language"]
+    assert item["default_artifact_mode"] == "vision-language"
+    assert source["required_weight_files"] == [
+        "Hy4-flash-Q3_K-00001-of-00002.gguf",
+        "Hy4-flash-Q3_K-00002-of-00002.gguf",
+        "mmproj-Hy4-flash-bf16.gguf",
+    ]
+    assert source["metadata_repo"] == "tencent/Hy4-flash"
+    assert source["metadata_revision"] == "eccd3123eec73f2040f4c9ed0de1883593470510"
+    assert native_catalog.source_choice(family, item) == choice
+    assert native_catalog.allowed_choice(choice)
+
+
+def test_hy4_family_is_visible_as_a_conditional_native_image_family():
+    from stark_convert.model_support import support_matrix
+
+    definition = next(
+        family for family in support_matrix()["families"] if family["family_id"] == native_catalog.HY4_FAMILY_ID
+    )
+    assert definition["modes"]["text"]["status"] == "conditional"
+    assert definition["modes"]["vision-language"]["status"] == "conditional"
+
+
+def test_hy4_family_catalog_returns_the_pinned_downloadable_choice_without_hub_search():
+    report = model_catalog.family_catalog(native_catalog.HY4_FAMILY_ID, hub=object())
+    assert report["status"] == "ready"
+    assert report["family_id"] == native_catalog.HY4_FAMILY_ID
+    assert report["items"] == native_catalog.catalog_items(native_catalog.HY4_FAMILY_ID)
 
 
 def test_qwen_native_catalog_preserves_text_source_and_adds_retained_image_choices():
@@ -210,5 +250,57 @@ def test_qwen_native_install_prepares_and_registers_the_pinned_source(tmp_path, 
         )
         assert installed["support_request_id"] == "install"
         assert host.install_progress["download"]["state"] == "complete"
+    finally:
+        host.stop(quiet=True)
+
+
+def test_failed_native_image_check_restores_owned_download_for_retry(tmp_path, monkeypatch):
+    from test_hybrid_prepare import metadata
+
+    choice = native_catalog.QWEN_CHOICE
+    source = {**hybrid_prepare.SOURCES[choice], "weight_bytes": 4}
+    monkeypatch.setitem(hybrid_prepare.SOURCES, choice, source)
+
+    def snapshot(repo, **options):
+        assert repo == source["weights_repo"]
+        root = Path(options["local_dir"])
+        (root / "model.safetensors").write_bytes(b"test")
+        metadata(root, architecture="qwen4_exp")
+
+    monkeypatch.setattr(hybrid_prepare, "snapshot_download", snapshot)
+    host = Desktop(tmp_path / "unused-worker", tmp_path / "library", io.StringIO())
+    host.begin_install_progress(host.epoch, "native")
+
+    def prepare(command, _environment, _epoch):
+        hybrid_prepare.prepare(choice, Path(command[7]))
+        return 0
+
+    monkeypatch.setattr(host, "run_converter", prepare)
+    checks = 0
+
+    def fail_once(_epoch, _path):
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            raise desktop_module.DesktopError("image validation needs a retry")
+
+    monkeypatch.setattr(host, "check_family_install", fail_once)
+    try:
+        try:
+            host.install(host.epoch, "native", choice, "text", "text", "first", source["weights_revision"])
+        except desktop_module.DesktopError:
+            pass
+        else:
+            raise AssertionError("expected the first image validation attempt to fail")
+
+        [owned] = (host.data_dir / "native-downloads").glob(choice + "-*")
+        staged_model = owned / "model"
+        assert desktop_module.model_valid(staged_model)
+        assert host.models == []
+
+        host.install(host.epoch, "native", choice, "text", "text", "retry", source["weights_revision"])
+        assert checks == 2
+        assert len(host.models) == 1
+        assert desktop_module.model_valid(Path(host.models[0]["path"]))
     finally:
         host.stop(quiet=True)

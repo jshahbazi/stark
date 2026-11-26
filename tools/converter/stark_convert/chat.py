@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import select
 import signal
@@ -39,6 +40,7 @@ from .template_runtime import (
 from .tool_protocols import runtime_template_source
 from .vision_runtime import (
     CONFIGURED_FAMILY_PROFILE,
+    HY4_VISION_PROFILE,
     LILY_FAMILY_PROFILE,
     VISION_MODEL_TYPES,
     family_image_input_contract,
@@ -268,14 +270,58 @@ def read_model_config(model):
 def load_template(model, *, expected_hashes=None):
     try:
         data = _chat_file(model / "config.json", 2 * 1024 * 1024)
-        if expected_hashes is not None and hashlib.sha256(data).hexdigest() != expected_hashes["config_sha256"]:
-            raise ValueError
         config = json.loads(data)
-        codec = config["token_codec_config"]
-        source = codec["prompt_template"]
-        if codec.get("type") != "ChatCodecConfig" or not isinstance(source, str) or not source:
-            raise ValueError
         image_family = model_image_family(config, model)
+        hy4 = config.get("model_type") == "hy_v4_flash" and image_family == {
+            "profile": HY4_VISION_PROFILE,
+            "version": 1,
+        }
+        if hy4:
+            from .vision_runtime import _HY4_METADATA_HASHES
+
+            metadata = {"config_sha256": hashlib.sha256(data).hexdigest()}
+            tokenizer_bytes = _chat_file(model / "tokenizer.json", 64 * 1024 * 1024)
+            metadata["tokenizer_sha256"] = hashlib.sha256(tokenizer_bytes).hexdigest()
+            metadata["processor_sha256"] = hashlib.sha256(
+                _chat_file(model / "processor_config.json", 64 * 1024)
+            ).hexdigest()
+            template_bytes = _chat_file(model / "chat_template.jinja", 256 * 1024)
+            metadata["template_sha256"] = hashlib.sha256(template_bytes).hexdigest()
+            if metadata != _HY4_METADATA_HASHES or (
+                expected_hashes is not None
+                and any(expected_hashes.get(key) != value for key, value in metadata.items())
+            ):
+                raise ValueError
+            source = template_bytes.decode("utf-8")
+            from tokenizers import Tokenizer
+
+            tokenizer = Tokenizer.from_str(tokenizer_bytes.decode("utf-8"))
+            text_config = config.get("text_config", config)
+
+            def special_token(name):
+                value = text_config.get(name)
+                if isinstance(value, list):
+                    value = value[0] if value else None
+                if type(value) is not int or not 0 <= value <= 1_000_000:
+                    return None
+                token = tokenizer.decode([value], skip_special_tokens=False)
+                return token if isinstance(token, str) and 0 < len(token.encode("utf-8")) <= 8192 else None
+
+            codec = {
+                "type": "ChatCodecConfig",
+                "prompt_template": source,
+            }
+            for field, key in (("bos_token", "bos_token_id"), ("eos_token", "eos_token_id")):
+                token = special_token(key)
+                if token is not None:
+                    codec[field] = token
+        else:
+            if expected_hashes is not None and hashlib.sha256(data).hexdigest() != expected_hashes["config_sha256"]:
+                raise ValueError
+            codec = config["token_codec_config"]
+            source = codec["prompt_template"]
+            if codec.get("type") != "ChatCodecConfig" or not isinstance(source, str) or not source:
+                raise ValueError
         if config.get("type") in VISION_MODEL_TYPES or image_family is not None:
             # Only the recognized program may reach Jinja compilation. An
             # immutable sandbox does not bound arbitrary template computation.
@@ -304,6 +350,10 @@ def load_template(model, *, expected_hashes=None):
                 template_hashes = qwen38_retained.SUPPORTED_TEMPLATE_HASHES
             elif image_family == {"profile": inkling_prepare.VISION_PROFILE, "version": 1}:
                 template_hashes = {inkling_prepare.TEMPLATE_SHA}
+            elif image_family == {"profile": HY4_VISION_PROFILE, "version": 1}:
+                from .vision_runtime import _HY4_METADATA_HASHES
+
+                template_hashes = {_HY4_METADATA_HASHES["template_sha256"]}
             contract = config.get("artifact_contract")
             family = contract.get("family") if isinstance(contract, dict) else None
             if (
@@ -349,13 +399,29 @@ def load_template(model, *, expected_hashes=None):
         policy = review.get("chat_template_system_role")
         if policy is not None and policy != SYSTEM_ROLE_POLICY:
             raise ValueError
-        template = _ChatTemplate(source, system_role=SYSTEM_ROLE_FOLD if policy is not None else None)
+        runtime_source = _hy4_runtime_template(source) if hy4 else source
+        template = _ChatTemplate(runtime_source, system_role=SYSTEM_ROLE_FOLD if policy is not None else None)
         # A template selected from a named list keeps tool calling unavailable.
         return codec_with_template_review(codec, review), template
     except TemplateHelperMissing:
         raise ChatError("Native chat-template helper is missing; rebuild or reinstall Stark.") from None
-    except (OSError, ValueError, KeyError, TypeError, ConversionError, TemplateError, SyntaxError):
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError, ConversionError, TemplateError, SyntaxError):
         raise ChatError("Cannot read chat metadata; use a converted language model with a chat template.") from None
+
+
+_HY4_FORMAT_TOKEN = re.compile(r"'([^'\\]*)\{\}([^'\\]*)'\.format\(HYTK\)")
+
+
+def _hy4_runtime_template(source):
+    """Normalize the pinned Hy4 template's bounded Python string formatting for MiniJinja."""
+    from .vision_runtime import _HY4_METADATA_HASHES
+
+    if hashlib.sha256(source.encode("utf-8")).hexdigest() != _HY4_METADATA_HASHES["template_sha256"]:
+        raise ValueError("unrecognized Hy4 chat template")
+    normalized, replacements = _HY4_FORMAT_TOKEN.subn(r"('\1' ~ HYTK ~ '\2')", source)
+    if replacements != 22:
+        raise ValueError("unrecognized Hy4 chat template formatting")
+    return normalized
 
 
 class Worker:

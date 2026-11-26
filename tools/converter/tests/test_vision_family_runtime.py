@@ -85,6 +85,97 @@ def test_inkling_profile_is_bound_to_its_pinned_target_artifacts():
     assert vision_runtime.family_image_input_contract(contract(draft)) is False
 
 
+def test_hy4_profile_is_bound_to_the_pinned_gguf_projector_and_metadata():
+    profile = vision_runtime.HY4_VISION_PROFILE
+    value = family_contract(
+        family_profile=profile,
+        artifact_schema_version=7,
+        model_source="AngelSlim/Hy4-flash-GGUF",
+        model_revision="c50d4dd30be42f2b91138e5731de0e2f32ad56b2",
+        artifact_sha256="f9a244c3a1f85e03847959b575528c3927ac05ab0a3f532b1c1831f9eb1ddd3c",
+        config_sha256="1f56ac1a3063f926e91ec43842bfdc0fd6d4401ef91bcdecd1fc27dd506ea968",
+        tokenizer_sha256="2e3f3d22065c2be5765ce99ab2410411ae338b32ce809ea20dcdb61d00198e83",
+        processor_sha256="cc5cc63da33e0ebf53b8ac035879982ba18c47965f82a5f341bc82d98759dc1d",
+        template_sha256="11b12531403da5726b7e1f6003f479043b05999e6746d39af949cbcdfd715c35",
+        max_source_pixels=32_000_000,
+        max_source_dimension=16_384,
+        max_processed_pixels=4_194_304,
+        max_patches=16_384,
+        max_image_tokens=8_192,
+    )
+    value["runtime_identity"].update(
+        hy4_load_profile="default",
+        expert_storage="streamed",
+        mapped_expert_residency=False,
+        grouped_prefill_requested=True,
+        grouped_prefill_operands="f32",
+        grouped_prefill_fragments_requested=False,
+        gpu_expert_plan=False,
+        prefill_chunk_tokens=1024,
+        prefill_stage_profile_requested=False,
+        prefill_dense_packed_requested=False,
+        prefill_dense_device_views_requested=False,
+        prefill_dense_ffn_device_views_requested=False,
+        prefill_tensor_mla_requested=False,
+        token_embeddings_resident=False,
+        draft_experts_resident=False,
+        draft_head_format="q8_0",
+        streamed_expert_demand_retention=False,
+        streamed_expert_arena_bytes=27_996_717_056,
+        streamed_expert_arena_requested_bytes=0,
+    )
+    assert vision_runtime.image_input_contract(value) == value
+    assert vision_runtime.family_image_input_contract(value) is True
+    for key, replacement in [
+        ("model_source", "tencent/Hy4-flash"),
+        ("model_revision", "a" * 40),
+        ("artifact_sha256", "0" * 64),
+        ("config_sha256", "0" * 64),
+        ("tokenizer_sha256", "0" * 64),
+        ("processor_sha256", "0" * 64),
+        ("template_sha256", "0" * 64),
+        ("max_source_dimension", 32_768),
+        ("max_processed_pixels", 16_777_216),
+        ("max_patches", 65_536),
+        ("max_image_tokens", 16_384),
+    ]:
+        assert vision_runtime.family_image_input_contract({**value, key: replacement}) is False
+    for key, replacement in [
+        ("hy4_load_profile", "unknown"),
+        ("expert_storage", "resident"),
+        ("grouped_prefill_operands", "bf16"),
+        ("prefill_chunk_tokens", True),
+        ("draft_head_format", "q4_0"),
+        ("streamed_expert_arena_bytes", -1),
+        ("unreviewed_runtime_option", True),
+    ]:
+        runtime = {**value["runtime_identity"], key: replacement}
+        candidate = {**value, "runtime_identity": runtime}
+        assert vision_runtime.image_input_contract(candidate) is None
+
+
+def test_hy4_prepared_image_identity_is_source_bound(tmp_path, monkeypatch):
+    from stark_convert import hybrid_prepare, hybrid_vision
+
+    identity = {
+        "repo": "AngelSlim/Hy4-flash-GGUF",
+        "revision": "c50d4dd30be42f2b91138e5731de0e2f32ad56b2",
+        "architecture": "hy4_flash",
+        "weight_bytes": 156_415_403_072,
+        "quantization": "Q3_K",
+    }
+    monkeypatch.setattr(hybrid_prepare, "prepared_identity", lambda _directory: identity)
+    result = hybrid_vision.prepared_image_identity(tmp_path)
+    assert result == {
+        "kind": "Hy4NativeVisionArtifact",
+        "schema_version": 7,
+        "family_profile": vision_runtime.HY4_VISION_PROFILE,
+        "family_version": 1,
+        "model_source": identity["repo"],
+        "model_revision": identity["revision"],
+    }
+
+
 def test_schema2_checkpoint_identity_remains_pinned():
     value = family_contract(artifact_schema_version=2)
     assert vision_runtime.image_input_contract(value) is None

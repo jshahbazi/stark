@@ -1932,12 +1932,15 @@ void Forward::Impl::at_cut(int s) {
         const size_t at = (size_t) (o + 1) * n_tok * topk;
         if (at + (size_t) n_tok * topk <= predicted.size())
             for (int t = 0; t < n_tok; ++t) {
-                std::vector<int32_t> idx((size_t) n_experts);
-                for (int e = 0; e < n_experts; ++e) idx[(size_t) e] = e;
                 const float* row = pr + (size_t) t * n_experts;
-                std::partial_sort(idx.begin(), idx.begin() + topk, idx.end(),
-                                  [&](int32_t x, int32_t y) { return row[x] > row[y] || (row[x] == row[y] && x < y); });
-                for (int k = 0; k < topk; ++k) predicted[at + (size_t) t * topk + k] = idx[(size_t) k];
+                std::vector<std::pair<float, int32_t>> candidates;
+                candidates.reserve((size_t) n_experts);
+                for (int e = 0; e < n_experts; ++e) candidates.emplace_back(row[e], e);
+                std::partial_sort(candidates.begin(), candidates.begin() + topk, candidates.end(),
+                                  [](const auto& a, const auto& b) {
+                                      return a.first > b.first || (a.first == b.first && a.second < b.second);
+                                  });
+                for (int k = 0; k < topk; ++k) predicted[at + (size_t) t * topk + k] = candidates[(size_t) k].second;
             }
     }
     if (!all_logits.empty()) {
@@ -2120,8 +2123,9 @@ void Forward::Impl::dump_block(const BW& b, int T, Dump* dump, const Inject& inj
     per("kv_cmpr", kvn, {kv_lora}, 2, (size_t) kv_lora);
     per("k_pe", kpe, {rope_dim, 1}, 1, (size_t) rope_dim);
     per("q_pe", qpe, {rope_dim, H}, 1, (size_t) H * rope_dim);
-    per("attn_kqv", kqv, {H * v_mla}, 2, (size_t) H * v_mla);
-    per("attn_gated", gated, {H * v_mla}, 2, (size_t) H * v_mla);
+    const int64_t attention_width = (int64_t) H * v_mla;
+    per("attn_kqv", kqv, {attention_width}, 2, (size_t) attention_width);
+    per("attn_gated", gated, {attention_width}, 2, (size_t) attention_width);
     per("attn_out", attn_out, {n_embd}, 2, (size_t) n_embd);
     per("hc_attn_out", hc_mid, {n_embd, hc}, 1, (size_t) hcw);
     per("ffn_norm", fnorm, {n_embd}, 2, (size_t) n_embd);

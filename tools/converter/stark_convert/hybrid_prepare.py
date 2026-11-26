@@ -21,7 +21,7 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-from . import inkling_prepare, qwen38_external
+from . import hy4_prepare, inkling_prepare, qwen38_external
 from .cli import _publish
 from .progress import (
     FDProgressSink,
@@ -69,6 +69,21 @@ SOURCES = {
         ],
         "required_files": ["LICENSE", "chat_template.jinja"],
         "quantization": "Q8_0",
+    },
+    "hy4-q3-k": {
+        "architecture": hy4_prepare.ARCHITECTURE,
+        "weights_repo": hy4_prepare.SOURCE_REPOSITORY,
+        "weights_revision": hy4_prepare.SOURCE_REVISION,
+        "weights_patterns": [*hy4_prepare.GGUF, "LICENSE"],
+        "metadata_repo": hy4_prepare.METADATA_REPOSITORY,
+        "metadata_revision": hy4_prepare.TENCENT_REVISION,
+        "weight_bytes": sum(size for size, _digest in hy4_prepare.GGUF.values()),
+        "weight_shards": len(hy4_prepare.GGUF),
+        "weight_extension": ".gguf",
+        "required_weight_files": list(hy4_prepare.GGUF),
+        "required_files": ["LICENSE", *hy4_prepare.METADATA],
+        "quantization": hy4_prepare.QUANTIZATION,
+        "hy4_metadata_patterns": list(hy4_prepare.METADATA),
     },
     "ripple-bf16": {
         "architecture": "ricursive",
@@ -176,9 +191,10 @@ def _ids(value):
     raise ValueError("invalid EOS metadata")
 
 
-def finish_metadata(directory: Path, choice: str) -> dict:
+def finish_metadata(directory: Path, choice: str, artifact_mode: str = "text") -> dict:
     """Bind the preserved architecture and tokenizer template for CLI chat."""
     receipt = _finish_metadata(directory, SOURCES[choice])
+    receipt["artifact_mode"] = artifact_mode
     (directory / "native-source.json").write_text(json.dumps(receipt, indent=2) + "\n")
     return receipt
 
@@ -188,7 +204,12 @@ def _finish_metadata(directory: Path, source: dict) -> dict:
     if config.get("model_type") != source["architecture"]:
         raise ValueError("source architecture changed")
     text = config.get("text_config", config)
-    tokenizer = _json(directory / "tokenizer_config.json", 2 * 1024 * 1024)
+    tokenizer_path = directory / "tokenizer_config.json"
+    if source["architecture"] == "hy4_flash" and not tokenizer_path.exists():
+        template = (directory / "chat_template.jinja").read_text()
+        tokenizer = {"chat_template": template}
+    else:
+        tokenizer = _json(tokenizer_path, 2 * 1024 * 1024)
     template_file = directory / "chat_template.jinja"
     if template_file.exists() or template_file.is_symlink():
         if template_file.is_symlink() or not template_file.is_file() or template_file.stat().st_size > 256 * 1024:
@@ -525,9 +546,12 @@ def prepared_identity(directory: Path) -> dict | None:
     try:
         config_path = directory / "config.json"
         config = _json(config_path)
-        receipt = _json(directory / "native-source.json")
         if config.get("model_type") == inkling_prepare.FAMILY:
+            receipt = _json(directory / "native-source.json")
             return inkling_prepare.prepared_identity(directory, config, receipt)
+        if config.get("model_type") == hy4_prepare.SOURCE_MODEL_TYPE:
+            return hy4_prepare.prepared_identity(directory)
+        receipt = _json(directory / "native-source.json")
         marker = config.get("stark_native_hybrid")
         if not isinstance(marker, dict) or marker.get("schema_version") != 1:
             return None
@@ -717,7 +741,7 @@ def prepare(
     inkling = choice in inkling_prepare.CHOICES
     if artifact_mode not in {"text", "vision-language"} or (
         artifact_mode == "vision-language"
-        and choice not in {"qwen38-mlx-serve-mixed", "qwen38-lily-q4-xl"}
+        and choice not in {"qwen38-mlx-serve-mixed", "qwen38-lily-q4-xl", "hy4-q3-k"}
         and not inkling
     ):
         raise ValueError("unsupported native artifact mode")
@@ -808,15 +832,25 @@ def prepare(
             max_workers=3,
             **download_options,
         )
-    snapshot_download(
-        source["metadata_repo"],
-        revision=download_source["metadata_revision"],
-        allow_patterns=inkling_prepare.METADATA if inkling else _METADATA,
-        local_dir=stage,
-        local_files_only=offline,
-        max_workers=2,
-        **download_options,
-    )
+    if choice == "hy4-q3-k":
+        snapshot_download(
+            source["metadata_repo"],
+            revision=source["metadata_revision"],
+            allow_patterns=source["hy4_metadata_patterns"],
+            local_dir=stage,
+            local_files_only=offline,
+            max_workers=2,
+        )
+    else:
+        snapshot_download(
+            source["metadata_repo"],
+            revision=download_source["metadata_revision"],
+            allow_patterns=inkling_prepare.METADATA if inkling else _METADATA,
+            local_dir=stage,
+            local_files_only=offline,
+            max_workers=2,
+            **download_options,
+        )
     if choice == "glm53-q2" and not gguf_complete:
         shards = sorted((stage / "UD-Q2_K_XL").glob("*.gguf"))
         if len(shards) != 4:
@@ -848,8 +882,24 @@ def prepare(
     if progress is not None:
         progress.emit("download", "complete", weight_bytes, weight_bytes, force=True)
         progress.emit("conversion", "running", force=True)
-    receipt = inkling_prepare.stage(stage) if inkling else finish_metadata(stage, choice)
-    if artifact_mode == "vision-language" and not inkling:
+    if choice == "hy4-q3-k":
+        from . import hy4_prepare
+
+        hy4_prepare.prepare(stage)
+        receipt = {
+            "schema_version": 1,
+            "artifact_mode": "vision-language",
+            "architecture": "hy4_flash",
+            "quantization": "Q3_K",
+            "weights_source": {"repo": source["weights_repo"], "revision": source["weights_revision"]},
+            "metadata_source": {"repo": source["metadata_repo"], "revision": source["metadata_revision"]},
+            "native_loading": "unverified",
+            "execution": "unverified",
+            "weight_bytes": source["weight_bytes"],
+        }
+    else:
+        receipt = inkling_prepare.stage(stage) if inkling else finish_metadata(stage, choice, artifact_mode)
+    if artifact_mode == "vision-language" and not inkling and choice != "hy4-q3-k":
         from .hybrid_vision import prepare_image_artifact
 
         prepare_image_artifact(stage, choice)

@@ -83,7 +83,7 @@ from .model_removal import RemovalError, prepare_removal, removal_info, remove_m
 from .model_support import support_matrix
 from .mtp import mtp_capabilities, resolve_mtp
 from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
-from .native_catalog import INKLING_FAMILY_ID, RIPPLE_FAMILY_ID
+from .native_catalog import HY4_FAMILY_ID, INKLING_FAMILY_ID, RIPPLE_FAMILY_ID
 from .native_catalog import allowed_choice as native_choice_allowed
 from .native_catalog import catalog_item as native_catalog_item
 from .native_catalog import catalog_items as native_catalog_items
@@ -101,6 +101,7 @@ from .resource_budget import (
 from .sources import huggingface_repository
 from .tool_protocols import protocol_stop_ids
 from .vision_runtime import (
+    HY4_VISION_PROFILE,
     VISION_MODEL_TYPES,
     model_image_family,
     supported_image_family,
@@ -1107,7 +1108,8 @@ class Desktop:
             native_choice = native_source_choice(family, native_identity)
             fixed_native_ids = {native_item["id"] for native_item in native_catalog_items(family)}
             if (
-                family in {NATIVE_FAMILY_ID, RIPPLE_FAMILY_ID, INKLING_FAMILY_ID} or item["id"] in fixed_native_ids
+                family in {NATIVE_FAMILY_ID, RIPPLE_FAMILY_ID, INKLING_FAMILY_ID, HY4_FAMILY_ID}
+                or item["id"] in fixed_native_ids
             ) and native_choice is None:
                 raise DesktopError("Refresh this family before downloading a model.")
             installed = self.catalog_installed_ids(item, mode)
@@ -2667,7 +2669,8 @@ class Desktop:
         if config.get("type") not in VISION_MODEL_TYPES and family is None:
             return None
         if not isinstance(contract, dict) or (
-            (family or {}).get("profile") not in {"qwen38-lily-retained-bf16-vision-v1", "inkling2-mini-native-v1"}
+            (family or {}).get("profile")
+            not in {"qwen38-lily-retained-bf16-vision-v1", "inkling2-mini-native-v1", HY4_VISION_PROFILE}
             and contract.get("schema_version") not in (3, 4, 5)
         ):
             return None
