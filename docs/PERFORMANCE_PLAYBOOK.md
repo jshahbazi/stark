@@ -893,6 +893,8 @@ Once all target experts are resident, check for command splits that serve the ol
 
 Retest the stage named by a one-way speedup. Loading routed prefill weights directly into Hy4 SIMD registers appeared 9.9% faster warm, but the reversed profile showed 2.37 s of warm routed time against 2.17 s. The advanced verifier's K3 also saved long-window target rounds while running below the earlier K2 rates. The paired short-code result for the original consolidated verifier was 62.54 vs 59.17 tok/s warm with exact output. [Paired code and follow-up screens](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-24--screen-wider-verification-and-direct-routed-weight-loads)
 
+When profiler timing improves, isolate its execution changes before reusing them. Hy4's stage encoder boundaries with sampling disabled reduced 4K warm median prefill from 579.23 to 535.17 tok/s in four matched loads. All outputs matched. Keep profile and throughput runs separate. [Hy4 encoder boundary isolation](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-25--isolate-prefill-encoder-boundaries-from-sampling)
+
 
 ## Ideas not yet tried
 

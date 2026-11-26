@@ -1231,3 +1231,38 @@ Harness SHA-256
 
 Natural-text harness SHA-256
 `f9e7565753accaf27233d74f04afd47dff04bb028f3ee68274530cca8e6e61f7`.
+
+## 20261125-HY4FRAG-25 · Isolate prefill encoder boundaries from sampling
+
+The earlier sampled prefill run exceeded its uninstrumented timing.
+This screen reused the profiler's stage boundaries with counter
+sampling disabled. It kept the same command buffers, stream cuts,
+event ordering and concurrent compute dispatch.
+
+Four loads of one Hy4-enabled executable ran the 4K K2 fixture twice
+each, in control, candidate, candidate, control order. Every load used
+the original projector, a 5,120-position cap and the same 40 GB
+streamed arena. All eight outputs matched all 64 reference IDs.
+Both snapshots from every load reported nominal thermal state and
+zero contenders.
+
+| Order and arm | First use tok/s | Warm tok/s | Receipt SHA-256 |
+| --- | ---: | ---: | --- |
+| 1. Control | 648.22 | 589.36 | `c5e4eaa43289a57631ba1048cfbeaeb74a3554b4b65b85f17db129e2f754a61d` |
+| 2. Encoder boundaries | 611.19 | 520.17 | `1d0c8a5fcbed50aa67be8c4b04fd2cf32ac930baa4431dc7b0b06eee21168a7c` |
+| 3. Encoder boundaries | 563.27 | 550.18 | `206f80b65da9101c82c8c3841ab6cde1f0a30df44b0da9ddd8822b71bc240c50` |
+| 4. Control | 602.18 | 569.11 | `9a830928d4175e604af14e5f43faa3a4ba55d1068b7136f9825d1ec54bd4e65d` |
+
+The candidate's median was 587.23 tok/s first use and 535.17 warm
+against 625.20 and 579.23. Keep the existing encoder boundaries.
+Use counters for attribution and uninstrumented timings for scoring.
+
+The initial default-feature executable omitted Hy4 and all four runs
+stopped at load. The receipts in attempted order have a concatenated
+SHA-256 of `8376d18794eceaa239f9d2e5a9abc7836846f2ba6b1cd3d8ebd95eb5c97d272c`.
+The corrected locked Rust 1.98.1 executable explicitly enabled
+`stark-generate/hy4` and has SHA-256
+`710f2cedff8c570f94be396208336754704a0fecc8fc88276821e9ce3ef38d86`.
+The unified source diff on `ec81193fb` and harness have SHA-256
+`aa0b8e8cb0161e3feb201b9933f4c6ff35f1d5a1c96bc08ed4b39b43ce28a386`
+and `41428073bf0ffeef4ee997860541e5731cd78f9aa0fd10c18ed6c360f0ff5164`.
