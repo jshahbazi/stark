@@ -1362,3 +1362,37 @@ and `99500045d487c7d755edf2fbbca21ad9974d566dcf682dc86379ca5339eaa7a3`.
 | --- | --- |
 | Rebuilt 4K streamed worker | `a0a934485d04dd2a1b6964fbdda02bae8d1ff8a2b2baee5d6946a8628cf42fa1` |
 | Rebuilt 4K and mapped lifecycle | `588dec1ee968dff06bab944277fed986a9e73384ff305c10de7f402aa40d15d5` |
+
+## 20261125-HY4FRAG-27 · Screen smaller routed staging and group-local dense packing
+
+The routed candidate halves the packed weight staging K dimension
+from 64 to 32, while keeping 128 threads, the route assignment, F16
+operands and the K16 F32 accumulation loop. Threadgroup storage drops
+from 18,432 to 10,240 bytes. The extra stages double the barrier count.
+The dense candidate packs each compute group's K slabs next to one
+another, keeping the validated device-view tile arithmetic and scratch
+size. Offline coordinate checks covered 1,236,992 routed cases and
+1,457,808 dense cases.
+
+Four 5,120-position loads used the 40 GB streamed arena and original
+projector on the same executable. Each ran two 4K requests with K2
+and zero reuse. All outputs matched the 64 reference IDs.
+
+| Order and arm | First use tok/s | Warm tok/s | Thermal state | Receipt SHA-256 |
+| --- | ---: | ---: | --- | --- |
+| 1. Control | 623.04 | 612.35 | Nominal | `30b906c39780f06c5079efe11e32e622801442a4fbfa4e8aa18ffbb46430b103` |
+| 2. Routed K32 staging | 626.12 | 611.28 | Nominal | `dc5d4f7c7cfcf76406e0b5cb9a7d3d7da87f406137d01ae6005ea2014c6ad958` |
+| 3. Group-local dense K64 packing | 641.09 | 598.91 | Nominal to fair | `5e7ab7455a5e7ef0771a79f4a58f8c3217655e13574d2b8e6dcd10aa25d95ad5` |
+| 4. Control | 631.67 | 622.89 | Fair | `620e6a71c8b2f61a8226453b1dde4b8ea9945fe6504d2e1e7baa545112643267` |
+
+The smaller staging tile landed inside first-use control drift and
+slowed the repeat slightly. The dense layout's first-use rate was
+1.5–2.9% higher than the controls and its warm rate was lower. Thermal
+state changed through that comparison. Keep the current staging and
+dense layout. The 743.2 tok/s target remains open.
+
+The private source diff on `4659df684`, isolated locked Rust 1.98.1
+Hy4 executable and harness have SHA-256
+`b0b5d3345779ddc9c4aaba7c4aa038c07b449e0dcf7a8537e6f4532dfaf1dd0d`,
+`86b191fd0c40b42fb9a42b4e143a83ab0789a2a17385f151f1e572c9280611eb`,
+and `3dc12a87e73e003feec7d88a0dd75c9c8c7fb49878f6c0ab5ccaa5a455b68e9e`.

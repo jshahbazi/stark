@@ -259,3 +259,33 @@ The pinned prior reference receipt SHA-256 is
 | Packed projections | `5cf280c1f993a9de8d663b6bb9f9bf9a717e5c8776f248673c0fb0ba5aeedf1d` |
 | Control | `9b7b2c06f552e68e45ed74b8fef9ca420ba032d6ba9d908e3861c1d5c1143645` |
 | Sampled verifier pressure stop | `972a8506e1c58f84fadc6ea686b22da38276e32c16301cc6eb72d068e4da33bb` |
+
+### Repeat after the host restart and sample 16K verification
+
+The first reverse-order run reached readiness before the host rebooted.
+Its receipt has no generation or terminal result. The retry used the
+same executable, references, 33,024-position cap and 4,096-row chunks.
+The control reported pressure level 2 after readiness and the watchdog
+stopped it after a 133.94 MiB swap increase, before any timed result.
+The packed worker completed both requests at 44.56 and 43.36 tok/s.
+Catch-up was 0.075 and 0.127 s. Both outputs and all draft work matched
+the first pair. Its pressure and swap held at level 1 and 125.94 MiB.
+The host reported nominal thermal state and zero contenders. The retry
+confirms the candidate's catch-up cost and yields no reversed rate
+comparison. Keep the packed path private.
+
+A 17,408-position load sampled 20 of 79 target rounds at 16K. It
+matched the 192 reference IDs and stayed at pressure level 1 with
+46.06 MiB additional observed swap. The samples attributed 0.290 s to
+routed products, including the GPU plan and combine, 0.242 s to dense
+attention projections, 0.095 s to remaining dense work including the
+head, 0.077 s to MLA, 0.065 s to attention elementwise work, 0.038 s to
+IndexPool, and 0.031 s to the router. Encoder boundaries affect
+scheduling. These totals price stages for investigation.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Interrupted reversal | `642dd276fcb40ed1675cdc32f3d0695f80ff945afb1312bc7fd423532c1ff9d6` |
+| Retried reverse control pressure stop | `52ca71b4da7ff407529c517062cd9eff91d50f5f21a789d338404bedcd37052c` |
+| Retried packed requests | `2905ecac95f8d861f2afe0949f3d82335432e99e212f9fbe95c809fc555b2e44` |
+| 16K mapped stage sample | `8617f834e429d77bbf02eb36673c68f1d49b51e67874adf1431820359910a071` |
