@@ -875,6 +875,10 @@ Keep lookup and ordinary coding fixtures separate. Live seven-draft lookup reach
 
 Removed logical traffic needs a wall-time check. Fusing the Hy4 gate and eliminating an estimated 38.65 GB of intermediate traffic at 4K produced first-use rates within control drift and no repeat gain. Keep direct device views with the existing gate epilogue. [Hy4 fused gate screen](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-14--fuse-the-dense-attention-gate-into-the-device-view-epilogue)
 
+Screen a companion draft head against the requested target artifact before porting it. The patched llama.cpp DFly pilot reduced target rounds from 75 to 64 on the 32K Q3_K coding input and measured 39.30 tok/s against the original NextN's 44.50. The output changed and tensor placement differed by mode. The source's separate Q4_K_M result remains specific to that artifact and workload. [Hy4 DFly reference screen](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-15--screen-the-angelslim-dfly-companion-on-the-pinned-q3_k-target)
+
+Match natural-text positions to the kernel's actual admission range. Masked F16 tensor MLA improved a fair-state 4K reversal by 10.3% first use and 6.1% warm while preserving all 64 reference IDs. Its natural-text gate at 2,120–2,408 positions agreed on 12 of 13 top-1 results despite equal accuracy. Keep the existing sparse arithmetic. [Hy4 masked sparse prefill](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-16--reuse-tensor-attention-with-the-exact-sparse-selection-mask)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |

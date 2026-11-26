@@ -356,6 +356,11 @@ support source-order parity on these inputs and give no basis to keep
 the kernel. The control also completed the 75-token TypeScript prompt
 at 34.76 tok/s over 192 outputs.
 
+On the 48 GB control, subtracting all measured host cut time leaves an
+optimistic 43.5 tok/s at 16K and 39.6 at 32K. The targets also require
+reducing the cost of each verification round or increasing useful
+outputs per round.
+
 Private kernel SHA-256
 `a0d8829545f9e050085774bc53617a67f7f97202027f6f53cb0417449a2c96a4`.
 Harness SHA-256 `b96a8bea3dc0ff76142248f16ac4b18196c95589c012c9ba309cbfde83a6945a`.
@@ -567,6 +572,23 @@ source patch SHA-256 is
 | Images and text prefix transitions | `52b666c983910868021deaabf5effb6a01927fce7ab062fef79f252e0be89277` |
 | Same-mode reuse, context boundary and mode changes | `d832faedd3a0bcb8dace33d405ebb1b942d178c2aea67ce63c1556da8b25104e` |
 
+The Rust 1.98.1 locked release worker rebuilt from `f90f3ec63` has
+SHA-256 `5cfcde51f02fb14275fd5d391266239b27cad4b94c9b82b2d3198eff2bb69325`.
+The original projector was loaded for both admitted runs. Both lookup
+repeats accepted 55 of 55 proposals in eight rounds at each setting.
+All completed arms matched the 64 reference output IDs.
+
+| Arena and context cap | K2 decode tok/s | K7 lookup decode tok/s | K2 first prefill tok/s | Receipt SHA-256 |
+| --- | ---: | ---: | ---: | --- |
+| Explicit 48 GB and 8,192 | Admission refused | | | `4e97ec716d3041a9c480626a5c9a28d133d8411e3c9e3abf3e3babb0d0a56d9b` |
+| Auto 27.997 GB and 8,192 | 24.80 | 47.17 / 46.31 | 536.32 | `1edda0833395c77b558bc77a8fb7fadbb3b2536bcb285dc07a45a9e13b057454` |
+| Explicit 39.997 GB and 5,120 | 28.99 | 65.58 / 63.40 | 640.48 | `58ebb251b181747c2491270aeccb784b65b1844f07aac5ec9553e9ea68fd9f99` |
+
+The auto run reported fair process thermal state throughout. The 40 GB
+run reported nominal state throughout. Neither snapshot pair found a
+named contender. Context cap and thermal conditions varied between the
+two runs, so the rates qualify only the respective measured settings.
+
 ## 20261125-HY4FRAG-14 · Fuse the dense attention gate into the device-view epilogue
 
 The candidate keeps the original precise sigmoid and F32 multiply, with
@@ -608,3 +630,137 @@ The later bracket used the HY4FRAG-13 binary and harness SHA-256
 | Fused first | `fe4f1c84d205e32e1f21b64ccc898934b8bbba68fce493e34a4becc16894de3f` |
 | Fused last | `8bdb60f6347625afc3038e8e7d4bbcb7003cbd29f673dd1f2ef1147864d92bcb` |
 | Control last | `2fef753e73efb57241597a66f7fdb86e4dc41dbe11744f469b85a93eeabd828e` |
+
+## 20261125-HY4FRAG-15 · Screen the AngelSlim DFly companion on the pinned Q3_K target
+
+The [publisher Metal guide](https://huggingface.co/AngelSlim/Hy4-flash-GGUF/blob/main/README_MAC-Metal.md#72-dfly-this-patch)
+reports 51.95 tok/s with Q4_K_M on an approximately 81K agent request.
+For this screen, the existing patched llama.cpp worker loaded the
+AngelSlim Q3_K target and used the pinned 32K rendered coding input,
+34,816-position cap, F16 cache, 512 batch and 256 microbatch. Both
+arms were text-only and generated 192 tokens. Each used its default
+tensor placement. DFly applies a different embedding and output
+placement by default. The host started and ended at fair thermal
+state with no named contenders in the snapshots. Separate build
+activity was observed while the second arm was running.
+
+| Draft mode | Prefill s | Decode tok/s | Proposed / accepted | Target draft rounds |
+| --- | ---: | ---: | ---: | ---: |
+| Author NextN, K2 | 95.826 | 44.50 | 149 / 115 | 75 |
+| DFly Q8_0 companion, K4 | 93.785 | 39.30 | 255 / 127 | 64 |
+
+The two outputs differed. DFly used fewer target rounds and took longer
+for the same output count. This exploratory result does not establish a
+speedup or parity on the Q3_K workload. Keep it a reference experiment.
+Match tensor placement and verify outputs before using the publisher's
+Q4_K_M speed to justify a native Q3_K port.
+
+The [companion artifact](https://huggingface.co/AngelSlim/Hy4-flash-GGUF/tree/c50d4dd30be42f2b91138e5731de0e2f32ad56b2)
+is 903,685,664 bytes at publisher revision
+`c50d4dd30be42f2b91138e5731de0e2f32ad56b2`, SHA-256
+`609464e933b332657ca84be9ee8867a8940c388844514f7d0673b2e77a1c7e00`.
+Reference worker SHA-256
+`b9aad7086abc83bb351abdfa3a41e3f8fde73529fbe8c4a9006d2ee23de0b9bf`.
+Harness SHA-256 `cc649d3a46a6c6c9f93580e0c1a19a87522cc0c4acfee86e8e6b26e74b1e2afb`.
+Receipt SHA-256 `880d1ba076c73ba8543b62183f1f8a5094ab6a94c29706396fd507bd3caff147`.
+
+The reference source uses the final trunk hidden state after the output
+normalization from the previous committed position and five indexed
+target caches. The native NextN hidden tap and Hy4 target verifier are
+reusable. A later implementation needs the companion's five-layer
+graph and selected-cell snapshots at the accepted target position.
+Inkling provides matched replay and verification measurements.
+
+## 20261125-HY4FRAG-16 · Reuse tensor attention with the exact sparse selection mask
+
+The existing 16-query Metal tensor kernel now has an indexed prefill
+specialization for absolute positions 2,048–4,095. A kernel builds a
+bitset from the model's `sel/nsel` output. The tensor product still
+checks the original causal upper bound and sink. It uses F16 queries
+and probabilities with F32 accumulation. Mask packing borrows up to
+1 MiB from existing score scratch. Other positions and the diagnostic
+mutation and injection paths use their existing kernels.
+
+The first timing attempts were refused for named competing processes.
+Two later runs at explicit 40 and 28 GB arena sizes were refused at
+live memory admission. A preceding known worker also refused the
+explicit 28 GB request. The automatic arena admitted 27.997 GB and
+8,192 positions for both arms. All completed 4K requests matched all
+64 reference output IDs.
+
+The initial stage samples ran with an unrelated `cargo` process present.
+The mask reduced attributed MLA time from 0.935 to 0.523 seconds. The
+mask arm also had 1.119 seconds in prefill encoding on its first run,
+against 0.008 for the control. The first-use wall result was slower
+despite a shorter GPU span. The subsequent stage-off contended bracket
+was inconclusive. Unrelated activity ended during the closing control.
+
+| Stage-off arm under contention | First prefill tok/s | Warm prefill tok/s |
+| --- | ---: | ---: |
+| Control first | 607.73 | 549.22 |
+| Mask first | 591.73 | 535.64 |
+| Mask last | 554.31 | 540.01 |
+| Control last | 569.75 | 462.18 |
+
+Two more pairs reversed launch order with no named competing processes
+at entry or exit. The first pair moved from nominal to fair during the
+opening candidate. Both arms of the reversal stayed fair.
+
+| Pair and order | First prefill tok/s | Warm prefill tok/s |
+| --- | ---: | ---: |
+| First pair · mask | 615.57 | 540.95 |
+| First pair · control | 531.24 | 446.49 |
+| Reversal · control | 494.57 | 486.30 |
+| Reversal · mask | 545.62 | 516.15 |
+
+The fair-state reversal improved 10.3% on first use and 6.1% warm. The
+candidate's strongest request in these pairs used the automatic arena
+and reached 615.57 tok/s. The earlier 658.52 tok/s first-use peak in
+HY4FRAG-11 used a different memory and host window.
+
+The Sol agent's vendor patch SHA-256 is
+`12b448f325a95334d26b601fc2dfe2a03a1b20ecbb9aafab9f8a603ea6a380f5`.
+Full measured source patch on `dbba655d8` SHA-256
+`bfe5aa15a43c90f0f075b923aa5209a3ae69bfc23f30f49a148617b7147988f2`.
+The masked-only patch on `f90f3ec63` is
+`db0eb1cdd3c09a3d6889c1e1d8e5e3426bf36c6cb46803d7df277df0a704e638`.
+Locked offline Rust 1.98.1 release worker SHA-256
+`5bf3a366edfc2861cae8fb0acfe59029782c40258cdf68e9ca0fd89d59d1c0f6`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Opening host refusals | `2a5616118e9358c20dca1e9eae5e60dbd1963eef82cf550d0078ea0587a08a5c` |
+| Returning mask host refusal | `294813218f13617428822fe151b4ba0988bf7f46d9a168f03cac3673461e527c` |
+| Closing control host refusal | `48854301e1f8f1be084363a564f90e29efd09cad54fa67d4a77af07a1138bb9b` |
+| Stage control host refusal | `cc0a5af6c0d14940f5ff0f4a388a0c7be4bf453e0d023665b15487370efbb7ba` |
+| Mask stage host refusal | `09ea3f543012883b94b955c97d7814a9190d4e1fc0fc3950274399b1b3269430` |
+| Explicit 40 GB control refusal | `e61961fefd8558b6a7ee17e4859ea04bb2915534c98875422a7e3129c325a95c` |
+| Explicit 40 GB mask refusal | `d0ea4d78ed5581fd1c8b4f909480ca970f1f937dc4ce5d1be862565fd7f25f6f` |
+| Explicit 40 GB stage refusals | `9c7b04e771645a6399ac61cc1899489512e5150b1433fa6d926ab7577bea075c`, `17ce0c06b4bc971bc55c5795a9d674bc8b651399f40b16a17abf03a51a12fedc` |
+| Explicit 28 GB control and mask refusals | `dfa6b7fef2f5b07745f66875ad7a85fedcada9a081c31a6d057fb2e77114e661`, `bfba6315edb1726abbe53c2f18877c82c2da2388273726c04f35ad386d601540` |
+| Explicit 28 GB stage refusals | `855abf09ac0ea64764a47d46028246ff18c37aa97afd3ab5922d6767c0974f8a`, `e827817d172e4c7a5d390746d344387b1b5db33418d0d55d0a388639cd64b00d` |
+| Previous worker's explicit 28 GB refusal | `6d697188622e223ce03c221675a9ebe8c701e310fd52795afe1469e08267ff10` |
+| Auto control stage sample | `a6a0a9c73456b108a99fc3b299e832ec6d3d9dd7f71cf00d64d9ced478b2175d` |
+| Auto mask stage sample | `4d55f6e3ac3bf4f9d470d539cd47d17f92260ba19cb2c79225a56e19eb92c647` |
+| Contended control first | `5c5cf26844a3dfe8e2c7406b387a2f28154b0d7097bb6cf9069aa05deb4a25f8` |
+| Contended mask first | `0de044d0b189b69af443c8d9878b6c68f1b13f285bc12fdc846eac277b78ad2b` |
+| Contended mask last | `b75f6380763cdd8d0c56450c3bd170f518868ff51363855f22299bd98e6b1d08` |
+| Contended control last | `d917b9f05374b7b19a0df68180f866e02ff01eb8c57b4b0c18605b03be41b246` |
+| First pair mask | `b67378144485cacd550d847e85b4f79e0c48496a0a5c4dcda9b4562d95fa82b6` |
+| First pair control | `ee5195073633b1744b726c9ced4074a25c366b8c325053303e7670eb2a255e19` |
+| Reversal control | `ecc1b9f5336ddba04371b9662bff076615d53510bf25ce46831660d424b9bb84` |
+| Reversal mask | `2b7ca65183a74422920492b1a0c82fc42aeffbe0954dab67f12552a3d834a3d8` |
+
+The candidate matched 12 of 13 teacher-forced natural-text top-1 results
+at 2,120–2,408 input positions. Each arm predicted the actual next token
+on six rows. This misses the exact top-1 gate for the masked suffix.
+Both images, text prefix hits, and cancellation still passed. A separate
+follow-up admitted a 40 GB arena and 5,120 positions, reaching 618.95
+first and 532.43 warm with exact 4K reference IDs. Leave the candidate
+out of the branch. The source-order sparse suffix remains active.
+
+| Validation or follow-up | SHA-256 |
+| --- | --- |
+| Teacher-forced top-1 at masked positions | `3547b13269c5fc2a1fb75b8227109d4984e9f9964c1efd5996487003e46a2bc7` |
+| Images, prefix hits and cancellation | `a1ae8c7de11815e804f248b78059621dcbcccea9b6272d3875d3fcf17fbfc439` |
+| 40 GB follow-up | `e44d9ff80777cc9008a12dee3c13f3e9c8bd522fbd2823c3d569005ea31b5401` |
