@@ -865,6 +865,8 @@ Expand large packed projections once when the direct tensor-view product repays 
 
 The source-order grouped IndexPool scorer matched the Hy4 control on 192 outputs at each long rung. After host cuts, its 16K and 32K decode costs each moved by less than 3%, and build activity started during the grouped arm. Leave the scorer unchanged and prioritize expert waits. At a 5,120-position cap, live memory admitted a 50 GB arena and refused 52 GB. [Hy4 arena and grouped IndexPool screens](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-08--screen-larger-arena-admission-at-a-5120-position-cap)
 
+Test streamed scheduling against the same output and draft work. On Hy4's short code fixture, earlier read-ahead reached 39.47 tok/s warm against controls at 37.73 and 39.35, with slightly longer cuts. Twelve readers, smaller reads, and a second read-ahead ordinal gave no clear gain. Smaller reads lowered bytes and took longer at the cut. [Hy4 streamed I/O schedules](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-10--compare-stratas-existing-streamed-io-schedules)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |

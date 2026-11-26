@@ -364,3 +364,45 @@ Harness SHA-256 `b96a8bea3dc0ff76142248f16ac4b18196c95589c012c9ba309cbfde83a6945
 | --- | --- |
 | 48 GB long control | `6c6456602b170277c69df7f5f45abd237dd1b1a2bd45c2bbe3df39d4c712cb0f` |
 | 48 GB grouped scores | `ef54c001fe7657abd050eee3323ad53f3d6f66a8868eddaf74b333c68f67fdca` |
+
+## 20261125-HY4FRAG-10 · Compare Strata's existing streamed I/O schedules
+
+On the 48 GB streamed worker with the original projector and an
+8,192-position cap, enabled four inherited scheduling controls one at a
+time. The pinned TypeScript fixture used 75 input positions and 192
+outputs with depth two. All twelve responses shared one output hash and
+accepted 116 of 149 proposals in 75 rounds. Host snapshots before and
+after every arm showed no named competing process.
+
+| Arm | First tok/s | Repeat tok/s | Repeat host cuts s | Repeat reads GB |
+| --- | ---: | ---: | ---: | ---: |
+| Control first | 32.88 | 37.73 | 1.218 | 45.98 |
+| Submit read-ahead before waiting | 34.29 | 39.47 | 1.235 | 47.03 |
+| Twelve reader threads | 32.34 | 37.21 | 1.302 | 48.90 |
+| Two reads per tensor slice | 30.39 | 37.19 | 1.524 | 41.46 |
+| Four predictions two ordinals ahead | 33.57 | 38.56 | 1.228 | 47.89 |
+| Control last | 33.41 | 39.35 | 1.227 | 45.37 |
+
+Moving read-ahead forward stayed inside the repeat control drift and
+slightly increased host cuts. Splitting reads reduced traffic and
+increased elapsed cuts. Retain the existing scheduler. The inherited
+switches were available only on the private comparator.
+
+Source patch SHA-256
+`da081030db74cf165b11e0de0a811dde5c36464e1d3c8f9516c0354090460296`.
+Rust 1.98.1 locked release worker SHA-256
+`b3004cbad854fd5829320877826950257b34ca77a73ab62ac57214a6d7e1ae1a`.
+Harness SHA-256 `d94784d0ee7727dec5abacc33645c502ed5b98d8b3502b5bafe947fd200a8af1`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Control first | `e14d34ae533bf1d2e322ffc40388ddb77ac3769958ab1063f50070d388cd4886` |
+| Earlier submission | `157dc62b9b2a4b2ce4457decfb4a4be5933e54c1de7776cfc725291b8b7d7ca2` |
+| More reader threads | `ba4b023293379f10c7f7db03305166aaae92d34331fbe9669a6616f4637c24da` |
+| Split reads | `2902239a5cbc4a0d896e1f76e9ad4b79b34b5ffcbd4439c9dd4144c58a4f05f4` |
+| Two ordinals ahead | `d37d327fa0169a11d75640b4ca6df4b8cba9699d68a01ebca21baf5a2bae15ed` |
+| Control last | `50d379b60c650919eaeedfcd239d02472c82c80f5b65b35623695ec6d1f5ef99` |
+
+The inherited contiguous expert sidecar is a separate option. The full
+trunk bank would duplicate about 86 GB, above the 60 GiB free on the
+measurement volume. No sidecar was produced or timed.
