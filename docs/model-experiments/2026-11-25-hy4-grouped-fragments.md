@@ -1717,3 +1717,19 @@ prefix state and recovered. The host stayed fair.
 The guarded executable and lifecycle receipt have SHA-256
 `a3986098915cbc158f9f3ae2bc2e7e9cafcfc546f300ccea012edd8a2729c081`
 and `40606422eae03a35374698427d30dbd32be6b75f6024c4c29ffd6e97d886696b`.
+
+The same guarded executable loaded both expert banks and the original
+projector at 33,024 positions, with 1,024-row chunks and Q5_0 NextN.
+The readiness record reported FFN views requested. The loaded
+capacity selected the original FFN products for both requests.
+
+| Fixture | Decode tok/s | Verify s | Draft s | Accepted / proposed / rounds |
+| --- | ---: | ---: | ---: | ---: |
+| 16K K2 | 44.53 | 3.822 | 0.466 | 111 / 158 / 80 |
+| 32K K2 | 44.77 | 3.851 | 0.414 | 113 / 155 / 78 |
+
+Both requests matched their 192 reference outputs with zero reuse.
+Thermal state was fair. Pressure stayed at level 1 and swap at
+48.4 MiB. The 32K rate leaves about 0.234 s to reach 47.37 tok/s over
+191 useful tokens. The long fallback receipt SHA-256 is
+`76daa7eda1e2911745304f01571cd905fa5fe8f8f7347b4b11c3caa6b499cce2`.
