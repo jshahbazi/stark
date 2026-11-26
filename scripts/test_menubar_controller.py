@@ -2302,7 +2302,6 @@ extension EngineController {
             var hy4Raw = groupedCatalogItem("hy4", repo: "AngelSlim/Hy4-flash-GGUF", name: "Hy4-flash AngelSlim Q3_K",
                                             group: "7", groupName: "Hy4-flash-GGUF", publisher: "AngelSlim",
                                             size: "64.8B", quantization: "Q3_K")
-            hy4Raw["family_id"] = "hy4_flash"
             hy4Raw["revision"] = "c50d4dd30be42f2b91138e5731de0e2f32ad56b2"
             hy4Raw["weight_bytes"] = Int64(156_415_403_072)
             guard let hy4 = FamilyModelCatalog.Item(hy4Raw),

@@ -844,7 +844,7 @@ struct FamilyModelCatalog {
 
         /// The pinned Hy4 GGUF streams weights, so its file size is not a comparable memory estimate.
         var hasComparableMemoryEstimate: Bool {
-            !(familyID == "hy4_flash" && repo == "AngelSlim/Hy4-flash-GGUF" &&
+            !(repo == "AngelSlim/Hy4-flash-GGUF" &&
               revision == "c50d4dd30be42f2b91138e5731de0e2f32ad56b2" && quantization == "Q3_K")
         }
 
