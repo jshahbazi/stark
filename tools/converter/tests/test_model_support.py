@@ -64,6 +64,7 @@ def test_matrix_is_shared_bounded_mutation_safe_and_separate_from_qualification(
         "elephant-1",
         "flint",
         "glm5_next",
+        "hy4_flash",
         "inkling2_loop",
         "ricursive",
     }

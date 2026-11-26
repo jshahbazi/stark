@@ -64,7 +64,8 @@ def test_hy4_family_is_visible_as_a_conditional_native_image_family():
     assert definition["modes"]["vision-language"]["status"] == "conditional"
 
 
-def test_hy4_family_catalog_returns_the_pinned_downloadable_choice_without_hub_search():
+def test_hy4_family_catalog_returns_the_pinned_downloadable_choice_without_hub_search(monkeypatch):
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     report = model_catalog.family_catalog(native_catalog.HY4_FAMILY_ID, hub=object())
     assert report["status"] == "ready"
     assert report["family_id"] == native_catalog.HY4_FAMILY_ID
