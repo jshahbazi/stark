@@ -175,6 +175,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Hy4-flash AngelSlim Q3_K multi-query MLA prefill](2026-11-25-hy4-multi-query-prefill.md) · Model experiment, 2026-11-25
 - [Hy4-flash AngelSlim Q3_K grouped expert fragments](2026-11-25-hy4-grouped-fragments.md) · Model experiment, 2026-11-25
 - [Hy4-flash catalog install and packaged generation](2026-11-26-hy4-desktop-catalog.md) · Model experiment, 2026-11-26
+- [Hy4-flash AngelSlim Q3_K tool calling](2026-11-26-hy4-tool-calling.md) · Model experiment, 2026-11-26
 - [GLM EXL3 throughput comparison and gap investigation](../benchmarks/2026-11-04-glm-mlx-stream-comparison.md) · Benchmark, 2026-11-04
 - [GLM-5.3 Batched Prefill Experiment](../benchmarks/GLM53_BATCHED_PREFILL_2026_11_02.md) · Benchmark, 2026-11-02
 - [Native GLM and Qwen GPU decode graphs](../benchmarks/GLM_QWEN_DECODE_GRAPH_2026_10_28.md) · Benchmark, 2026-10-28

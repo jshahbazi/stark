@@ -89,7 +89,7 @@ from .native_catalog import catalog_item as native_catalog_item
 from .native_catalog import catalog_items as native_catalog_items
 from .native_catalog import source_choice as native_source_choice
 from .progress import CONVERTER_FAILURE_CATEGORIES
-from .reasoning import ReasoningStream, assistant_message, prompt_opens_reasoning, reasoning_options
+from .reasoning import ReasoningStream, assistant_message, prompt_opens_reasoning, reasoning_options, reasoning_tags
 from .registry import get_model
 from .resource_budget import (
     INPUT_BYTES,
@@ -3229,7 +3229,9 @@ class Desktop:
             self.generation_estimates.record(estimate_key, reply)
             inkling_message = reply.get("_inkling_message")
             assistant = inkling_message or assistant_message(
-                reply["text"], initial_thinking=reply.get("_tool_initial_thinking", False)
+                reply["text"],
+                initial_thinking=reply.get("_tool_initial_thinking", False),
+                tags=reasoning_tags(tool_parser_for(self.codec)),
             )
             visible_text = inkling_message["content"] if inkling_message is not None else reply["text"]
             finish_reason = reply.get("finish_reason")
@@ -3406,13 +3408,14 @@ class Desktop:
             raise
         except (TemplateError, ChatError):
             raise APIError(400, "The model's chat template rejected these messages.", "invalid_messages") from None
-        initial_thinking = prompt_opens_reasoning(prompt)
+        tags = reasoning_tags(parser)
+        initial_thinking = prompt_opens_reasoning(prompt, tags=tags)
         inkling_stream = None
         if parser == INKLING_PARSER and on_delta is not None:
             inkling_stream = InklingResponseStream(on_delta, on_reasoning or (lambda _text: None))
             on_delta = inkling_stream.feed
         reasoning_stream = (
-            ReasoningStream(on_delta, on_reasoning, initial_thinking=initial_thinking)
+            ReasoningStream(on_delta, on_reasoning, initial_thinking=initial_thinking, tags=tags)
             if inkling_stream is None and on_delta is not None and on_reasoning is not None
             else None
         )
@@ -4006,7 +4009,9 @@ class Desktop:
                     )
                 )
                 parts = assistant_message(
-                    message.get("content") or "", initial_thinking=reply.get("_tool_initial_thinking", False)
+                    message.get("content") or "",
+                    initial_thinking=reply.get("_tool_initial_thinking", False),
+                    tags=reasoning_tags(parser),
                 )
                 if parser != INKLING_PARSER and "reasoning_content" in parts:
                     message = {**message, **parts}

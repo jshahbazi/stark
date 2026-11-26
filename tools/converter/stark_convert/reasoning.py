@@ -2,7 +2,7 @@
 
 import hashlib
 
-from .api_tools import GLM53_TEMPLATE_SHA256
+from .api_tools import GLM53_TEMPLATE_SHA256, HY4_REASONING_TAGS, HY4_TOOL_PARSER
 from .inkling_prepare import TEMPLATE_SHA as INKLING_TEMPLATE_SHA
 from .template_compat import template_program_sha256
 from .vision_runtime import _HY4_METADATA_HASHES
@@ -10,12 +10,15 @@ from .vision_runtime import _HY4_METADATA_HASHES
 # Same source-bound GLM program as api_tools: zai-org/GLM-5.3-Flash
 # metadata revision 04c4e9e95c5da8862dced7e5056455116f83a7e0.
 _GLM53_PROGRAM = "55dff1823a10de87fa2f4ca4c0986498cd577ed4d495642f6c371e0abbcc243a"
-_OPEN = "<think>"
-_CLOSE = "</think>"
+_DEFAULT_TAGS = ("<think>", "</think>")
 
 
-def prompt_opens_reasoning(prompt):
-    return prompt.rstrip().endswith(_OPEN)
+def reasoning_tags(parser):
+    return HY4_REASONING_TAGS if parser == HY4_TOOL_PARSER else _DEFAULT_TAGS
+
+
+def prompt_opens_reasoning(prompt, *, tags=_DEFAULT_TAGS):
+    return prompt.rstrip().endswith(tags[0])
 
 
 def reasoning_options(codec, *, thinking=False, effort=None):
@@ -48,17 +51,18 @@ def reasoning_options(codec, *, thinking=False, effort=None):
     }
 
 
-def assistant_message(text, *, initial_thinking=False):
+def assistant_message(text, *, initial_thinking=False, tags=_DEFAULT_TAGS):
     """Split one leading reasoning block; later literal tags stay visible."""
-    start = len(_OPEN) if not initial_thinking and text.startswith(_OPEN) else 0
+    opening, closing_tag = tags
+    start = len(opening) if not initial_thinking and text.startswith(opening) else 0
     if not initial_thinking and not start:
         return {"role": "assistant", "content": text}
-    closing = text.find(_CLOSE, start)
+    closing = text.find(closing_tag, start)
     if closing < 0:
         return {"role": "assistant", "content": "", "reasoning_content": text[start:]}
     return {
         "role": "assistant",
-        "content": text[closing + len(_CLOSE) :],
+        "content": text[closing + len(closing_tag) :],
         "reasoning_content": text[start:closing],
     }
 
@@ -66,8 +70,9 @@ def assistant_message(text, *, initial_thinking=False):
 class ReasoningStream:
     """Keep partial boundary tags private and emit the same split as buffering."""
 
-    def __init__(self, content, reasoning, *, initial_thinking=False):
+    def __init__(self, content, reasoning, *, initial_thinking=False, tags=_DEFAULT_TAGS):
         self.deliver = {"content": content, "reasoning_content": reasoning}
+        self.tags = tags
         self.state = "reasoning_content" if initial_thinking else "opening"
         self.initial_thinking = initial_thinking
         self.tail = ""
@@ -82,24 +87,25 @@ class ReasoningStream:
 
     def feed(self, value):
         value, self.tail = self.tail + value, ""
+        opening, closing_tag = self.tags
         if self.state == "opening":
-            if _OPEN.startswith(value) and len(value) < len(_OPEN):
+            if opening.startswith(value) and len(value) < len(opening):
                 self.tail = value
                 return
-            if value.startswith(_OPEN):
-                value = value[len(_OPEN) :]
+            if value.startswith(opening):
+                value = value[len(opening) :]
                 self.state = "reasoning_content"
             else:
                 self.state = "content"
         if self.state == "reasoning_content":
-            closing = value.find(_CLOSE)
+            closing = value.find(closing_tag)
             if closing >= 0:
                 self._emit("reasoning_content", value[:closing])
-                value = value[closing + len(_CLOSE) :]
+                value = value[closing + len(closing_tag) :]
                 self.state = "content"
             else:
-                for size in range(min(len(value), len(_CLOSE) - 1), 0, -1):
-                    if _CLOSE.startswith(value[-size:]):
+                for size in range(min(len(value), len(closing_tag) - 1), 0, -1):
+                    if closing_tag.startswith(value[-size:]):
                         self.tail, value = value[-size:], value[:-size]
                         break
                 self._emit("reasoning_content", value)
@@ -107,7 +113,7 @@ class ReasoningStream:
         self._emit("content", value)
 
     def finish(self, text):
-        message = assistant_message(text, initial_thinking=self.initial_thinking)
+        message = assistant_message(text, initial_thinking=self.initial_thinking, tags=self.tags)
         for field in self.deliver:
             value = message.get(field, "")
             emitted = self.emitted[field]

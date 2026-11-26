@@ -382,10 +382,14 @@ def template_review_receipt(root):
 def model_tool_support(root):
     """Inspect the artifact's bounded codec, independently of saved metadata."""
     try:
-        config = _json(_small_file(Path(root), "config.json"))
+        path = Path(root)
+        config = _json(_small_file(path, "config.json"))
         codec = config.get("token_codec_config") if isinstance(config, dict) else None
         if not isinstance(codec, dict) or codec.get("type") != "ChatCodecConfig":
             codec = None
+        if isinstance(config, dict) and config.get("model_type") == "hy_v4_flash":
+            if (prepared_identity(path) or {}).get("architecture") == "hy4_flash":
+                codec = {"prompt_template": _small_file(path, "chat_template.jinja").decode("utf-8")}
         return tool_support_for(codec_with_template_review(codec, template_review_receipt(root)))
     except Exception:
         return tool_support_for(None)
