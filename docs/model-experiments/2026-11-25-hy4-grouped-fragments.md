@@ -1772,3 +1772,88 @@ harness and receipt have SHA-256 values
 `cf5d8e4c796989b6b92f9093fbe7b06eace89ee898d21849da8ce7cecd554156`,
 `872a300269e37deeacb66f46b51109bf2f16da0ed54b6ba50454db7a4beeb346`
 and `5a19a2d7faec7d6f8e42e0fd59e50c3d6e57e30ad1c968f3d2eb1ceacda39d71`.
+
+## 20261126-HY4FRAG-35 · Isolate the per-head key and value projections
+
+This follow-up gives each per-head product its own encoder bucket.
+The private attention index field measures K_B and the miscellaneous
+field measures V_B. The attention dense field covers the other
+non-MLA work. The dispatches and arithmetic stay the same.
+
+The 42 trunk layers use Q8_0 weights for both products. Each
+projection has 12 layers with 32 heads and 30 layers with 64.
+K_B has 192 inputs and 512 outputs per head. V_B has 512 inputs
+and 256 outputs. The NextN pair uses BF16 and is outside this
+trunk profile. The measured trunk projections already use the
+packed input kernel with F16 operands and F32 accumulation.
+
+The same streamed geometry as HY4FRAG-34 ran two exact K2 4K
+requests with zero reuse and the original projector. Both sampled
+42 blocks at nominal thermal state with all command spans valid.
+
+| Sampled stage | First-use s | Warm s |
+| --- | ---: | ---: |
+| K_B | 0.158 | 0.181 |
+| V_B | 0.213 | 0.250 |
+| Other non-MLA attention | 1.507 | 1.641 |
+| MLA | 0.795 | 0.893 |
+| Routed experts | 2.019 | 2.219 |
+
+The two products used 371 ms on first use and 431 ms warm. To
+close the first-use target gap from these products alone would
+require removing about 66% of their measured time. Keep the
+existing products until a candidate establishes headroom at that
+scale. Encoder-sampled times are attribution.
+
+The profiling patch on `37569441c`, Rust 1.98.1 release worker,
+harness and receipt have SHA-256 values
+`6844205357a9895143e835e52bc2d5cf04b239b66bf1d3375c38d196b9824067`,
+`75c0cde6e966b575fb253c1eb47652b74df2a5810446646727158803fa2733c2`,
+`fa2d81532f14d5e15cf56fd344bda0b162b44a3b5aeeb63b7c9a23444770e29d`
+and `355b1f389e86c47e0c37341341875d2e6dddf90b2f6e597946f71c10d0e3e176`.
+
+## 20261126-HY4FRAG-36 · Check loaded capacity on the uninstrumented 4K path
+
+The guarded executable from HY4FRAG-33 loaded with an
+8,192-position cap first and a 5,120-position cap second. Both
+used 4,096-row chunks, the 40 GB streamed arena, the original
+projector, Q5_0 NextN and FFN views. Each ran the 4K fixture
+twice at K2 without stage sampling or prefix reuse. All four
+requests matched the 64 reference IDs and draft counts. Thermal
+state stayed nominal.
+
+| Loaded capacity | First-use tok/s | Warm tok/s |
+| ---: | ---: | ---: |
+| 8,192 | 697.42 | 626.07 |
+| 5,120 | 695.14 | 670.15 |
+
+The first-use rates differed by 0.3% and both were below the
+earlier 711.61 tok/s exact run. The one-way warm comparison
+cannot isolate the effect of capacity. Keep the existing choice
+of loaded capacity and use the uninstrumented times for scoring.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| 8,192 positions | `4c1874fd93dbcd1a9a58e9aa829d5a079afc80dd3355ae9aef7e7da139657631` |
+| 5,120 positions | `4f06e3fbee2547318a249f73d7195b217561dd0f7024bc63099dad427e726fe6` |
+
+## 20261126-HY4FRAG-37 · Screen the historical masked MLA on the guarded build
+
+The private patch carried the HY4FRAG-16 shader into the guarded FFN
+build and scoped it to eligible indexed text rows at positions
+2,048–4,095 and a loaded capacity of at most 8,192. The Rust release
+build succeeded. The opening flags-off worker returned
+`hy4_native_load_failed` before readiness, so the comparison
+produced no performance or quality samples.
+
+The concatenated shader source assigned function constant 62 to
+both the historical masked MLA selector and the current MoE
+weight-keeping selector. The private patch remains outside the
+selected implementation.
+
+The private patch, executable, harness and refusal receipt have
+SHA-256 values
+`d93e29a2587a74c3339f597515131a331247429dad2d3ebace417a091069769d`,
+`47086cf8f65f808373e837804c78aaec36bd5f3c2312d035de20675e9a17dd4f`,
+`863cd0c8d546ea871158c29a3e032e97e13e7defb1b9c11afd36c653eaaa0360`
+and `78c7b0ef6c8b9b4cb374bd46ba56ecbf82c7a36bbe4d41df6da75760b97d31bc`.

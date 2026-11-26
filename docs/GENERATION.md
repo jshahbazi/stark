@@ -54,12 +54,14 @@ On Apple Silicon, the `hy4` feature runs the original Q3_K split GGUF and BF16
 projector in the generation worker. It uses the Strata Metal graph and Stark's
 request serialization, sampling, cancellation and prefix reuse. At load the
 worker sizes its context from the checkpoint, Metal buffer limits and available
-memory after reserving the expert arena and workspace. It publishes that
-capacity and the sizing inputs in `context_sizing` for the life of the worker.
-`STARK_HY4_CONTEXT_LIMIT` can lower the advertised capacity before allocation.
-The worker always loads the projector. Text can request up to two greedy
-NextN draft tokens per round. Image requests use target-only generation and
-invalidate the preceding text prefix.
+memory after reserving the expert arena and workspace. It uses the shared
+load-time context fitter and publishes the selected capacity and sizing inputs
+in `context_sizing`. Within that capacity, each text request can choose its own
+window. `plan_generation` clamps the caller's ceiling to the loaded window and
+the worker request budget. `STARK_HY4_CONTEXT_LIMIT` is an optional upper bound
+applied before allocation. The worker always loads the projector. Image requests
+use target-only generation and invalidate the preceding text prefix. [Flexible
+window verification](model-experiments/2026-11-25-hy4-context-ladder.md#20261126-hy4ladder-05--verify-flexible-windows-on-the-measured-profiles)
 
 Put the two verified Q3_K shards and their original BF16 projector in one
 local directory. Prepare that directory and build the worker from the source
@@ -81,6 +83,39 @@ directory. Allow 3.6 GiB of writable space there. The normal worker image
 transaction is available when launched with `--vision-staging-root`. The trial
 has its own worker and artifact evidence in the
 [Hy4 Q3_K record](model-experiments/2026-11-25-hy4-native-q3-k.md).
+
+### Tested Hy4 load profiles
+
+`STARK_HY4_LOAD_PROFILE` selects the startup configuration. Individual Hy4
+options override the profile defaults. The tuned profiles require Metal 4 and use the original
+Q3_K target and BF16 projector, the Q5_0 NextN vocabulary projection, resident
+token embeddings, grouped routed fragments, packed dense attention and tensor
+MLA. Both select their context from available memory when the optional cap is
+unset.
+
+| Profile | Worker settings |
+| --- | --- |
+| `default` or unset | Streamed storage, 1,024-row chunks, grouped F32 prefill and the Q8_0 draft head. |
+| `streamed-prefill` | 40 GB streamed arena with demand retention, 4,096-row chunks and guarded FFN views. The FFN views are eligible through 8,192 loaded positions. |
+| `resident-decode` | Both expert banks resident, 1,024-row chunks and the original FFN path. Text can explicitly request three greedy drafts for short code. |
+
+```sh
+STARK_HY4_LOAD_PROFILE=streamed-prefill \
+  target/release/stark-generate --model-path /absolute/path/to/hy4-model --prefix-cache
+STARK_HY4_LOAD_PROFILE=resident-decode \
+  target/release/stark-generate --model-path /absolute/path/to/hy4-model --prefix-cache
+```
+
+Text requests can enable greedy NextN with `mtp: true`, which recommends two drafts.
+Use `mtp_drafts: 3` explicitly for the measured short-code configuration. The
+earlier 4K decode peak used resident storage and a 4,096-row chunk override.
+The 4K prefill, 4K decode and short-code peaks used an 8,192-position loaded
+window. Set `STARK_HY4_CONTEXT_LIMIT=8192` to bound the load for that geometry
+and check the selected capacity in readiness. Longer loaded windows use the
+original FFN projection for all chunks. Memory admission can refuse the
+requested arena or resident banks on a busy host. [Benchmark settings and results](model-experiments/speed-other-families.md#hy4-flash)
+
+### Individual Hy4 controls
 
 The worker defaults to streamed experts, grouped F32 prefill on Metal 4 and
 1,024-token prefix boundaries. `STARK_HY4_EXPERT_STORAGE=mapped` selects the

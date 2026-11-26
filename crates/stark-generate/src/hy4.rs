@@ -136,18 +136,31 @@ impl Hy4Backend {
             return Err("invalid_hy4_tokenizer");
         }
         let identity = Engine::<Metal>::new().map_err(|_| "native_backend_unavailable")?.metal_device_identity();
+        let load_profile = match std::env::var("STARK_HY4_LOAD_PROFILE").as_deref() {
+            Ok("default") | Err(std::env::VarError::NotPresent) => "default",
+            Ok("streamed-prefill") => "streamed-prefill",
+            Ok("resident-decode") => "resident-decode",
+            _ => return Err("invalid_hy4_load_profile"),
+        };
+        let streamed_prefill = load_profile == "streamed-prefill";
+        let resident_decode = load_profile == "resident-decode";
+        let tuned = streamed_prefill || resident_decode;
         let storage = match std::env::var("STARK_HY4_EXPERT_STORAGE").as_deref() {
-            Ok("streamed") | Err(std::env::VarError::NotPresent) => ExpertStorage::Streamed,
+            Ok("streamed") => ExpertStorage::Streamed,
             Ok("mapped") => ExpertStorage::Mapped,
             Ok("mapped-resident") => ExpertStorage::MappedResident,
             Ok("auto") => ExpertStorage::Auto,
+            Err(std::env::VarError::NotPresent) if resident_decode => ExpertStorage::MappedResident,
+            Err(std::env::VarError::NotPresent) => ExpertStorage::Streamed,
             _ => return Err("invalid_hy4_expert_storage"),
         };
         let grouped = verify_switch("STARK_HY4_GROUPED_PREFILL", "invalid_hy4_grouped_prefill", true)?;
         let gpu_plan = verify_switch("STARK_HY4_GPU_PLAN", "invalid_hy4_gpu_plan", true)?;
         let chunk = match std::env::var("STARK_HY4_PREFILL_CHUNK").as_deref() {
-            Ok("1024") | Err(std::env::VarError::NotPresent) => PREFILL_CHUNK,
+            Ok("1024") => PREFILL_CHUNK,
             Ok("4096") => 4096,
+            Err(std::env::VarError::NotPresent) if streamed_prefill => 4096,
+            Err(std::env::VarError::NotPresent) => PREFILL_CHUNK,
             _ => return Err("invalid_hy4_prefill_chunk"),
         };
         let profile_prefill = verify_switch("STARK_HY4_PROFILE_PREFILL", "invalid_hy4_prefill_profile", false)?;
@@ -156,14 +169,17 @@ impl Hy4Backend {
         if larger_arena && arena_gb.is_some() {
             return Err("invalid_hy4_stream_arena");
         }
+        let prefill_arena = streamed_prefill && matches!(storage, ExpertStorage::Streamed);
         let arena_bytes_requested = u64::from(arena_gb.unwrap_or(if larger_arena {
             36
+        } else if prefill_arena {
+            40
         } else {
             0
         })) * 1_000_000_000;
         let context_limit = optional_bound("STARK_HY4_CONTEXT_LIMIT", 2..=u32::MAX, "invalid_hy4_context_limit")?;
         let demand_retention =
-            verify_switch("STARK_HY4_STREAM_DEMAND_RETENTION", "invalid_hy4_stream_demand_retention", false)?;
+            verify_switch("STARK_HY4_STREAM_DEMAND_RETENTION", "invalid_hy4_stream_demand_retention", prefill_arena)?;
         let lookup_enabled = verify_switch("STARK_HY4_MTP_LOOKUP", "invalid_hy4_mtp_lookup", false)?;
         let draft_limit = if lookup_enabled {
             MAX_DRAFTS
@@ -175,24 +191,35 @@ impl Hy4Backend {
             RECOMMENDED_DRAFTS as u32..=draft_limit as u32,
             "invalid_hy4_mtp_max_drafts",
         )?
-        .unwrap_or(RECOMMENDED_DRAFTS as u32) as usize;
-        let routed_half = verify_switch("STARK_HY4_PREFILL_ROUTED_HALF", "invalid_hy4_prefill_routed_half", false)?;
-        let routed_fragments =
-            verify_switch("STARK_HY4_PREFILL_ROUTED_FRAGMENTS", "invalid_hy4_prefill_routed_fragments", false)?;
-        let dense_packed = verify_switch("STARK_HY4_PREFILL_DENSE_PACKED", "invalid_hy4_prefill_dense_packed", false)?;
-        let dense_device_views =
-            verify_switch("STARK_HY4_PREFILL_DENSE_DEVICE_VIEWS", "invalid_hy4_prefill_dense_device_views", false)?;
+        .unwrap_or(if resident_decode {
+            3
+        } else {
+            RECOMMENDED_DRAFTS as u32
+        }) as usize;
+        let routed_half =
+            verify_switch("STARK_HY4_PREFILL_ROUTED_HALF", "invalid_hy4_prefill_routed_half", tuned && grouped)?;
+        let routed_fragments = verify_switch(
+            "STARK_HY4_PREFILL_ROUTED_FRAGMENTS",
+            "invalid_hy4_prefill_routed_fragments",
+            tuned && routed_half && grouped,
+        )?;
+        let dense_packed = verify_switch("STARK_HY4_PREFILL_DENSE_PACKED", "invalid_hy4_prefill_dense_packed", tuned)?;
+        let dense_device_views = verify_switch(
+            "STARK_HY4_PREFILL_DENSE_DEVICE_VIEWS",
+            "invalid_hy4_prefill_dense_device_views",
+            tuned && dense_packed,
+        )?;
         let dense_ffn_device_views = verify_switch(
             "STARK_HY4_PREFILL_DENSE_FFN_DEVICE_VIEWS",
             "invalid_hy4_prefill_dense_ffn_device_views",
-            false,
+            prefill_arena && dense_device_views,
         )?;
-        let tensor_mla = verify_switch("STARK_HY4_PREFILL_TENSOR_MLA", "invalid_hy4_prefill_tensor_mla", false)?;
+        let tensor_mla = verify_switch("STARK_HY4_PREFILL_TENSOR_MLA", "invalid_hy4_prefill_tensor_mla", tuned)?;
         let resident_token_embeddings =
-            verify_switch("STARK_HY4_EMBEDDINGS_RESIDENT", "invalid_hy4_embeddings_resident", false)?;
+            verify_switch("STARK_HY4_EMBEDDINGS_RESIDENT", "invalid_hy4_embeddings_resident", tuned)?;
         let resident_draft_experts =
-            verify_switch("STARK_HY4_MTP_RESIDENT_EXPERTS", "invalid_hy4_mtp_resident_experts", false)?;
-        let draft_head_q5 = verify_switch("STARK_HY4_MTP_HEAD_Q5", "invalid_hy4_mtp_head_q5", false)?;
+            verify_switch("STARK_HY4_MTP_RESIDENT_EXPERTS", "invalid_hy4_mtp_resident_experts", resident_decode)?;
+        let draft_head_q5 = verify_switch("STARK_HY4_MTP_HEAD_Q5", "invalid_hy4_mtp_head_q5", tuned)?;
         if routed_half && !grouped {
             return Err("invalid_hy4_prefill_routed_half");
         }
@@ -243,6 +270,7 @@ impl Hy4Backend {
             "apple_gpu_family": identity.apple_gpu_family,
             "gpu_core_count": identity.gpu_core_count,
             "supports_mxu": identity.supports_mxu,
+            "hy4_load_profile": load_profile,
             "expert_storage": if native.mapped_experts() { "mapped" } else { "streamed" },
             "mapped_expert_residency": matches!(storage, ExpertStorage::MappedResident),
             "grouped_prefill_requested": grouped,
@@ -443,6 +471,11 @@ impl GenerationBackend for Hy4Backend {
     }
     fn context_sizing_metadata(&self) -> Option<Value> {
         Some(json!(self.native.context_sizing()))
+    }
+    fn supports_automatic_context_planning(&self) -> bool {
+        // The native graph budgets and allocates the full capacity at load.
+        // Individual text requests can use any smaller logical window.
+        true
     }
     fn eos_token_ids(&self) -> &[u32] {
         EOS

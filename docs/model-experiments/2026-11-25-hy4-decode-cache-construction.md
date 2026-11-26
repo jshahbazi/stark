@@ -720,3 +720,53 @@ The executable is bound in the
 The suite harness and receipt have SHA-256
 `99cd26758eac2b63f7101129346a5722fa362de6f0f1ee676dab655a246c706a`
 and `4ff27105fda670a53b3a9dc41091ea42b6c78e2256f4fa3de903b697991d8aae`.
+
+## 20261126-HY4NEXTN-18 · Test vector loads in the Q8_0 verifier
+
+The candidate reads each packed Q8_0 code block through four
+two-byte-aligned `packed_ushort4` loads. It keeps the original
+34-byte block layout, half-scale read, F32 accumulation chains,
+lane reduction and K-split merge. The function constant applies to
+the attention gate and output in mapped text windows of one to
+four rows. It leaves prefill, draft and image operators unchanged.
+
+Both loads used the same executable, both resident banks, the
+original projector, Q5_0 NextN, a 16,640-position cap and 1,024-row
+chunks. Each ran short K3 code three times with five-second quiet
+intervals between requests, then one 16K K2 request. All eight
+output sequences matched their 192 reference IDs with zero reuse.
+The code used 62 rounds and the long fixture used 80 in both arms.
+
+| Load order | Arm | Short code first tok/s | Short code warm tok/s | 16K tok/s | 16K verify s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Existing scalar loads | 62.70 | 67.35 / 67.76 | 40.90 | 4.300 |
+| 2 | Vector loads | 60.35 | 66.91 / 66.87 | 45.21 | 3.886 |
+
+Warm code fell about 1%. The opening 16K control was well below
+the earlier 47.65 tok/s result, and its GPU spans accounted for
+most of the difference. Repeat the 16K fixture in reverse load
+order without preceding code requests.
+
+| Load order | Arm | 16K tok/s | Verify s | GPU span s |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Vector loads | 45.57 | 3.861 | 3.764 |
+| 2 | Existing scalar loads | 45.85 | 3.826 | 3.738 |
+
+Both reversed requests matched all 192 IDs and used the same
+80 rounds. All four loads stayed nominal at pressure level 1.
+Swap rose by at most 0.438 MiB. The reversal did not reproduce
+the initial 16K gain. Keep the original load instructions and
+leave the vector-load patch private.
+
+The patch on `37569441c`, Rust 1.98.1 release worker and harness
+have SHA-256 values
+`bff9a1cd98e7893b1ea88ee76b98139cca1de243fbfb5a1694ee3ad98521eaec`,
+`56dce574342d8011b1375bfb5b988018624448c627c2f5669da601287bcc05d8`
+and `8cdc303e5873e9f4fc68613214e920d0cc5fde9bc3313782dab6f6b287f8bc69`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Scalar first | `877db40c52f6ae3abbf815d429fdbaafa8c1bf10822ff50b597f8194e1fc1be1` |
+| Vector second | `ed79c8ae4ab39c52b6b9c3d4c15b90548eeaa6d58d1f41049d37ebdde0fdd26d` |
+| Vector first | `b90b0a79a9cd18cb213d5d7b2f11941fcd0ffcd01caf88b3845d1d6d43911890` |
+| Scalar second | `8dc16ccad0b39baef57dc97edf625ce24327299b514f0d19a0553fba5571e4bb` |

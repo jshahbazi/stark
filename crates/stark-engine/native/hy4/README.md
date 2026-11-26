@@ -6,6 +6,12 @@ The build embeds the quant definitions and Metal shader sources in the library. 
 
 The original expert stream reads packed banks into its Metal arena. Stark also wraps read-only GGUF expert ranges directly when the mapped banks fit the live host and Metal budgets. The layer records retain the original gate, up and down offsets and strides. The vision integration reuses Strata’s GGUF projector, vision tower and M-RoPE encoder. Stark provides the resized RGB input and token spans through the native request interface.
 
+The generation worker offers `STARK_HY4_LOAD_PROFILE=streamed-prefill` and
+`STARK_HY4_LOAD_PROFILE=resident-decode` for the measured configurations.
+Both use the existing context fitter before allocating the graph and accept
+different request windows within the selected capacity. See [tested load
+profiles](../../../../docs/GENERATION.md#tested-hy4-load-profiles).
+
 The pinned GGUF graph stores latent MLA rows by absolute position, including the sliding-attention blocks. Its IndexPool cache writes a pooled key into the first row of a complete group. At a complete group boundary Stark can rewind the text sequence by clamping the pooled-key counts and replacing the suffix. The next prefill supplies a fresh head output. MTP truncates its row count and retains the verified trunk hidden rows before the same boundary. Request identity and invalidation are tracked by the Stark caller.
 
 The grouped prefill path extends Strata’s Metal 4 matrix multiply to the Q3_K and Q4_K gate/up tensors in this artifact. It uses the upstream Q4_K down projection and top-k combine. When every trunk expert block is covered, the planner groups the whole chunk into 64-entry by 64-output tiles. It stages dequantized weights and activations in F32 and accumulates in F32. The reduction order differs from GEMV. The worker uses this path by default on supported devices.

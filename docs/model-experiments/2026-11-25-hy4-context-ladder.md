@@ -84,15 +84,42 @@ Final executable SHA-256 `a247da3ad1e4eb1e5988e709734e162eda3914218d2e775466ffb8
 4K receipt SHA-256 `fdf50b70157436df3ed8cddaa82e7335eec43393e458a28801ae4e6d5a8e2ba0`.
 Image and cache receipt SHA-256 `0e9e7440616bcc116322b35211086bf0e548e45948596a323c8d8c0b03998926`.
 
-## Next measured work
+## 20261126-HY4LADDER-05 · Verify flexible windows on the measured profiles
 
-The 4K prefill and decode targets remain open. The context and short coding
-speeds remain below the requested targets. Test batched NextN cache projections
-and resident token embeddings against equal-work decode and draft acceptance,
-and direct transfers into NextN history against total prefill time. Test wider
-shared-latent MLA in the target verifier with the same sparse cell lists.
-Keep the live working-set rejection in the expert-capacity sweep. The 34,816
-limit allocates that capacity up front. Request-sized physical growth needs its
-own cache-restoration gate. The standard profile remains draft pending a
-pinned llmprobe client, matched rendering and drafting, and a full
-natural-text quality result.
+The delivery worker groups the selected kernels into `streamed-prefill`
+and `resident-decode` load profiles. Both use the original Q3_K artifact
+and BF16 projector. The profiles use the shared context fitter with
+their own allocations. Neither sets a default cap.
+
+Each test loaded one worker on the M5 Max with 128 GiB and checked
+its profile settings, advertised maximum and context sizing. Its two
+4,096-input, 64-output K2 requests used different windows planned by
+`plan_generation`. Both returned the exact pinned output with zero
+reuse. A plan above the loaded capacity returned the capacity as its
+ceiling. Direct generation above the capacity returned
+`context_overflow`, and a valid follow-up succeeded.
+
+| Profile | Optional cap | Loaded capacity | Request windows tested |
+| --- | ---: | ---: | --- |
+| Streamed prefill | Unset | 221,184 | 4,352 and 32,768 |
+| Resident decode | Unset | 200,704 | 4,352 and 32,768 |
+| Streamed prefill | 8,192 | 8,192 | 4,352 and 8,192 |
+
+Memory pressure stayed at level 1. Swap rose by at most 0.5 MiB.
+The narrow streamed load also exercises the existing FFN capacity
+guard. These are request-window and admission checks. The existing
+performance numbers retain their measured loaded geometry and
+fixture sizes. The standard benchmark profile remains draft.
+[Performance checkpoint](speed-other-families.md#november-26-performance-checkpoint)
+
+The Rust source diff on `25a6d6ca1`, Rust 1.98.1 release worker and
+private smoke harness have SHA-256 values
+`65674beb048d4236a5174cd381f947ffbe4cdbdb38d64512ecde69c14d0f3591`,
+`a209d483f7e30c35cc281936b2cc1bed466ee2bee62a1fbbc689cc215666ca81`
+and `3496482e0789d0cb5548513ce3b17328a7813f9d7c55f166d6929a32dae9a091`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Streamed prefill, uncapped | `327ea2403930bf0b14d3b5d91ccd42fdae5f786648c08de7451b5a3ba3188d4e` |
+| Resident decode, uncapped | `a2cb0206b9ae62d7543730719c6f6aa4d356e66ad218607783ceca41e3729cfa` |
+| Streamed prefill, 8,192 cap | `43859b77c66a0fccd564f0ab81aaf287d1c6fdf2337cc75163cf403ade2024fd` |

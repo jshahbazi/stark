@@ -77,6 +77,12 @@ at 4K prefill. The qualified Q5_0 head reached 67.73 tok/s warm median
 on short TypeScript against 64.58 with Q8_0. Both long-context
 brackets retained the K2 recommendation.
 
+The worker exposes the selected configurations as the
+[`streamed-prefill` and `resident-decode` load profiles](../GENERATION.md#tested-hy4-load-profiles).
+With the optional context cap unset, both planned multiple request
+windows in one loaded worker and reproduced the pinned outputs.
+[Flexible-context verification](2026-11-25-hy4-context-ladder.md#20261126-hy4ladder-05--verify-flexible-windows-on-the-measured-profiles)
+
 ### Experiment history
 
 | Attempt | Scoped result | Decision and limits | Source |
@@ -138,6 +144,10 @@ brackets retained the K2 recommendation.
 | Q5_0 K2 versus K3 at 16K | Same loaded 16,640-position worker. K2 reached 46.80 and 47.65 tok/s at 80 rounds. K3 reached 45.84 and 46.07 at 68 rounds. All 192 IDs matched on every request. | Retain K2. | [HY4NEXTN-16](2026-11-25-hy4-decode-cache-construction.md#20261126-hy4nextn-16--compare-two-and-three-drafts-at-16k) |
 | Short TypeScript, Python and Rust code at K3 | Warm runs peaked at 67.82, 62.92 and 61.16 tok/s with 62, 66 and 68 rounds. All twelve serial and draft requests matched their fixture references. | Retain the individual workload rates. | [HY4NEXTN-17](2026-11-25-hy4-decode-cache-construction.md#20261126-hy4nextn-17--check-short-coding-across-three-workloads) |
 | Isolated attention device-view packing at 4K | Packing used 59 ms in both exact profiles. The paired tensor products used 756 and 862 ms. Each request sampled all 42 blocks. | Defer packing as a primary lever against the 245 ms target gap. | [HY4FRAG-34](2026-11-25-hy4-grouped-fragments.md#20261126-hy4frag-34--isolate-attention-device-view-packing) |
+| Isolated per-head key and value products at 4K | The Q8_0 trunk projections took 371 ms first and 431 ms warm in two exact profiles. Both already use F16 operands. | Keep the existing products. Recovering 245 ms from this stage alone requires about 66% of its first-use time. | [HY4FRAG-35](2026-11-25-hy4-grouped-fragments.md#20261126-hy4frag-35--isolate-the-per-head-key-and-value-projections) |
+| Packed vector loads in the mapped Q8_0 verifier | Exact outputs and draft counts. Warm code fell about 1%. At 16K, the opening pair rose from 40.90 to 45.21 tok/s. The reverse pair reached 45.57 with vector loads and 45.85 with scalar loads. | Keep scalar loads. | [HY4NEXTN-18](2026-11-25-hy4-decode-cache-construction.md#20261126-hy4nextn-18--test-vector-loads-in-the-q8_0-verifier) |
+| 4K streamed FFN views at two loaded capacities | First-use rates were 697.42 tok/s at 8,192 positions and 695.14 at 5,120. Warm rates were 626.07 and 670.15 in that load order. All four outputs matched. | Keep the current capacity choice. First-use rates were similar and warm attribution remains unresolved. | [HY4FRAG-36](2026-11-25-hy4-grouped-fragments.md#20261126-hy4frag-36--check-loaded-capacity-on-the-uninstrumented-4k-path) |
+| Historical masked MLA on the guarded FFN build | The flags-off worker stopped before readiness. The imported shader and the current MoE shader shared the same function-constant index. | Keep the original sparse MLA. This attempt yielded no timings. | [HY4FRAG-37](2026-11-25-hy4-grouped-fragments.md#20261126-hy4frag-37--screen-the-historical-masked-mla-on-the-guarded-build) |
 
 ## Decision models and scoring
 
