@@ -1126,6 +1126,42 @@ paired long-window timings remain open.
 | Combined | `91bdd31f9c59aabf341bbfb38654733c4a5d96563c110a22e9b23f7fe0328a67` |
 | Flags-off | `dfe6ea8783427c13c694dd2e148eaaa6c0e91cdfe5feba0c7c2ae8f516338d52` |
 
+### Qualify the prepared worker
+
+The rebuilt worker applies the three changes to mapped-resident mode
+with GPU planning. It retained both expert banks and the original
+projector at an 8,192-position cap. All 64 IDs matched on two K2 4K
+requests at 56.23 and 56.59 tok/s. The two K3 coding requests matched
+all 192 IDs at 54.46 and 56.28 tok/s. Every request used one command
+buffer per target round. These coding rates came from a separate
+lifecycle sequence after the two 4K requests.
+
+The run reproduced 4,096-position text prefix hits before and after
+images. Both images matched their expected outputs with zero drafts
+and zero reused positions. Image completion, invalid images and
+cancellation each invalidated the text prefix and recovered on the
+next text request. The static review confirmed that per-table Engram
+inputs remain valid through GPU completion and are charged before the
+mapped admission recheck.
+
+The host reported fair thermal state initially, nominal at exit and
+zero contenders. Readiness took 77.03 s. The first 4K prefill took
+16.65 s, including 4.44 s of Engram wait, and the repeat took 6.60 s.
+The memory sampling subprocess timed out during the run. The collected
+samples showed pressure level 1 and unchanged swap. The interrupted
+monitor limits conclusions about peak pressure. The private harness
+now handles sampling failures by stopping its owned worker.
+
+Adopt the mapped-resident verifier. Keep the original Q8 arithmetic
+for each row and the existing sparse selector above the contiguous
+range. The typed patch on `0d640cd95` has SHA-256
+`e7153eae0890e964e1ceb120e133c5b4a6592622676a36d90ce1854fd1267e7d`.
+The locked Rust 1.98.1 executable, lifecycle harness used for the run,
+and receipt have SHA-256
+`71ef2cdcca7fe2c371320bc8e3f3b5f961a288c13104a858378a2b7ca2b431ca`,
+`99f20cb3f3f38ace74bdaa2d7961efc35d3cd832f8050c485b141b947f37c998`,
+and `9b50208f347b6e707c016c54951c7c99ab42d13bbe9377fa7f2995a1835298da`.
+
 ## 20261125-HY4FRAG-24 · Screen wider verification and direct routed weight loads
 
 The advanced mapped build combines the earlier command consolidation

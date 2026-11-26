@@ -28,7 +28,7 @@
 //
 // Buffers and grid exactly as gemv: W, x, s16 (unused by Q8_0), y, GemvArgs; grid.x = row groups, grid.y = heads.
 
-template <int LPR, int NR, int SG, int KS, bool STREAM>
+template <int LPR, int NR, int SG, int KS, bool STREAM, bool PAIR34 = false>
 kernel void hy4_flash_gemv_q8(device const uchar* W [[buffer(0)]], device const float* xp [[buffer(1)]],
                         device const float* s16 [[buffer(2)]], device float* y [[buffer(3)]],
                         constant GemvArgs& a [[buffer(4)]], uint3 tg [[threadgroup_position_in_grid]],
@@ -64,52 +64,56 @@ kernel void hy4_flash_gemv_q8(device const uchar* W [[buffer(0)]], device const 
             for (int j = 0; j < 16; ++j) raw[r][j] = p[j];
             s[r] = rdh(b);
         }
-        if (STREAM && NTOK <= 2) {
-            // One or two tokens (decode, and MTP k = 1's verify window): tokens innermost, so a unit's bytes are
-            // expanded once per row instead of once per (row, token).  Every chain c[r][t][i] still takes its terms
-            // in j order and the per-unit update of acc[r][t] is the same expression, so this is bitwise the
-            // per-token loop below (and gemv).  Restricted to NTOK <= 2: beyond that the compiler keeps several
-            // token groups live at once and the layout loses more than it saves.
-            float c[NR][2][4];
-            for (int r = 0; r < NR; ++r)
-                for (int t = 0; t < NTOK; ++t) c[r][t][0] = c[r][t][1] = c[r][t][2] = c[r][t][3] = 0.0f;
-            for (int j = 0; j < 16; j += 4) {
-                float4 xa[2], xb[2];
-                for (int t = 0; t < NTOK; ++t) {
-                    device const float4* xv = (device const float4*)(xp + t * int(a.x_stride) + u * UNIT);
-                    xa[t] = xv[j / 4];
-                    xb[t] = xv[4 + j / 4];
-                }
-                for (int r = 0; r < NR; ++r) {
-                    const ushort l0 = raw[r][j / 2], l1 = raw[r][j / 2 + 1];
-                    const ushort h0 = raw[r][8 + j / 2], h1 = raw[r][8 + j / 2 + 1];
-                    const float q0 = float(as_type<char>(uchar(l0 & 255))), q1 = float(as_type<char>(uchar(l0 >> 8)));
-                    const float q2 = float(as_type<char>(uchar(l1 & 255))), q3 = float(as_type<char>(uchar(l1 >> 8)));
-                    const float g0 = float(as_type<char>(uchar(h0 & 255))), g1 = float(as_type<char>(uchar(h0 >> 8)));
-                    const float g2 = float(as_type<char>(uchar(h1 & 255))), g3 = float(as_type<char>(uchar(h1 >> 8)));
-                    for (int t = 0; t < NTOK; ++t) {
-                        c[r][t][0] = fma(q0, xa[t].x, c[r][t][0]);
-                        c[r][t][1] = fma(q1, xa[t].y, c[r][t][1]);
-                        c[r][t][2] = fma(g0, xb[t].x, c[r][t][2]);
-                        c[r][t][3] = fma(g1, xb[t].y, c[r][t][3]);
-                        c[r][t][0] = fma(q2, xa[t].z, c[r][t][0]);
-                        c[r][t][1] = fma(q3, xa[t].w, c[r][t][1]);
-                        c[r][t][2] = fma(g2, xb[t].z, c[r][t][2]);
-                        c[r][t][3] = fma(g3, xb[t].w, c[r][t][3]);
+        int paired = NTOK <= 2 ? NTOK : 0;
+        if (PAIR34 && NTOK == 3) paired = 2;
+        if (PAIR34 && NTOK == 4) paired = 4;
+        if (STREAM && paired != 0) {
+            // Each pair shares one byte expansion while keeping each
+            // token's four FMA chains in the original j order. The
+            // three-row schedule uses one pair and the scalar tail.
+            auto dot_pair = [&](int first, int count) {
+                float c[NR][2][4];
+                for (int r = 0; r < NR; ++r)
+                    for (int t = 0; t < count; ++t) c[r][t][0] = c[r][t][1] = c[r][t][2] = c[r][t][3] = 0.0f;
+                for (int j = 0; j < 16; j += 4) {
+                    float4 xa[2], xb[2];
+                    for (int t = 0; t < count; ++t) {
+                        device const float4* xv = (device const float4*)(xp + (first + t) * int(a.x_stride) + u * UNIT);
+                        xa[t] = xv[j / 4];
+                        xb[t] = xv[4 + j / 4];
+                    }
+                    for (int r = 0; r < NR; ++r) {
+                        const ushort l0 = raw[r][j / 2], l1 = raw[r][j / 2 + 1];
+                        const ushort h0 = raw[r][8 + j / 2], h1 = raw[r][8 + j / 2 + 1];
+                        const float q0 = float(as_type<char>(uchar(l0 & 255))), q1 = float(as_type<char>(uchar(l0 >> 8)));
+                        const float q2 = float(as_type<char>(uchar(l1 & 255))), q3 = float(as_type<char>(uchar(l1 >> 8)));
+                        const float g0 = float(as_type<char>(uchar(h0 & 255))), g1 = float(as_type<char>(uchar(h0 >> 8)));
+                        const float g2 = float(as_type<char>(uchar(h1 & 255))), g3 = float(as_type<char>(uchar(h1 >> 8)));
+                        for (int t = 0; t < count; ++t) {
+                            c[r][t][0] = fma(q0, xa[t].x, c[r][t][0]);
+                            c[r][t][1] = fma(q1, xa[t].y, c[r][t][1]);
+                            c[r][t][2] = fma(g0, xb[t].x, c[r][t][2]);
+                            c[r][t][3] = fma(g1, xb[t].y, c[r][t][3]);
+                            c[r][t][0] = fma(q2, xa[t].z, c[r][t][0]);
+                            c[r][t][1] = fma(q3, xa[t].w, c[r][t][1]);
+                            c[r][t][2] = fma(g2, xb[t].z, c[r][t][2]);
+                            c[r][t][3] = fma(g3, xb[t].w, c[r][t][3]);
+                        }
                     }
                 }
-            }
-            for (int r = 0; r < NR; ++r)
-                for (int t = 0; t < NTOK; ++t) {
-                    const float4 sc = float4(s[r], s[r], 0.0f, 0.0f);
-                    const float xsum[2] = {0.0f, 0.0f};
-                    acc[r][t] += sc.x * (c[r][t][0] + c[r][t][1]) + sc.y * (c[r][t][2] + c[r][t][3]) -
-                                 (sc.z * xsum[0] + sc.w * xsum[1]);
-                }
-            continue;
+                for (int r = 0; r < NR; ++r)
+                    for (int t = 0; t < count; ++t) {
+                        const float4 sc = float4(s[r], s[r], 0.0f, 0.0f);
+                        const float xsum[2] = {0.0f, 0.0f};
+                        acc[r][first + t] += sc.x * (c[r][t][0] + c[r][t][1]) + sc.y * (c[r][t][2] + c[r][t][3]) -
+                                     (sc.z * xsum[0] + sc.w * xsum[1]);
+                    }
+            };
+            dot_pair(0, min(paired, 2));
+            if (paired == 4) dot_pair(2, 2);
         }
         if (STREAM) {
-            for (int t = 0; t < NTOK; ++t) {
+            for (int t = paired; t < NTOK; ++t) {
                 device const float4* xv = (device const float4*)(xp + t * int(a.x_stride) + u * UNIT);
                 float c[NR][4];
                 for (int r = 0; r < NR; ++r) c[r][0] = c[r][1] = c[r][2] = c[r][3] = 0.0f;
@@ -179,3 +183,7 @@ kernel void hy4_flash_gemv_q8(device const uchar* W [[buffer(0)]], device const 
 #define HY4_FLASH_GQ8(L, R, S, K) HY4_FLASH_GQ8S(L, R, S, K, false)
 HY4_FLASH_GQ8(32, 2, 8, 2) HY4_FLASH_GQ8S(32, 2, 16, 2, true) HY4_FLASH_GQ8(32, 1, 8, 2) HY4_FLASH_GQ8(32, 1, 4, 1) HY4_FLASH_GQ8S(16, 2, 4, 1, true) HY4_FLASH_GQ8(16, 1, 4, 1)
 HY4_FLASH_GQ8(8, 1, 4, 1) HY4_FLASH_GQ8(4, 1, 4, 1) HY4_FLASH_GQ8(2, 1, 4, 1) HY4_FLASH_GQ8(1, 1, 4, 1) HY4_FLASH_GQ8(1, 1, 2, 1)
+template [[host_name("hy4_flash_gemv_q8_32_2_16_2_pair34")]]
+    kernel decltype(hy4_flash_gemv_q8<32, 2, 16, 2, true, true>) hy4_flash_gemv_q8<32, 2, 16, 2, true, true>;
+template [[host_name("hy4_flash_gemv_q8_16_2_4_1_pair34")]]
+    kernel decltype(hy4_flash_gemv_q8<16, 2, 4, 1, true, true>) hy4_flash_gemv_q8<16, 2, 4, 1, true, true>;

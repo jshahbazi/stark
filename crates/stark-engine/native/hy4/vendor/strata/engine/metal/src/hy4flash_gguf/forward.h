@@ -73,6 +73,7 @@ struct Prefill {
     int mma = 1;
     bool profile_stages = false;    ///< Sample aggregate prefill encoder times in the diagnostic worker
     bool mapped_gpu_plan = false;  ///< Build decode/verify expert groups on Metal for mapped banks
+    bool optimize_mapped_decode = false;  ///< Consolidate resident-target commands and reuse Q8 decode work
     bool routed_half = false;       ///< Stage grouped expert GEMM operands as F16, keeping F32 accumulation
     bool routed_fragments = false;  ///< Use gathered F16 tensor fragments for packed grouped experts
     bool dense_packed = false;      ///< Read packed Q8_0 attention projections into prefill tensor fragments

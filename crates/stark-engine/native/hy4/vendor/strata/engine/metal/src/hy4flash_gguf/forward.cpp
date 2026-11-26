@@ -15,6 +15,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 
@@ -257,6 +258,10 @@ struct Forward::Impl {
     std::string pack;
     EngramSupply eng;
     bool eng_ready = false;
+    struct EngramDecodeInput {
+        mtl::Buffer rows, valid, any;
+    };
+    std::vector<EngramDecodeInput> decode_engram_inputs;
     Timing tm;
     int n_tok = 0, p0 = 0;              // the window being run
     std::vector<int32_t> routed, predicted;
@@ -435,7 +440,7 @@ struct Forward::Impl {
         auto it = gemv_.find(k);
         if (it == gemv_.end())
             it = gemv_.emplace(k, DenseGemvF32(*cx, lib, type, n_in, n_out, (uint32_t) ref::row_bytes(type, (int) n_in),
-                                               GemvHeads{}, /*allow_mm=*/true, packed))
+                                               GemvHeads{}, /*allow_mm=*/true, packed, pf.optimize_mapped_decode))
                      .first;
         return it->second;
     }
@@ -447,7 +452,7 @@ struct Forward::Impl {
             it = gemvh_
                      .emplace(k, DenseGemvF32(*cx, lib, type, n_in, n_out,
                                               (uint32_t) ref::row_bytes(type, (int) n_in), h, /*allow_mm=*/true,
-                                              pf.dense_packed))
+                                              pf.dense_packed, pf.optimize_mapped_decode))
                      .first;
         return it->second;
     }
@@ -624,14 +629,15 @@ struct Forward::Impl {
     std::string resolve();
     void encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int>& cuts, const BW& b, const mtl::Buffer& x,
                       const mtl::Buffer& out, int T, bool want_dump, bool gpu_plan = false,
-                      mtl::Context::GraphProfile* profile = nullptr);
+                      mtl::Context::GraphProfile* profile = nullptr,
+                      const EngramDecodeInput* engram_input = nullptr);
     void encode_head(std::vector<mtl::Dispatch>& ds, const mtl::Buffer& x, int x_t0, int T, bool with_logits = true);
     std::string run_head(const mtl::Buffer& x, int x_t0, int T);
     std::string run_hidden(const mtl::Buffer& x, int x_t0, int T);
     void clamp_pools(int p0_);
     void at_cut(int s);
     std::string prepare_window(const int32_t* all_tokens, int p0_, int T, bool need_engram);
-    std::string engram_rows_for(int block_id, int T);
+    std::string engram_rows_for(int block_id, int T, const EngramDecodeInput* input = nullptr);
     std::string embed_window(const int32_t* all_tokens, int T);
     void dump_block(const BW& b, int T, Dump* dump, const Inject& inj, const mtl::Buffer& in, const mtl::Buffer& out);
 };
@@ -795,6 +801,15 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     if (!pack.empty()) {
         if (const std::string e = eng.open(mm, pack); !e.empty()) return "Engram: " + e;
         eng_ready = true;
+        if (pf.optimize_mapped_decode) {
+            const size_t cells = size_t(Forward::kMaxWindow) * eng.rows_per_token();
+            decode_engram_inputs.resize((size_t) eng.n_tables());
+            for (auto& input : decode_engram_inputs) {
+                input.rows = cx->alloc(cells * eng.row_bytes());
+                input.valid = cx->alloc(cells * sizeof(float));
+                input.any = cx->alloc(size_t(Forward::kMaxWindow) * sizeof(float));
+            }
+        }
     }
     return {};
 }
@@ -1103,7 +1118,7 @@ std::string Forward::Impl::alloc() {
 // ---- one block -----------------------------------------------------------------------------------------------------
 void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int>& cuts, const BW& b,
                                  const mtl::Buffer& x_in, const mtl::Buffer& out, int T, bool want_dump, bool gpu_plan,
-                                 mtl::Context::GraphProfile* profile) {
+                                 mtl::Context::GraphProfile* profile, const EngramDecodeInput* engram_input) {
     const uint32_t uT = (uint32_t) T;
     const uint32_t H = (uint32_t) b.heads;
     const mtl::Buffer* resid = &x_in;
@@ -1115,12 +1130,15 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     if (b.engram_table >= 0) {
         stage(tm.pf_other_ms);
         const int cols = m->geo.engram_heads;
+        const mtl::Buffer& rows = engram_input ? engram_input->rows : eng_rows;
+        const mtl::Buffer& valid = engram_input ? engram_input->valid : eng_valid;
+        const mtl::Buffer& any = engram_input ? engram_input->any : eng_any;
         {
             mtl::Dispatch d;
             d.p = &p_eng_rows;
             EngramRowArgs a{(uint32_t) m->geo.engram_head_dim, (uint32_t) cols, m->engram_row_bytes,
                             (uint32_t) m->geo.engram_lookup_dim(), kEngramEps};
-            d.args = {mtl::Arg::B(eng_rows), mtl::Arg::B(m->dense, b.t[W_E_LOOK]->offset), mtl::Arg::B(eng_valid),
+            d.args = {mtl::Arg::B(rows), mtl::Arg::B(m->dense, b.t[W_E_LOOK]->offset), mtl::Arg::B(valid),
                       mtl::Arg::B(eng_r), mtl::Arg::V(a)};
             d.grid[0] = uT * (uint32_t) cols;
             d.tg[0] = 256;
@@ -1155,7 +1173,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
             mtl::Dispatch d;
             d.p = &p_eng_delta;
             d.args = {mtl::Arg::B(x_in), mtl::Arg::B(eng_kv), mtl::Arg::B(m->dense, b.t[W_E_GAMMA]->offset),
-                      mtl::Arg::B(m->dense, b.t[W_E_HCS]->offset), mtl::Arg::B(eng_gate), mtl::Arg::B(eng_any),
+                      mtl::Arg::B(m->dense, b.t[W_E_HCS]->offset), mtl::Arg::B(eng_gate), mtl::Arg::B(any),
                       mtl::Arg::B(eng_delta), mtl::Arg::B(hc_eng), mtl::Arg::V(ea)};
             d.grid[0] = (uint32_t) hc;
             d.grid[1] = uT;
@@ -1233,6 +1251,14 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
              "hy4_flash_copy_f32 (k_pe dump)");
     }
 
+    // Under the pool budget, the indexer writes sel[i] = i and n_sel = p + 1.
+    // The range kernels visit those same cells in the same order. Still
+    // build the pooled-key history for later positions and prefix restore.
+    const bool bound_attention = pf.optimize_mapped_decode && gpu_plan && !pr_in_chunk && !images() && !want_dump &&
+                                 mut.none && pf.probe == 0 && inj == nullptr;
+    const bool indexed_range = bound_attention && b.has_indexer && !b.sliding && m->geo.idx_select_tail &&
+                               idx_kpool > 0 && p0 + T <= (idx_topk / idx_kpool) * idx_kpool;
+    const bool use_selection = b.has_indexer && !indexed_range;
     // ---- the indexer, on the sparse blocks
     uint32_t n_pool = 0;
     if (b.has_indexer) {
@@ -1288,6 +1314,8 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
             mtl::require_fit(d, "hy4_flash_indexer_kpool");
             ds.push_back(d);
         }
+    }
+    if (use_selection) {
         stage(tm.pf_attention_dense_ms);
         const gguf::Tensor* iqb = b.t[W_IQ_B];
         gv(iqb, true).append(ds, m->dense, iqb->offset, q_resid, (uint32_t) m->geo.q_lora_rank, iq,
@@ -1414,7 +1442,10 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         const uint32_t nt = (uint32_t) std::min(attn_mma ? T : asub, T - t0);
         const size_t probe_pos = pf.probe == 1 && pr_in_chunk ? 0 : 4 * (size_t) t0;
         // the bound on a row's key count: the window for a sliding block, the scratch row for a selection
-        const uint32_t n_cap = !b.has_indexer && a.window != 0 ? a.window : (uint32_t) Forward::kSelCap;
+        uint32_t n_cap = !use_selection && a.window != 0 ? a.window : (uint32_t) Forward::kSelCap;
+        // Except for injected selections, every selected cell is unique
+        // and causal. No query can see more than last_position + 1 cells.
+        if (bound_attention) n_cap = std::min(n_cap, (uint32_t) (p0 + t0) + nt);
         const std::vector<mtl::Arg> args = {mtl::Arg::B(Q, 4 * (size_t) t0 * H * (size_t) kv_w),
                   mtl::Arg::B(kv, 2 * (size_t) b.kv_off),
                   mut.no_sinks ? mtl::Arg::B(mut_sinks) : mtl::Arg::B(m->dense, b.t[W_SINKS]->offset),
@@ -1427,7 +1458,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         if (attn_mma) {
             // the MMA kernel's eight arguments: q, kv, sinks, sel, n_sel, pos, o, the args bytes (no score scratch)
             mtl::Dispatch d;
-            d.p = b.has_indexer ? &attn_pf_sel : &attn_pf_range;
+            d.p = use_selection ? &attn_pf_sel : &attn_pf_range;
             d.args = {args[0], args[1], args[2], args[3], args[4], args[5], args[7], args[8]};
             d.grid[0] = nt;
             d.grid[1] = (H + 31) / 32;
@@ -1435,7 +1466,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
             mtl::require_fit(d, "hy4_flash_mla_pf5_s32");
             ds.push_back(d);
         } else {
-            append_attn(ds, b.has_indexer ? attn_sel : attn_range, args, H, nt, n_cap, a.sc_stride, (uint32_t) kv_w,
+            append_attn(ds, use_selection ? attn_sel : attn_range, args, H, nt, n_cap, a.sc_stride, (uint32_t) kv_w,
                         (uint32_t) kv_lora, (uint32_t) kv_w, "hy4_flash_mla_attn");
         }
     }
@@ -2339,17 +2370,16 @@ namespace {
 void cut_tramp(void* u, int s) { ((Forward::Impl*) u)->at_cut(s); }
 }  // namespace
 
-/// The window's Engram rows and validity into the shared buffers the kernels read.  One window is one command
-/// buffer per Engram block (the four tables would otherwise overwrite each other's rows), which `window` handles.
-std::string Forward::Impl::engram_rows_for(int block_id, int T) {
+/// Copy one table's rows and validity into the host-written inputs for its Engram dispatches.
+std::string Forward::Impl::engram_rows_for(int block_id, int T, const EngramDecodeInput* input) {
     std::string err;
     const uint8_t* rows = eng.join(block_id, err);
     if (rows == nullptr) return "Engram block " + std::to_string(block_id) + ": " + err;
     const uint64_t cols = eng.rows_per_token();
-    std::memcpy(eng_rows.ptr, rows, (size_t) T * cols * eng.row_bytes());
+    std::memcpy(input ? input->rows.ptr : eng_rows.ptr, rows, (size_t) T * cols * eng.row_bytes());
     const float* v = eng.valid(block_id);
-    std::memcpy(eng_valid.ptr, v, (size_t) T * cols * 4);
-    float* any = eng_any.as<float>();
+    std::memcpy(input ? input->valid.ptr : eng_valid.ptr, v, (size_t) T * cols * sizeof(float));
+    float* any = (input ? input->any : eng_any).as<float>();
     for (int t = 0; t < T; ++t) {
         float s = 0;
         for (uint64_t c = 0; c < cols; ++c) s += v[(size_t) t * cols + c];
@@ -2466,8 +2496,7 @@ std::string Forward::window(const int32_t* all_tokens, int p0, int T, Dump* dump
     const double te = mtl::now_s();
     if (const std::string e = im.prepare_window(all_tokens, p0, T, need_engram); !e.empty()) return e;
     if (need_engram) {
-        // The whole window is one command buffer, so the rows have to be in their buffer before it is
-        // committed: all four tables are joined here.
+        // Finish all four reads before encoding the target window.
         for (int i = 0; i < im.eng.n_tables(); ++i) {
             std::string err;
             if (im.eng.join(im.eng.block_of(i), err) == nullptr)
@@ -2479,6 +2508,7 @@ std::string Forward::window(const int32_t* all_tokens, int p0, int T, Dump* dump
     const bool gpu_plan = im.pf.mapped_gpu_plan && im.m->stream.mapped() && moe_indirect() &&
         dump == nullptr && im.pr_record == nullptr && im.pr_force == nullptr &&
         0 < im.topk && T * im.topk <= 128;
+    const bool one_command = gpu_plan && !im.images() && !im.decode_engram_inputs.empty();
     if (!gpu_plan) {
         im.routed.assign((size_t) im.m->stream.n_layers() * (size_t) T * (size_t) im.topk, -1);
         im.predicted.assign((size_t) im.m->stream.n_layers() * (size_t) T * (size_t) im.topk, -1);
@@ -2515,12 +2545,17 @@ std::string Forward::window(const int32_t* all_tokens, int p0, int T, Dump* dump
     };
     for (size_t l = 0; l < im.blk.size(); ++l) {
         const Impl::BW& b = im.blk[l];
+        const Impl::EngramDecodeInput* engram_input = nullptr;
         if (b.engram_table >= 0) {
-            // one Engram block's rows at a time in the shared buffer, so what is already encoded runs first
-            if (const std::string e = flush(); !e.empty()) return e;
-            if (const std::string e = im.engram_rows_for(b.id, T); !e.empty()) return e;
+            if (one_command) {
+                // All blocks can share one command once host-written inputs cannot overwrite each other.
+                engram_input = &im.decode_engram_inputs[(size_t) b.engram_table];
+            } else if (const std::string e = flush(); !e.empty()) {
+                return e;
+            }
+            if (const std::string e = im.engram_rows_for(b.id, T, engram_input); !e.empty()) return e;
         }
-        im.encode_block(ds, cuts, b, *in, *out, T, false, gpu_plan);
+        im.encode_block(ds, cuts, b, *in, *out, T, false, gpu_plan, nullptr, engram_input);
         std::swap(in, out);
     }
     im.encode_head(ds, *in, 0, T);

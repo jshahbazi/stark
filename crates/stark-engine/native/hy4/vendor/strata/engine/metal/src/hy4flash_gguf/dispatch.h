@@ -191,7 +191,7 @@ class DenseGemvF32 {
 public:
     DenseGemvF32() = default;
     DenseGemvF32(mtl::Context& cx, int lib, int ggml_type, uint32_t n_in, uint32_t n_out, uint32_t row_bytes,
-                 GemvHeads heads = {}, bool allow_mm = false, bool packed_prefill = false)
+                 GemvHeads heads = {}, bool allow_mm = false, bool packed_prefill = false, bool pair_q8 = false)
         : type_(ggml_type),
           // a per-head weight (append_heads, grid = {row groups, H}) takes gemv_head_tile, which gives the narrow
           // band NR 2 for the one geometry its guard admits.  Same tile for every T.  NOTE for anyone reading a
@@ -208,11 +208,15 @@ public:
                          ggml_type);
             std::abort();
         }
+        const std::string name = tile_.engine_name(ggml_type);
+        // The paired kernels cover the existing streaming Q8 geometries.
+        const bool pair_verify = pair_q8 &&
+            (name == "hy4_flash_gemv_q8_32_2_16_2" || name == "hy4_flash_gemv_q8_16_2_4_1");
         for (int t = 0; t < strata_hy4_flash_metal::kHy4FlashGemvMaxTok; ++t) {
             mtl::Constants c;
             c.i(0, t + 1);
             if (h) c.u(10, heads.w).u(11, heads.x).u(12, heads.y);
-            p_[t] = cx.pipeline(lib, tile_.engine_name(ggml_type), c);
+            p_[t] = cx.pipeline(lib, pair_verify && (t == 2 || t == 3) ? name + "_pair34" : name, c);
         }
         // prefill's MMA (hy4_flash_mm.metal): the formats it decodes, K in steps of 32, and x rows / head slices that
         // start on a float4 (every hy4-flash dense matrix qualifies; anything else keeps the GEMV)

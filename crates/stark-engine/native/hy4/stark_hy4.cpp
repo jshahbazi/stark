@@ -151,6 +151,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         prefill.chunk = chunk;
         prefill.grouped_k_quant = grouped != 0;
         prefill.mapped_gpu_plan = gpu_plan != 0;
+        prefill.optimize_mapped_decode = resident_experts && prefill.mapped_gpu_plan;
         prefill.profile_stages = profile_prefill != 0;
         prefill.routed_half = routed_half != 0;
         prefill.routed_fragments = routed_fragments != 0;
