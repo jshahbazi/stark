@@ -406,3 +406,92 @@ Harness SHA-256 `d94784d0ee7727dec5abacc33645c502ed5b98d8b3502b5bafe947fd200a8af
 The inherited contiguous expert sidecar is a separate option. The full
 trunk bank would duplicate about 86 GB, above the 60 GiB free on the
 measurement volume. No sidecar was produced or timed.
+
+## 20261125-HY4FRAG-11 · Reuse one routed weight tile across 128 rows
+
+The candidate keeps the packed expert weights, K64 staging and K16 F32
+accumulation steps. It uses eight SIMD groups to share a weight tile
+across up to 128 rows. The tile-list capacity, emission and dispatch
+share the geometry across all routed trunk layers. Direct dense tensor
+views were on in both arms.
+
+The first bracket was interrupted by an unrelated compile. The opening
+two loads completed with exact outputs. Their warm decode moved from
+37.80 to 23.18 tok/s as the compile started, and host admission refused
+the last two loads. The fresh bracket below had no named competing
+process at entry or exit. All eight requests matched all 64 reference
+IDs and the same draft work.
+
+| Arm in run order | First prefill tok/s | Warm prefill tok/s |
+| --- | ---: | ---: |
+| 64 rows first | 648.01 | 582.42 |
+| 128 rows first | 598.40 | 565.18 |
+| 128 rows last | 594.49 | 556.88 |
+| 64 rows last | 658.52 | 500.69 |
+
+The wider tile was 8–10% slower on first use. Warm candidate rates stayed
+within the control range. Separate stage samples measured 31,776 routed
+tiles against 52,390, a 39% reduction. Routed GPU time increased from
+2.024 to 2.459 seconds. Keep the 64-row fragments. Under this host window
+the existing settings reached 658.52 tok/s first and 582.42 tok/s on a
+repeat. The 64-row stage sample measured 1.597 seconds in attention
+projections, 0.781 in MLA and 0.399 in attention elementwise work.
+
+Stark base `edb1f3f2a`. The Sol agent's vendor patch SHA-256 is
+`c824e59657ed237db8fd680f6e916b4d110b60fef00a23d52e8b8d5cc7d4d0f2`.
+Full source patch SHA-256
+`a8cd057fac90bb620d59bef8a8230e0b6a9a8aa20b64636545ab71819d455f14`.
+Locked offline Rust 1.98.1 release worker SHA-256
+`d7d843eb21fe5e4db8a4c4633a8c5d2613e4539fac79dbbef466c3428258364c`.
+Clean harness SHA-256 `f18417ff90f4ca9e1f426895a8a80b4636b8447a1370cced2e4d4f9105ac6984`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Interrupted 128 rows, first | `75b52124c180c1dde0b22350da5453568f2fd3cd047e05158e3d5120d028a10f` |
+| Interrupted 64 rows, first | `e60e370e04c792c694c16c546c3fbdc99379e3de80d0518424c9cf0a67571eca` |
+| Interrupted 64 rows, refusal | `4c1be3f299a3d0eb5f44d52bcd1dc3db0e4f3e0f7263956d5448efc7e720df6d` |
+| Interrupted 128 rows, refusal | `5e1e4a7534bcd323c623417ed07987854ee320ebe1d0030872659bbd394a85eb` |
+| 64 rows first | `306dc4fb3999d7c9efaad92d11b73af80e51b0d3319a29853ebb06cf547ec813` |
+| 128 rows first | `1e1b896a243c61b413e4cb25a6c5fdbd6aaf1aaee1eff72f21e9895a435ba6fe` |
+| 128 rows last | `7ad4ce12214dc338bfe5a12eff0dbca36853a2e249adfaf5c695e08e68f33fd1` |
+| 64 rows last | `7db36ac470bec5469fdd0c0f6188defb11afe183ff032e6f0a53261711c6ab29` |
+| 64-row stage sample | `8fd57eda90228fa028317609def490f345f6e35442da802de548dd4987202454` |
+| 128-row stage sample | `72d049880f4630613f4710c020521e85468dec369af133466e23984cbe738504` |
+
+## 20261125-HY4FRAG-12 · Test deeper verification and replay the prompt-lookup gate
+
+The HY4FRAG-11 control path loaded 50.996 GB at a 5,120-position cap.
+It ran depth two, four, four, then two on each input with zero prefix
+reuse. All generated IDs agreed within each fixture. The two short
+coding prompts retained their best throughput at two drafts.
+
+| Input | Depth-two tok/s | Depth-four tok/s | Target rounds at two / four |
+| --- | ---: | ---: | ---: |
+| Fixed 4K | 29.66–40.35 | 46.88–48.84 | 22 / 13 |
+| Rendered 4K coding | 30.54–34.30 | 31.66–31.82 | 82 / 64 |
+| Short TypeScript | 39.12–40.79 | 37.90–37.91 | 75 / 58 |
+
+Depth four at the 48 GB, 34,816-position configuration matched the depth-two
+output on both long inputs. The depth-four run had fair process thermal
+state. This table compares separate loads rather than a single timing bracket.
+
+| Input | Depth-two tok/s | Depth-four tok/s | Target rounds at two / four |
+| --- | ---: | ---: | ---: |
+| 16K | 31.67 | 26.83 | 79 / 62 |
+| 32K | 29.47 | 28.05 | 78 / 60 |
+
+An in-memory replay used Stark's existing 4-gram lookup and backward
+agreement rules. The fixed repeat-text input was eligible at 62 of 63
+positions. Its 413 overlapping offers all matched. A lookup-only policy
+with at most seven proposals per round could cover the continuation in
+eight target rounds. This is an offline estimate. The 75-token and 4K
+rendered coding fixtures offered zero lookup drafts. Keep those coding
+workloads separate from the repeat-text test.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| 51 GB depth and replay screen | `f64f7506a1994ac3941cdb185b75d91e686168e979f05d77daac6cbd4f86ff4d` |
+| 48 GB depth-four long ladder | `7dbfc2453b196b708db1b51f8fbebcb25dbd606241233d30b4f58c620e3718ec` |
+
+Replay helper SHA-256
+`04410bdf5613f9ad03ab66b38d21c275f8f5d66afcadcfb4d7d2ee7d75cb62df`.

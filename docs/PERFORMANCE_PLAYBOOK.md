@@ -867,6 +867,10 @@ The source-order grouped IndexPool scorer matched the Hy4 control on 192 outputs
 
 Test streamed scheduling against the same output and draft work. On Hy4's short code fixture, earlier read-ahead reached 39.47 tok/s warm against controls at 37.73 and 39.35, with slightly longer cuts. Twelve readers, smaller reads, and a second read-ahead ordinal gave no clear gain. Smaller reads lowered bytes and took longer at the cut. [Hy4 streamed I/O schedules](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-10--compare-stratas-existing-streamed-io-schedules)
 
+Measure occupancy and useful time when widening the routed row tile. Hy4's 128-row fragments used 39% fewer tiles and spent 22% more GPU time in routed products. The two first-use 4K controls with 64 rows reached 648–659 tok/s. The wider path reached 594–598 and was removed. [Hy4 wider row tile](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-11--reuse-one-routed-weight-tile-across-128-rows)
+
+Replay the existing lookup gate before adding a new scheduler. Hy4's repeated-text benchmark could cover 63 useful outputs in eight target rounds with ideal lookup at a maximum of seven proposals. Its short and 4K rendered coding fixtures offered zero lookup tokens. Depth four reduced 16K and 32K target round counts by 22–23% and had lower observed throughput on the separate long runs. [Hy4 depth and lookup replay](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-12--test-deeper-verification-and-replay-the-prompt-lookup-gate)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |
