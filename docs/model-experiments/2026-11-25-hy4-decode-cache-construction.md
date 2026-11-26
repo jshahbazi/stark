@@ -164,3 +164,40 @@ host cuts without increasing the admitted physical window. Pricing the
 exact prefill workspace and testing a wider grouped kernel are prepared
 experiments. The published targets and the standard benchmark remain open.
 Profile receipt SHA-256 `c9e37b0d8414f9a1ea99e96f9db8661719e64ab5b1ca57add10ed2ddeb288351`.
+
+## 20261125-HY4NEXTN-06 · Wider routed tile and exact scratch estimate
+
+At a fixed 40 GB arena and 8,192-position capacity, compared the existing
+64 × 32 × 32 grouped routed kernel to the vendor's 64 × 64 × 64 kernel.
+The candidate halves the K steps and output tiles and uses a larger
+threadgroup tile. Both use F16 operands and F32 accumulation. The single
+screening binary also moves the prefill scratch layout dry run to load
+planning and uses its exact page-rounded size for the late arena guard.
+That memory bookkeeping change applies to every arm in this bracket.
+
+| Arm | First prefill tok/s | Warm prefill tok/s |
+| --- | ---: | ---: |
+| Control start | 488.84 | 435.13 |
+| Wider routed tile | 471.49 | 443.13 |
+| Control end | 446.22 | 410.63 |
+
+All six requests matched all 64 reference IDs and accepted 41 of 43
+drafts. The warm candidate was about 2% above the first control. Warm
+control drift was about 6%. A separate stage sample with the larger
+kernel covered all 42 blocks and measured 2.557 s in routed experts. The
+earlier final build's 2.448 s is a separate profile with different clock
+conditions. The wider tile has no demonstrated throughput gain and was
+removed. The exact scratch estimate passed these functional runs. A
+controlled admission comparison remains open, so the allocation change
+also stayed out of the branch.
+
+Screening binary SHA-256 `7119345f1c68f0941b83525a737563d4884e35a6c00233d228defb8c1a573f1a`.
+Source diff SHA-256 `cb07131ecf876bb7017182fe31e575043dcadc7a3cb2f443fe383a92720af568`.
+Harness SHA-256 `9a52cbd9018ad9bab9f8eb9d8df3f3aa885b2b7ad7e23be1345bafd79ec1d4f0`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Control start | `2f6e8db0eed2b174f6b3db7da3a3dd8c7f09e41b7b86e53c921eadefdce93291` |
+| Wider tile | `3ca84a52faa5454b75dc1b962a586131fc69e2d3e6e18b05711937d2c02bcf31` |
+| Control end | `b072e4a96c614a97dcc862ee13945bedba4c1f00540aecd88035e74a4277f678` |
+| Wider tile profile | `a062e6f306872e02bd36dbc3ed11bb4ebcadfbaae7662e4bd1438a8c3c452105` |

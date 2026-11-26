@@ -847,6 +847,8 @@ Size the expert arena and the context together. On the final Hy4 Q3_K build at 8
 
 Reprofile after landing a different operand path. With packed projections, grouped routed half and resident embeddings, Hy4 Q3_K's separate 4K K2 stage sample attributed 2.45 s to routed experts, 2.06 s to attention projections, 1.88 s to MLA and 0.06 s to expert waits. Use the sampled budget to choose the next kernel. The 743.2 tok/s target allows 5.51 s for the whole fixture. [Remaining Hy4 prefill budget](model-experiments/2026-11-25-hy4-decode-cache-construction.md#20261125-hy4nextn-05--remaining-4k-prefill-budget)
 
+The wider Hy4 routed tile cut the number of output tiles and K steps with the same precision. Its 443.13 tok/s warm 4K K2 result beat the first control by about 2% in a bracket with about 6% control drift. The change was removed. Isolate any admission gain from the exact scratch estimate in a separate live memory comparison. [Wide tile and scratch sizing screen](model-experiments/2026-11-25-hy4-decode-cache-construction.md#20261125-hy4nextn-06--wider-routed-tile-and-exact-scratch-estimate)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |
