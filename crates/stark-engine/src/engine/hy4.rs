@@ -117,6 +117,7 @@ pub struct Options {
     pub routed_fragments: bool,
     pub dense_packed: bool,
     pub dense_device_views: bool,
+    pub dense_ffn_device_views: bool,
     pub resident_token_embeddings: bool,
     pub resident_draft_experts: bool,
     pub draft_head_q5: bool,
@@ -204,6 +205,7 @@ unsafe extern "C" {
         max_drafts: c_int,
         routed_fragments: c_int,
         dense_device_views: c_int,
+        dense_ffn_device_views: c_int,
         resident_draft_experts: c_int,
         draft_head_q5: c_int,
         select_context: unsafe extern "C" fn(*const ContextMemory, *mut c_void) -> u32,
@@ -308,6 +310,7 @@ impl Session {
                 options.max_drafts as c_int,
                 c_int::from(options.routed_fragments),
                 c_int::from(options.dense_device_views),
+                c_int::from(options.dense_ffn_device_views),
                 c_int::from(options.resident_draft_experts),
                 c_int::from(options.draft_head_q5),
                 select_context,
@@ -353,7 +356,11 @@ impl Session {
     }
 
     pub fn draft_head_format(&self) -> &'static str {
-        if self.draft_head_q5 { "q5_0" } else { "q8_0" }
+        if self.draft_head_q5 {
+            "q5_0"
+        } else {
+            "q8_0"
+        }
     }
 
     pub fn arena_bytes(&self) -> u64 {

@@ -1567,3 +1567,113 @@ absolute path. The initial build log SHA-256 is
 | K32 control profile | `9cb94c43333e3b85173d734c304616640cb988a2a84b0deee0cbae9bfcef240a` |
 | Natural-text comparison | `5b0662447769ee89c7417412027b8e23162598822cfa343b2a416b9dd41a0cee` |
 | Natural-text harness | `58dc3c5852aa14890707a8285a193c412a7a6f4e49873c50d94a6f62e4e10f45` |
+
+## 20261126-HY4FRAG-32 · Reuse dense device views for FFN
+
+The candidate extends the adopted K64 Metal device-view product to the
+same eight dense, shared and latent FFN projection sites as HY4FRAG-31.
+It stages F16 operands from the existing Q8_0 weights and F32
+activations, with F32 accumulation. The GGUF and attention, routed
+expert and decode products retain their existing representations.
+Text stages of at least 512 rows use it when the Q8_0 shape is aligned
+to 64 and the existing scratch fits. The largest FFN projection uses
+189 MiB of the 224 MiB device-view scratch at 4K. Vision chunks use
+their existing path.
+
+The 13 teacher-forced natural-text rows at 552–840 positions all
+matched the F32 control, with eight correct true next tokens in
+each arm. The throughput bracket then ran one Rust 1.98.1 Hy4
+executable across four loads with the original projector, a 40 GB
+streamed arena, 5,120 positions and 4,096-row chunks. All eight K2
+requests matched the same 64 output IDs at zero reuse, with
+41 accepted drafts, 42 proposals and 22 verifier rounds. The host
+stayed nominal in all four loads.
+
+| Order and arm | First use tok/s | Warm tok/s | Receipt SHA-256 |
+| --- | ---: | ---: | --- |
+| 1. F32 FFN control | 610.14 | 569.11 | `0d8e1f8587ec78b5e20ec59882ee17cdc5f783b800a3eaa5ae72835f6e68699c` |
+| 2. FFN device views | 670.19 | 637.12 | `ac85cbd8c1aa6394db5716e7c3d254f8dbef0194b1fb49938ff32143aed06e5d` |
+| 3. FFN device views | 693.02 | 649.78 | `5e2f3c5312d1158df32966e2c03ac568ea337ba1d0d36a71399f8ac860f60e4f` |
+| 4. F32 FFN control | 528.58 | 509.68 | `8471f4a86aaa3129916a7b5d96c66b97cdb723fa2fbb6b5c15ca705ddd0c8339` |
+
+Against the faster opening control, both candidate requests saved
+at least 0.60 s first and 0.76 s warm. The closing control was slower,
+so it provides a wide drift bound. The 693.02 tok/s peak still leaves
+about 0.40 s to the 743.2 tok/s target. The exact same prefill
+workload and output caps define these local rates.
+
+The candidate diff on `85a74c59c`, release worker and timing harness
+have SHA-256 `3fb032366eb711279d43e29b766b711e33f43a78b06d07b271f772caf0b58f28`,
+`3c5d64c7487ae27a7b72ef8a9825f7aea6d8287a848a571e3294c9d4074739b4`,
+and `28a5800a009c61261da2896b595f623924e34566c5ce65d87243cdc335d3013b`.
+The natural-text harness and receipt have SHA-256
+`05c5dd19ff5a2be27bddd0d94e0608ea594931f58253b0a1dbc6ddfacf7418b3`
+and `02b1f7b5359ee5b45cb3295b2303c5c41ed7787b06bfe5e41d72ce1614d2ea83`.
+
+In the separate stage profile, the candidate ran first. All four
+requests matched the 64 output IDs across 42 profiled blocks per
+request. The dense FFN stage fell from 0.792 to 0.370 s on first use
+and from 0.971 to 0.362 s warm. Routed and attention stages varied
+in the opposite direction. The profile attributes a gain to the
+FFN stage. The uninstrumented bracket supplies the throughput rates.
+
+| Profile receipt | SHA-256 |
+| --- | --- |
+| FFN device views | `df0c72f911736d22d3c71ace2b538401be5636434013c2acbd2f400c16c4a64a` |
+| F32 FFN control | `f82586821a13777c4fddc48b4ea2661e1e061c6c2c02e75e4b16e4ef69bd5ea6` |
+
+### Qualify the typed FFN option
+
+The rebuilt worker accepts `STARK_HY4_PREFILL_DENSE_FFN_DEVICE_VIEWS=1`
+with the existing dense device-view setting, and reports
+`prefill_dense_ffn_device_views_requested` at readiness. The unset
+option and `0` keep the existing FFN path. The two invalid configuration
+probes used value `2` and requested FFN views with the shared device
+views disabled. Both returned `invalid_hy4_prefill_dense_ffn_device_views`
+before model readiness.
+
+The first lifecycle session stopped before readiness. A detached
+retry stopped before emitting an event. The next foreground startup
+returned `hy4_source_changed`. All three current file fingerprints
+differed from the previous receipt only in device ID. The first
+preparation invocation loaded the converter from another checkout and
+stopped at import. Running the branch's preparation tool with its
+own converter verified all three pinned GGUF digests and the sidecars.
+The previous source receipt SHA-256 was
+`987e7190e2e3f7ea2ba3910f95c7d6bf044b515cd1a296e475b558fa02b8e273`.
+The refreshed receipt SHA-256 is
+`0071689e0e7cbe41d7709c995010cec9a023d90f7ff78c860d678a0e9be5ce93`.
+The artifact identity remained the same.
+
+With both resident expert banks, readiness took 183.4 s. The
+guard stopped the first request at pressure level 2 and 88.4 MiB
+peak swap. That session produced no eligible performance sample.
+
+The streamed qualification used a 40 GB arena, the original projector,
+Q5_0 NextN, an 8,192-position cap and 4,096-row chunks. Readiness
+confirmed the option. The two 4K requests matched all 64 reference IDs
+with zero reuse and 41 of 42 proposals accepted in 22 rounds. Prefill
+reached 696.67 tok/s first and 641.30 warm. The same loaded worker
+restored 4,096 positions on exact text continuations. Both image
+outputs matched with zero drafting and reuse. Invalid and cancelled
+image requests cleared text reuse and recovered. Thermal state
+remained nominal.
+
+Adopt the FFN device views as a typed opt-in. The default keeps
+the existing FFN projection policy. The streamed harness SHA-256
+is `7cf80cf96f6e184aed5f2d7eab424c24818565716a8aea2548ab3c0e8f7c46f1`.
+
+The typed source diff on `85a74c59c`, Rust 1.98.1 release worker and
+lifecycle harness have SHA-256
+`dd4ffdf4b3be2b99f34c4e5e4d75feb41803c440982b1c56f373d36ba3489880`,
+`f07cfb136cae960ac1e354ceb1610f26177bffacfbd3487ac418544670c3c7b8`,
+and `64f20d7c0ccbc2fe83057223003a27b8e3f32e0c460e27bf248e2c95495cc49e`.
+
+| Qualification receipt | SHA-256 |
+| --- | --- |
+| Invalid value | `dc66ec2d92ccdd70a479cd4552aa8617c31e70315d02058b8bd6388090bf5d3c` |
+| Missing shared device views | `06f8c56385407a0ea420b00d5a51a131af426ab3adbf0061a58d92910eaeb7e2` |
+| Interrupted before readiness | `adce0e5ddb1268f116d89da7dd5e54f4b8b35348460f9ef06c5100065550ba9d` |
+| Stale source receipt refusal | `a11fb1497c2b4a5554734e94ad1f69c8dc3527d3feca8abf14834f56f4362e0d` |
+| Resident pressure stop | `e29fd466e017c00ba1f4f62b5c66412735554cac00ad97b28765940c07537217` |
+| Streamed 4K and lifecycle | `112ed826f5ad1b6eea7c1a850de7fb2e37e496f7adbd5381a3f8ea6c5016b4db` |

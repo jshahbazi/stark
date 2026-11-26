@@ -636,3 +636,26 @@ The executable and harness are bound in
 SHA-256 `a19d6446458f4c0923c3747de6a7bfcbb1ea2cde675585f65c34fc2c1a1267b0`.
 The shell wrapper hit the same post-run status-variable error as
 HY4NEXTN-13. The receipt contains all four results and passed.
+
+## 20261126-HY4NEXTN-15 · Price mapped verifier host work
+
+Recomputed the budget from the existing peak receipts in
+HY4NEXTN-09, HY4NEXTN-10 and HY4NEXTN-14. Each request produced
+191 useful outputs and had zero target host cuts. The unclassified
+time subtracts Metal encoding, commit, completion waits and Engram
+from target verification wall time. It includes construction and
+barrier pruning of the dispatch list.
+
+| Workload | Rounds | Dispatches | Metal encode ms | Unclassified ms | Wall time to recover ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Short K3 code at 68.58 tok/s | 62 | 120,826 | 45.35 | 21.37 | 56.40 |
+| 16K K2 at 46.36 tok/s | 79 | 159,383 | 63.42 | 26.53 | 259.03 |
+| 32K K3 at 44.51 tok/s | 65 | 131,353 | 57.17 | 24.50 | 259.36 |
+
+The controlled short-code cadence runs need about 105 ms and spent
+48–51 ms encoding. Descriptor reuse would recover a fraction of these
+host budgets. The existing ICB experiment also assumes direct grids
+and rejects inline arguments. The mapped route plan produces indirect
+grids and the verifier carries inline arguments. Defer descriptor and
+ICB work as a primary speed lever. This analysis uses the existing
+receipts and adds no new throughput samples.

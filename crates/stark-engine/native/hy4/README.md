@@ -29,3 +29,5 @@ Q8_0 matrix multiply for eligible cache projections. The kernel stages weights a
 accumulates in F32. Cache windows of up to eight rows use GEMV. [Packed cache qualification](../../../../docs/model-experiments/2026-11-25-hy4-decode-cache-construction.md#qualify-the-packed-cache-in-the-rebuilt-worker)
 
 The optional dense device views pack the attention gate and output projection operands into contiguous 64-element K slabs. The Metal tensor products keep their F16 inputs, F32 accumulation order and scratch allocation. [Dense layout qualification](../../../../docs/model-experiments/2026-11-25-hy4-grouped-fragments.md#qualify-the-rebuilt-dense-layout)
+
+Set `STARK_HY4_PREFILL_DENSE_FFN_DEVICE_VIEWS=1` together with `STARK_HY4_PREFILL_DENSE_DEVICE_VIEWS=1` to use the same workspace and kernels for aligned trunk Q8_0 FFN projections on text prefill chunks of at least 512 rows. This option uses F16 operands with F32 accumulation. Shapes that exceed the existing workspace use the original projection. The worker reports the setting as `prefill_dense_ffn_device_views_requested`.

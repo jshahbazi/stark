@@ -77,7 +77,8 @@ struct Prefill {
     bool routed_half = false;       ///< Stage grouped expert GEMM operands as F16, keeping F32 accumulation
     bool routed_fragments = false;  ///< Use gathered F16 tensor fragments for packed grouped experts
     bool dense_packed = false;      ///< Read packed Q8_0 attention projections into prefill tensor fragments
-    bool dense_device_views = false; ///< Expand gate/output operands once for direct F16 tensor views
+    bool dense_device_views = false; ///< Expand attention gate/output operands once for direct F16 tensor views
+    bool dense_ffn_device_views = false; ///< Also use direct F16 tensor views for eligible trunk FFN projections
     bool tensor_mla = false;        ///< Use multi-query tensor attention for contiguous prefill ranges
     bool grouped_k_quant = false;   ///< Q3_K/Q4_K gate/up with Q4_K down, on Metal 4
     /// A WRONG DECISION, ON PURPOSE, IN THE PREFILL PATH ONLY (HY4_FLASH_PREFILL_PROBE), so that

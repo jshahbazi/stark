@@ -287,6 +287,7 @@ struct Forward::Impl {
     mtl::Pipeline attn_pf_range, attn_pf_sel;   // the prefill MMA attention (hy4_flash_attn_pf.metal), prompt chunks only
     mtl::Pipeline attn_pf_tensor;
     mtl::Pipeline p_dense_pack, p_dense_device;
+    bool dense_ffn_device_views = false;
     bool pf_mma_ok = false, pf_mma_idx_ok = false;
     std::map<std::array<uint64_t, 4>, DenseGemvF32> gemv_;
     std::map<std::array<uint64_t, 6>, DenseGemvF32> gemvh_;   // per-head weights, one dispatch for all heads
@@ -462,17 +463,22 @@ struct Forward::Impl {
         for (size_t i = 1; i < t->shape.size(); ++i) rows *= t->shape[i];
         return gv(t->type, n_in, (uint32_t) rows, attention);
     }
-    void append_attention_gate_or_output(std::vector<mtl::Dispatch>& ds, const gguf::Tensor* w,
-                                         const mtl::Buffer& input, uint32_t n_in, const mtl::Buffer& output,
-                                         uint32_t n_out, uint32_t n_tok) {
-        if (!pf.dense_device_views || n_tok < 512 || w->type != ref::Q8_0 || n_in % 64 || n_out % 64) {
-            gv(w, true).append(ds, m->dense, w->offset, input, n_in, output, n_out, 0, n_tok);
+    void append_dense_projection(std::vector<mtl::Dispatch>& ds, const gguf::Tensor* w,
+                                 const mtl::Buffer& input, uint32_t n_in, const mtl::Buffer& output,
+                                 uint32_t n_out, uint32_t n_tok, bool attention) {
+        const bool device_view_requested = attention || (dense_ffn_device_views && !images());
+        if (!pf.dense_device_views || !device_view_requested || n_tok < 512 || w->type != ref::Q8_0 ||
+            n_in % 64 || n_out % 64) {
+            gv(w, attention).append(ds, m->dense, w->offset, input, n_in, output, n_out, 0, n_tok);
             return;
         }
         const size_t weight_bytes = sizeof(uint16_t) * size_t(n_in) * n_out;
         const size_t input_bytes = sizeof(uint16_t) * size_t(n_in) * n_tok;
-        if (weight_bytes + input_bytes > dense_device_scratch.bytes)
-            throw std::runtime_error("Hy4 dense device view scratch is too small");
+        if (weight_bytes > dense_device_scratch.bytes || input_bytes > dense_device_scratch.bytes - weight_bytes) {
+            if (attention) throw std::runtime_error("Hy4 dense device view scratch is too small");
+            gv(w).append(ds, m->dense, w->offset, input, n_in, output, n_out, 0, n_tok);
+            return;
+        }
         MmArgs args{n_in, n_out, n_tok, (uint32_t) ref::row_bytes(w->type, (int) n_in), n_in, n_out};
         mtl::Dispatch d;
         d.p = &p_dense_pack;
@@ -652,6 +658,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
         return "packed expert fragments need the grouped F16 Metal 4 prefill path";
     if (pf.dense_packed && !c.supports_metal4()) return "packed attention prefill needs Metal 4";
     if (pf.dense_device_views && !pf.dense_packed) return "dense device views need packed prefill";
+    if (pf.dense_ffn_device_views && !pf.dense_device_views) return "FFN device views need dense device views";
     if (pf.tensor_mla && !c.supports_metal4()) return "tensor MLA prefill needs Metal 4";
     // The sub-batch sizes are clamped to [kMaxWindow, tcap]: a decode window must fit in ONE sub-batch of each
     // stage, or the "prefill is bitwise decode" claim would rest on a path decode never takes.
@@ -705,6 +712,8 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
         return "attention.key_length (" + std::to_string(kv_w) + ") is not kv_lora_rank + rope_dim";
 
     mut = Mut::from_env();
+    dense_ffn_device_views = pf.dense_ffn_device_views && mut.none && pf.probe == 0 &&
+                             prefill_mm_enabled() && !prefill_mm_half() && !MmRange::get().on();
     if (!mut.none && mut.name[0] == '?')
         return "HY4_FLASH_MUT=" + mut.name.substr(1) + " is not one of the third gate's mutations (plan P0.3 §6: "
                "no_sinks, rope_theta, engram_delta2, router_biased, clamp7, no_ape, no_tail, pool_rope_last, "
@@ -1479,7 +1488,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         GemvHeads{(uint32_t) vb_head, (uint32_t) kv_lora, (uint32_t) v_mla})
         .append_heads(ds, m->dense, vb->offset, attn_o, H * (uint32_t) kv_lora, kqv, H * (uint32_t) v_mla, 0, uT, H);
     const gguf::Tensor* ag = b.t[W_AGATE];
-    append_attention_gate_or_output(ds, ag, anorm, (uint32_t) n_embd, gproj, H * (uint32_t) v_mla, uT);
+    append_dense_projection(ds, ag, anorm, (uint32_t) n_embd, gproj, H * (uint32_t) v_mla, uT, true);
     stage(tm.pf_attention_misc_ms);
     {
         ElemArgs a{H * (uint32_t) v_mla, H * (uint32_t) v_mla, H * (uint32_t) v_mla, H * (uint32_t) v_mla};
@@ -1488,7 +1497,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     }
     stage(tm.pf_attention_dense_ms);
     const gguf::Tensor* ao = b.t[W_AOUT];
-    append_attention_gate_or_output(ds, ao, gated, H * (uint32_t) v_mla, attn_y, (uint32_t) n_embd, uT);
+    append_dense_projection(ds, ao, gated, H * (uint32_t) v_mla, attn_y, (uint32_t) n_embd, uT, true);
     stage(tm.pf_attention_misc_ms);
     rms(ds, attn_y, 0, (uint32_t) n_embd, b.t[W_POST_ATTN], attn_out, 0, (uint32_t) n_embd, (uint32_t) n_embd, T,
         eps);
@@ -1503,10 +1512,10 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         const gguf::Tensor* wg = b.t[W_FGATE];
         const gguf::Tensor* wu = b.t[W_FUP];
         const gguf::Tensor* wd = b.t[W_FDOWN];
-        gv(wg).append(ds, m->dense, wg->offset, fnorm, (uint32_t) n_embd, dg, (uint32_t) m->geo.dense_ff, 0, uT);
-        gv(wu).append(ds, m->dense, wu->offset, fnorm, (uint32_t) n_embd, du, (uint32_t) m->geo.dense_ff, 0, uT);
+        append_dense_projection(ds, wg, fnorm, (uint32_t) n_embd, dg, (uint32_t) m->geo.dense_ff, uT, false);
+        append_dense_projection(ds, wu, fnorm, (uint32_t) n_embd, du, (uint32_t) m->geo.dense_ff, uT, false);
         glu(ds, dg, du, da, (uint32_t) m->geo.dense_ff, T, INFINITY);   // the dense FFN does NOT clamp
-        gv(wd).append(ds, m->dense, wd->offset, da, (uint32_t) m->geo.dense_ff, ffn_sum, (uint32_t) n_embd, 0, uT);
+        append_dense_projection(ds, wd, da, (uint32_t) m->geo.dense_ff, ffn_sum, (uint32_t) n_embd, uT, false);
         ffn_result = &ffn_sum;
     } else {
         stage(tm.pf_moe_route_ms);
@@ -1570,15 +1579,15 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         const gguf::Tensor* su = b.t[W_SH_U];
         const gguf::Tensor* sd = b.t[W_SH_D];
         auto shared_expert = [&] {
-            gv(sg).append(ds, m->dense, sg->offset, fnorm, (uint32_t) n_embd, shg, (uint32_t) expert_ff, 0, uT);
-            gv(su).append(ds, m->dense, su->offset, fnorm, (uint32_t) n_embd, shu, (uint32_t) expert_ff, 0, uT);
+            append_dense_projection(ds, sg, fnorm, (uint32_t) n_embd, shg, (uint32_t) expert_ff, uT, false);
+            append_dense_projection(ds, su, fnorm, (uint32_t) n_embd, shu, (uint32_t) expert_ff, uT, false);
             glu(ds, shg, shu, sha, (uint32_t) expert_ff, T, INFINITY);
-            gv(sd).append(ds, m->dense, sd->offset, sha, (uint32_t) expert_ff, sho, (uint32_t) n_embd, 0, uT);
+            append_dense_projection(ds, sd, sha, (uint32_t) expert_ff, sho, (uint32_t) n_embd, uT, false);
         };
         const bool early = shared_early();
         if (early) shared_expert();
         const gguf::Tensor* rd = b.t[W_RDOWN];
-        gv(rd).append(ds, m->dense, rd->offset, fnorm, (uint32_t) n_embd, rdown, (uint32_t) latent, 0, uT);
+        append_dense_projection(ds, rd, fnorm, (uint32_t) n_embd, rdown, (uint32_t) latent, uT, false);
         if (!gpu_plan) cut_wait.push_back(early ? (int) ds.size() : cuts.back());
         const ExpertSlices& es = m->experts[(size_t) b.ordinal];
         const MoeF32& mo = moe(es.type[kGate], es.type[kDown]);
@@ -1739,7 +1748,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
 
         stage(tm.pf_dense_ms);
         const gguf::Tensor* ru = b.t[W_RUP];
-        gv(ru).append(ds, m->dense, ru->offset, mlat, (uint32_t) latent, upo, (uint32_t) n_embd, 0, uT);
+        append_dense_projection(ds, ru, mlat, (uint32_t) latent, upo, (uint32_t) n_embd, uT, false);
         if (!early) shared_expert();   // HY4_FLASH_SHARED_EARLY=0: after the routed experts, inside the wait
         {
             ElemArgs a{(uint32_t) n_embd, (uint32_t) n_embd, (uint32_t) n_embd, (uint32_t) n_embd};

@@ -56,6 +56,29 @@ available at [`636aa42d70917473b9294b0812ab4ba94396a2b5`](https://github.com/jsh
 The native path uses AngelSlim Hy4-flash Q3_K at `c50d4dd30be42f2b91138e5731de0e2f32ad56b2`,
 with its BF16 projector, on an M5 Max with 128 GiB. The external comparison timed the patched llama.cpp server and the Stark worker at their respective phase boundaries.
 
+### November 26 performance checkpoint
+
+The publisher's WorkBuddy figures are the numerical targets. The
+original prompts and scoring protocol are unavailable. Stark's local
+fixtures fix the input and output counts, require exact output IDs
+and disable prefix reuse for timing. Each rate is bound to the
+specific build and conditions in its record.
+
+| Workload | Target tok/s | Local peak tok/s | Evidence |
+| --- | ---: | ---: | --- |
+| 4K K2 decode | 50.34 | 58.28 | [Qualified Q5_0 NextN worker](2026-11-25-hy4-decode-cache-construction.md#qualify-the-typed-q5-option) |
+| 16K K2 decode | 49.47 | 46.36 | [Rebuilt packed draft cache](2026-11-25-hy4-decode-cache-construction.md#20261126-hy4nextn-09--check-one-draft-on-the-rebuilt-16k-worker) |
+| 32K K3 decode | 47.37 | 44.51 | [Peak in the diagnostic depth bracket](2026-11-25-hy4-decode-cache-construction.md#20261126-hy4nextn-14--recheck-three-drafts-with-the-rebuilt-32k-worker) |
+| 4K prefill | 743.20 | 696.67 | [Rebuilt FFN device-view option](2026-11-25-hy4-grouped-fragments.md#qualify-the-typed-ffn-option) |
+| Short TypeScript K3 decode | 70.00 | 68.58 | [Peak in the diagnostic draft-head bracket](2026-11-25-hy4-decode-cache-construction.md#20261126-hy4nextn-10--price-q5_0-for-the-draft-vocabulary) |
+
+The rebuilt attention-only K64 layout separately reached 658.59 tok/s
+at 4K prefill. The qualified Q5_0 head reached 67.73 tok/s warm median
+on short TypeScript against 64.58 with Q8_0. The 32K bracket
+retained the K2 recommendation.
+
+### Experiment history
+
 | Attempt | Scoped result | Decision and limits | Source |
 | --- | --- | --- | --- |
 | Patched llama.cpp Metal with BF16 projector | Matched 4K fixture measured 7.047–7.344 s prefill and 1.692–1.721 s decode with drafting off. Depth two measured 7.332–7.428 s prefill and 1.012–1.049 s decode, with 41/42 proposals accepted. | Two diagnostic attempts per depth, same exact greedy IDs. | [Pinned reference](2026-11-25-hy4-native-q3-k.md) |
@@ -109,6 +132,8 @@ with its BF16 projector, on an M5 Max with 128 GiB. The external comparison time
 | Same-loaded Q5_0 short-code cadence | Five- and ten-second pauses reached 67.38 and 67.42 tok/s median over two requests each. All outputs and draft counts matched. | Keep request cadence fixed in comparisons. | [HY4NEXTN-13](2026-11-25-hy4-decode-cache-construction.md#20261126-hy4nextn-13--compare-short-code-request-cadence) |
 | Q5_0 K2 versus K3 at 32K with packed cache | K3 reached 44.51 and 43.19 tok/s in 65 rounds. The closing K2 request reached 43.33 in 78 rounds. All outputs matched. | Keep K2 for long requests. | [HY4NEXTN-14](2026-11-25-hy4-decode-cache-construction.md#20261126-hy4nextn-14--recheck-three-drafts-with-the-rebuilt-32k-worker) |
 | K64 staging for F32 dense FFN products | The 4K candidate matched all outputs and first use reached 638 tok/s against 583 and 611. Warm rates crossed. Separate FFN attribution showed 0.771/0.881 s against 0.709/0.762 s. | Keep the K32 staging. | [HY4FRAG-31](2026-11-25-hy4-grouped-fragments.md#20261126-hy4frag-31--stage-dense-ffn-inputs-in-k64-blocks) |
+| K64 device views for dense FFN | First-use prefill reached 670.19–693.02 tok/s and warm reached 637.12–649.78. The FFN stage fell from 0.792/0.971 to 0.370/0.362 s. All fixed outputs and 13 natural decisions matched. | Adopt the typed opt-in. The rebuilt streamed worker reached 696.67 tok/s and passed image and prefix lifecycle checks. The first resident trial hit the pressure guard. | [HY4FRAG-32](2026-11-25-hy4-grouped-fragments.md#20261126-hy4frag-32--reuse-dense-device-views-for-ffn) |
+| Mapped verifier host budget | Peak Metal encode and unclassified time total 90 ms at 16K and 82 ms at 32K. Both target gaps are about 259 ms. | Defer descriptor and ICB reuse as a primary lever. | [HY4NEXTN-15](2026-11-25-hy4-decode-cache-construction.md#20261126-hy4nextn-15--price-mapped-verifier-host-work) |
 
 ## Decision models and scoring
 

@@ -94,7 +94,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
                                int storage, int grouped, int gpu_plan, int profile_prefill, uint64_t arena_bytes_requested,
                                int demand_retention, int routed_half, int dense_packed, int resident_token_embeddings,
                                int tensor_mla, int max_drafts, int routed_fragments, int dense_device_views,
-                               int resident_draft_experts, int draft_head_q5,
+                               int dense_ffn_device_views, int resident_draft_experts, int draft_head_q5,
                                uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
                                StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
                                uint64_t* arena_bytes, int* actual_draft_head_q5) noexcept {
@@ -104,6 +104,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
             storage < 0 || storage > 3 ||
             ((arena_bytes_requested || demand_retention) && storage != 1) ||
             (draft_head_q5 != 0 && draft_head_q5 != 1) ||
+            (dense_ffn_device_views != 0 && dense_ffn_device_views != 1) ||
             max_drafts < kRecommendedDrafts || max_drafts > kMaxDrafts) return 1;
         auto session = std::make_unique<StarkHy4>();
         auto& s = *session;
@@ -158,6 +159,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         prefill.routed_fragments = routed_fragments != 0;
         prefill.dense_packed = dense_packed != 0;
         prefill.dense_device_views = dense_device_views != 0;
+        prefill.dense_ffn_device_views = dense_ffn_device_views != 0;
         prefill.tensor_mla = tensor_mla != 0;
         if (!s.forward.open(s.model, s.metal, pack, prefill).empty()) return 4;
         const bool resident_nextn = resident_draft_experts != 0;
