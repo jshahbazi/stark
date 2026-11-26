@@ -236,7 +236,7 @@ Omitting both fields preserves the MTP preference.
 
 ## Function tools
 
-`/v1/capabilities` reports `tool_calling`, `tool_parser` and `tool_choices` for the running model. Tool support means that the loaded chat template has an implemented, tested wire-format parser. Stark recognizes the reviewed originals below by source SHA-256 and also accepts syntax-equivalent Jinja programs, independently of the model name or saved installation metadata:
+`/v1/capabilities` reports `tool_calling`, `tool_parser` and `tool_choices` for the running model. Tool support means that the loaded chat template has an implemented, tested wire-format parser. Stark recognizes the reviewed originals below by source SHA-256 and accepts syntax-equivalent Jinja programs where registered. The native Hy4 template requires an exact source hash.
 
 | Parser | Supported template sources | Template SHA-256 |
 | --- | --- | --- |
@@ -247,6 +247,7 @@ Omitting both fields preserves the MTP preference.
 | `qwen35-xml-v1` | `alibiserikbay/JevK5`, revision `c4f7fdb3aeab5582336406e78d3bef11bf98833d` | `a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715` |
 | `glm53-xml-v1` | `zai-org/GLM-5.3-Flash`, revision `04c4e9e95c5da8862dced7e5056455116f83a7e0`, used by native preparation | `34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891` |
 | `glm53-xml-v1` | `RecursiveSI/flint-int4`, revision `3b93f9053b530488405ae9fca51d4900d6ce21f0` | `7940f4ffa3275c36caa4a582f845aaad79da11018b3961e8fbcad6ae29733466` |
+| `hy4-flash-xml-v1` | `tencent/Hy4-flash`, revision `eccd3123eec73f2040f4c9ed0de1883593470510`, used by the pinned native AngelSlim Q3_K artifact | `11b12531403da5726b7e1f6003f479043b05999e6746d39af949cbcdfd715c35` |
 
 Additional reviewed sources use the protocols below. Full pinned revisions,
 original and normalized hashes, program fingerprints and licenses are in the

@@ -44,7 +44,10 @@ _PARSER = "qwen3-hermes-v1"
 _XML_PARSER = "qwen38-xml-v1"
 _QWEN35_XML_PARSER = "qwen35-xml-v1"
 _GLM_PARSER = "glm53-xml-v1"
-_XML_PARSERS = frozenset({_XML_PARSER, _QWEN35_XML_PARSER, _GLM_PARSER})
+HY4_TOOL_PARSER = "hy4-flash-xml-v1"
+HY4_REASONING_TAGS = ("<think:opensource>", "</think:opensource>")
+_KEY_VALUE_PARSERS = frozenset({_GLM_PARSER, HY4_TOOL_PARSER})
+_XML_PARSERS = frozenset({_XML_PARSER, _QWEN35_XML_PARSER, *_KEY_VALUE_PARSERS})
 _HERMES_PARSERS = frozenset({_PARSER, "smollm3-hermes-v1"})
 TOOL_PARSERS = frozenset({*_HERMES_PARSERS, *_XML_PARSERS, *FORMATS, INKLING_PARSER})
 # Official Qwen/Qwen3-0.6B tokenizer_config.json chat_template at revision
@@ -73,6 +76,9 @@ QWEN38_OFFICIAL_TEMPLATE_SHA256 = "61c5db6e90356e85fb2ccfd0466fddf3b2a5c6058b20b
 QWEN35_XML_TEMPLATE_SHA256 = "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
 GLM53_TEMPLATE_SHA256 = "34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891"
 FLINT_TEMPLATE_SHA256 = "7940f4ffa3275c36caa4a582f845aaad79da11018b3961e8fbcad6ae29733466"
+# Tencent/Hy4-flash chat_template.jinja at eccd3123eec73f2040f4c9ed0de1883593470510,
+# used by the pinned native AngelSlim Q3_K artifact.
+HY4_TEMPLATE_SHA256 = "11b12531403da5726b7e1f6003f479043b05999e6746d39af949cbcdfd715c35"
 # Version-1 Jinja AST fingerprints of the hash-verified sources above.
 # They admit only syntax-equivalent programs, independently of model metadata.
 _SUPPORTED_TEMPLATE_PROGRAMS = {
@@ -110,6 +116,9 @@ _XML_RESERVED = (
     "<think",
     "</think",
 )
+_KEY_VALUE_MARKERS = ("<arg_key", "</arg_key", "<arg_value", "</arg_value")
+_HY4_TOOL_OPEN = "<tool_calls:opensource>"
+_HY4_TOOL_CLOSE = "</tool_calls:opensource>"
 # Fixed categories for rejected generated calls, safe to show clients. They
 # never include generated text, tool names, argument names or values.
 _INVALID_CALL_REASONS = {
@@ -394,6 +403,8 @@ def tool_parser_for(codec: dict | None) -> str | None:
         return _QWEN35_XML_PARSER
     if digest in {GLM53_TEMPLATE_SHA256, FLINT_TEMPLATE_SHA256}:
         return _GLM_PARSER
+    if digest == HY4_TEMPLATE_SHA256:
+        return HY4_TOOL_PARSER
     program = template_program_sha256(source)
     return _SUPPORTED_TEMPLATE_PROGRAMS.get(program) or TEMPLATE_PROGRAMS.get(program)
 
@@ -589,27 +600,28 @@ def validate_parser_tools(tools: list[dict], parser: str | None) -> None:
                 )
 
 
-def _tool_prefix_safe(prefix, *, initial_thinking=False):
+def _tool_prefix_safe(prefix, *, initial_thinking=False, reasoning_tags=("<think>", "</think>")):
+    opening_tag, closing_tag = reasoning_tags
     if initial_thinking:
         # The trusted renderer may have opened this block in the input prompt.
         # Generated text must close it before an executable call can begin.
-        prefix = "<think>" + prefix
+        prefix = opening_tag + prefix
     visible = []
     cursor = 0
     while cursor < len(prefix):
-        opening = prefix.find("<think>", cursor)
-        closing = prefix.find("</think>", cursor)
+        opening = prefix.find(opening_tag, cursor)
+        closing = prefix.find(closing_tag, cursor)
         if opening < 0:
             visible.append(prefix[cursor:])
             break
         if 0 <= closing < opening:
             return False
         visible.append(prefix[cursor:opening])
-        closing = prefix.find("</think>", opening + len("<think>"))
-        nested = prefix.find("<think", opening + len("<think>"))
+        closing = prefix.find(closing_tag, opening + len(opening_tag))
+        nested = prefix.find("<think", opening + len(opening_tag))
         if closing < 0 or (nested >= 0 and nested < closing):
             return False
-        cursor = closing + len("</think>")
+        cursor = closing + len(closing_tag)
     prefix = "".join(visible)
     if any(marker in prefix for marker in ("```", "~~~", "<!--", "<think", "</think")):
         return False
@@ -663,14 +675,12 @@ def _tool_prefix_safe(prefix, *, initial_thinking=False):
 
 
 def _xml_parameter_value(body, types, invalid, parser):
-    reserved = _XML_RESERVED + (
-        ("<arg_key", "</arg_key", "<arg_value", "</arg_value") if parser == _GLM_PARSER else ()
-    )
+    reserved = _XML_RESERVED + (_KEY_VALUE_MARKERS if parser in _KEY_VALUE_PARSERS else ())
     if any(marker in body for marker in reserved):
         raise invalid("format")
     # The Qwen renderers add exactly one LF before and after each value.
     # Inline values are also lossless; a half frame cannot be repaired safely.
-    if parser != _GLM_PARSER and (body.startswith("\n") or body.endswith("\n")):
+    if parser not in _KEY_VALUE_PARSERS and (body.startswith("\n") or body.endswith("\n")):
         if len(body) < 2 or not (body.startswith("\n") and body.endswith("\n")):
             raise invalid("format")
         body = body[1:-1]
@@ -797,17 +807,28 @@ def _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
     return {"role": "assistant", "content": text[:start].rstrip() or None, "tool_calls": calls}, "tool_calls"
 
 
-def _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid):
-    """Decode the pinned GLM arg-key/value grammar without repairing output."""
+def _parse_key_value_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid, parser):
+    """Decode the pinned GLM and Hy4 arg-key/value frames."""
     schemas = _xml_tool_schemas(tools)
+    suffix = ":opensource" if parser == HY4_TOOL_PARSER else ""
+    call_open, call_close = f"<tool_call{suffix}>", f"</tool_call{suffix}>"
+    key_open, key_close = f"<arg_key{suffix}>", f"</arg_key{suffix}>"
+    value_open, value_close = f"<arg_value{suffix}>", f"</arg_value{suffix}>"
     calls = []
-    cursor = start
+    cursor = start if parser == _GLM_PARSER else start + len(_HY4_TOOL_OPEN)
+    if parser == HY4_TOOL_PARSER:
+        text = text.rstrip()
+        if not text.startswith(_HY4_TOOL_OPEN, start) or not text.endswith(_HY4_TOOL_CLOSE):
+            raise invalid("format")
+        text = text[: -len(_HY4_TOOL_CLOSE)].rstrip()
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
     while cursor < len(text):
         if len(calls) >= MAX_CALLS:
             raise invalid("count")
-        if not text.startswith("<tool_call>", cursor):
+        if not text.startswith(call_open, cursor):
             raise invalid("trailing" if calls else "format")
-        cursor += len("<tool_call>")
+        cursor += len(call_open)
         end = text.find("<", cursor, cursor + 66)
         if end < 0:
             raise invalid("format")
@@ -819,21 +840,21 @@ def _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
         cursor = end
         arguments = {}
         argument_bytes = 0
-        while text.startswith("<arg_key>", cursor):
-            cursor += len("<arg_key>")
-            end = text.find("</arg_key>", cursor, cursor + 65 + len("</arg_key>"))
+        while text.startswith(key_open, cursor):
+            cursor += len(key_open)
+            end = text.find(key_close, cursor, cursor + 65 + len(key_close))
             if end < 0:
                 raise invalid("format")
             parameter = text[cursor:end]
             if not _NAME.fullmatch(parameter) or parameter not in schemas[name] or parameter in arguments:
                 raise invalid("argument")
-            cursor = end + len("</arg_key>")
-            if not text.startswith("<arg_value>", cursor):
+            cursor = end + len(key_close)
+            if not text.startswith(value_open, cursor):
                 raise invalid("format")
-            cursor += len("<arg_value>")
-            end = text.find("</arg_value>", cursor, cursor + MAX_ARGUMENT_BYTES + len("</arg_value>") + 1)
+            cursor += len(value_open)
+            end = text.find(value_close, cursor, cursor + MAX_ARGUMENT_BYTES + len(value_close) + 1)
             if end < 0:
-                raise invalid("limits" if text.find("</arg_value>", cursor) >= 0 else "format")
+                raise invalid("limits" if text.find(value_close, cursor) >= 0 else "format")
             body = text[cursor:end]
             argument_bytes += len(parameter.encode("utf-8")) + len(body.encode("utf-8"))
             if argument_bytes > MAX_ARGUMENT_BYTES:
@@ -846,14 +867,14 @@ def _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
                     "tool_argument_type_unsupported",
                 )
             try:
-                arguments[parameter] = _xml_parameter_value(body, schemas[name][parameter], invalid, _GLM_PARSER)
+                arguments[parameter] = _xml_parameter_value(body, schemas[name][parameter], invalid, parser)
                 bounded_json(arguments, MAX_ARGUMENT_BYTES, label="Function arguments")
             except APIError as error:
                 if error.code in {"invalid_tool_call", "tool_argument_type_unsupported"}:
                     raise
                 raise invalid("limits") from None
-            cursor = end + len("</arg_value>")
-        if not text.startswith("</tool_call>", cursor):
+            cursor = end + len(value_close)
+        if not text.startswith(call_close, cursor):
             raise invalid("format")
         calls.append(
             {
@@ -865,9 +886,11 @@ def _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
                 },
             }
         )
-        cursor += len("</tool_call>")
+        cursor += len(call_close)
         while cursor < len(text) and text[cursor].isspace():
             cursor += 1
+    if not calls:
+        raise invalid("format")
     if not parallel_tool_calls and len(calls) != 1:
         raise invalid("count")
     return {"role": "assistant", "content": text[:start].rstrip() or None, "tool_calls": calls}, "tool_calls"
@@ -1033,6 +1056,8 @@ class ToolTextStream:
     def __init__(self, deliver, *, parser=None):
         self.deliver = deliver
         self._markers = TOOL_MARKERS if parser in FORMATS else self._markers
+        if parser == HY4_TOOL_PARSER:
+            self._markers += _KEY_VALUE_MARKERS
         self._bare_pending = parser in {"llama-json-v1", "phi4-json-v1"}
         self._bare_prefix = "{" if parser == "llama-json-v1" else "["
         self.tail = ""
@@ -1201,9 +1226,7 @@ def parse_tool_output(
 
     start = text.find("<tool_call")
     if start < 0 and "</tool_call" not in text:
-        if parser == _GLM_PARSER and any(
-            marker in text for marker in ("<arg_key", "</arg_key", "<arg_value", "</arg_value")
-        ):
+        if parser in _KEY_VALUE_PARSERS and any(marker in text for marker in _KEY_VALUE_MARKERS):
             raise invalid("markup")
         if parser in _XML_PARSERS and any(
             marker in text for marker in ("<function", "</function", "<parameter", "</parameter")
@@ -1221,17 +1244,16 @@ def parse_tool_output(
         raise ValueError("Invalid private tool-call ID prefix")
     if start < 0 or "</tool_call" in text[:start]:
         raise invalid("markup")
-    if parser == _GLM_PARSER and any(
-        marker in text[:start] for marker in ("<arg_key", "</arg_key", "<arg_value", "</arg_value")
-    ):
+    if parser in _KEY_VALUE_PARSERS and any(marker in text[:start] for marker in _KEY_VALUE_MARKERS):
         raise invalid("markup")
-    if not _tool_prefix_safe(text[:start], initial_thinking=initial_thinking):
+    reasoning_tags = {"reasoning_tags": HY4_REASONING_TAGS} if parser == HY4_TOOL_PARSER else {}
+    if not _tool_prefix_safe(text[:start], initial_thinking=initial_thinking, **reasoning_tags):
         raise invalid("prefix")
     names = {tool["function"]["name"] for tool in tools}
     if isinstance(tool_choice, dict):
         names &= {tool_choice["function"]["name"]}
-    if parser == _GLM_PARSER:
-        return _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid)
+    if parser in _KEY_VALUE_PARSERS:
+        return _parse_key_value_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid, parser)
     if parser in _XML_PARSERS:
         return _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid, parser)
     calls = []

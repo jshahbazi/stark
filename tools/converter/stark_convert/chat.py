@@ -25,7 +25,7 @@ from .inkling_chat import PARSER as INKLING_PARSER
 from .inkling_chat import parse_response as parse_inkling_response
 from .media import MAX_IMAGE_BYTES, ImageData, MediaError, PrivateMediaStore
 from .mtp import default_mtp_enabled, mtp_capabilities, resolve_mtp
-from .reasoning import assistant_message, prompt_opens_reasoning, reasoning_options
+from .reasoning import assistant_message, prompt_opens_reasoning, reasoning_options, reasoning_tags
 from .resource_budget import REQUEST_BUDGET_MIB, WIRE_BYTES
 from .template_runtime import (
     SYSTEM_ROLE_FOLD,
@@ -1205,11 +1205,15 @@ def run_chat(args, worker):
                 print(str(error))
                 continue
             raise
-        if tool_parser_for(codec) == INKLING_PARSER:
+        parser = tool_parser_for(codec)
+        if parser == INKLING_PARSER:
             assistant, _, _ = parse_inkling_response(reply["text"])
             displayed = assistant["content"]
         else:
-            assistant = assistant_message(reply["text"], initial_thinking=prompt_opens_reasoning(prompt))
+            tags = reasoning_tags(parser)
+            assistant = assistant_message(
+                reply["text"], initial_thinking=prompt_opens_reasoning(prompt, tags=tags), tags=tags
+            )
             displayed = reply["text"]
         print("Stark> " + terminal_text(displayed) + "\n")
         messages = [*candidate, assistant]
