@@ -119,6 +119,7 @@ pub struct Options {
     pub dense_device_views: bool,
     pub resident_token_embeddings: bool,
     pub resident_draft_experts: bool,
+    pub draft_head_q5: bool,
     pub tensor_mla: bool,
     pub max_drafts: usize,
     pub context_limit: Option<u32>,
@@ -204,12 +205,14 @@ unsafe extern "C" {
         routed_fragments: c_int,
         dense_device_views: c_int,
         resident_draft_experts: c_int,
+        draft_head_q5: c_int,
         select_context: unsafe extern "C" fn(*const ContextMemory, *mut c_void) -> u32,
         sizing: *mut c_void,
         session: *mut *mut c_void,
         vision: *mut VisionGeometry,
         mapped: *mut c_int,
         arena_bytes: *mut u64,
+        actual_draft_head_q5: *mut c_int,
     ) -> c_int;
     fn stark_hy4_close(session: *mut c_void);
     fn stark_hy4_clear(session: *mut c_void);
@@ -249,6 +252,7 @@ pub struct Session {
     inner: NonNull<c_void>,
     vision: VisionGeometry,
     mapped_experts: bool,
+    draft_head_q5: bool,
     arena_bytes: u64,
     sizing: ContextSizing,
     max_drafts: usize,
@@ -278,6 +282,7 @@ impl Session {
         let mut vision = VisionGeometry::default();
         let mut mapped = 0;
         let mut arena_bytes = 0;
+        let mut actual_draft_head_q5 = 0;
         let mut selection = ContextSelection {
             limit: options.context_limit,
             sizing: None,
@@ -304,12 +309,14 @@ impl Session {
                 c_int::from(options.routed_fragments),
                 c_int::from(options.dense_device_views),
                 c_int::from(options.resident_draft_experts),
+                c_int::from(options.draft_head_q5),
                 select_context,
                 ptr::from_mut(&mut selection).cast(),
                 &mut inner,
                 &mut vision,
                 &mut mapped,
                 &mut arena_bytes,
+                &mut actual_draft_head_q5,
             )
         };
         if code != 0 {
@@ -330,6 +337,7 @@ impl Session {
             inner: NonNull::new(inner).ok_or("hy4_native_load_failed")?,
             vision,
             mapped_experts: mapped != 0,
+            draft_head_q5: actual_draft_head_q5 != 0,
             arena_bytes,
             sizing: selection.sizing.expect("successful Hy4 open selected a context"),
             max_drafts: options.max_drafts,
@@ -342,6 +350,10 @@ impl Session {
 
     pub fn mapped_experts(&self) -> bool {
         self.mapped_experts
+    }
+
+    pub fn draft_head_format(&self) -> &'static str {
+        if self.draft_head_q5 { "q5_0" } else { "q8_0" }
     }
 
     pub fn arena_bytes(&self) -> u64 {

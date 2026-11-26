@@ -94,15 +94,16 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
                                int storage, int grouped, int gpu_plan, int profile_prefill, uint64_t arena_bytes_requested,
                                int demand_retention, int routed_half, int dense_packed, int resident_token_embeddings,
                                int tensor_mla, int max_drafts, int routed_fragments, int dense_device_views,
-                               int resident_draft_experts,
+                               int resident_draft_experts, int draft_head_q5,
                                uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
                                StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
-                               uint64_t* arena_bytes) noexcept {
+                               uint64_t* arena_bytes, int* actual_draft_head_q5) noexcept {
     *output = nullptr;
     try {
         if ((chunk != 1024 && chunk != 4096) ||
             storage < 0 || storage > 3 ||
             ((arena_bytes_requested || demand_retention) && storage != 1) ||
+            (draft_head_q5 != 0 && draft_head_q5 != 1) ||
             max_drafts < kRecommendedDrafts || max_drafts > kMaxDrafts) return 1;
         auto session = std::make_unique<StarkHy4>();
         auto& s = *session;
@@ -161,7 +162,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         if (!s.forward.open(s.model, s.metal, pack, prefill).empty()) return 4;
         const bool resident_nextn = resident_draft_experts != 0;
         if (!s.mtp.open(s.model, s.metal, s.forward.library(), 1024, pack, resident_nextn,
-                        resident_nextn && prefill.dense_packed).empty()) return 5;
+                        resident_nextn && prefill.dense_packed, draft_head_q5 != 0).empty()) return 5;
         if (!s.vision.build(s.metal, s.forward.library()).empty()) return 3;
         auto arena = plan_arena(s.model, s.metal);
         // Stark's resident expert paths budget shared allocation and leave
@@ -202,6 +203,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         s.capacity = context;
         s.max_drafts = max_drafts;
         s.tokens.reserve(static_cast<size_t>(context));
+        *actual_draft_head_q5 = s.mtp.uses_q5_draft_head();
         *output = session.release();
         return 0;
     } catch (...) {

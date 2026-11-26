@@ -187,6 +187,7 @@ impl Hy4Backend {
             verify_switch("STARK_HY4_EMBEDDINGS_RESIDENT", "invalid_hy4_embeddings_resident", false)?;
         let resident_draft_experts =
             verify_switch("STARK_HY4_MTP_RESIDENT_EXPERTS", "invalid_hy4_mtp_resident_experts", false)?;
+        let draft_head_q5 = verify_switch("STARK_HY4_MTP_HEAD_Q5", "invalid_hy4_mtp_head_q5", false)?;
         if routed_half && !grouped {
             return Err("invalid_hy4_prefill_routed_half");
         }
@@ -219,6 +220,7 @@ impl Hy4Backend {
                 dense_device_views,
                 resident_token_embeddings,
                 resident_draft_experts,
+                draft_head_q5,
                 tensor_mla,
                 max_drafts,
                 context_limit,
@@ -245,6 +247,7 @@ impl Hy4Backend {
             "prefill_tensor_mla_requested": tensor_mla,
             "token_embeddings_resident": resident_token_embeddings,
             "draft_experts_resident": resident_draft_experts,
+            "draft_head_format": native.draft_head_format(),
             "streamed_expert_demand_retention": demand_retention,
             "streamed_expert_arena_bytes": native.arena_bytes(),
             "streamed_expert_arena_requested_bytes": arena_bytes_requested,

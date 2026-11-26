@@ -76,10 +76,10 @@ int stark_hy4_open(const char* model, const char* projector, const char* pack, i
                    int storage, int grouped, int gpu_plan, int profile_prefill, uint64_t arena_bytes_requested,
                    int demand_retention, int routed_half, int dense_packed, int resident_token_embeddings,
                    int tensor_mla, int max_drafts, int routed_fragments, int dense_device_views,
-                   int resident_draft_experts,
+                   int resident_draft_experts, int draft_head_q5,
                    uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
                    StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
-                   uint64_t* arena_bytes) noexcept;
+                   uint64_t* arena_bytes, int* actual_draft_head_q5) noexcept;
 void stark_hy4_close(StarkHy4* session) noexcept;
 void stark_hy4_clear(StarkHy4* session) noexcept;
 int stark_hy4_retain_prefix(StarkHy4* session, int position) noexcept;

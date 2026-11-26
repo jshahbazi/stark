@@ -450,3 +450,98 @@ The draft-head patch SHA-256 is
 | --- | --- |
 | Q5_0 | `e4ab1e21883f28c1eb982c5ea967f2325f8613868df1624923313e1e27787e3d` |
 | Q8_0 | `1261cd80e66013660148b62a9a4bae120dd8c3fe2cc6ef435e2c6dac8982a994` |
+
+### Repeat with the packed draft cache and longer context
+
+The [HY4FRAG-29 build](2026-11-25-hy4-grouped-fragments.md#20261126-hy4frag-29--share-packed-expert-bytes-across-k16-fragments)
+used a 33,024-position cap and 1,024-row prefill chunks. Q8_0 ran
+first, reversing the head order in a new build and context setting.
+Both expert banks and the original projector were loaded. Each worker
+ran short code at K2 and twice at K3, followed by K2 at 16K and 32K.
+All outputs matched their 192 reference IDs. Thermal state stayed
+nominal and pressure stayed at level 1 with stable 132 MiB swap.
+
+| Arm | Short K3 tok/s | 16K K2 tok/s | 32K K2 tok/s | Receipt SHA-256 |
+| --- | ---: | ---: | ---: | --- |
+| Q8_0 | 64.57 / 61.28 | 44.81 | 43.53 | `e64275c4a9a2b6b2efd0ad451c78cb991c00212739218eb7bd980ee074b0bd50` |
+| Q5_0 | 67.57 / 63.85 | 45.83 | 43.82 | `0232f2f261cd7c104ad6710afb6bb9eabf18ce234032274488c17e91de6307a8` |
+| Q5_0 with concurrent verifier branches | 68.51 / 63.17 | 46.25 | 43.91 | `e7540ad5972f402971bb2dafcf02e4f812f0990b0cbd65efba1478b533a2db59` |
+
+Q5_0 kept 62 short K3 rounds against 64 for Q8_0. It needed 80
+rounds at 16K against 79 for Q8_0. Both heads used 78 rounds at 32K.
+The warm K3 medians were 65.71 and 62.93 tok/s with Q5_0 and Q8_0.
+Long-window speed changed much less. Use Q5_0 as a coding candidate
+and retain the Q8_0 reference.
+
+The concurrent schedule stages independent query, latent KV and
+attention gate projections together. It also overlaps router
+selection and shared activation preparation, then issues shared down
+alongside routed gate/up. Buffer joins retain the consumer ordering.
+It preserved the Q5_0 outputs and draft counts. Its warm medians were
+within 0.2%, and long decode changed by less than 1% against Q5_0
+alone. Keep the current verifier scheduling.
+
+### Qualify the typed Q5 option
+
+The isolated worker selects Q5_0 with `STARK_HY4_MTP_HEAD_Q5=1`.
+The unset option and `0` select Q8_0. Readiness reports the loaded
+derived format. The worker refused the invalid value `2` before
+model loading. The original BF16 target vocabulary path is shared
+by both options.
+
+On the same rebuilt executable, Q8_0 ran first and Q5_0 second.
+Both workers used an 8,192-position cap and five seconds of quiet time
+before each of the two warm K3 requests. All six outputs matched the
+192 TypeScript reference IDs. Q8_0 reached 57.95 tok/s cold and
+64.50/64.65 warm. Q5_0 reached 62.30 cold and 67.75/67.71 warm.
+The median warm gain was 4.9%, with 62 target rounds against 64.
+The earlier back-to-back screen retained the 68.58 tok/s peak.
+
+The Q5_0 lifecycle load matched all 64 reference IDs on both 4K
+requests, with 41 accepted drafts in 22 rounds. It reached
+55.05/58.28 decode tok/s and 653.94/632.53 prefill tok/s. Text
+continuations restored 4,096 positions with exact outputs. Both
+image answers matched with zero drafting and zero reuse. Invalid
+images and cancellation cleared the prefix and recovered.
+Observed pressure stayed at level 1 with stable 132 MiB swap.
+All three loads were nominal and free of named contenders.
+
+Adopt Q5_0 as an opt-in draft vocabulary. Keep Q8_0 as the default.
+The native source diff on `db01930d5`, isolated Rust 1.98.1 Hy4
+executable and harness have SHA-256
+`ac3baf2637b871f77ee6f6efa22e0f1331513d36945a93b9632cad121123e7d6`,
+`5ba73193746cb10b20640519f7f95e1d4aa393c565f4a69d8d764566a8653234`,
+and `f2d6bd82ce9b67ed427a5a82a44af51580f4001f741bd300581ad00c63f02bfb`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Rebuilt Q8_0 code | `18d9b6a2cc16e52300d06884e99e254f9c29d345e4d3c8699b71821571c9dd6e` |
+| Rebuilt Q5_0 code | `f3ef319340ac8b5d5052e338345a0d80f67b0dcf481200443c73fda4fb3fa101` |
+| Rebuilt Q5_0 image and prefix lifecycle | `4be28b6a414a2993147d3b87da4233eac886e20726db4d30ddb4ae247877d9ff` |
+| Invalid option refusal | `15857658517a1e47c1cc14f973b1d4de8f221a83dd30c762441aa12b43373349` |
+
+## 20261126-HY4NEXTN-11 · Isolate the exact verifier vocabulary projection
+
+The HY4FRAG-29 worker used the original target head and Q8_0 NextN.
+It sampled one in four mapped verification windows. The trunk,
+head preparation, vocabulary projection and argmax each used a
+separate encoder in sampled rounds. All other rounds used the existing
+command schedule. The private harness reused the prefill stage
+counters for attribution with ordinary prefill profiling off.
+All three requests matched their 192 reference IDs at pressure
+level 1 with stable swap and nominal thermal state.
+
+| Workload | Total rounds | Sampled rounds | Head prep ms | Vocabulary projection ms | Argmax ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Short K2 | 75 | 19 | 0.526 | 26.811 | 0.291 |
+| Short K3 | 64 | 16 | 0.471 | 25.776 | 0.253 |
+| 16K K2 | 79 | 20 | 0.674 | 28.722 | 0.448 |
+
+The sampled mean extrapolates to about 0.103 s of vocabulary projection
+over all short K3 rounds and 0.113 s over the 16K K2 rounds. The entire
+projection budget is below either gap to the target rate. Fusing argmax
+would remove a much smaller part of the cost. Keep the current exact
+head and defer vocabulary fusion as a primary speed lever.
+
+Profile receipt SHA-256
+`3c383deab0f19b80fb686de3104769a64fac21439b3ce70bc028e48da5c84980`.

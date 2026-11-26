@@ -105,7 +105,8 @@ public:
     /// Packed cache projections require the packed Q8_0 prefill pipeline in lib.
     std::string open(Model& m, mtl::Context& cx, int lib, int chunk = 1024,
                      const std::string& pack_dir = {}, bool resident_experts = false,
-                     bool packed_cache_projections = false);
+                     bool packed_cache_projections = false, bool q5_draft_head = false);
+    bool uses_q5_draft_head() const;
     std::string load_resident_experts();
     /// Forgets the rows and the pooled keys; hidden(0) = 0.
     void reset();

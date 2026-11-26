@@ -304,7 +304,7 @@ struct Mtp::Impl {
     // the quantized copies: the block's dense matrices and the MTP head; the experts come from a file
     mtl::Buffer qdense, qhead;
     int quant = 30;         // the experts' and dense matrices' type: 30 = as in the GGUF, 8 = Q8_0
-    int head_type = 30;     // the MTP head: 30 = the trunk's output.weight itself, 8 = a Q8_0 copy
+    int head_type = 30;     // BF16 output.weight or a separate Q8_0/Q5_0 draft copy
     std::string quantize();
     static constexpr uint64_t kQ8Header = 4096;
     uint64_t q8_matrix_bytes(int k) const {   // gate / up: [eff rows][latent], down: [latent rows][eff]
@@ -349,7 +349,7 @@ struct Mtp::Impl {
     }
 
     std::string open(Model& mm, mtl::Context& c, int lib_, int chunk, const std::string& pack_dir,
-                     bool resident_bank, bool use_packed_cache_projections);
+                     bool resident_bank, bool use_packed_cache_projections, bool q5_draft_head);
     void encode_rows(std::vector<mtl::Dispatch>& ds, int q0, int T);
     void encode_full_a(std::vector<mtl::Dispatch>& ds, int q, int r);
     void encode_full_b(std::vector<mtl::Dispatch>& ds, int r);
@@ -370,7 +370,7 @@ struct Mtp::Impl {
 };
 
 std::string Mtp::Impl::open(Model& mm, mtl::Context& c, int lib_, int chunk, const std::string& pack_dir,
-                           bool resident_bank, bool use_packed_cache_projections) {
+                           bool resident_bank, bool use_packed_cache_projections, bool q5_draft_head) {
     pack = pack_dir;
     resident_experts = resident_bank;
     packed_cache_projections = resident_bank && use_packed_cache_projections;
@@ -462,7 +462,7 @@ std::string Mtp::Impl::open(Model& mm, mtl::Context& c, int lib_, int chunk, con
         return e != nullptr && std::strcmp(e, "bf16") == 0 ? 30 : 8;
     };
     quant = env_type("HY4_FLASH_MTP_QUANT");
-    head_type = env_type("HY4_FLASH_MTP_HEAD");
+    head_type = q5_draft_head ? ref::Q5_0 : env_type("HY4_FLASH_MTP_HEAD");
     if (const std::string e = quantize(); !e.empty()) return e;
 
     p_rms_w = cx->pipeline(lib, "hy4_flash_rmsnorm", mtl::Constants().b(40, true));
@@ -598,15 +598,50 @@ std::string Mtp::Impl::open(Model& mm, mtl::Context& c, int lib_, int chunk, con
 
 namespace {
 
-/// BF16 rows -> Q8_0 with ggml's reference quantizer (ref::quantize_q8_0), `rows` rows of `n_in` values, on threads.
-void bf16_to_q8(const uint16_t* src, uint64_t rows, uint32_t n_in, uint8_t* dst, int threads) {
-    const size_t rb = ref::row_bytes(8, (int) n_in);
+// Signed-maximum Q5_0 quantization and block layout, following ggml
+// ggml/src/ggml-quants.c (2cbca38) and this runtime's ref::dequant.
+bool quantize_q5_head_row(const float* row, uint32_t width, uint8_t* out) {
+    for (uint32_t base = 0; base < width; base += 32, out += 22) {
+        const float* block = row + base;
+        float largest = 0.0f;
+        for (uint32_t j = 0; j < 32; ++j) {
+            if (!std::isfinite(block[j])) return false;
+            if (std::fabs(block[j]) > std::fabs(largest)) largest = block[j];
+        }
+        const float scale = largest / -16.0f;
+        const uint16_t encoded = ref::f32_to_f16(scale);
+        if ((encoded & 0x7c00u) == 0x7c00u) return false;
+        const float inverse = (encoded & 0x7fffu) != 0 ? 1.0f / scale : 0.0f;
+        out[0] = (uint8_t) encoded;
+        out[1] = (uint8_t) (encoded >> 8);
+        uint32_t high_bits = 0;
+        uint8_t codes[32];
+        for (uint32_t j = 0; j < 32; ++j) {
+            const float scaled = block[j] * inverse;
+            codes[j] = (uint8_t) std::clamp((int) (scaled + 16.5f), 0, 31);
+            high_bits |= (uint32_t) (codes[j] >> 4) << j;
+        }
+        for (uint32_t j = 0; j < 4; ++j) out[2 + j] = (uint8_t) (high_bits >> (j * 8));
+        for (uint32_t j = 0; j < 16; ++j) out[6 + j] = (codes[j] & 15) | ((codes[j + 16] & 15) << 4);
+    }
+    return true;
+}
+
+/// Build a packed draft copy from resident BF16 rows.
+template <int Type>
+bool quantize_bf16_rows(const uint16_t* src, uint64_t rows, uint32_t n_in, uint8_t* dst, int threads) {
+    static_assert(Type == ref::Q8_0 || Type == ref::Q5_0);
+    const size_t rb = ref::row_bytes(Type, (int) n_in);
     std::atomic<uint64_t> next{0};
+    std::atomic<bool> valid{true};
     std::vector<std::thread> th;
     for (int i = 0; i < threads; ++i)
         th.emplace_back([&] {
             std::vector<float> f(n_in);
             for (;;) {
+                if constexpr (Type == ref::Q5_0) {
+                    if (!valid.load(std::memory_order_relaxed)) return;
+                }
                 const uint64_t r0 = next.fetch_add(64);
                 if (r0 >= rows) return;
                 for (uint64_t r = r0; r < std::min(rows, r0 + 64); ++r) {
@@ -615,11 +650,18 @@ void bf16_to_q8(const uint16_t* src, uint64_t rows, uint32_t n_in, uint8_t* dst,
                         const uint32_t b = (uint32_t) row[j] << 16;
                         std::memcpy(&f[j], &b, 4);
                     }
-                    ref::quantize_q8_0(f.data(), n_in, dst + r * rb);
+                    if constexpr (Type == ref::Q8_0) {
+                        ref::quantize_q8_0(f.data(), n_in, dst + r * rb);
+                    } else if (!quantize_q5_head_row(f.data(), n_in, dst + r * rb)) {
+                        valid.store(false, std::memory_order_relaxed);
+                        return;
+                    }
                 }
             }
         });
     for (auto& x : th) x.join();
+    if constexpr (Type == ref::Q5_0) return valid.load(std::memory_order_relaxed);
+    return true;
 }
 
 }  // namespace
@@ -652,22 +694,29 @@ std::string Mtp::Impl::quantize() {
             std::vector<uint8_t> src((size_t) (rows_of(t[i]) * n_in * 2));
             if (!m->tensor_bytes(t[i]->name, 0, src.size(), src.data()))
                 return std::string("MTP: cannot read ") + t[i]->name;
-            bf16_to_q8((const uint16_t*) src.data(), rows_of(t[i]), n_in, qdense.as<uint8_t>() + at, threads);
+            quantize_bf16_rows<ref::Q8_0>((const uint16_t*) src.data(), rows_of(t[i]), n_in,
+                                           qdense.as<uint8_t>() + at, threads);
             wr[i] = WRef{&qdense, at, 8};
             at += (rows_of(t[i]) * ref::row_bytes(8, (int) n_in) + 255) / 256 * 256;
         }
         std::fprintf(stderr, "strata_hy4_flash_metal: MTP block's %zu dense matrices as Q8_0 (%.1f MB)\n", slots.size(), total / 1e6);
     }
-    if (head_type == 8) {
+    if (head_type == ref::Q8_0 || head_type == ref::Q5_0) {
         const gguf::Tensor* o = t[OUT];
-        if (o->type != 30) return "MTP: output.weight is not BF16, HY4_FLASH_MTP_HEAD=q8_0 expects it";
+        if (o->type != ref::BF16 || o->shape[0] % 32 != 0)
+            return "MTP: packed head requires block-aligned BF16 output.weight";
         const uint32_t n_in = (uint32_t) o->shape[0];
-        qhead = cx->alloc((size_t) (rows_of(o) * ref::row_bytes(8, (int) n_in)));
-        bf16_to_q8((const uint16_t*) ((const uint8_t*) m->dense.ptr + o->offset), rows_of(o), n_in, qhead.as<uint8_t>(),
-                   threads);
-        wr[OUT] = WRef{&qhead, 0, 8};
-        std::fprintf(stderr, "strata_hy4_flash_metal: MTP head = a Q8_0 copy of output.weight (%.1f MB); the trunk's head is unchanged\n",
-                     qhead.bytes / 1e6);
+        qhead = cx->alloc((size_t) (rows_of(o) * ref::row_bytes(head_type, (int) n_in)));
+        const uint16_t* source = (const uint16_t*) ((const uint8_t*) m->dense.ptr + o->offset);
+        if (head_type == ref::Q5_0) {
+            if (!quantize_bf16_rows<ref::Q5_0>(source, rows_of(o), n_in, qhead.as<uint8_t>(), threads))
+                return "MTP: the draft head cannot be represented as Q5_0";
+        } else {
+            quantize_bf16_rows<ref::Q8_0>(source, rows_of(o), n_in, qhead.as<uint8_t>(), threads);
+        }
+        wr[OUT] = WRef{&qhead, 0, head_type};
+        std::fprintf(stderr, "strata_hy4_flash_metal: MTP head = %s output.weight (%.1f MB)\n",
+                     ref::type_name(head_type), qhead.bytes / 1e6);
     }
     return {};
 }
@@ -1197,10 +1246,11 @@ uint64_t Mtp::resident_expert_bytes(const hy4_flash::Geometry& g) {
 }
 
 std::string Mtp::open(Model& m, mtl::Context& cx, int lib, int chunk, const std::string& pack_dir,
-                      bool resident_experts, bool packed_cache_projections) {
+                      bool resident_experts, bool packed_cache_projections, bool q5_draft_head) {
     if (im_ != nullptr) return "already open";
     im_ = new Impl();
-    const std::string e = im_->open(m, cx, lib, chunk, pack_dir, resident_experts, packed_cache_projections);
+    const std::string e = im_->open(m, cx, lib, chunk, pack_dir, resident_experts, packed_cache_projections,
+                                    q5_draft_head);
     if (!e.empty()) {
         im_->rpool.reset();   // join the readers, then close their fd (a profile error returns after it was opened)
         if (im_->fd >= 0) ::close(im_->fd);
@@ -1210,6 +1260,10 @@ std::string Mtp::open(Model& m, mtl::Context& cx, int lib, int chunk, const std:
     }
     reset();
     return {};
+}
+
+bool Mtp::uses_q5_draft_head() const {
+    return im_ != nullptr && im_->wr[Impl::OUT].type == ref::Q5_0;
 }
 
 std::string Mtp::load_resident_experts() {
