@@ -1101,3 +1101,97 @@ The locked Rust 1.98.1 worker, harness and receipt have SHA-256
 `f8d4c6ff5967d335e1cfc1b1ea87a3c70a5994f1b2c47d60ce40ed1e94ad66b7`,
 `bbc32032c59eee93fd06adf8fc64fe6136d83c31f9d9aad7cec34619376aec6a`
 and `fa9d741e7c8b65464713449e1f8fe9677ee46b37b892c8f2715bddbdf33acd66`.
+
+### Reverse the short-code comparison
+
+The same worker binary ran the combined arm first and the flags-off
+control second. Each load ran the 192-output TypeScript fixture three
+times at K3 with zero prefix reuse, both resident banks and the original
+projector. The worker advertised 34,816 positions. All six requests
+matched the same output hash and used 64 target rounds. Both loads
+reported nominal thermal state, zero named contenders, normal pressure,
+and unchanged observed swap.
+
+| Arm | First use tok/s | Warm tok/s | Warm median tok/s | Target commands per round |
+| --- | ---: | ---: | ---: | ---: |
+| Combined | 59.13 | 64.84 / 60.23 | 62.54 | 1 |
+| Flags-off control | 57.18 | 61.64 / 56.70 | 59.17 | 5 |
+
+Warm median decode improved 5.7%. The sample supports the combined
+code-path gain across these two loads. Individual contributions and
+paired long-window timings remain open.
+
+| Request receipt | SHA-256 |
+| --- | --- |
+| Combined | `91bdd31f9c59aabf341bbfb38654733c4a5d96563c110a22e9b23f7fe0328a67` |
+| Flags-off | `dfe6ea8783427c13c694dd2e148eaaa6c0e91cdfe5feba0c7c2ae8f516338d52` |
+
+## 20261125-HY4FRAG-24 · Screen wider verification and direct routed weight loads
+
+The advanced mapped build combines the earlier command consolidation
+with independent gate projections, wider Q3_K and Q4_K expert threadgroups,
+contiguous short-context NextN attention, and GPU Q8_0 draft embedding
+gathers. On the 34,816-position worker, K3 used both resident banks and
+the original projector. Every 192-output request matched its previous
+target output IDs. The host went from nominal to fair thermal state
+with stable swap and no named contenders.
+
+| Workload | Useful decode tok/s | Target rounds | Verify s | Draft s |
+| --- | ---: | ---: | ---: | ---: |
+| Short TypeScript, first | 53.56 | 64 | 3.005 | 0.560 |
+| Short TypeScript, warm | 64.35 / 59.49 | 64 | 2.677 / 2.915 | 0.291 / 0.295 |
+| 16K rendered code | 41.95 | 68 | 3.941 | 0.611 |
+| 32K rendered code | 40.75 | 64 | 3.867 | 0.819 |
+
+The additional changes showed no clear gain on short code. K3 reduced
+long-context round counts while the observed wall rates stayed below
+the earlier K2 screen. The follow-up K2 load reported pressure level 2
+and the owned-worker watchdog stopped it before readiness. Peak
+observed swap rose by 37.12 MiB. The stopped load produced no rates.
+
+The separate direct-register prefill path keeps the routed K16 product
+and its F32 reduction order. It decodes packed weights directly into
+SIMD group fragments, removing intermediate weight staging and its K64
+barriers. On a 5,120-position streamed worker and 40 GB arena, both
+arms matched all 64 reference IDs. The candidate ran first. Both arms
+reported nominal thermal state and zero named contenders.
+
+| 4K prefill arm | First use tok/s | Warm tok/s |
+| --- | ---: | ---: |
+| Direct registers | 582.77 | 582.31 |
+| Shared staging | 571.00 | 530.08 |
+
+The direct path improved first use by 2.1% and the repeat by 9.9% in
+one pair. In the separate, reversed stage profile, the shared-staging
+routed stage took 2.010 s first and 2.169 s warm, against 2.009 and
+2.367 s with direct registers. All four requests covered 42 profiled
+blocks and matched the same 64 IDs. The stage data show no reduction
+in routed work. The direct path also passed all 13 natural-text rows.
+Keep the original routed staging because the gain failed to reproduce.
+
+The follow-up retained the original F32 score and softmax and split
+the value probabilities into two F16 terms. It matched 12 of 13
+control top-1 decisions with six true next tokens correct in both
+arms. The discrepancy remains after restoring operand precision.
+Keep the original value-product path. The failed gate stopped
+throughput scoring of the residual variant.
+
+Source diff on `0d640cd95` SHA-256
+`cad75584cb57b68ee10bedfa4dd6c8f25a2de9b33ed20c448102bd2a699191e9`.
+Locked Rust 1.98.1 worker SHA-256
+`815bbd771b1090bb4f2aeb0bb762f561c47ee57e91c77ad6873effefcbaf4c80`.
+Harness SHA-256
+`ff4c528de3db600f6ca22b9abd7677c1551799704e22846d0dd4724d261ecb8b`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Advanced K3 ladder | `dcd48c77b7e43cc8b6274831faee556f2dce53f2ecc8a62014c11dfe4186e9c1` |
+| Advanced K2 pressure stop | `181f7c2f6683259d378e1d545a7fe01d616197501ba8ad2d8d8e4a7fa958f2b6` |
+| Direct registers | `ac418e6de71abcf983e2c340d9f86cef8a9e9c7e80e36694d218e61ea762e698` |
+| Shared staging | `540a2e9eccf05a22fb9b80784e4cc9221b79eb31b1aaf0c323137ee7e04dc268` |
+| Shared staging stage profile | `79b0dd5ce4d6e5eb77176dde02e078c0c7b4aa4e9ca89d608674bd30be6ae3cb` |
+| Direct registers stage profile | `4f0281228a6ad23cc3ae76c02657028b2d29425d96c2a75f5c98f5d20e1533c9` |
+| Natural-text register and residual checks | `61bbde1ff7ea88c61fd8a617e9cae281f966f1bc26a43e801a99f32b09da8215` |
+
+Natural-text harness SHA-256
+`f9e7565753accaf27233d74f04afd47dff04bb028f3ee68274530cca8e6e61f7`.

@@ -891,6 +891,9 @@ Test attention value precision independently of the query-key score and softmax.
 
 Once all target experts are resident, check for command splits that serve the old streaming path. Staging Hy4's Engram inputs separately reduced mapped verification from five command buffers to one per round. A combined screen with ordered Q8 row pairing and a contiguous IndexPool shortcut kept all output IDs and reached 64.00 tok/s on short code and 42.12 at 32K. Pair and isolate the changes before adoption. [Hy4 mapped verification screen](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-23--consolidate-mapped-verification-work)
 
+Retest the stage named by a one-way speedup. Loading routed prefill weights directly into Hy4 SIMD registers appeared 9.9% faster warm, but the reversed profile showed 2.37 s of warm routed time against 2.17 s. The advanced verifier's K3 also saved long-window target rounds while running below the earlier K2 rates. The paired short-code result for the original consolidated verifier was 62.54 vs 59.17 tok/s warm with exact output. [Paired code and follow-up screens](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-24--screen-wider-verification-and-direct-routed-weight-loads)
+
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |
