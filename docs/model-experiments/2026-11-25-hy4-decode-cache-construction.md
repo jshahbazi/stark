@@ -685,3 +685,38 @@ The executable and harness are bound in the
 [FFN option qualification](2026-11-25-hy4-grouped-fragments.md#qualify-the-typed-ffn-option).
 The exact 16K control receipt has SHA-256
 `eb83df672c790d2367d1b33f0d4e54270f77c6b0a8000575f700767eafd198f4`.
+
+## 20261126-HY4NEXTN-17 · Check short coding across three workloads
+
+The suite fixed three cases before timing. It used the existing short
+TypeScript task and added Python interval scheduling and Rust CSV
+parsing. The model's pinned chat template and tokenizer rendered all
+three. Each case produced 192 output IDs. The new cases used their
+opening serial requests as references and the closing serial requests
+checked the same hashes. TypeScript kept its previously frozen
+reference across all four requests.
+
+One loaded worker ran K0, K3, K3 and K0 per case with five seconds
+of quiet time before each request after the first in its case.
+It used both resident expert banks, the original projector, a
+Q5_0 draft head, 1,024-row chunks and an 8,192-position cap.
+All twelve requests returned exact IDs with zero prefix reuse.
+The host stayed nominal with pressure level 1 and peak swap
+0.375 MiB above its starting value.
+
+| Case | Input tokens | Serial tok/s | K3 tok/s | K3 accepted / proposed / rounds |
+| --- | ---: | ---: | ---: | ---: |
+| TypeScript task queue | 75 | 35.21 / 36.72 | 64.79 / 67.82 | 129 / 182 / 62 |
+| Python interval scheduling | 89 | 34.43 / 36.43 | 61.60 / 62.92 | 125 / 197 / 66 |
+| Rust CSV parsing | 82 | 34.84 / 36.51 | 59.97 / 61.16 | 123 / 204 / 68 |
+
+Faster code in this suite needed fewer verification rounds.
+The earlier TypeScript peak of 68.58 tok/s remains the best
+observed coding rate. The three-case suite produced no 70 tok/s
+request.
+
+The executable is bound in the
+[guarded FFN record](2026-11-25-hy4-grouped-fragments.md#20261126-hy4frag-33--bound-ffn-device-views-to-the-qualified-capacity).
+The suite harness and receipt have SHA-256
+`99cd26758eac2b63f7101129346a5722fa362de6f0f1ee676dab655a246c706a`
+and `4ff27105fda670a53b3a9dc41091ea42b6c78e2256f4fa3de903b697991d8aae`.

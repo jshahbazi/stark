@@ -1733,3 +1733,42 @@ Thermal state was fair. Pressure stayed at level 1 and swap at
 48.4 MiB. The 32K rate leaves about 0.234 s to reach 47.37 tok/s over
 191 useful tokens. The long fallback receipt SHA-256 is
 `76daa7eda1e2911745304f01571cd905fa5fe8f8f7347b4b11c3caa6b499cce2`.
+
+## 20261126-HY4FRAG-34 · Isolate attention device-view packing
+
+The private profiler samples separate encoder boundaries around the
+attention gate and output packs and their corresponding tensor
+products. It keeps the existing dispatches and arithmetic. In this
+receipt, the usual attention index field holds both packs, the
+miscellaneous field holds both products, and the dense field holds
+all remaining non-MLA attention. The MLA and total fields keep their
+usual scopes.
+
+One loaded worker ran the exact 4K fixture twice, at K2 with zero
+prefix reuse. The run used the original projector, a 5,120-position
+cap, 4,096-row chunks, the 40 GB streamed arena, Q5_0 NextN and
+the guarded FFN views. Both requests matched all 64 output IDs and
+sampled 42 blocks. Thermal state stayed nominal and every command
+span timestamp was valid.
+
+| Sampled stage | First-use s | Warm s |
+| --- | ---: | ---: |
+| Attention gate and output packs | 0.059 | 0.059 |
+| Attention gate and output tensor products | 0.756 | 0.862 |
+| Remaining non-MLA attention | 1.185 | 1.308 |
+| MLA | 0.859 | 0.983 |
+| Routed expert products | 2.178 | 2.415 |
+| Dense FFN products | 0.277 | 0.310 |
+
+The earlier uninstrumented 711.61 tok/s request needs about
+245 ms to reach 743.2. The measured pack stage offers about 59 ms
+before accounting for any replacement work. Defer packing changes
+as a primary lever. Treat the sample times as attribution because
+separate encoder boundaries perturb scheduling.
+
+The profiling patch on `37569441c`, Rust 1.98.1 release worker,
+harness and receipt have SHA-256 values
+`4d0072ae64e7ac041e1fae6e30567cda0849041b4209b0226360404a54ca4a1c`,
+`cf5d8e4c796989b6b92f9093fbe7b06eace89ee898d21849da8ce7cecd554156`,
+`872a300269e37deeacb66f46b51109bf2f16da0ed54b6ba50454db7a4beeb346`
+and `5a19a2d7faec7d6f8e42e0fd59e50c3d6e57e30ad1c968f3d2eb1ceacda39d71`.
