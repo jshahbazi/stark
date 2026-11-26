@@ -1509,3 +1509,61 @@ and `2c9ab7f532d08e272cee84676f09dd0319ee0d23b97ea0781990d3f850f4f392`.
 | Existing value product profile | `9932b562080e52e04537e441faa035652f063bd2a84a7abf1b92b39660244288` |
 | Natural-text comparison | `924e977d5fe7424580d8ef6c84fc1a1b315c9397728e9089a386eacc95c96967` |
 | Natural-text harness | `cf6d2447281ef0253676575bc650687cd557c234a4ee1189c84b6b323efe53dd` |
+
+## 20261126-HY4FRAG-31 · Stage dense FFN inputs in K64 blocks
+
+The private FFN candidate uses the existing F32 Q8_0 Metal matrix
+product with two packed 32-wide blocks per staging step. Each of
+the eight-wide products consumes the same F32 values and updates
+the same accumulator in the existing sequence. The N64, M32 tile
+and 128-thread dispatch stay fixed. Threadgroup scratch grows from
+13,824 to 26,112 bytes as staging barriers fall by half.
+
+The candidate covers eight projection sites in dense, shared and
+latent FFN paths on text prefill of at least 256 rows. The attention
+and routed quantized expert products keep their existing paths.
+Vision input chunks, decode, and NextN stay on the existing products.
+
+Four 5,120-position workers used the original projector, 40 GB
+streamed arena and 4,096-row chunks. All eight K2 requests matched
+the 64 reference IDs with zero prefix reuse, 41 accepted drafts,
+42 proposals and 22 rounds. The opening control went from fair to
+nominal thermal state. The other three loads stayed nominal.
+
+| Order and arm | First use tok/s | Warm tok/s | Receipt SHA-256 |
+| --- | ---: | ---: | --- |
+| 1. K32 control | 583.47 | 618.33 | `a5ad5046de5c275ab9c6bb975fc21eb1d9140b8047b2eca61bec787fdba8e963` |
+| 2. K64 candidate | 637.69 | 605.73 | `b7a1b49bb5f32fff9008cc2e57a5c1da32db28f252d6f6fc77caa6a2cad519d5` |
+| 3. K64 candidate | 638.66 | 606.40 | `65c241c305d0ee593c7296b80d72cf48427f9f233331a847df4981cd9c1f1826` |
+| 4. K32 control | 611.38 | 578.90 | `56c49fbbae8a041e70c5185ac8b3253f322c0f2f3dc8c66d57c22f5529003933` |
+
+First-use prefill time fell by 597 ms against the opening control
+and by 286 ms against the closing control. Warm results changed
+direction. In the separate profiling pair the candidate ran first.
+All four requests matched the 64 reference IDs across 42 profiled
+blocks each. The dense FFN stage took 0.771/0.881 s with K64 and
+0.709/0.762 s with K32. The direct stage comparison showed a
+regression of 62 ms on first use and 119 ms warm. The result is
+consistent with the cost of larger staging allocations. Keep the
+existing K32 product.
+
+The natural-text gate exercised the candidate on 13 requests at
+552–840 positions. All top-1 choices matched, with eight true next
+tokens predicted in each arm. The performance decision stands.
+
+The diff on `1998e09f8`, locked Rust 1.98.1 release worker and
+timing harness have SHA-256
+`c6161a9c3b10599ceb1eaf440635c8bd64809c8ef58f67bc6bdd7cf59d16759f`,
+`b81d594509a0f81f135d635e6c50ed09b6f2e07b7909d5e636768414e90b0fab`,
+and `5dd707318395bf36ee2dbacd94f97a833d71c4aef413928b2abf8288206f56ef`.
+The initial build command could not locate Cargo and produced no
+binary. The retry invoked the installed Cargo executable by its
+absolute path. The initial build log SHA-256 is
+`92195e0ac0aa21a54a4ed69e7f552d1f5a439989324b18cdb398f57dd4ef4ede`.
+
+| Receipt or harness | SHA-256 |
+| --- | --- |
+| K64 candidate profile | `8ce9d3c77d34e623155353af4a90eec0b2b0049200ae56c5d79bc3db08746e51` |
+| K32 control profile | `9cb94c43333e3b85173d734c304616640cb988a2a84b0deee0cbae9bfcef240a` |
+| Natural-text comparison | `5b0662447769ee89c7417412027b8e23162598822cfa343b2a416b9dd41a0cee` |
+| Natural-text harness | `58dc3c5852aa14890707a8285a193c412a7a6f4e49873c50d94a6f62e4e10f45` |

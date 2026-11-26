@@ -577,3 +577,62 @@ and `2528b866601a7c5c7fe9541acd9c1a57e33871f8aecd03990c881a0544053ca9`.
 | --- | --- |
 | Q5_0 | `cb4deb71a8c9369d2f780ad1f388abfacd2a7c3487bdd8b0756c42ce201a4e64` |
 | Q4_0 | `569eac865b5dc06fd8dd0ad4599be18bfd0dc8d4fa413d5ed7c5d4582b6b2257` |
+
+## 20261126-HY4NEXTN-13 · Compare short-code request cadence
+
+The qualified Q5_0 worker ran the short TypeScript fixture five times
+at K3. Both expert banks and the original projector were loaded with
+an 8,192-position cap. After first use, the waits before each request
+were 5, 10, 10 and 5 seconds. Every request matched all 192 output
+IDs and had zero prefix reuse, 129 accepted drafts, 182 proposals
+and 62 verifier rounds.
+
+| Seconds before request | Decode tok/s | Verify s | Draft s |
+| --- | ---: | ---: | ---: |
+| First use | 61.30 | 2.680 | 0.435 |
+| 5 | 67.30 | 2.557 | 0.280 |
+| 10 | 67.35 | 2.555 | 0.280 |
+| 10 | 67.49 | 2.550 | 0.279 |
+| 5 | 67.46 | 2.551 | 0.279 |
+
+The five- and ten-second medians were 67.38 and 67.42 tok/s, a 0.07%
+difference. Thermal state stayed nominal with no named contenders,
+pressure level 1 and stable 132 MiB swap. Keep cadence fixed in future
+comparisons. A longer pause did not bring this fixture to 70 tok/s.
+
+The same executable is bound in [HY4NEXTN-10](#qualify-the-typed-q5-option).
+The cadence harness and complete receipt have SHA-256
+`b282dd5843e9096cb835781e7c85177e935940209d7972dd225f58404a1a5307`
+and `84de0391d3a0dd62ac1a693f394abd2bd4ad13b863df641642db7e9423efaf60`.
+The outer shell failed after the harness ended because its status
+variable name was reserved. The receipt contains all five measurements,
+both host snapshots and a passing terminal result.
+
+## 20261126-HY4NEXTN-14 · Recheck three drafts with the rebuilt 32K worker
+
+The previous wider verifier used a larger workspace and the older
+draft-cache projections. This run used the qualified Q5_0 head, both
+resident expert banks, the original projector, a 33,024-position cap
+and 1,024-row chunks. The same loaded worker alternated K2, K3, K3
+and K2. All four requests matched their 192 reference IDs with zero
+prefix reuse.
+
+| Depth in order | Decode tok/s | Verify s | Draft s | Catch-up s | Accepted / proposed / rounds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| K2 | 39.75 | 4.305 | 0.499 | 0.146 | 113 / 155 / 78 |
+| K3 | 44.51 | 3.806 | 0.485 | 0.135 | 126 / 193 / 65 |
+| K3 | 43.19 | 3.936 | 0.486 | 0.137 | 126 / 193 / 65 |
+| K2 | 43.33 | 3.983 | 0.425 | 0.140 | 113 / 155 / 78 |
+
+The K3 medians were 43.85 tok/s and 3.871 s of verification.
+K3 saved 13 rounds, and the second K3 request was slower than the
+closing K2 control. The K3 peak leaves about 0.26 s to reach 47.37
+tok/s over 191 useful tokens. Keep the K2 recommendation for long
+requests. Thermal state moved from nominal to fair with pressure
+at level 1 and stable 132 MiB swap.
+
+The executable and harness are bound in
+[HY4NEXTN-10](#qualify-the-typed-q5-option). The completed receipt has
+SHA-256 `a19d6446458f4c0923c3747de6a7bfcbb1ea2cde675585f65c34fc2c1a1267b0`.
+The shell wrapper hit the same post-run status-variable error as
+HY4NEXTN-13. The receipt contains all four results and passed.
