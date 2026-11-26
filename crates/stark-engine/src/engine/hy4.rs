@@ -105,6 +105,7 @@ pub struct DraftStats {
     pub prefill_attention_misc_seconds: f64,
 }
 
+#[derive(Clone, Copy)]
 pub struct Options {
     pub chunk: usize,
     pub storage: ExpertStorage,

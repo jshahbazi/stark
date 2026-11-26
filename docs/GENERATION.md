@@ -95,17 +95,23 @@ has its own worker and artifact evidence in the
 
 ### Tested Hy4 load profiles
 
-`STARK_HY4_LOAD_PROFILE` selects the startup configuration. Individual Hy4
-options override the profile defaults. The tuned profiles require Metal 4 and use the original
+With `STARK_HY4_LOAD_PROFILE` unset, Stark selects `streamed-prefill` on Metal 4.
+It first tries a 40 GB expert arena. If memory admission fails, it retries the
+tuned path with the ordinary arena, then tries the legacy profile if the tuned
+path still exceeds the budget. Older Metal hardware selects the legacy profile.
+The worker fits the context at load using the memory and workspace of the
+selected profile.
+
+`STARK_HY4_LOAD_PROFILE` can select an explicit profile. Individual Hy4 options
+override its defaults. The tuned profiles require Metal 4 and use the original
 Q3_K target and BF16 projector, the Q5_0 NextN vocabulary projection, resident
 token embeddings, grouped routed fragments, packed dense attention and tensor
-MLA. Both select their context from available memory when the optional cap is
-unset.
+MLA.
 
 | Profile | Worker settings |
 | --- | --- |
-| `default` or unset | Streamed storage, 1,024-row chunks, grouped F32 prefill and the Q8_0 draft head. |
-| `streamed-prefill` | 40 GB streamed arena with demand retention, 4,096-row chunks and guarded FFN views. The FFN views are eligible through 8,192 loaded positions. |
+| `default` | Legacy streamed profile with 1,024-row chunks, grouped F32 prefill and the Q8_0 draft head. |
+| `streamed-prefill` | 40 GB streamed arena with demand retention, 4,096-row prefill and prefix boundaries, and guarded FFN views. The FFN views are eligible through 8,192 loaded positions. |
 | `resident-decode` | Both expert banks resident, 1,024-row chunks and the original FFN path. Text can explicitly request three greedy drafts for short code. |
 
 ```sh
@@ -126,7 +132,7 @@ requested arena or resident banks on a busy host. [Benchmark settings and result
 
 ### Individual Hy4 controls
 
-The worker defaults to streamed experts, grouped F32 prefill on Metal 4 and
+The legacy profile uses streamed experts, grouped F32 prefill on Metal 4 and
 1,024-token prefix boundaries. `STARK_HY4_EXPERT_STORAGE=mapped` selects the
 experimental read-only banks under Metal and live RAM limits. Mapped decode
 uses the GPU expert planner. Its first prompt can incur substantial page-fault

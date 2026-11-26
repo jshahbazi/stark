@@ -59,13 +59,15 @@ The [per-attempt history](speed-other-families.md#experiment-history) preserves 
 
 ## Load profiles and flexible context
 
-| Profile in PR #205 | Intended workload and current policy |
+| Load profile | Intended workload and policy |
 | --- | --- |
-| `default` or unset | Ordinary desktop and worker load. Streamed experts, a 1,024-row prefill and prefix grid, grouped F32 when available, and Q8_0 draft vocabulary. |
-| `streamed-prefill` | Metal 4. 40 GB streamed arena, repeat-demand retention, 4,096-row chunks, resident embeddings, grouped fragments, packed dense projections, tensor MLA and the Q5_0 draft head. Guarded FFN views apply through 8,192 loaded positions. |
+| `default` | Legacy load used in PR #205. Streamed experts, a 1,024-row prefill and prefix grid, grouped F32 when available, and Q8_0 draft vocabulary. |
+| `streamed-prefill` | Automatic on Metal 4. Requests a 40 GB streamed arena with repeat-demand retention, 4,096-row chunks, resident embeddings, grouped fragments, packed dense projections, tensor MLA and the Q5_0 draft head. Guarded FFN views apply through 8,192 loaded positions. |
 | `resident-decode` | Metal 4. Resident target and NextN expert banks, resident embeddings, 1,024-row chunks, grouped fragments, packed dense projections, tensor MLA, original FFN path and the Q5_0 draft head. Start at K2. Use K3 explicitly for the measured short-code configuration. |
 
-Both tuned profiles are opt-in. The worker fits capacity at load from the checkpoint, Metal buffer limits and live headroom after reserving experts, KV and index state, draft history, prefill scratch and image workspace. Requests may choose smaller windows within the fitted capacity. Use `STARK_HY4_CONTEXT_LIMIT=8192` when replaying the short-window benchmark geometry and record what actually loaded. [Runnable profile settings](../GENERATION.md#tested-hy4-load-profiles)
+The automatic load retries with the ordinary streamed arena after a memory-admission failure, then uses the legacy graph if the tuned graph still cannot fit. The resident-decode profile remains opt-in. The worker fits capacity at load from the checkpoint, Metal buffer limits and live headroom after reserving experts, KV and index state, draft history, prefill scratch and image workspace. Requests may choose smaller windows within the fitted capacity. Use `STARK_HY4_CONTEXT_LIMIT=8192` when replaying the short-window benchmark geometry and record what actually loaded. [Runnable profile settings](../GENERATION.md#tested-hy4-load-profiles)
+
+The [OpenCode default-profile benchmark](2026-11-26-hy4-opencode-defaults.md) measures the automatic load through the actual client at 16K–27K, including a same-session prefix hit.
 
 With the cap unset, the two tuned workers selected 221,184 and 200,704 positions on the test machine. Each returned the pinned 4K output at request ceilings of 4,352 and 32,768 with zero reuse. `plan_generation` clamped above-capacity ceilings, and a direct overflow was refused before a successful follow-up. These are capacity and request-window checks. The generated prompts in this check were 4K. [HY4LADDER-05](2026-11-25-hy4-context-ladder.md#20261126-hy4ladder-05--verify-flexible-windows-on-the-measured-profiles)
 

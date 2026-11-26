@@ -116,32 +116,34 @@ struct LookupStats {
     rounds: usize,
 }
 
+const STREAMED_PREFILL_ARENA_GB: u32 = 40;
+
+fn resolve_load_profile(
+    setting: Result<&str, &std::env::VarError>,
+    supports_metal4: bool,
+) -> Result<&'static str, &'static str> {
+    match setting {
+        Ok("default") => Ok("default"),
+        Ok("streamed-prefill") => Ok("streamed-prefill"),
+        Ok("resident-decode") => Ok("resident-decode"),
+        Err(std::env::VarError::NotPresent) if supports_metal4 => Ok("streamed-prefill"),
+        Err(std::env::VarError::NotPresent) => Ok("default"),
+        _ => Err("invalid_hy4_load_profile"),
+    }
+}
+
+fn load_memory_failure(result: &Result<Session, &'static str>) -> bool {
+    matches!(
+        result,
+        Err("hy4_larger_arena_exceeds_budget" | "hy4_expert_arena_load_failed" | "resource_budget_exceeded")
+    )
+}
+
 impl Hy4Backend {
-    pub(crate) fn load(
-        path: &Path,
-        cancellation: Option<CancelSignal>,
-    ) -> Result<Self, &'static str> {
-        let source = source::VerifiedSource::open(path)?;
-        for (name, digest) in [
-            ("config.json", CONFIG_SHA),
-            ("tokenizer.json", TOKENIZER_SHA),
-            ("processor_config.json", PROCESSOR_SHA),
-            ("chat_template.jinja", TEMPLATE_SHA),
-            ("engram_token_map.bin", ENGRAM_MAP_SHA),
-        ] {
-            verify(&path.join(name), digest)?;
-        }
-        let tokenizer = Tokenizer::from_file(path.join("tokenizer.json")).map_err(|_| "invalid_hy4_tokenizer")?;
-        if tokenizer.get_vocab_size(true) != VOCAB {
-            return Err("invalid_hy4_tokenizer");
-        }
-        let identity = Engine::<Metal>::new().map_err(|_| "native_backend_unavailable")?.metal_device_identity();
-        let load_profile = match std::env::var("STARK_HY4_LOAD_PROFILE").as_deref() {
-            Ok("default") | Err(std::env::VarError::NotPresent) => "default",
-            Ok("streamed-prefill") => "streamed-prefill",
-            Ok("resident-decode") => "resident-decode",
-            _ => return Err("invalid_hy4_load_profile"),
-        };
+    fn load_options(
+        load_profile: &str,
+        lookup_enabled: bool,
+    ) -> Result<(Options, bool), &'static str> {
         let streamed_prefill = load_profile == "streamed-prefill";
         let resident_decode = load_profile == "resident-decode";
         let tuned = streamed_prefill || resident_decode;
@@ -173,14 +175,13 @@ impl Hy4Backend {
         let arena_bytes_requested = u64::from(arena_gb.unwrap_or(if larger_arena {
             36
         } else if prefill_arena {
-            40
+            STREAMED_PREFILL_ARENA_GB
         } else {
             0
         })) * 1_000_000_000;
         let context_limit = optional_bound("STARK_HY4_CONTEXT_LIMIT", 2..=u32::MAX, "invalid_hy4_context_limit")?;
         let demand_retention =
             verify_switch("STARK_HY4_STREAM_DEMAND_RETENTION", "invalid_hy4_stream_demand_retention", prefill_arena)?;
-        let lookup_enabled = verify_switch("STARK_HY4_MTP_LOOKUP", "invalid_hy4_mtp_lookup", false)?;
         let draft_limit = if lookup_enabled {
             MAX_DRAFTS
         } else {
@@ -238,9 +239,8 @@ impl Hy4Backend {
         if arena_bytes_requested != 0 && !matches!(storage, ExpertStorage::Streamed) {
             return Err("invalid_hy4_stream_arena");
         }
-        let native = Session::load(
-            path,
-            path,
+        let profile_arena = prefill_arena && arena_gb.is_none() && !larger_arena;
+        Ok((
             Options {
                 chunk,
                 storage,
@@ -261,7 +261,50 @@ impl Hy4Backend {
                 max_drafts,
                 context_limit,
             },
-        )?;
+            profile_arena,
+        ))
+    }
+
+    pub(crate) fn load(
+        path: &Path,
+        cancellation: Option<CancelSignal>,
+    ) -> Result<Self, &'static str> {
+        let source = source::VerifiedSource::open(path)?;
+        for (name, digest) in [
+            ("config.json", CONFIG_SHA),
+            ("tokenizer.json", TOKENIZER_SHA),
+            ("processor_config.json", PROCESSOR_SHA),
+            ("chat_template.jinja", TEMPLATE_SHA),
+            ("engram_token_map.bin", ENGRAM_MAP_SHA),
+        ] {
+            verify(&path.join(name), digest)?;
+        }
+        let tokenizer = Tokenizer::from_file(path.join("tokenizer.json")).map_err(|_| "invalid_hy4_tokenizer")?;
+        if tokenizer.get_vocab_size(true) != VOCAB {
+            return Err("invalid_hy4_tokenizer");
+        }
+        let engine = Engine::<Metal>::new().map_err(|_| "native_backend_unavailable")?;
+        let identity = engine.metal_device_identity();
+        let profile_setting = std::env::var("STARK_HY4_LOAD_PROFILE");
+        let automatic = matches!(profile_setting, Err(std::env::VarError::NotPresent));
+        let mut load_profile = resolve_load_profile(profile_setting.as_deref(), engine.supports_metal4())?;
+        drop(engine);
+        let lookup_enabled = verify_switch("STARK_HY4_MTP_LOOKUP", "invalid_hy4_mtp_lookup", false)?;
+        let (mut options, profile_arena) = Self::load_options(load_profile, lookup_enabled)?;
+        let mut native = Session::load(path, path, options);
+        if automatic && load_profile == "streamed-prefill" {
+            // A busy host can reject the larger arena while admitting the tuned graph.
+            if profile_arena && load_memory_failure(&native) {
+                options.arena_bytes_requested = 0;
+                native = Session::load(path, path, options);
+            }
+            if load_memory_failure(&native) {
+                load_profile = "default";
+                (options, _) = Self::load_options(load_profile, lookup_enabled)?;
+                native = Session::load(path, path, options);
+            }
+        }
+        let native = native?;
         source.verify_unchanged()?;
         let lookup_newline = lookup_enabled.then(|| Arc::new(NewlineTokens::from_tokenizer(&tokenizer, VOCAB)));
         let runtime = json!({
@@ -272,23 +315,23 @@ impl Hy4Backend {
             "supports_mxu": identity.supports_mxu,
             "hy4_load_profile": load_profile,
             "expert_storage": if native.mapped_experts() { "mapped" } else { "streamed" },
-            "mapped_expert_residency": matches!(storage, ExpertStorage::MappedResident),
-            "grouped_prefill_requested": grouped,
-            "grouped_prefill_operands": if routed_half { "f16" } else if grouped { "f32" } else { "off" },
-            "grouped_prefill_fragments_requested": routed_fragments,
-            "gpu_expert_plan": gpu_plan && native.mapped_experts(),
-            "prefill_chunk_tokens": chunk,
-            "prefill_stage_profile_requested": profile_prefill,
-            "prefill_dense_packed_requested": dense_packed,
-            "prefill_dense_device_views_requested": dense_device_views,
-            "prefill_dense_ffn_device_views_requested": dense_ffn_device_views,
-            "prefill_tensor_mla_requested": tensor_mla,
-            "token_embeddings_resident": resident_token_embeddings,
-            "draft_experts_resident": resident_draft_experts,
+            "mapped_expert_residency": matches!(options.storage, ExpertStorage::MappedResident),
+            "grouped_prefill_requested": options.grouped,
+            "grouped_prefill_operands": if options.routed_half { "f16" } else if options.grouped { "f32" } else { "off" },
+            "grouped_prefill_fragments_requested": options.routed_fragments,
+            "gpu_expert_plan": options.gpu_plan && native.mapped_experts(),
+            "prefill_chunk_tokens": options.chunk,
+            "prefill_stage_profile_requested": options.profile_prefill,
+            "prefill_dense_packed_requested": options.dense_packed,
+            "prefill_dense_device_views_requested": options.dense_device_views,
+            "prefill_dense_ffn_device_views_requested": options.dense_ffn_device_views,
+            "prefill_tensor_mla_requested": options.tensor_mla,
+            "token_embeddings_resident": options.resident_token_embeddings,
+            "draft_experts_resident": options.resident_draft_experts,
             "draft_head_format": native.draft_head_format(),
-            "streamed_expert_demand_retention": demand_retention,
+            "streamed_expert_demand_retention": options.demand_retention,
             "streamed_expert_arena_bytes": native.arena_bytes(),
-            "streamed_expert_arena_requested_bytes": arena_bytes_requested,
+            "streamed_expert_arena_requested_bytes": options.arena_bytes_requested,
         });
         Ok(Self {
             native,
@@ -301,7 +344,7 @@ impl Hy4Backend {
             lookup_stats: LookupStats::default(),
             lookup_newline,
             runtime,
-            chunk,
+            chunk: options.chunk,
         })
     }
 
@@ -643,5 +686,30 @@ impl GenerationBackend for Hy4Backend {
     }
     fn prefix_cache_retained(&self) -> bool {
         self.retained.is_some() || self.pending.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_memory_failure, resolve_load_profile};
+
+    #[test]
+    fn implicit_load_profile_uses_metal4_path() {
+        let unset = Err(&std::env::VarError::NotPresent);
+        assert_eq!(resolve_load_profile(unset, true), Ok("streamed-prefill"));
+        assert_eq!(resolve_load_profile(unset, false), Ok("default"));
+        assert_eq!(resolve_load_profile(Ok("default"), true), Ok("default"));
+        assert_eq!(resolve_load_profile(Ok("streamed-prefill"), false), Ok("streamed-prefill"));
+        assert_eq!(resolve_load_profile(Ok("resident-decode"), true), Ok("resident-decode"));
+        assert_eq!(resolve_load_profile(Ok("map"), true), Err("invalid_hy4_load_profile"));
+    }
+
+    #[test]
+    fn implicit_load_can_retry_memory_admission_errors() {
+        assert!(load_memory_failure(&Err("hy4_larger_arena_exceeds_budget")));
+        assert!(load_memory_failure(&Err("hy4_expert_arena_load_failed")));
+        assert!(load_memory_failure(&Err("resource_budget_exceeded")));
+        assert!(!load_memory_failure(&Err("invalid_hy4_gguf")));
+        assert!(!load_memory_failure(&Err("hy4_metal_graph_load_failed")));
     }
 }
