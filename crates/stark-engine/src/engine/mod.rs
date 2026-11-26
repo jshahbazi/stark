@@ -68,6 +68,12 @@ pub struct MetalDeviceIdentity {
 
 #[cfg(feature = "metal")]
 impl Engine<Metal> {
+    pub fn supports_metal4(&self) -> bool {
+        use metal::{MTLDevice, MTLGPUFamily};
+
+        self.context.device.supports_family(MTLGPUFamily::Metal4)
+    }
+
     /// Submit and boundedly wait for an empty queue signal during worker idle.
     pub fn maintain_idle_queue(&self) -> Result<(), &'static str> {
         self.context.maintain_idle_queue()

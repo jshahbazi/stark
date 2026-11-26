@@ -93,7 +93,8 @@ struct StarkHy4 {
 extern "C" int stark_hy4_open(const char* model, const char* projector, const char* pack, int chunk,
                                int storage, int grouped, int gpu_plan, int profile_prefill, uint64_t arena_bytes_requested,
                                int demand_retention, int routed_half, int dense_packed, int resident_token_embeddings,
-                               int tensor_mla, int max_drafts, int routed_fragments, int dense_device_views,
+                               int tensor_mla, int compensated_sparse_mla, int max_drafts, int routed_fragments,
+                               int dense_device_views,
                                int dense_ffn_device_views, int resident_draft_experts, int draft_head_q5,
                                uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
                                StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
@@ -127,8 +128,8 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         const size_t dense_view_bytes = dense_device_views ? Forward::dense_device_scratch_bytes(geo, chunk) : 0;
         const double future = 2.0 * kGiB * (chunk / 1024.0) + s.vision.reserved_bytes() + dense_view_bytes;
         const uint64_t draft_bank_bytes = resident_draft_experts ? Mtp::resident_expert_bytes(geo) : 0;
-        if (resident_draft_experts && (draft_bank_bytes == 0 || draft_bank_bytes > s.metal.max_buffer_length()))
-            return 5;
+        if (resident_draft_experts && draft_bank_bytes == 0) return 5;
+        if (draft_bank_bytes > s.metal.max_buffer_length()) return 10;
         const double draft_and_decode_reserve = 3.0 * kGiB +
             std::max(0.0, static_cast<double>(draft_bank_bytes) - Mtp::kExpertPoolBudgetBytes);
         const auto initial = plan_arena(s.model, s.metal);
@@ -161,6 +162,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         prefill.dense_device_views = dense_device_views != 0;
         prefill.dense_ffn_device_views = dense_ffn_device_views != 0;
         prefill.tensor_mla = tensor_mla != 0;
+        prefill.compensated_sparse_mla = compensated_sparse_mla != 0;
         if (!s.forward.open(s.model, s.metal, pack, prefill).empty()) return 4;
         const bool resident_nextn = resident_draft_experts != 0;
         if (!s.mtp.open(s.model, s.metal, s.forward.library(), 1024, pack, resident_nextn,

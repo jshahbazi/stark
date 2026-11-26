@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <stdexcept>
 
 namespace strata::hy4_flash {
 namespace {
@@ -660,6 +661,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     if (pf.dense_device_views && !pf.dense_packed) return "dense device views need packed prefill";
     if (pf.dense_ffn_device_views && !pf.dense_device_views) return "FFN device views need dense device views";
     if (pf.tensor_mla && !c.supports_metal4()) return "tensor MLA prefill needs Metal 4";
+    if (pf.compensated_sparse_mla && !c.supports_metal4()) return "compensated sparse MLA prefill needs Metal 4";
     // The sub-batch sizes are clamped to [kMaxWindow, tcap]: a decode window must fit in ONE sub-batch of each
     // stage, or the "prefill is bitwise decode" claim would rest on a path decode never takes.
     tcap = std::max(Forward::kMaxWindow, pf.chunk);
@@ -785,7 +787,16 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     }
     if (pf_mma_ok) {
         attn_pf_range = cx->pipeline(lib, "hy4_flash_mla_pf5_s32", mtl::Constants().b(43, false));
-        attn_pf_sel = cx->pipeline(lib, "hy4_flash_mla_pf5_s32", mtl::Constants().b(43, true));
+        const auto selection = mtl::Constants().b(43, true);
+        if (pf.compensated_sparse_mla) {
+            try {
+                auto candidate = cx->pipeline(lib, "hy4_flash_mla_pf5_compensated_s32", selection);
+                if (candidate.max_threads >= 1024) attn_pf_sel = std::move(candidate);
+            } catch (const std::runtime_error&) {
+                // Keep the original specialization if the device rejects the optional pipeline.
+            }
+        }
+        if (!attn_pf_sel.handle) attn_pf_sel = cx->pipeline(lib, "hy4_flash_mla_pf5_s32", selection);
     }
     if (pf.tensor_mla && pf_mma_ok) attn_pf_tensor = cx->pipeline(lib, "stark_hy4_mla_prefill_tensor");
     if (pf_mma_idx_ok) p_idx_score_pf = cx->pipeline(lib, "hy4_flash_indexer_score_pf");

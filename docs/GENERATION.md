@@ -95,18 +95,26 @@ has its own worker and artifact evidence in the
 
 ### Tested Hy4 load profiles
 
-`STARK_HY4_LOAD_PROFILE` selects the startup configuration. Individual Hy4
-options override the profile defaults. The tuned profiles require Metal 4 and use the original
+With `STARK_HY4_LOAD_PROFILE` unset, Stark tries `resident-decode` first on
+Metal 4. If the resident banks or context exceed the memory budget, it tries
+`streamed-prefill` with a 40 GB arena, then with its ordinary arena, then the
+legacy profile. An expert-storage or streaming option starts the automatic
+selection at `streamed-prefill`. Older Metal hardware selects the legacy
+profile. The worker fits the context at load using the memory and workspace
+of the selected profile. Check the loaded profile and capacity in readiness.
+
+`STARK_HY4_LOAD_PROFILE` selects one profile explicitly. Individual Hy4 options
+override its defaults. The tuned profiles require Metal 4 for their optimized
+prefill kernels and use the original
 Q3_K target and BF16 projector, the Q5_0 NextN vocabulary projection, resident
-token embeddings, grouped routed fragments, packed dense attention and tensor
-MLA. Both select their context from available memory when the optional cap is
-unset.
+token embeddings, grouped routed fragments, packed dense attention, tensor
+MLA and compensated indexed sparse prefill.
 
 | Profile | Worker settings |
 | --- | --- |
-| `default` or unset | Streamed storage, 1,024-row chunks, grouped F32 prefill and the Q8_0 draft head. |
-| `streamed-prefill` | 40 GB streamed arena with demand retention, 4,096-row chunks and guarded FFN views. The FFN views are eligible through 8,192 loaded positions. |
-| `resident-decode` | Both expert banks resident, 1,024-row chunks and the original FFN path. Text can explicitly request three greedy drafts for short code. |
+| `default` | Legacy streamed profile with 1,024-row chunks, grouped F32 prefill and the Q8_0 draft head. |
+| `streamed-prefill` | 40 GB streamed arena with demand retention, 4,096-row prefill and prefix boundaries, and guarded FFN views. The FFN views are eligible through 8,192 loaded positions. |
+| `resident-decode` | Both expert banks resident, 4,096-row prefill and prefix boundaries, and the original FFN path. Text can explicitly request three greedy drafts for short code. |
 
 ```sh
 STARK_HY4_LOAD_PROFILE=streamed-prefill \
@@ -122,16 +130,18 @@ The 4K prefill, 4K decode and short-code peaks used an 8,192-position loaded
 window. Set `STARK_HY4_CONTEXT_LIMIT=8192` to bound the load for that geometry
 and check the selected capacity in readiness. Longer loaded windows use the
 original FFN projection for all chunks. Memory admission can refuse the
-requested arena or resident banks on a busy host. [Benchmark settings and results](model-experiments/speed-hy4.md)
+requested arena or resident banks on a busy host. The resident OpenCode
+benchmark on a 128 GiB M5 Max fitted 118,784 positions with no context cap
+and took 98 s to start. [Resident OpenCode benchmark](model-experiments/2026-11-26-hy4-resident-opencode.md)
 
 ### Individual Hy4 controls
 
-The worker defaults to streamed experts, grouped F32 prefill on Metal 4 and
+The legacy profile uses streamed experts, grouped F32 prefill on Metal 4 and
 1,024-token prefix boundaries. `STARK_HY4_EXPERT_STORAGE=mapped` selects the
 experimental read-only banks under Metal and live RAM limits. Mapped decode
 uses the GPU expert planner. Its first prompt can incur substantial page-fault
-latency and system swap. `STARK_HY4_PREFILL_CHUNK=4096` selects a 4,096-token
-boundary for a prefill comparison. With `STARK_HY4_EXPERT_STORAGE=streamed`,
+latency and system swap. `STARK_HY4_PREFILL_CHUNK=1024` or `4096` overrides
+prefill and prefix geometry. With `STARK_HY4_EXPERT_STORAGE=streamed`,
 `STARK_HY4_STREAM_ARENA_GB` requests an expert cache in whole decimal GB under
 the memory limits. `STARK_HY4_STREAM_ARENA_36GB=1` is the equivalent legacy
 setting for 36 GB. Select one arena setting per worker. Readiness reports
@@ -142,6 +152,14 @@ changes encoder boundaries. The [4K experiment
 record](model-experiments/2026-11-25-hy4-prefill-decode-profile.md) covers the
 observed benefit and remaining qualification. The verification and worker
 gates remain artifact-specific.
+
+The tuned profiles request compensated indexed sparse prefill on Metal 4.
+The kernel splits queries and probabilities into F16 operands and keeps F32
+accumulation and the original F16 K/V cache. The worker uses the original
+kernel if the compensated pipeline is unavailable. Set
+`STARK_HY4_PREFILL_COMPENSATED_SPARSE_MLA=0` to select the original kernel
+explicitly. The compensated kernel has passed synthetic GPU accuracy checks.
+Full-model parity and speed are still to be measured. [Compensated sparse MLA record](model-experiments/2026-11-26-hy4-compensated-sparse-mla.md)
 
 `STARK_HY4_PREFILL_ROUTED_HALF=1` selects F16 operands with F32 accumulation
 for eligible grouped routed experts. Dense projections and the small
