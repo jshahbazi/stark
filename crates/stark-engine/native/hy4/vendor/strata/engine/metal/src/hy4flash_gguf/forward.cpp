@@ -402,11 +402,17 @@ struct Forward::Impl {
         auto it = moemm_.find(k);
         if (it == moemm_.end()) {
             const MoeMm md = mm_mode();
-            const MoeMmTile t = mm_tile();
+            MoeMmTile gu = mm_tile(), down = gu;
+            if (pf.routed_fragments && gu.half && (gu_type == ref::Q3_K || gu_type == ref::Q4_K) &&
+                d_type == ref::Q4_K && latent % 64 == 0 && expert_ff % 64 == 0) {
+                gu.fragments = down.fragments = true;
+                gu.tk = down.tk = 64;
+                down.tn = 64;
+            }
             // one running sum unless the mode asks for a sum per K step
             mtl::Constants c;
             if (md != MoeMm::F32x2) c.i(60, 1);
-            it = moemm_.emplace(k, MoeMmF32(*cx, lib, (uint32_t) latent, (uint32_t) expert_ff, t, t, c, gu_type)).first;
+            it = moemm_.emplace(k, MoeMmF32(*cx, lib, (uint32_t) latent, (uint32_t) expert_ff, gu, down, c, gu_type)).first;
         }
         return it->second;
     }
@@ -603,6 +609,8 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     cx = &c;
     pack = pack_dir;
     pf = p;
+    if (pf.routed_fragments && (!pf.routed_half || !pf.grouped_k_quant || !c.supports_metal4()))
+        return "packed expert fragments need the grouped F16 Metal 4 prefill path";
     if (pf.dense_packed && !c.supports_metal4()) return "packed attention prefill needs Metal 4";
     if (pf.tensor_mla && !c.supports_metal4()) return "tensor MLA prefill needs Metal 4";
     // The sub-batch sizes are clamped to [kMaxWindow, tcap]: a decode window must fit in ONE sub-batch of each
@@ -667,6 +675,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     auto kernel_files = strata_hy4_flash_metal::hy4_flash_kernel_files(mm_supported);
     if (pf.dense_packed) kernel_files.emplace_back("stark_hy4_flash_dense_packed.metal");
     if (pf.tensor_mla) kernel_files.emplace_back("stark_hy4_flash_mla_prefill.metal");
+    if (pf.routed_fragments) kernel_files.emplace_back("stark_hy4_flash_moe_fragments.metal");
     lib = cx->compile(kernel_files, strata_hy4_flash_metal::hy4_flash_prelude(), false);
     p_rms_w = cx->pipeline(lib, "hy4_flash_rmsnorm", mtl::Constants().b(40, true));
     p_rms_nw = cx->pipeline(lib, "hy4_flash_rmsnorm", mtl::Constants().b(40, false));
@@ -2567,9 +2576,9 @@ std::string Forward::prefill(const int32_t* all_tokens, int p0, int T, const Pre
     if (im.pr_record != nullptr && im.routed.empty())
         im.routed.assign((size_t) im.m->stream.n_layers() * (size_t) T * (size_t) im.topk, -1);
     struct InChunk {
-        bool& f;
-        ~InChunk() { f = false; }
-    } in_chunk{im.pr_in_chunk};
+        Impl& graph;
+        ~InChunk() { graph.pr_in_chunk = false; }
+    } in_chunk{im};
     im.pr_in_chunk = true;
 
     const mtl::Buffer* in = &im.hcA;

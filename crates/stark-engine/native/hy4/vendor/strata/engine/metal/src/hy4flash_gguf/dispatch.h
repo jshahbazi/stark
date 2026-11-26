@@ -696,7 +696,12 @@ struct Hy4FlashMmArgs {
 
 /// TM entries x TN outputs a threadgroup, split over SGM x SGN simdgroups; half: f16 operands, f32 sums.
 /// mpp: Metal 4 matmul2d (hy4_flash_mm2_*, SGM * SGN simdgroups as its execution scope) instead of simdgroup_matrix.
-struct MoeMmTile { int tm = 64, tn = 32, sgm = 4, sgn = 1; bool half = true; bool mpp = false; int tk = 32; };
+struct MoeMmTile {
+    int tm = 64, tn = 32, sgm = 4, sgn = 1;
+    bool half = true, mpp = false;
+    int tk = 32;
+    bool fragments = false;
+};
 
 class MoeMmF32 {
 public:
@@ -712,6 +717,7 @@ public:
         if (n_latent % (uint32_t) gu.tk != 0 || n_ff % (uint32_t) dn.tk != 0)
             throw std::runtime_error("MoeMmF32: TK must divide n_latent and n_ff");
         auto nm = [](const char* k, const Tile& t) {
+            if (t.fragments) return std::string("stark_hy4_moe_fragments_") + k;
             const std::string ty = t.half ? "_half" : "_float";
             if (t.mpp)
                 return std::string("hy4_flash_mm2_") + k + "_" + std::to_string(t.tm) + "_" + std::to_string(t.tn) + "_" +
@@ -719,10 +725,10 @@ public:
             return std::string("hy4_flash_mm_") + k + "_" + std::to_string(t.tm) + "_" + std::to_string(t.tn) + "_" +
                    std::to_string(t.sgm) + "_" + std::to_string(t.sgn) + ty;
         };
-        mtl::Constants gu_probe = probe;
+        mtl::Constants gu_probe = gu.fragments ? mtl::Constants{} : probe;
         if (gu.mpp) gu_probe.i(61, gu_type);
         p_gu_ = cx.pipeline(lib, nm("gu", gu), gu_probe);
-        p_dn_ = cx.pipeline(lib, nm("down", dn), probe);
+        p_dn_ = cx.pipeline(lib, nm("down", dn), dn.fragments ? mtl::Constants{} : probe);
     }
     int tm() const { return gu_.tm; }
     const std::string& gu_name() const { return p_gu_.name; }

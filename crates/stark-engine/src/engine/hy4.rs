@@ -13,7 +13,8 @@ use super::context::ContextSizing;
 
 pub const VOCAB: usize = 120_832;
 pub const PREFILL_CHUNK: usize = 1024;
-pub const MAX_DRAFTS: usize = 2;
+pub const RECOMMENDED_DRAFTS: usize = 2;
+pub const MAX_DRAFTS: usize = 4;
 pub const SHARD: &str = "Hy4-flash-Q3_K-00001-of-00002.gguf";
 pub const ENGRAM_SHARD: &str = "Hy4-flash-Q3_K-00002-of-00002.gguf";
 pub const PROJECTOR: &str = "mmproj-Hy4-flash-bf16.gguf";
@@ -111,9 +112,11 @@ pub struct Options {
     pub arena_bytes_requested: u64,
     pub demand_retention: bool,
     pub routed_half: bool,
+    pub routed_fragments: bool,
     pub dense_packed: bool,
     pub resident_token_embeddings: bool,
     pub tensor_mla: bool,
+    pub max_drafts: usize,
     pub context_limit: Option<u32>,
 }
 
@@ -193,6 +196,8 @@ unsafe extern "C" {
         dense_packed: c_int,
         resident_token_embeddings: c_int,
         tensor_mla: c_int,
+        max_drafts: c_int,
+        routed_fragments: c_int,
         select_context: unsafe extern "C" fn(*const ContextMemory, *mut c_void) -> u32,
         sizing: *mut c_void,
         session: *mut *mut c_void,
@@ -239,6 +244,7 @@ pub struct Session {
     mapped_experts: bool,
     arena_bytes: u64,
     sizing: ContextSizing,
+    max_drafts: usize,
 }
 
 fn path_arg(path: &Path) -> Result<CString, &'static str> {
@@ -255,6 +261,9 @@ impl Session {
         prepare: &Path,
         options: Options,
     ) -> Result<Self, &'static str> {
+        if !(RECOMMENDED_DRAFTS..=MAX_DRAFTS).contains(&options.max_drafts) {
+            return Err("invalid_hy4_mtp_max_drafts");
+        }
         let shard = path_arg(&model.join(SHARD))?;
         let projector = path_arg(&model.join(PROJECTOR))?;
         let prepare = path_arg(prepare)?;
@@ -284,6 +293,8 @@ impl Session {
                 c_int::from(options.dense_packed),
                 c_int::from(options.resident_token_embeddings),
                 c_int::from(options.tensor_mla),
+                options.max_drafts as c_int,
+                c_int::from(options.routed_fragments),
                 select_context,
                 ptr::from_mut(&mut selection).cast(),
                 &mut inner,
@@ -312,6 +323,7 @@ impl Session {
             mapped_experts: mapped != 0,
             arena_bytes,
             sizing: selection.sizing.expect("successful Hy4 open selected a context"),
+            max_drafts: options.max_drafts,
         })
     }
 
@@ -329,6 +341,10 @@ impl Session {
 
     pub fn context_sizing(&self) -> ContextSizing {
         self.sizing
+    }
+
+    pub fn max_drafts(&self) -> usize {
+        self.max_drafts
     }
     pub fn begin(
         &mut self,

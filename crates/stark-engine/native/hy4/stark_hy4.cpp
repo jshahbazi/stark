@@ -20,7 +20,9 @@ using namespace strata::hy4_flash;
 
 namespace {
 constexpr int kVocab = 120832;
-constexpr int kMaxDrafts = 2;
+constexpr int kRecommendedDrafts = 2;
+constexpr int kMaxDrafts = 4;
+static_assert(kMaxDrafts + 1 <= Forward::kMaxWindow && kMaxDrafts < Mtp::kCacheSlack);
 constexpr uint64_t kGiB = 1ull << 30;
 
 double mapped_expert_room(const ArenaPlan& arena) {
@@ -80,6 +82,7 @@ struct StarkHy4 {
     int context = 0;
     int position = 0;
     int drafts = 0;
+    int max_drafts = 0;
     StarkHy4Stats start_stats{};
     mtl::Context::SegTiming decode_start{};
     double decode_engram_start_ms = 0;
@@ -90,14 +93,15 @@ struct StarkHy4 {
 extern "C" int stark_hy4_open(const char* model, const char* projector, const char* pack, int chunk,
                                int storage, int grouped, int gpu_plan, int profile_prefill, uint64_t arena_bytes_requested,
                                int demand_retention, int routed_half, int dense_packed, int resident_token_embeddings,
-                               int tensor_mla,
+                               int tensor_mla, int max_drafts, int routed_fragments,
                                uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
                                StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
                                uint64_t* arena_bytes) noexcept {
     *output = nullptr;
     try {
         if ((chunk != 1024 && chunk != 4096) ||
-            ((arena_bytes_requested || demand_retention) && storage != 1)) return 1;
+            ((arena_bytes_requested || demand_retention) && storage != 1) ||
+            max_drafts < kRecommendedDrafts || max_drafts > kMaxDrafts) return 1;
         auto session = std::make_unique<StarkHy4>();
         auto& s = *session;
         s.metal.lock_safe_math();
@@ -140,6 +144,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         prefill.mapped_gpu_plan = gpu_plan != 0;
         prefill.profile_stages = profile_prefill != 0;
         prefill.routed_half = routed_half != 0;
+        prefill.routed_fragments = routed_fragments != 0;
         prefill.dense_packed = dense_packed != 0;
         prefill.tensor_mla = tensor_mla != 0;
         if (!s.forward.open(s.model, s.metal, pack, prefill).empty()) return 4;
@@ -182,6 +187,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
                    static_cast<uint32_t>(vg.merge), static_cast<uint64_t>(vg.min_pixels),
                    static_cast<uint64_t>(vg.max_pixels)};
         s.capacity = context;
+        s.max_drafts = max_drafts;
         s.tokens.reserve(static_cast<size_t>(context));
         *output = session.release();
         return 0;
@@ -221,7 +227,7 @@ extern "C" int stark_hy4_begin(StarkHy4* session, const uint32_t* tokens, int co
     auto& s = *session;
     try {
         if (context > s.capacity || count < 1 || count >= context || reuse < 0 || reuse >= count ||
-            drafts < 0 || drafts > kMaxDrafts || (image && (reuse || drafts))) return 1;
+            drafts < 0 || drafts > s.max_drafts || (image && (reuse || drafts))) return 1;
         const auto valid = [](uint32_t token) { return token < kVocab; };
         if (!std::all_of(tokens, tokens + count, valid)) return 1;
         if (reuse == 0) {

@@ -17,7 +17,10 @@ use stark_engine::{
     backends::metal::Metal,
     engine::{
         Engine,
-        hy4::{DraftStats, ExpertStorage, ImageInput, MAX_DRAFTS, Options, PREFILL_CHUNK, SHARD, Session, VOCAB},
+        hy4::{
+            DraftStats, ExpertStorage, ImageInput, MAX_DRAFTS, Options, PREFILL_CHUNK, RECOMMENDED_DRAFTS, SHARD,
+            Session, VOCAB,
+        },
         hybrid::activity::InferenceActivity,
     },
 };
@@ -147,13 +150,24 @@ impl Hy4Backend {
         let context_limit = optional_bound("STARK_HY4_CONTEXT_LIMIT", 2..=u32::MAX, "invalid_hy4_context_limit")?;
         let demand_retention =
             verify_switch("STARK_HY4_STREAM_DEMAND_RETENTION", "invalid_hy4_stream_demand_retention", false)?;
+        let max_drafts = optional_bound(
+            "STARK_HY4_MTP_MAX_DRAFTS",
+            RECOMMENDED_DRAFTS as u32..=MAX_DRAFTS as u32,
+            "invalid_hy4_mtp_max_drafts",
+        )?
+        .unwrap_or(RECOMMENDED_DRAFTS as u32) as usize;
         let routed_half = verify_switch("STARK_HY4_PREFILL_ROUTED_HALF", "invalid_hy4_prefill_routed_half", false)?;
+        let routed_fragments =
+            verify_switch("STARK_HY4_PREFILL_ROUTED_FRAGMENTS", "invalid_hy4_prefill_routed_fragments", false)?;
         let dense_packed = verify_switch("STARK_HY4_PREFILL_DENSE_PACKED", "invalid_hy4_prefill_dense_packed", false)?;
         let tensor_mla = verify_switch("STARK_HY4_PREFILL_TENSOR_MLA", "invalid_hy4_prefill_tensor_mla", false)?;
         let resident_token_embeddings =
             verify_switch("STARK_HY4_EMBEDDINGS_RESIDENT", "invalid_hy4_embeddings_resident", false)?;
         if routed_half && !grouped {
             return Err("invalid_hy4_prefill_routed_half");
+        }
+        if routed_fragments && !(routed_half && grouped) {
+            return Err("invalid_hy4_prefill_routed_fragments");
         }
         if demand_retention && !matches!(storage, ExpertStorage::Streamed) {
             return Err("invalid_hy4_stream_demand_retention");
@@ -173,9 +187,11 @@ impl Hy4Backend {
                 arena_bytes_requested,
                 demand_retention,
                 routed_half,
+                routed_fragments,
                 dense_packed,
                 resident_token_embeddings,
                 tensor_mla,
+                max_drafts,
                 context_limit,
             },
         )?;
@@ -189,6 +205,7 @@ impl Hy4Backend {
             "expert_storage": if native.mapped_experts() { "mapped" } else { "streamed" },
             "grouped_prefill_requested": grouped,
             "grouped_prefill_operands": if routed_half { "f16" } else if grouped { "f32" } else { "off" },
+            "grouped_prefill_fragments_requested": routed_fragments,
             "gpu_expert_plan": gpu_plan && native.mapped_experts(),
             "prefill_chunk_tokens": chunk,
             "prefill_stage_profile_requested": profile_prefill,
@@ -457,8 +474,8 @@ impl GenerationBackend for Hy4Backend {
 
     fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
         Some(MtpCapabilities {
-            max_drafts: MAX_DRAFTS,
-            recommended_drafts: MAX_DRAFTS,
+            max_drafts: self.native.max_drafts(),
+            recommended_drafts: RECOMMENDED_DRAFTS,
             sampling: "greedy-target-match-v1",
             verification: "hy4-nextn-greedy-prefix-match-v1",
         })

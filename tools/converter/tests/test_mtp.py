@@ -65,9 +65,10 @@ def test_inkling_short_verifier_uses_the_separate_three_draft_contract():
     assert mtp_capabilities({"mtp": dict(raw, verification="inkling-dspark-target-draw-v1")})["supported"] is False
 
 
-def test_hy4_admits_its_greedy_verifier_and_resolves_sampled_requests_to_serial():
+@pytest.mark.parametrize("maximum", (2, 3, 4))
+def test_hy4_admits_its_greedy_verifier_and_resolves_sampled_requests_to_serial(maximum):
     raw = descriptor(
-        max_drafts=2,
+        max_drafts=maximum,
         sampling="greedy-target-match-v1",
         verification="hy4-nextn-greedy-prefix-match-v1",
     )
@@ -76,7 +77,7 @@ def test_hy4_admits_its_greedy_verifier_and_resolves_sampled_requests_to_serial(
     assert resolve_mtp(True, raw, {"mode": "greedy"}) == 2
     assert resolve_mtp(True, raw, {"mode": "stochastic", "temperature": 1.0}) == 0
     assert default_mtp_enabled(raw) is False
-    for changes in ({"verification": "unknown"}, {"max_drafts": 3}, {"default_drafts": 2}):
+    for changes in ({"verification": "unknown"}, {"max_drafts": 1}, {"max_drafts": 5}, {"default_drafts": 2}):
         assert mtp_capabilities({"mtp": dict(raw, **changes)})["supported"] is False
 
 

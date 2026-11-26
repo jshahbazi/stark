@@ -851,6 +851,10 @@ The wider Hy4 routed tile cut the number of output tiles and K steps with the sa
 
 Reuse contiguous MLA tiles across query rows where the selector already exposes a complete range. Hy4 Q3_K uses a 16-query tensor kernel on sliding and initial causal indexed rows, and reuses its sparse kernel past the cutoff. On the 4K K2 bracket with packed projections and a 40 GB arena, first-use prefill improved 7–13% and warm prefill 6–14%, with all 64 reference IDs matching. Retain the kernel opt-in. A separate stage sample measured 0.910 s of MLA against 1.880 s on the preceding profiled build. [Hy4 multi-query MLA prefill](model-experiments/2026-11-25-hy4-multi-query-prefill.md)
 
+Reuse the gathered fragment layout for grouped Q3_K and Q4_K experts. The Hy4 kernel fetches packed blocks ahead of the next F16 tensor product, stages only weights, and combines gate and up in one product with F32 accumulation. In the same-binary bracket, 4K K2 warm prefill improved 13–19% and all 64 reference IDs matched. [Hy4 grouped expert fragments](model-experiments/2026-11-25-hy4-grouped-fragments.md)
+
+Measure depth on both high-acceptance and coding fixtures. On Hy4's fixed 4K fixture, four NextN drafts reduced target rounds from 22 to 13 and raised decode from 33–39 to 44–46 tok/s on the 40 GB arena. The short TypeScript fixture kept its best rate at depth two. Keep the deeper ceiling opt-in. At 48 GB, retaining experts from the final 256 prompt rows produced more expert reads and slightly longer host cuts in the observed repeats. Keep retention driven by decode demand. [Hy4 depth and retention screens](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-02--verify-three-and-four-nextn-drafts-per-round)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |
@@ -939,6 +943,7 @@ The [experiment selection table](#choose-a-performance-experiment) links the GLM
 | 2026-11-25 | [Hy4-flash context ladder and packed Q8_0 prefill](model-experiments/2026-11-25-hy4-context-ladder.md) | Matched-input ladder through 32K, NextN catch-up attribution, retained packed Q8_0 projections and rejected decode file caching |
 | 2026-11-25 | [Hy4-flash NextN cache construction and verify attention](model-experiments/2026-11-25-hy4-decode-cache-construction.md) | Resident packed token embeddings, rejected cache MMA, history batching and fused verifier attention |
 | 2026-11-25 | [Hy4-flash multi-query MLA prefill](model-experiments/2026-11-25-hy4-multi-query-prefill.md) | Opt-in tensor kernel for contiguous sliding and causal keys, stage attribution and 4K exact-output bracket |
+| 2026-11-25 | [Hy4-flash grouped expert fragments](model-experiments/2026-11-25-hy4-grouped-fragments.md) | Gathered F16 tensor inputs, fused packed gate and up, and a controlled exact-output 4K comparison |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 
