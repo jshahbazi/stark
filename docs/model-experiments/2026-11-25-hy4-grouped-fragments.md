@@ -1464,3 +1464,48 @@ and harness have SHA-256
 `ec3dd25db6b3fd152de488d401b0ef655397530ec5a812c343cdfbcbc234fece`,
 `5d95b571c362beb0f09c7b7721363934c86332b985bf5da1482055703d026d4b`,
 and `669fc50a21f2c6211ba72194c266309ce97cf353bdf8d235db0e0bfb02ada882`.
+
+## 20261126-HY4FRAG-30 · Use FP32 probabilities in sparse value products
+
+The candidate uses Metal TensorOps to multiply the existing F32
+softmax probabilities by gathered F16 values, with F32 accumulation.
+It keeps the production selector, QK, softmax and cache layout.
+The tensor path covers sparse prefill positions 2,048–4,095 and
+changes the accumulation grouping. It leaves target verification,
+NextN and image requests on their existing paths. The installed SDK
+supports the threadgroup input types. [Apple's mixed-operand example](https://developer.apple.com/videos/play/wwdc2026/330/?time=753)
+
+Four 5,120-position workers used the same 40 GB streamed arena,
+original projector, 4,096-row chunks and K2. All eight outputs and
+draft counts matched. The thermal state stayed nominal with zero
+named contenders.
+
+| Order and arm | First use tok/s | Warm tok/s | Receipt SHA-256 |
+| --- | ---: | ---: | --- |
+| 1. Existing value product | 646.53 | 616.98 | `e0a02584e5821d79a09b67fc43e320b19f18cfbf22b40c11f6422a0d7a32241c` |
+| 2. F32 tensor input | 627.23 | 583.09 | `f39d90cf1956f3c86664315642434ff8e157ab2acd44eba5843179011554f95e` |
+| 3. F32 tensor input | 653.15 | 633.73 | `45ab278e5860168c28cd28258e5403b3dfdf0dbee6e34ead2bf80a7e162c4b51` |
+| 4. Existing value product | 639.68 | 570.42 | `dad43b0ab95ad0181c07184a3d2134c24d8c222a9b7cb23c27b173c41e3fc40b` |
+
+The speed comparison changed sign with launch order. Separate
+stage attribution sampled 42 blocks in every request. The candidate
+spent 0.956/0.935 s in MLA against 0.799/1.040 s in the control.
+Observed routed durations varied as well.
+
+At 2,120–2,408 positions, 12 of 13 natural-text top-1 decisions
+matched. Both arms predicted six true next tokens. Keeping F32
+probabilities and the original scores still left a disagreement.
+Keep the existing sparse value product.
+
+The source diff on `db01930d5` includes the adopted Q5_0 draft head.
+The diff, isolated Rust 1.98.1 executable and timing harness have
+SHA-256 `d1b4281dc440c7b336648f876422b47e5230eadeb29208a0833661aa03968ec8`,
+`6aa0a7372aaab3ed8f011c91bb7917278a80dabb467bd93c523c18ff828477c4`,
+and `2c9ab7f532d08e272cee84676f09dd0319ee0d23b97ea0781990d3f850f4f392`.
+
+| Receipt or harness | SHA-256 |
+| --- | --- |
+| F32 tensor input profile | `63564a2c35fd8c3ea804646eb3cbb6649d4c25d5bbc014d2c870c3b7d1995969` |
+| Existing value product profile | `9932b562080e52e04537e441faa035652f063bd2a84a7abf1b92b39660244288` |
+| Natural-text comparison | `924e977d5fe7424580d8ef6c84fc1a1b315c9397728e9089a386eacc95c96967` |
+| Natural-text harness | `cf6d2447281ef0253676575bc650687cd557c234a4ee1189c84b6b323efe53dd` |

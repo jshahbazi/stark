@@ -1,6 +1,6 @@
 # Performance playbook
 
-Use this guide when adding a model or improving its performance. The family speed histories answer “what happened on this artifact?” This page answers “what should I measure or try next?” Each comparison belongs to the build, workload and host in its dated report. Updated 2026-11-25.
+Use this guide when adding a model or improving its performance. The family speed histories answer “what happened on this artifact?” This page answers “what should I measure or try next?” Each comparison belongs to the build, workload and host in its dated report. Updated 2026-11-26.
 
 ## Choose a performance experiment
 
@@ -909,9 +909,13 @@ Use total verify time when pricing a lower draft depth. With Hy4's rebuilt packe
 
 Measure draft quantization through to exact target output and useful tokens. Hy4's Q5_0 draft vocabulary cut the derived head from 394.4 to 255.2 MB and saved about 55 ms of warm draft time on short code. It used 62 target rounds against 64. The first warm median was 66.27 tok/s against 62.31 with a slower cold request. The rebuilt pair reached 67.73 against 64.58 warm with the same five-second spacing, exact outputs and a passing image and prefix lifecycle. Long-window gains stayed smaller. Keep the original BF16 target and expose Q5_0 on the draft only. [Hy4 draft vocabulary screen](model-experiments/2026-11-25-hy4-decode-cache-construction.md#20261126-hy4nextn-10--price-q5_0-for-the-draft-vocabulary)
 
+Check target rounds when a draft vocabulary gets smaller. Hy4's Q4_0 head saved another 46.4 MB against Q5_0. Warm draft time held at 0.270 s. Three extra verifier rounds increased verification by about 130 ms and reduced warm K3 code from 67.86 to 64.85 tok/s. Keep the Q5_0 opt-in. [Hy4 Q4_0 draft screen](model-experiments/2026-11-25-hy4-decode-cache-construction.md#20261126-hy4nextn-12--screen-a-q4_0-draft-vocabulary)
+
 Check shared byte loads through the full routed prefill. Reusing Hy4's Q3_K and Q4_K code bytes across K16 fragments preserved all 64 reference IDs in both orders. First-use rates stayed inside control drift and both warm rates fell. Keep the existing fragment loads and their traffic assumptions separate from measured speed. [Hy4 paired fragment loads](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261126-hy4frag-29--share-packed-expert-bytes-across-k16-fragments)
 
 Isolate the vocabulary projection before redesigning the greedy readout. Hy4's sampled short K3 and 16K K2 projection times extrapolate to 0.103 and 0.113 s over their respective requests. Argmax used under half a millisecond across each sampled slice. Keep the exact head and focus on larger stages. [Hy4 head attribution](model-experiments/2026-11-25-hy4-decode-cache-construction.md#20261126-hy4nextn-11--isolate-the-exact-verifier-vocabulary-projection)
+
+Check accumulation order when higher operand precision is insufficient. Hy4's tensor sparse value product kept F32 probabilities, the original scores and the same F16 cache. Its 4K outputs matched, first and warm speed moved in opposite directions across pairs, and 12 of 13 natural-text top-1 decisions matched. Keep the existing sparse value arithmetic. [Hy4 FP32 value-product test](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261126-hy4frag-30--use-fp32-probabilities-in-sparse-value-products)
 
 Price staging occupancy against extra barriers. Halving Hy4's routed K staging dropped threadgroup memory from 18 to 10 KiB with the same K16 products. First-use prefill stayed inside control drift and warm prefill stayed flat. A group-local dense layout gave small first-use gains and lower warm rates as thermal state changed. Keep the adopted K64 layouts. [Hy4 staging and packing screen](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-27--screen-smaller-routed-staging-and-group-local-dense-packing)
 

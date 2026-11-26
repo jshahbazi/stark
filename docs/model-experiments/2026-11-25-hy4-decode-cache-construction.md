@@ -545,3 +545,35 @@ head and defer vocabulary fusion as a primary speed lever.
 
 Profile receipt SHA-256
 `3c383deab0f19b80fb686de3104769a64fac21439b3ce70bc028e48da5c84980`.
+
+## 20261126-HY4NEXTN-12 · Screen a Q4_0 draft vocabulary
+
+The private Q4_0 variant derives the draft vocabulary from the original
+BF16 rows. The 208.8 MB head is 46.4 MB smaller than Q5_0. The target
+still uses the original BF16 vocabulary. The same feature-enabled Rust
+1.98.1 executable loaded both expert banks and the original projector.
+Each 8,192-position worker ran three K3 requests on the 75-input
+TypeScript fixture, with five seconds before each warm request. Q5_0
+ran first. All requests matched 192 reference IDs with zero reuse.
+
+| Head | First tok/s | Warm tok/s | Warm draft s | Warm verify s | Accepted / proposed / rounds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Q5_0 | 61.28 | 67.79 / 67.93 | 0.270 / 0.270 | 2.547 / 2.542 | 129 / 182 / 62 |
+| Q4_0 | 56.59 | 64.81 / 64.89 | 0.271 / 0.270 | 2.676 / 2.673 | 126 / 191 / 65 |
+
+Q4_0 reduced the warm median from 67.86 to 64.85 tok/s. It needed three
+additional target rounds and spent about 130 ms more in verification.
+Warm draft time stayed flat. Q5_0 started at fair thermal state and
+ended at nominal. Q4_0 stayed nominal. Both arms had zero named
+contenders, pressure level 1 and stable 132 MiB swap.
+Keep the Q5_0 opt-in and Q8_0 default. Remove the Q4_0 diagnostic.
+
+The source diff on `1998e09f8`, executable and harness have SHA-256
+`144dc5fcda202b147a9a650bc55f70b2628adb23175ea0ff12234ef1d0f5b917`,
+`cfcd6c2aeb6ed57508dc91672a8330a9dafc86cefa9dec4ece475961a28d0ee6`,
+and `2528b866601a7c5c7fe9541acd9c1a57e33871f8aecd03990c881a0544053ca9`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Q5_0 | `cb4deb71a8c9369d2f780ad1f388abfacd2a7c3487bdd8b0756c42ce201a4e64` |
+| Q4_0 | `569eac865b5dc06fd8dd0ad4599be18bfd0dc8d4fa413d5ed7c5d4582b6b2257` |
