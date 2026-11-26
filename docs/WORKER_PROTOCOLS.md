@@ -145,6 +145,12 @@ Each Auto request uses the allowance admitted by the current estimate. A smaller
 allowance from a previous request does not restrict a later request when memory
 headroom or the caller's context budget increases.
 
+Native Hy4 sizes and allocates its finite context at model load. Its text
+planner selects a logical request window within that allocation, the caller's
+ceiling, and the worker token budget. Successive requests can use different
+windows in the same worker. Readiness reports the loaded capacity and
+`context_sizing`.
+
 Native text generation also checks allocation admission for explicit output
 requests. A finite context using sparse Metal buffers is charged for the actual
 input plus requested output span; unused reserved address capacity is not mapped

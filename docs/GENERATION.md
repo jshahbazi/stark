@@ -48,6 +48,126 @@ finishes before cancellation resets the request and clears its prefix state.
 
 With `--image`, the CLI reads one regular local file with a 4 MiB limit and accepts PNG or JPEG signatures. The first user turn contains an image placeholder followed by its text. Later turns keep that placeholder in the conversation and resubmit the same owned image bytes for each fresh request; `/reset` clears the conversation and attaches the image to the next first turn. The image stays in process memory between turns. Each request uses the [private staging and transaction lifecycle](#prepared-image-operations). A worker without passing image evidence and an invalid image produce fixed, path-free errors. See the [CLI implementation](../tools/converter/stark_convert/chat.py) and [private image staging](../tools/converter/stark_convert/media.py).
 
+## AngelSlim Hy4 Flash Q3_K
+
+On Apple Silicon, the `hy4` feature runs the original Q3_K split GGUF and BF16
+projector in the generation worker. It uses the Strata Metal graph and Stark's
+request serialization, sampling, cancellation and prefix reuse. At load the
+worker sizes its context from the checkpoint, Metal buffer limits and available
+memory after reserving the expert arena and workspace. It uses the shared
+load-time context fitter and publishes the selected capacity and sizing inputs
+in `context_sizing`. Within that capacity, each text request can choose its own
+window. `plan_generation` clamps the caller's ceiling to the loaded window and
+the worker request budget. `STARK_HY4_CONTEXT_LIMIT` is an optional upper bound
+applied before allocation. The worker always loads the projector. Image requests
+use target-only generation and invalidate the preceding text prefix. [Flexible
+window verification](model-experiments/2026-11-25-hy4-context-ladder.md#20261126-hy4ladder-05--verify-flexible-windows-on-the-measured-profiles)
+
+In a Hy4-enabled desktop build, choose **Manage Models → Model Catalog → Hy4-flash → Hy4-flash AngelSlim Q3_K**.
+Stark downloads the pinned split GGUF and BF16 projector, verifies their hashes,
+and prepares the Tencent metadata before adding the model to the library. Allow
+about 150 GiB of free disk space for the weights and the first-run draft sidecar.
+Select the installed model in Playground to load it for chat.
+[Packaged install and generation check](model-experiments/2026-11-26-hy4-desktop-catalog.md)
+
+### Prepare a local copy from source
+
+Put the two verified Q3_K shards and their original BF16 projector in one
+local directory. Prepare that directory and build the worker from the source
+checkout:
+
+```sh
+uv run --locked --project tools/converter python scripts/prepare_hy4.py /absolute/path/to/hy4-model
+cargo +1.98.1 build --locked --release -p stark-generate --features hy4
+target/release/stark-generate --model-path /absolute/path/to/hy4-model --prefix-cache
+```
+
+Preparation verifies SHA-256 on the original GGUF files, extracts the Engram
+token map from shard one and stages the small pinned Tencent metadata files.
+It writes a private local verification receipt. The worker checks the source
+file fingerprints around model load, so moving the files to another filesystem
+or replacing a shard calls for rerunning preparation.
+The first worker load builds a reusable Q8_0 draft-expert sidecar in the model
+directory. Allow 3.6 GiB of writable space there. The normal worker image
+transaction is available when launched with `--vision-staging-root`. The native worker
+has its own worker and artifact evidence in the
+[Hy4 Q3_K record](model-experiments/2026-11-25-hy4-native-q3-k.md).
+
+### Tested Hy4 load profiles
+
+`STARK_HY4_LOAD_PROFILE` selects the startup configuration. Individual Hy4
+options override the profile defaults. The tuned profiles require Metal 4 and use the original
+Q3_K target and BF16 projector, the Q5_0 NextN vocabulary projection, resident
+token embeddings, grouped routed fragments, packed dense attention and tensor
+MLA. Both select their context from available memory when the optional cap is
+unset.
+
+| Profile | Worker settings |
+| --- | --- |
+| `default` or unset | Streamed storage, 1,024-row chunks, grouped F32 prefill and the Q8_0 draft head. |
+| `streamed-prefill` | 40 GB streamed arena with demand retention, 4,096-row chunks and guarded FFN views. The FFN views are eligible through 8,192 loaded positions. |
+| `resident-decode` | Both expert banks resident, 1,024-row chunks and the original FFN path. Text can explicitly request three greedy drafts for short code. |
+
+```sh
+STARK_HY4_LOAD_PROFILE=streamed-prefill \
+  target/release/stark-generate --model-path /absolute/path/to/hy4-model --prefix-cache
+STARK_HY4_LOAD_PROFILE=resident-decode \
+  target/release/stark-generate --model-path /absolute/path/to/hy4-model --prefix-cache
+```
+
+Text requests can enable greedy NextN with `mtp: true`, which recommends two drafts.
+Use `mtp_drafts: 3` explicitly for the measured short-code configuration. The
+earlier 4K decode peak used resident storage and a 4,096-row chunk override.
+The 4K prefill, 4K decode and short-code peaks used an 8,192-position loaded
+window. Set `STARK_HY4_CONTEXT_LIMIT=8192` to bound the load for that geometry
+and check the selected capacity in readiness. Longer loaded windows use the
+original FFN projection for all chunks. Memory admission can refuse the
+requested arena or resident banks on a busy host. [Benchmark settings and results](model-experiments/speed-hy4.md)
+
+### Individual Hy4 controls
+
+The worker defaults to streamed experts, grouped F32 prefill on Metal 4 and
+1,024-token prefix boundaries. `STARK_HY4_EXPERT_STORAGE=mapped` selects the
+experimental read-only banks under Metal and live RAM limits. Mapped decode
+uses the GPU expert planner. Its first prompt can incur substantial page-fault
+latency and system swap. `STARK_HY4_PREFILL_CHUNK=4096` selects a 4,096-token
+boundary for a prefill comparison. With `STARK_HY4_EXPERT_STORAGE=streamed`,
+`STARK_HY4_STREAM_ARENA_GB` requests an expert cache in whole decimal GB under
+the memory limits. `STARK_HY4_STREAM_ARENA_36GB=1` is the equivalent legacy
+setting for 36 GB. Select one arena setting per worker. Readiness reports
+the requested size and actual arena allocation in bytes. Set
+`STARK_HY4_PROFILE_PREFILL=1` to capture aggregate GPU stage timings. Use a
+separate run with the profiler off to measure throughput, since stage sampling
+changes encoder boundaries. The [4K experiment
+record](model-experiments/2026-11-25-hy4-prefill-decode-profile.md) covers the
+observed benefit and remaining qualification. The verification and worker
+gates remain artifact-specific.
+
+`STARK_HY4_PREFILL_ROUTED_HALF=1` selects F16 operands with F32 accumulation
+for eligible grouped routed experts. Dense projections and the small
+decode and verification windows keep their existing paths.
+`STARK_HY4_STREAM_DEMAND_RETENTION=1` enables bounded repeat-demand retention
+with streamed storage. Both are opt-in. The diagnostic rates apply to the
+36 GB arena and 4,096-row prefill geometry. [Routed precision and
+retention record](model-experiments/2026-11-25-hy4-dense-prefill-expert-retention.md)
+
+`STARK_HY4_PREFILL_DENSE_PACKED=1` selects experimental Metal 4 tensor
+projections for packed Q8_0 attention weights during prefill. The kernel
+uses F16 operands and F32 accumulation. The [context ladder and projection
+record](model-experiments/2026-11-25-hy4-context-ladder.md) covers the measured
+4K comparison and the 32K prompt.
+
+`STARK_HY4_PREFILL_TENSOR_MLA=1` selects the experimental Metal 4
+multi-query kernel for sliding and fully causal indexed prefill rows.
+It uses F16 query and probability operands with F32 accumulation and
+preserves each row's visible keys. Indexed rows past the causal region
+use the existing sparse selector. [Prefill MLA experiment](model-experiments/2026-11-25-hy4-multi-query-prefill.md)
+
+`STARK_HY4_EMBEDDINGS_RESIDENT=1` loads the original packed Q8_0 token
+embedding table into the dense allocation. Target and NextN share the table.
+The extra 394 MB is counted before context sizing. See the [NextN cache
+construction experiment](model-experiments/2026-11-25-hy4-decode-cache-construction.md).
+
 ## Image qualification
 
 The [execution catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json) contains two passed schema-2 records for BF16 `Qwen/Qwen3.5-0.8B`: the developer worker `5fc92516…` and Developer ID signed worker `741a3ea7…`. Both use Metal on an Apple M5 Max with 40 GPU cores, Apple GPU family 1010 and MXU enabled, running macOS 26.7.1. Each record binds all five artifact-file hashes, the exact full executable hash, and its source-bound evidence: [developer execution](archive/runs/2026-10-26-qwen35-image-execution.md) and [signed-worker execution](archive/runs/2026-10-27-qwen35-signed-worker.md).

@@ -145,29 +145,11 @@ pub(crate) fn resized_dimensions(
     limits: &PreprocessLimits,
 ) -> Result<(u32, u32), InvalidInput> {
     check_source_dimensions(width, height, limits)?;
-    if f64::from(width.max(height)) / f64::from(width.min(height)) > 200.0 {
-        return Err(InvalidInput("image aspect ratio exceeds processor bounds"));
-    }
-    let factor = f64::from(PATCH * MERGE);
-    let (h, w) = (f64::from(height), f64::from(width));
-    let mut target_h = (h / factor).round_ties_even() * factor;
-    let mut target_w = (w / factor).round_ties_even() * factor;
     if limits.processor_max_pixels < MIN_PIXELS || limits.processor_max_pixels > MAX_PIXELS {
         return Err(InvalidInput("unsupported processor pixel bound"));
     }
-    if target_h * target_w > limits.processor_max_pixels as f64 {
-        let beta = ((h * w) / limits.processor_max_pixels as f64).sqrt();
-        target_h = factor.max((h / beta / factor).floor() * factor);
-        target_w = factor.max((w / beta / factor).floor() * factor);
-    } else if target_h * target_w < MIN_PIXELS as f64 {
-        let beta = (MIN_PIXELS as f64 / (h * w)).sqrt();
-        target_h = (h * beta / factor).ceil() * factor;
-        target_w = (w * beta / factor).ceil() * factor;
-    }
-    if target_h < factor || target_w < factor || target_h > u32::MAX as f64 || target_w > u32::MAX as f64 {
-        return Err(InvalidInput("processed image dimensions overflow"));
-    }
-    let (target_w, target_h) = (target_w as u32, target_h as u32);
+    let (target_w, target_h) =
+        smart_resize_dimensions(width, height, PATCH * MERGE, MIN_PIXELS, limits.processor_max_pixels)?;
     let pixels = u64::from(target_w) * u64::from(target_h);
     let patches = pixels / u64::from(PATCH * PATCH);
     if pixels > limits.max_processed_pixels || patches > u64::from(limits.max_encoder_patches) {
@@ -175,6 +157,36 @@ pub(crate) fn resized_dimensions(
     }
     rgb_bytes(target_w, target_h)?;
     Ok((target_w, target_h))
+}
+
+// Callers validate source dimensions and supply an admitted model's resize policy.
+fn smart_resize_dimensions(
+    width: u32,
+    height: u32,
+    alignment: u32,
+    min_pixels: u64,
+    max_pixels: u64,
+) -> Result<(u32, u32), InvalidInput> {
+    if f64::from(width.max(height)) / f64::from(width.min(height)) > 200.0 {
+        return Err(InvalidInput("image aspect ratio exceeds processor bounds"));
+    }
+    let factor = f64::from(alignment);
+    let (h, w) = (f64::from(height), f64::from(width));
+    let mut target_h = (h / factor).round_ties_even() * factor;
+    let mut target_w = (w / factor).round_ties_even() * factor;
+    if target_h * target_w > max_pixels as f64 {
+        let beta = ((h * w) / max_pixels as f64).sqrt();
+        target_h = factor.max((h / beta / factor).floor() * factor);
+        target_w = factor.max((w / beta / factor).floor() * factor);
+    } else if target_h * target_w < min_pixels as f64 {
+        let beta = (min_pixels as f64 / (h * w)).sqrt();
+        target_h = (h * beta / factor).ceil() * factor;
+        target_w = (w * beta / factor).ceil() * factor;
+    }
+    if target_h < factor || target_w < factor || target_h > u32::MAX as f64 || target_w > u32::MAX as f64 {
+        return Err(InvalidInput("processed image dimensions overflow"));
+    }
+    Ok((target_w as u32, target_h as u32))
 }
 
 fn be_u16(bytes: &[u8]) -> Result<u16, InvalidInput> {
@@ -630,6 +642,62 @@ fn cubic(distance: f64) -> f64 {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ResizeFilter {
+    TorchBicubic,
+    PillowLanczos,
+}
+
+impl ResizeFilter {
+    fn radius(self) -> f64 {
+        match self {
+            Self::TorchBicubic => 2.0,
+            Self::PillowLanczos => 3.0,
+        }
+    }
+
+    fn weight(
+        self,
+        distance: f64,
+    ) -> f64 {
+        match self {
+            Self::TorchBicubic => cubic(distance),
+            Self::PillowLanczos if (-3.0..3.0).contains(&distance) => {
+                let sinc = |x: f64| {
+                    let phase = std::f64::consts::PI * x;
+                    if phase == 0.0 {
+                        1.0
+                    } else {
+                        phase.sin() / phase
+                    }
+                };
+                sinc(distance) * sinc(distance / 3.0)
+            },
+            Self::PillowLanczos => 0.0,
+        }
+    }
+
+    fn precision(
+        self,
+        maximum: f64,
+    ) -> u32 {
+        match self {
+            Self::TorchBicubic => {
+                let mut precision = 0;
+                while precision < 22 {
+                    if (0.5 + maximum * f64::from(1u32 << (precision + 1))) as i32 >= 1 << 15 {
+                        break;
+                    }
+                    precision += 1;
+                }
+                precision
+            },
+            // Pillow encodes fractions with 22 bits and keeps two bits of accumulation headroom.
+            Self::PillowLanczos => 22,
+        }
+    }
+}
+
 struct ResizeWeights {
     start: usize,
     weights: Vec<i32>,
@@ -638,9 +706,10 @@ struct ResizeWeights {
 fn resize_weights(
     input: u32,
     output: u32,
+    filter: ResizeFilter,
 ) -> Result<(Vec<ResizeWeights>, u32), InvalidInput> {
     let scale = f64::from(input) / f64::from(output);
-    let support = 2.0 * scale.max(1.0);
+    let support = filter.radius() * scale.max(1.0);
     let invscale = 1.0 / scale.max(1.0);
     let mut rows = Vec::new();
     rows.try_reserve_exact(output as usize).map_err(|_| InvalidInput("resize coefficient allocation failed"))?;
@@ -653,7 +722,7 @@ fn resize_weights(
         weights.try_reserve_exact(end - start).map_err(|_| InvalidInput("resize coefficient allocation failed"))?;
         let mut total = 0.0;
         for source in start..end {
-            let weight = cubic((source as f64 - center + 0.5) * invscale);
+            let weight = filter.weight((source as f64 - center + 0.5) * invscale);
             weights.push(weight);
             total += weight;
         }
@@ -666,13 +735,7 @@ fn resize_weights(
         }
         rows.push((start, weights));
     }
-    let mut precision = 0u32;
-    while precision < 22 {
-        if (0.5 + maximum * f64::from(1u32 << (precision + 1))) as i32 >= 1 << 15 {
-            break;
-        }
-        precision += 1;
-    }
+    let precision = filter.precision(maximum);
     let multiplier = f64::from(1u32 << precision);
     Ok((
         rows.into_iter()
@@ -690,12 +753,21 @@ pub(super) fn resize_rgb(
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, InvalidInput> {
+    resize_rgb_with_filter(image, width, height, ResizeFilter::TorchBicubic)
+}
+
+fn resize_rgb_with_filter(
+    image: &RgbImage,
+    width: u32,
+    height: u32,
+    filter: ResizeFilter,
+) -> Result<Vec<u8>, InvalidInput> {
     let horizontal = if image.width == width {
         let mut copy = zeroed_bytes(image.pixels.len())?;
         copy.copy_from_slice(&image.pixels);
         copy
     } else {
-        let (rows, precision) = resize_weights(image.width, width)?;
+        let (rows, precision) = resize_weights(image.width, width, filter)?;
         let mut output = zeroed_bytes(rgb_bytes(width, image.height)?)?;
         for y in 0..image.height as usize {
             for (x, row) in rows.iter().enumerate() {
@@ -714,7 +786,7 @@ pub(super) fn resize_rgb(
     if image.height == height {
         return Ok(horizontal);
     }
-    let (rows, precision) = resize_weights(image.height, height)?;
+    let (rows, precision) = resize_weights(image.height, height, filter)?;
     let mut output = zeroed_bytes(rgb_bytes(width, height)?)?;
     for (y, row) in rows.iter().enumerate() {
         for x in 0..width as usize {
@@ -729,6 +801,41 @@ pub(super) fn resize_rgb(
         }
     }
     Ok(output)
+}
+
+/// The RGB bytes and processed dimensions accepted by the pinned Hy4 Flash BF16 projector.
+pub struct Hy4ImagePixels {
+    pub rgb: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Bounded static JPEG/PNG processing for the Hy4 Flash AngelSlim artifact.
+/// Uses its published processor geometry and Pillow RGB/Lanczos policy.
+pub fn prepare_hy4_image_rgb(encoded: &[u8]) -> Result<Hy4ImagePixels, InvalidInput> {
+    const MIN_PIXELS: u64 = 4_096;
+    const MAX_PIXELS: u64 = 4_194_304;
+    let limits = PreprocessLimits::default();
+    let mut dimensions = (0, 0);
+    let image = decode_image_alpha(encoded, &limits, AlphaBackground::Discard, false, |width, height| {
+        dimensions = smart_resize_dimensions(width, height, 32, MIN_PIXELS, MAX_PIXELS)?;
+        let (width, height) = dimensions;
+        if !(MIN_PIXELS..=MAX_PIXELS).contains(&(u64::from(width) * u64::from(height))) {
+            return Err(InvalidInput("processed image exceeds native admission bounds"));
+        }
+        Ok(())
+    })?;
+    let (width, height) = dimensions;
+    let rgb = if width == image.width && height == image.height {
+        image.pixels
+    } else {
+        resize_rgb_with_filter(&image, width, height, ResizeFilter::PillowLanczos)?
+    };
+    Ok(Hy4ImagePixels {
+        rgb,
+        width,
+        height,
+    })
 }
 
 #[cfg(test)]

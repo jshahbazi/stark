@@ -14,6 +14,8 @@ use crate::{
 pub mod classifier_model;
 pub mod context;
 pub mod decider;
+#[cfg(all(feature = "hy4", target_os = "macos", target_arch = "aarch64"))]
+pub mod hy4;
 #[cfg(unix)]
 pub mod hybrid;
 #[cfg(all(target_os = "macos", feature = "inkling-slice"))]

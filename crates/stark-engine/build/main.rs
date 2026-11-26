@@ -7,6 +7,9 @@ use common::{compiler::Compiler, enum_paths::EnumPaths, envs, gpu_types::GpuType
 
 mod cpu;
 
+#[cfg(feature = "hy4")]
+mod hy4;
+
 #[cfg(feature = "glm-exl3")]
 mod glm_exl3;
 #[cfg(feature = "glm-exl3")]
@@ -62,6 +65,11 @@ fn main() -> anyhow::Result<ExitCode> {
             fs::create_dir_all(&out_dir).with_context(|| format!("cannot recreate {}", out_dir.display()))?;
         }
         debug_log!("cleaned caches");
+    }
+
+    #[cfg(feature = "hy4")]
+    if target_os == "macos" && target_arch == "aarch64" {
+        hy4::build(&out_dir)?;
     }
 
     #[cfg(all(feature = "inkling-slice", target_os = "macos"))]

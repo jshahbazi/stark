@@ -56,7 +56,7 @@ For normal use, install the [signed release](../../docs/INSTALLATION.md). The co
 
 ```sh
 PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-score --bin stark-score --features optimized
-PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-generate --bin stark-generate
+PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-generate --bin stark-generate --features hy4
 PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-template --bin stark-template
 PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-score --bin stark-decide
 uv run --no-project --python 3.13.13 python scripts/build_menubar.py --install --open

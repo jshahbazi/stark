@@ -1788,7 +1788,7 @@ def model_identity(model: Path, *, small_limit=16 * 1024 * 1024) -> dict:
         size = path.stat().st_size
         if path.suffix in (".json", ".jinja", ".txt", ".model") and size <= small_limit:
             result["files"][path.name] = sha256_file(path)
-        elif path.suffix == ".safetensors":
+        elif path.suffix in (".gguf", ".safetensors"):
             result["weights"][path.name] = size
     return result
 
@@ -1821,6 +1821,23 @@ def weight_problem(model: Path) -> str | None:
                 f"are missing (first: {missing[0]})"
             )
         return None
+    ggufs = [
+        path for path in model.glob("*.gguf") if not path.name.startswith("mmproj-")
+    ]
+    if ggufs:
+        for path in ggufs:
+            if path.stat().st_size == 0:
+                return f"empty GGUF weight shard: {path.name}"
+            split = re.fullmatch(r"(.+)-(\d{5})-of-(\d{5})\.gguf", path.name)
+            if split:
+                stem, part, total = split.groups()
+                if not 0 < int(part) <= int(total):
+                    return f"invalid GGUF split filename: {path.name}"
+                for index in range(1, int(total) + 1):
+                    name = f"{stem}-{index:05d}-of-{total}.gguf"
+                    if not (model / name).is_file():
+                        return f"missing GGUF weight shard: {name}"
+        return None
     shards = [
         path for path in model.glob("*.safetensors") if path.name != "mtp.safetensors"
     ]
@@ -1832,7 +1849,7 @@ def weight_problem(model: Path) -> str | None:
 
 
 def artifact_facts(model: Path) -> dict:
-    """Model type and chat-template hash from an artifact's config.json."""
+    """Model type and chat-template hash from the artifact metadata."""
     facts = {"model_type": None, "template_sha256": None}
     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError):
         config = json.loads((model / "config.json").read_text())
@@ -1841,6 +1858,8 @@ def artifact_facts(model: Path) -> dict:
         template = (config.get("token_codec_config") or {}).get("prompt_template")
         if isinstance(template, str):
             facts["template_sha256"] = text_digest(template)
+        elif (model / "chat_template.jinja").is_file():
+            facts["template_sha256"] = sha256_file(model / "chat_template.jinja")
     return facts
 
 
@@ -2365,15 +2384,21 @@ def fetch(port, route, body=None):
 
 
 def native_metrics(port) -> dict:
+    names = {
+        PREFILL_METRIC: PREFILL_METRIC,
+        DECODE_METRIC: DECODE_METRIC,
+        "llamacpp:prompt_seconds_total": PREFILL_METRIC,
+        "llamacpp:tokens_predicted_seconds_total": DECODE_METRIC,
+    }
     with http_request(port, "/metrics") as response:
-        pairs = [
-            line.split()
-            for line in response.read().decode().splitlines()
-            if line.startswith((PREFILL_METRIC + " ", DECODE_METRIC + " "))
-        ]
-    if len(pairs) != 2:
+        metrics = {}
+        for line in response.read().decode().splitlines():
+            name, _, value = line.partition(" ")
+            if name in names:
+                metrics[names[name]] = float(value)
+    if set(metrics) != {PREFILL_METRIC, DECODE_METRIC}:
         raise BenchError("native_metrics_missing")
-    return {name: float(value) for name, value in pairs}
+    return metrics
 
 
 def completion(port, model, prompt, cap, draft, salt, ignore_eos=False) -> dict:
@@ -3660,10 +3685,80 @@ class MlxServeEngine(ServerEngine):
         return "--mtp forced" if config.mlx_force_mtp else "engine default"
 
 
+class LlamaCppEngine(ServerEngine):
+    key = "llama-cpp"
+    label = "llama.cpp Metal"
+    failure_prefix = "llama_cpp"
+
+    def command(self, config, arm, port, kind):
+        profile = require_profile(config)
+        reference = profile.reference(self.key)
+        models = []
+        for path in arm.model.glob("*.gguf"):
+            if path.name.startswith("mmproj-"):
+                continue
+            split = re.search(r"-(\d{5})-of-\d{5}\.gguf$", path.name)
+            if split is None or split[1] == "00001":
+                models.append(path)
+        projectors = sorted(arm.model.glob("mmproj-*.gguf"))
+        if len(models) != 1:
+            raise BenchError("llama_cpp_gguf_required")
+        if profile.image_capable and len(projectors) != 1:
+            raise BenchError("llama_cpp_projector_required")
+        parallel = BURST_WIDTH if kind == "burst" else 1
+        context = (
+            profile.burst_context * parallel if kind == "burst" else profile.max_context
+        )
+        command = [
+            str(arm.binary),
+            "--model",
+            str(models[0]),
+            "--host",
+            HOST,
+            "--port",
+            str(port),
+            "--ctx-size",
+            str(context),
+            "--parallel",
+            str(parallel),
+            "--metrics",
+            "--no-webui",
+            "--no-cache-prompt",
+            "--cache-ram",
+            "0",
+            "--ctx-checkpoints",
+            "0",
+            "--log-disable",
+            *reference.flags,
+        ]
+        if profile.image_capable:
+            command.extend(["--mmproj", str(projectors[0])])
+        if kind == "burst":
+            command.extend(reference.draft_off_flags)
+        elif config.mlx_force_mtp:
+            command.extend(reference.draft_force_flags)
+        return command
+
+    def launch_plan(self, config, arm, kind):
+        try:
+            return super().launch_plan(config, arm, kind)
+        except BenchError as error:
+            return [str(error)]
+
+    def console(self, config, lines, receipts, tail):
+        # Never retain arbitrary reference diagnostics. This launcher uses a
+        # typed startup failure from the process or health check instead.
+        for _ in lines:
+            pass
+
+    def drafting_plan(self, config):
+        return "draft flags forced" if config.mlx_force_mtp else "engine default"
+
+
 # Adding a reference engine: subclass ServerEngine (command, console), register
 # it here, and declare a [[reference]] block for it in a model profile.
 ENGINES: dict[str, Engine] = {
-    engine.key: engine for engine in (StarkEngine(), MlxServeEngine())
+    engine.key: engine for engine in (StarkEngine(), MlxServeEngine(), LlamaCppEngine())
 }
 
 

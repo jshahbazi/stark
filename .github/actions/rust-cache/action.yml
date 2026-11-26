@@ -22,17 +22,25 @@ runs:
         CACHE_RESTORE_SCOPES: ${{ inputs.restore-scopes }}
       run: |
         set -euo pipefail
-        bash scripts/ci/rust-cache-key.sh "$CACHE_SCOPE" "$CACHE_METAL" >> "$GITHUB_OUTPUT"
+        if ! fingerprint=$(bash scripts/ci/rust-cache-key.sh "$CACHE_SCOPE" "$CACHE_METAL"); then
+          echo '::warning::Rust cache fingerprint failed. Building without a cache.'
+          exit 0
+        fi
+        printf '%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
         {
           echo 'fallback-restore-prefixes<<STARK_RESTORE_SCOPES'
           while IFS= read -r restore_scope || test -n "$restore_scope"; do
             test -n "$restore_scope" || continue
-            bash scripts/ci/rust-cache-key.sh "$restore_scope" "$CACHE_METAL" \
-              | sed -n 's/^restore-prefix=//p'
+            if fallback_prefix=$(bash scripts/ci/rust-cache-key.sh "$restore_scope" "$CACHE_METAL" | sed -n 's/^restore-prefix=//p'); then
+              printf '%s\n' "$fallback_prefix"
+            else
+              echo '::warning::A Rust cache fallback fingerprint failed. Skipping that fallback.' >&2
+            fi
           done <<< "$CACHE_RESTORE_SCOPES"
           echo 'STARK_RESTORE_SCOPES'
         } >> "$GITHUB_OUTPUT"
     - name: Restore Rust build cache
+      if: steps.key.outputs.key != ''
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |

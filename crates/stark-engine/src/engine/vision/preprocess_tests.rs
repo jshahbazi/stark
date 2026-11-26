@@ -351,3 +351,26 @@ fn image_decode_indexed_png_expands_palette_and_transparency() {
     let rgb = decode_image_discard_alpha(&encoded, &limits(), |_, _| Ok(())).unwrap();
     assert_eq!(rgb.pixels, [17, 83, 149, 200, 100, 50]);
 }
+
+#[stark_test]
+fn hy4_resizes_to_the_pillow_lanczos_reference() {
+    use sha2::{Digest, Sha256};
+
+    let (width, height) = (80, 112);
+    let mut rgb = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            for c in 0..3 {
+                rgb.push((13 * x + 3 * y * x + 53 * y + 71 * c + ((x + 5 * y) ^ (3 * c))) as u8);
+            }
+        }
+    }
+    let encoded = png(width, height, ExtendedColorType::Rgb8, &rgb);
+    let processed = prepare_hy4_image_rgb(&encoded).unwrap();
+    assert_eq!((processed.width, processed.height), (64, 128));
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&processed.rgb)),
+        // Pillow 13.0.0 RGB/LANCZOS on the same deterministic synthetic pixels.
+        "a22821e6e102b3fb28dfa0100f0681c75429b3c6cacfaabf0b66359c0faf56d9"
+    );
+}

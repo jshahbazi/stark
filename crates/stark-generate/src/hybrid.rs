@@ -35,7 +35,7 @@ mod nucleus;
 /// Recurrent snapshots also depend on whether the draft head ran in prefill.
 const PREFIX_CACHE_KEY: &str = "model-instance+context-tokens+cache-scope+mtp-enabled";
 
-fn report_prefill_progress(
+pub(crate) fn report_prefill_progress(
     elapsed: Duration,
     last_reported: &mut Duration,
     on_progress: Option<&mut ProgressCallback<'_>>,

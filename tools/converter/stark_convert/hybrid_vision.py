@@ -40,6 +40,17 @@ def prepared_image_identity(directory: Path) -> dict | None:
 
     try:
         base = prepared_identity(directory)
+        if base is not None and base.get("architecture") == "hy4_flash":
+            from .vision_runtime import HY4_VISION_PROFILE
+
+            return {
+                "kind": "Hy4NativeVisionArtifact",
+                "schema_version": 7,
+                "family_profile": HY4_VISION_PROFILE,
+                "family_version": 1,
+                "model_source": base["repo"],
+                "model_revision": base["revision"],
+            }
         if base is None or base["architecture"] != "qwen4_exp" or not _remote_identity(base):
             return None
         value = json.loads(_read(directory / MANIFEST, 262144), object_pairs_hook=_unique_object)

@@ -557,6 +557,7 @@ struct ModelFamily: Identifiable {
         case "qwen3_5_moe": return "Qwen3.5 MoE"
         case "qwen4_exp": return "Qwen3.8 Flash Next"
         case "glm5_next": return "GLM-5.3 Flash"
+        case "hy4_flash": return "Hy4-flash"
         case "ricursive": return "Ripple-65B Preview"
         case "inkling2_loop": return "Inkling 2 Mini"
         case "llama": return "Llama"
@@ -839,6 +840,12 @@ struct FamilyModelCatalog {
                 guard let parsed = SupportMetadata.string(value, maximum: 128) else { return nil }
                 familyID = parsed
             } else { familyID = nil }
+        }
+
+        /// The pinned Hy4 GGUF streams weights, so its file size is not a comparable memory estimate.
+        var hasComparableMemoryEstimate: Bool {
+            !(repo == "AngelSlim/Hy4-flash-GGUF" &&
+              revision == "c50d4dd30be42f2b91138e5731de0e2f32ad56b2" && quantization == "Q3_K")
         }
 
         /// Whether the weights alone fit the guide's memory budget: 85% of physical
@@ -4076,7 +4083,8 @@ struct ModelsView: View {
                     busy: engine.busy, showsRepositoryLink: group.items.count > 1,
                     downloadProgress: engine.retainedCatalogDownloadProgress(for: item),
                     score: item.referenceScore?.score(for: catalogSort),
-                    exceedsMemory: !item.fits(physicalMemory: ProcessInfo.processInfo.physicalMemory)) {
+                    exceedsMemory: item.hasComparableMemoryEstimate &&
+                        !item.fits(physicalMemory: ProcessInfo.processInfo.physicalMemory)) {
                         engine.installCatalogItem(id: item.id)
                     }
             }

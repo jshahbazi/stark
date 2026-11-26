@@ -37,10 +37,10 @@ impl Session {
             }
         }
 
-        if self.dspark_enabled {
-            if let (Some(draft), Some(next)) = (&self.dspark, &draft_cache) {
-                draft.encode_context_cache_copy(next, &encoder, self.position);
-            }
+        if self.dspark_enabled
+            && let (Some(draft), Some(next)) = (&self.dspark, &draft_cache)
+        {
+            draft.encode_context_cache_copy(next, &encoder, self.position);
         }
 
         encoder.end_encoding();

@@ -1,0 +1,772 @@
+# AngelSlim Hy4-flash NextN cache construction and verify attention
+
+The [verified AngelSlim Q3_K artifact](2026-11-25-hy4-native-q3-k.md#artifact-and-runtime-identities) runs on the same M5 Max 128 GiB host with the BF16 projector loaded. In the [previous 32K run](2026-11-25-hy4-context-ladder.md#20261125-hy4ladder-02--load-time-context-sizing), NextN prompt catch-up accounted for 3.142 of 9.429 decode seconds. Catch-up remains in the decode phase for all arms.
+
+## 20261125-HY4NEXTN-01 · Isolate work on the draft and target paths
+
+The screening binary is built at Stark `52d6ad5242e28b06eb8a4166b9504aaf048cc447` plus source diff SHA-256 `7e990e5388835058832a32d2eb407acd0bd0ab7feb09270299629f2e2e2814e5`. Rust 1.98.1 locked offline release build SHA-256 `228053da957964029c037d903f957540a07a96b8091530ac9df1854e53e8146d`. The complete runtime shader source passed the Metal 4 syntax check. Harness SHA-256 `951d71ee3439bc0792919ee089adc58baea9c5f542ba3da7ebfb01e15a4b3409`. Bracket driver SHA-256 `06596637eee4cb58f7e091144a3ece106e94e86e21ae8d8cda6a56e9679ae56c`.
+
+All arms request 34,816 positions, ordinary streamed arena, demand
+retention, 4,096-row chunks, packed attention projections and grouped routed
+F16 operands with F32 accumulation. Prefix reuse and Metal stage sampling
+are off. Drafting is greedy NextN at depth two with the original model assets.
+The `4K` replay requests 64 output tokens. The 16K and short coding diagnostics use
+the raw-ID fixtures from the earlier ladder and request 192 output tokens.
+These fixtures carry a fixed coding instruction. They do not use the pinned
+chat renderer. They can screen a change on matched token IDs, but the model
+card's code-generation maximum needs a coding workload rendered for the
+actual model interface.
+
+| Arm | Change and expected cost |
+| --- | --- |
+| Draft cache MMA | Reuse the existing F32 dense matmuls for the five NextN prompt-cache projections above eight rows. This changes their accumulation order. Single draft rows keep their existing kernels. |
+| Batched draft-history writes | Keep the same eight-row operators and write their FP32 result directly into draft history in one command list per prompt chunk. It removes per-sub-batch submission and the CPU copy. |
+| Resident Q8_0 embeddings | Load the verified 394,395,648-byte packed token embedding table with dense weights before context admission. Target and NextN use the existing resident reads and exact CPU row decoding. Engram remains separate. |
+| Fused target MLA | Read each latent cache tile for 16 heads together and reduce online softmax partitions, keeping the exact existing sparse cells and sliding window. Query and probability operands round to F16 and scores, accumulation and output are F32. The candidate uses the existing score scratch allocation when it is large enough. |
+
+| Arm in run order | 4K prefill tok/s | 4K decode tok/s | 16K decode tok/s | 16K catch-up s | Short coding decode tok/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Control start | 481.32 | 27.14 | 23.22 | 1.522 | 25.91 |
+| Draft cache MMA | 444.17 | 25.85 | 24.16 | 1.317 | 26.99 |
+| Batched draft-history writes | 468.52 | 26.65 | Unmeasured | Unmeasured | Unmeasured |
+| Resident Q8_0 embeddings | 456.20 | 31.52 | 28.08 | 0.207 | Unmeasured |
+| Fused target MLA | 402.59 | 30.28 | 27.72 | 0.401 | 26.97 |
+| Control end | 396.78 | 30.27 | 27.46 | 0.413 | 26.72 |
+
+The closing control caught a large change in catch-up cost with the
+packed embedding table still on file. Resident embeddings took
+0.045 seconds at 4K against 0.083–0.306 in the controls and 0.207 at
+16K against 0.413–1.522. End-to-end 16K decode improved 2–21% across
+the bracket. The 4K and 16K output IDs and counts matched both controls.
+Keep the resident table opt-in and charge its 394 MB to load planning.
+Actual storage latency and rate gains depend on the host file cache.
+
+The batched draft-history result fell within prefill drift. The draft
+cache MMA did not beat the closing control's decode or time-to-catch-up.
+Fused MLA spent 5.960 seconds verifying at 16K against 6.017–6.096 in
+the controls. Its 16K output matched and the short coding output
+changed. Both the useful decode rate and verification gains were small
+on the measured width. All three changes stayed out of the branch.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Control start | `76b79161cdcffdcf3647477c7159b2d803294d53b5d92fd47dac45128c88dc35` |
+| Draft cache MMA | `414f89ef0cb41ec8e02f75aff127b6587c73a08654c82e8d2f241a93273641a4` |
+| Batched draft-history writes | `e49396311eaab7780ad42d803329fb82e77743b513eb290a5ca26f2d2334ec35` |
+| Resident embeddings | `129348051ff7822778fb63c35ba6bb38f174f9b02871348ca2439562d7564527` |
+| Fused MLA | `8038624bf6176d291bf2ef64d2a9a47612218df111d70100d846bebe39c504f9` |
+| Control end | `27da5dfd5dd5bf4225b257b9851744e13e8cc2e9268aedb8b748ec722d4fafbd` |
+
+## 20261125-HY4NEXTN-02 · Pinned chat coding diagnostic and arena admission
+
+The diagnostic rendered the fixed TypeScript request and archive with
+the source-pinned Tencent chat template and reasoning disabled. It then
+passed the resulting token IDs directly to the worker. The repeated-text
+4K row retains its earlier raw fixture. The standard server renderer and
+llmprobe client remain separate qualification work.
+
+The live plan for the explicit 40 GB arena started a worker with capacity
+below the requested diagnostic window of 34,816. That cell produced no
+timing. The automatic 28 GB arena passed readiness and completed every
+requested generation length in one resident-embedding process. Pressure
+remained normal in the observed samples.
+
+| Input | Prefill tok/s | Decode tok/s | Accepted / proposed | NextN catch-up s | Target host cuts s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 75 coding request | 55.06 | 28.70 | 116 / 149 | 0.000 | 2.773 |
+| 4,096 repeated text | 461.42 | 24.06 | 41 / 43 | 0.046 | 1.221 |
+| 16,384 rendered archive | 385.61 | 24.95 | 111 / 157 | 0.207 | 3.056 |
+| 32,768 rendered archive | 386.44 | 23.63 | 104 / 173 | 0.430 | 3.005 |
+
+The 4K repeated fixture matched the same 64 reference IDs. The coding
+diagnostics use new token IDs and are absolute native measurements. They
+need a paired reference run for an engine comparison. With the embedding
+table resident, the long target verification and expert stalls deserve
+priority ahead of changing the draft-cache projection arithmetic.
+
+40 GB admission receipt SHA-256 `a45b4a80cb75ae41b9232e9817576c56f0986e24f8eb61443f57528098d2e677`.
+28 GB rendered ladder receipt SHA-256 `3bfb16fac14a104ecf227a214a44a0d5c5f9e79c3fe0345e89ea646b19cf1306`.
+Rendered ladder wrapper SHA-256 `3912c2f7437f786a7bc5c50810fb7750d4587f0479540ca910c8c9a6e50d8268`.
+Renderer helper SHA-256 `9bb9750b3b6c191fbe4e656886ce7ea83269c5a2855d96a433f2880a9f527f70`.
+
+## 20261125-HY4NEXTN-03 · Final resident build
+
+The retained change uses the existing dense-buffer read of the original
+Q8_0 rows. The locked offline Rust 1.98.1 release binary SHA-256 is
+`5e656a4ae0a49ce030bcc19ca7f99e63f197bc4f7c2dce7101361692a98335e3`.
+With both packed projections and the resident table enabled, it passed
+the two projector cases, exact text prefix reuse at 1,024 positions and
+recovery after invalid and cancelled image requests. Image and prefix
+receipt SHA-256 `11f5aaa1cf5993f2a1424f878535ebf33d7b5fd48f19b85c9b01f06bcf5598fd`.
+
+Three 8,192-position arena arms each ran two 4K repeated-text requests
+with the projector loaded and zero reused input. Only the arena setting
+changed. All six requests matched the 64 reference IDs and accepted 41
+of 43 proposals. First use follows worker load. The warm row is a
+second full prefill in that worker.
+
+| Arena in run order, actual GB | Prefill first / warm tok/s | Decode first / warm tok/s | Warm expert reads GB | Warm target host cuts s |
+| --- | ---: | ---: | ---: | ---: |
+| 39.997 | 479.64 / 430.40 | 31.21 / 42.76 | 24.27 | 0.253 |
+| 27.997 | 493.32 / 435.92 | 25.93 / 32.29 | 43.62 | 0.873 |
+| 47.998 | 479.49 / 431.73 | 31.47 / 43.83 | 18.41 | 0.227 |
+
+Relative to the 28 GB arm, 40 GB improved decode by 20% first and 32%
+warm in this three-arm comparison. At 48 GB warm software reads fell
+another 24% from 40 GB and throughput rose another 2.5%. The 48 GB
+worker had 0.923 GB left in its context budget and could fit 12,113
+tokens before the shared margin. The 8,192-position run fits. The
+observed budget leaves less room for long contexts. Keep these sizes as
+explicit opt-in settings and track performance and admission together.
+
+| Final receipt | SHA-256 |
+| --- | --- |
+| 40 GB | `a8ad78640ed7d81f79209c1990532c43c34e2f73e188215ed7c1ae4ea14dd835` |
+| 28 GB | `06d60cd5a6cdfd778a2b49bd2de417a5541c1379563193f4b55a389da19f1ddb` |
+| 48 GB | `46d4cd771fce2814cfd9bc5e645c7075af18e9338de832124a9e453ab8215f66` |
+
+## 20261125-HY4NEXTN-04 · 40 GB long-context retry
+
+The later live budget admitted 34,816 positions with 39,996,981,248
+arena bytes. The final resident build replayed the same three rendered
+coding cells as the 28 GB screening build, with equal fixture hashes,
+equal generated IDs and equal proposal and acceptance counts. The
+projector was loaded, all 192 outputs were generated in each case,
+and reuse was zero. The runs are single observations on different
+builds with the same selected execution paths. Memory pressure remained
+normal in the observed samples.
+
+| Input | 28 GB decode tok/s | 40 GB decode tok/s | 40 GB prefill tok/s | Host cuts at 28 / 40 GB s |
+| --- | ---: | ---: | ---: | ---: |
+| 75 coding request | 28.70 | 32.97 | 58.55 | 2.773 / 2.126 |
+| 16,384 rendered archive | 24.95 | 30.17 | 388.16 | 3.056 / 2.005 |
+| 32,768 rendered archive | 23.63 | 26.96 | 387.11 | 3.005 / 1.963 |
+
+The 40 GB 32K request spent 0.464 seconds in NextN catch-up.
+Receipt SHA-256 `d8d10b250c904c1d560cda6a8ddc26f9d096bbde8ff710aec91f39806f921370`.
+
+## 20261125-HY4NEXTN-05 · Remaining 4K prefill budget
+
+With the final resident build, 40 GB and a single 4,096-row chunk, separate
+stage sampling covered all 42 blocks and the same 64 reference IDs. Routed
+expert preparation and compute took 2.448 s, attention projections 2.061 s,
+MLA 1.880 s, dense and shared feed-forward 0.694 s, and IndexPool and
+selection 0.055 s. The expert wait counter was 0.062 s. The other work and
+the rest of the request account for the remainder of the 8.251 s observation.
+Use these instrumented spans for attribution. Measure throughput with the
+profiler off.
+
+At 743.2 tok/s a 4,096-token request has about 5.51 s of prefill time. Wider
+routed tiles and multi-query tensor MLA each address one of the three
+largest spans. The observed expert waits provide little prefill headroom in
+this run. For decode, prioritize protecting hot experts or removing target
+host cuts without increasing the admitted physical window. Pricing the
+exact prefill workspace and testing a wider grouped kernel are prepared
+experiments. The published targets and the standard benchmark remain open.
+Profile receipt SHA-256 `c9e37b0d8414f9a1ea99e96f9db8661719e64ab5b1ca57add10ed2ddeb288351`.
+
+## 20261125-HY4NEXTN-06 · Wider routed tile and exact scratch estimate
+
+At a fixed 40 GB arena and 8,192-position capacity, compared the existing
+64 × 32 × 32 grouped routed kernel to the vendor's 64 × 64 × 64 kernel.
+The candidate halves the K steps and output tiles and uses a larger
+threadgroup tile. Both use F16 operands and F32 accumulation. The single
+screening binary also moves the prefill scratch layout dry run to load
+planning and uses its exact page-rounded size for the late arena guard.
+That memory bookkeeping change applies to every arm in this bracket.
+
+| Arm | First prefill tok/s | Warm prefill tok/s |
+| --- | ---: | ---: |
+| Control start | 488.84 | 435.13 |
+| Wider routed tile | 471.49 | 443.13 |
+| Control end | 446.22 | 410.63 |
+
+All six requests matched all 64 reference IDs and accepted 41 of 43
+drafts. The warm candidate was about 2% above the first control. Warm
+control drift was about 6%. A separate stage sample with the larger
+kernel covered all 42 blocks and measured 2.557 s in routed experts. The
+earlier final build's 2.448 s is a separate profile with different clock
+conditions. The wider tile has no demonstrated throughput gain and was
+removed. The exact scratch estimate passed these functional runs. A
+controlled admission comparison remains open, so the allocation change
+also stayed out of the branch.
+
+Screening binary SHA-256 `7119345f1c68f0941b83525a737563d4884e35a6c00233d228defb8c1a573f1a`.
+Source diff SHA-256 `cb07131ecf876bb7017182fe31e575043dcadc7a3cb2f443fe383a92720af568`.
+Harness SHA-256 `9a52cbd9018ad9bab9f8eb9d8df3f3aa885b2b7ad7e23be1345bafd79ec1d4f0`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Control start | `2f6e8db0eed2b174f6b3db7da3a3dd8c7f09e41b7b86e53c921eadefdce93291` |
+| Wider tile | `3ca84a52faa5454b75dc1b962a586131fc69e2d3e6e18b05711937d2c02bcf31` |
+| Control end | `b072e4a96c614a97dcc862ee13945bedba4c1f00540aecd88035e74a4277f678` |
+| Wider tile profile | `a062e6f306872e02bd36dbc3ed11bb4ebcadfbaae7662e4bd1438a8c3c452105` |
+
+## 20261125-HY4NEXTN-07 · Batch the resident draft's cache projections
+
+The mapped K2 verifier keeps the target GGUF arithmetic. The candidate
+uses the existing Metal 4 packed Q8_0 projections for NextN's EH, KV A,
+index-key, index-value and index-gate cache rows. These projections use
+F16 operands and F32 accumulation. The original GEMVs handle at most
+eight rows. A complete 1,024-row chunk uses five matrix dispatches in
+place of 640 GEMVs. The original prepared expert banks, resident token
+embeddings, prefill options and BF16 projector are shared by both arms.
+
+Two fresh workers from the same executable admitted 33,024 positions.
+The packed arm ran first. Both ran the pinned 16K and 32K requests in
+that order with K2 and no prefix reuse. All four outputs matched the
+192 reference IDs. Both cases kept the same accepted and proposed
+counts and target round counts. Both workers reported fair thermal
+state, zero contenders and pressure level 1 with stable swap.
+
+| Case and arm | Decode tok/s | Catch-up s | Draft s | Target verify s |
+| --- | ---: | ---: | ---: | ---: |
+| 16K packed | 44.97 | 0.075 | 0.591 | 3.656 |
+| 16K control | 43.06 | 0.200 | 0.712 | 3.723 |
+| 32K packed | 44.32 | 0.127 | 0.452 | 3.857 |
+| 32K control | 41.60 | 0.419 | 0.756 | 3.834 |
+
+The one-way pair saved 0.125 s of catch-up at 16K and 0.292 s at
+32K. End-to-end decode improved 4.4% and 6.5%. At 32K the target phase
+cost stayed similar and the rate remains 3.05 tok/s below the published
+47.37. Retain the private candidate for order reversal and lifecycle
+checks before adoption. Hold GPU embedding gathers off to keep
+attribution on the five projections.
+
+The separate mapped attribution run sampled every fourth target
+verification with staged encoders and prefill profiling off. Its
+owned-worker watchdog stopped it after readiness when pressure reached
+level 2 and observed swap grew by 33.94 MiB. The stopped run produced no
+stage or throughput result. The earlier two loads remained eligible.
+
+The private Q5_0 draft vocabulary scout reduced the derived draft head
+from 394.4 MB to 255.2 MB. Offline layout tests matched 4,101 reference
+blocks. The 26.2 GB theoretical read reduction over 188 proposals is
+about 48 ms at peak memory bandwidth. An additional verifier round could
+erase it. The compiled option stayed off during the timed runs. Defer its
+native screen and keep the target and draft vocabulary kernels unchanged.
+
+The private source diff on `ec81193fb`, locked Rust 1.98.1 Hy4 build,
+and harness have SHA-256
+`abfb37b2edc035525dc680950bd0e50a352c53d49be05beae8023a81ce8b8470`,
+`992b81a18e43a63e4d3b60e1a18b33a14951aabc8f572ccb75592224a475404b`,
+and `b701cd263d87a96d2a431f46d38d18b206498fbbf26b1856acbf8b2c5fe3f98d`.
+The pinned prior reference receipt SHA-256 is
+`fa9d741e7c8b65464713449e1f8fe9677ee46b37b892c8f2715bddbdf33acd66`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Packed projections | `5cf280c1f993a9de8d663b6bb9f9bf9a717e5c8776f248673c0fb0ba5aeedf1d` |
+| Control | `9b7b2c06f552e68e45ed74b8fef9ca420ba032d6ba9d908e3861c1d5c1143645` |
+| Sampled verifier pressure stop | `972a8506e1c58f84fadc6ea686b22da38276e32c16301cc6eb72d068e4da33bb` |
+
+### Repeat after the host restart and sample 16K verification
+
+The first reverse-order run reached readiness before the host rebooted.
+Its receipt has no generation or terminal result. The retry used the
+same executable, references, 33,024-position cap and 4,096-row chunks.
+The control reported pressure level 2 after readiness and the watchdog
+stopped it after a 133.94 MiB swap increase, before any timed result.
+The packed worker completed both requests at 44.56 and 43.36 tok/s.
+Catch-up was 0.075 and 0.127 s. Both outputs and all draft work matched
+the first pair. Its pressure and swap held at level 1 and 125.94 MiB.
+The host reported nominal thermal state and zero contenders. The retry
+confirms the candidate's catch-up cost and yields no reversed rate
+comparison. Keep the packed path private.
+
+A 17,408-position load sampled 20 of 79 target rounds at 16K. It
+matched the 192 reference IDs and stayed at pressure level 1 with
+46.06 MiB additional observed swap. The samples attributed 0.290 s to
+routed products, including the GPU plan and combine, 0.242 s to dense
+attention projections, 0.095 s to remaining dense work including the
+head, 0.077 s to MLA, 0.065 s to attention elementwise work, 0.038 s to
+IndexPool, and 0.031 s to the router. Encoder boundaries affect
+scheduling. These totals price stages for investigation.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Interrupted reversal | `642dd276fcb40ed1675cdc32f3d0695f80ff945afb1312bc7fd423532c1ff9d6` |
+| Retried reverse control pressure stop | `52ca71b4da7ff407529c517062cd9eff91d50f5f21a789d338404bedcd37052c` |
+| Retried packed requests | `2905ecac95f8d861f2afe0949f3d82335432e99e212f9fbe95c809fc555b2e44` |
+| 16K mapped stage sample | `8617f834e429d77bbf02eb36673c68f1d49b51e67874adf1431820359910a071` |
+
+### Reduce long-window prefill workspace and test paired gate rows
+
+The [HY4FRAG-27 executable](2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-27--screen-smaller-routed-staging-and-group-local-dense-packing)
+used 1,024-row prefill chunks and a 17,408-position context cap.
+All completed K2 requests matched the pinned 192 output IDs and the
+earlier draft counts. Observed pressure stayed at level 1 with no
+swap growth on the three completed workers.
+
+| Arm in run order | Decode tok/s | Catch-up s | Target verify s | Receipt SHA-256 |
+| --- | ---: | ---: | ---: | --- |
+| Control, compiler detected | No timing | | | `f72bb38be977db5c8fd3bf601fd3369025e9ac8bf515318ff3ab2c8da56712d6` |
+| Packed cache and paired gate output rows | 28.04 | 0.066 | 6.346 | `e84ae21916c8496180d85bb6dedb64b0b7190ed24bf7ee7f0ce91d26d8611dc7` |
+| Packed cache | 45.25 | 0.066 | 3.760 | `e39b9024a0ca3eb0f346449b414156cbcb2b26ac3bfe158914c1c52eccf4bc56` |
+| Control retry | 42.97 | 0.214 | 3.826 | `8ae8e62c335d85e0fa35add36d83ddbff5e0dd3b928ef8618e5b28af436627ce` |
+
+The rejected first control detected a separate Metal compiler at
+admission. Both the packed cache and retried control reported nominal
+thermal state and zero contenders. Draft catch-up fell by 0.148 s, a
+second scoped pair with the same direction as the 4,096-row chunk
+comparison. The packed cache rate still trails 49.47 at 16K.
+
+Pairing adjacent output rows of Q3_K and Q4_K gate/up products keeps
+the eight-lane FMA and reduction order, and halves repeated logical
+activation loads for three verifier rows. This arm moved from fair
+to nominal thermal state. Its draft phase stayed within 6 ms of the
+packed-only arm and target verification cost rose by 2.586 s. Remove
+the pairing and keep the existing gate geometry.
+
+### Qualify the packed cache in the rebuilt worker
+
+The isolated build enables the five eligible packed Q8_0 projections
+when resident NextN experts and packed dense prefill are both selected.
+It reuses the same Metal library and F16 operands with F32 accumulation.
+Individual draft steps and bulk windows at or below eight rows use
+the existing GEMV. No persistent buffer or cache layout changes.
+
+The 8,192-position lifecycle worker matched all 64 reference IDs on
+both K2 4K requests and kept 41 accepted drafts in 22 rounds. It restored
+4,096 positions with exact continuation, matched both image answers,
+and recovered after an invalid image and image cancellation. Text reuse
+and drafting were off for the image requests. Readiness took 83.27 s.
+
+| Workload | Prefill tok/s | Decode tok/s | NextN catch-up s |
+| --- | ---: | ---: | ---: |
+| 4K K2 first use | 645.33 | 53.75 | 0.025 |
+| 4K K2 repeat | 630.08 | 57.88 | 0.015 |
+| Short TypeScript K3 | | 64.46 / 60.10 | 0.000 |
+| 16K K2 | 468.75 | 45.14 | 0.067 |
+| 32K K2 | 451.65 | 43.60 | 0.138 |
+
+The long worker admitted 33,024 positions with 1,024-row prefill chunks
+and matched all 192 output IDs and draft counts in each case. Both
+workers retained the original projector and both resident banks.
+Both host snapshots from each load were nominal with zero contenders.
+Sampled pressure stayed at level 1 and swap at 140 MiB.
+
+Adopt this path under the two existing opt-in settings. The native
+source diff on `4fb3b10dc`, isolated release build, and harness have
+SHA-256 `5d221ffc79f36ad34de44917338e4accf44a73a274a82e65c8236b00eba8a087`,
+`84e9dce6da7820e02b0993e93f13eac5d0974619dcf320355c7e539a27360310`,
+and `aa42853ff32588aa0f73529dc65039ec1e49379815c15ae671e154db097f56e3`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Rebuilt 4K and image/prefix lifecycle | `819dc994f0932ed91e6de890c02474b5844de29d0c376b2bd69ad19a18c70f00` |
+| Rebuilt long-window and code requests | `2f2944ea928643e73f070e4de7e102c4791c9080cfa82d49d074cc011b32f262` |
+
+## 20261126-HY4NEXTN-08 · Share Q8 byte expansion across three and four verifier rows
+
+The current streaming Q8 GEMV already loads packed weight units once.
+The candidate removes the second byte expansion when three or four
+rows share those units, keeping each row's F32 FMA and lane-reduction
+order. Its safe-math Metal AIR uses 256 bytes of source working arrays
+per lane against 128 in the paired kernel. Final register allocation
+was unavailable from the offline toolchain.
+
+Both workers admitted 33,024 positions with 1,024-row prefill chunks,
+resident target and NextN banks, packed draft cache projections and
+the original projector. K3 TypeScript followed a K2 request, then K2
+ran at 16K and 32K. Both host snapshots on each load were nominal with
+zero contenders. Pressure stayed at level 1 and swap at 140 MiB.
+Every output and draft-work count matched its reference.
+
+| Arm | Short K3 tok/s | 16K K2 tok/s | 32K K2 tok/s | Receipt SHA-256 |
+| --- | ---: | ---: | ---: | --- |
+| Current Q8 pairs | 63.77 / 59.32 | 45.75 | 44.06 | `50bb11139b37e7c96d049aa70bc26edfee14f418fad940190b1482ede631ccc3` |
+| Shared byte expansion | 63.83 / 60.14 | 44.00 | 43.70 | `169c044ecd3f338fe556c331e98ef554585c2355ce485a56c6d724dce858501a` |
+
+The code gain stayed within drift. Target verification increased from
+3.797 to 3.963 s at 16K and from 3.882 to 3.920 s at 32K. The draft
+catch-up times stayed within 1 ms. Keep the established Q8 pairs.
+The packed control extends the 1,024-row memory check to 32K and
+records a 45.75 tok/s 16K peak in this experiment.
+
+The source diff on `3c7c973a0`, isolated locked Rust 1.98.1 release
+executable, and harness have SHA-256
+`1c224e86c7a46a4e7da3b137a3f3ffc23af5b9659ee24fb71bf269153a0993d0`,
+`4c73bd4e5da9242d5c9183d3775bc1f1aee7d7121896816a4f9ba298932cecf4`,
+and `61c22b485cc191b51058be50077e2b9a5cbf3e0620f4c7c26b6411ee999cbf41`.
+
+## 20261126-HY4NEXTN-09 · Check one draft on the rebuilt 16K worker
+
+One loaded worker used the adopted packed draft cache, resident target
+and draft banks, original projector, 1,024-row prefill chunks and a
+17,408-position cap. It alternated K2, K1, K1 and K2 on the pinned
+16K prompt. Every request matched 192 output IDs and used zero prefix
+reuse. The host went from nominal to fair with zero contenders.
+Observed pressure was level 1 and swap stayed at 140 MiB.
+
+| Arm in order | Decode tok/s | Target verify s | Draft s | Accepted / proposed / rounds |
+| --- | ---: | ---: | ---: | ---: |
+| K2 first | 45.74 | 3.759 | 0.416 | 112 / 156 / 79 |
+| K1 first | 42.68 | 4.199 | 0.275 | 88 / 103 / 103 |
+| K1 repeat | 42.09 | 4.249 | 0.288 | 88 / 103 / 103 |
+| K2 repeat | 46.36 | 3.745 | 0.374 | 112 / 156 / 79 |
+
+One draft reduced time per target round and required 24 additional
+rounds. The median of the paired K1/K2 rates was 0.921. Keep K2 for
+this long fixture and defer the 32K K1 repeat. The 46.36 tok/s repeat
+is the highest measured 16K result and leaves 3.11 tok/s to the goal.
+
+The rebuilt executable, harness and bracket receipt have SHA-256
+`84e9dce6da7820e02b0993e93f13eac5d0974619dcf320355c7e539a27360310`,
+`aa42853ff32588aa0f73529dc65039ec1e49379815c15ae671e154db097f56e3`,
+and `51c4b378ab4f28829e0d4f1d16a8dfef054b10273c603e3422130ddb8c3e102d`.
+
+## 20261126-HY4NEXTN-10 · Price Q5_0 for the draft vocabulary
+
+The scout quantizes a derived copy of the NextN vocabulary projection
+to Q5_0 from the original BF16 rows. The target keeps the source BF16
+weights and the same greedy verifier. The derived head occupies
+255.2 MB against 394.4 MB for Q8_0. The original draft expert bank and
+the rest of the draft block are shared.
+
+With both expert banks and the BF16 projector loaded, one executable
+ran three full K3 TypeScript requests on each of two 8,192-position
+workers. Q5_0 ran first. All six outputs matched the 192 reference IDs.
+Both loads stayed at nominal thermal state, pressure level 1 and
+132 MiB swap with zero named contenders.
+
+| Draft head | Cold tok/s | Warm tok/s | Warm draft seconds | Accepted / proposed / rounds |
+| --- | ---: | ---: | ---: | ---: |
+| Q5_0 | 58.16 | 68.58 / 63.96 | 0.239 / 0.243 | 129 / 182 / 62 |
+| Q8_0 | 59.74 | 64.45 / 60.17 | 0.295 / 0.297 | 127 / 188 / 64 |
+
+Warm medians were 66.27 and 62.31 tok/s. In this order the Q5_0 arm
+saved about 55 ms of draft work on each warm request and finished in
+two fewer target rounds. This measures one coding fixture. The cold
+request was 2.6% slower with Q5_0. Repeat the pair in reverse order
+and check long-window acceptance and lifecycle before promotion.
+
+The existing isolated Hy4 executable and harness are bound in
+[HY4NEXTN-07](#20261125-hy4nextn-07--batch-the-resident-drafts-cache-projections).
+The draft-head patch SHA-256 is
+`934ac2e6aaf394d747fa2cf5359b7fa93c112e3bbe52b87fc53f72e6d34d7ece`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Q5_0 | `e4ab1e21883f28c1eb982c5ea967f2325f8613868df1624923313e1e27787e3d` |
+| Q8_0 | `1261cd80e66013660148b62a9a4bae120dd8c3fe2cc6ef435e2c6dac8982a994` |
+
+### Repeat with the packed draft cache and longer context
+
+The [HY4FRAG-29 build](2026-11-25-hy4-grouped-fragments.md#20261126-hy4frag-29--share-packed-expert-bytes-across-k16-fragments)
+used a 33,024-position cap and 1,024-row prefill chunks. Q8_0 ran
+first, reversing the head order in a new build and context setting.
+Both expert banks and the original projector were loaded. Each worker
+ran short code at K2 and twice at K3, followed by K2 at 16K and 32K.
+All outputs matched their 192 reference IDs. Thermal state stayed
+nominal and pressure stayed at level 1 with stable 132 MiB swap.
+
+| Arm | Short K3 tok/s | 16K K2 tok/s | 32K K2 tok/s | Receipt SHA-256 |
+| --- | ---: | ---: | ---: | --- |
+| Q8_0 | 64.57 / 61.28 | 44.81 | 43.53 | `e64275c4a9a2b6b2efd0ad451c78cb991c00212739218eb7bd980ee074b0bd50` |
+| Q5_0 | 67.57 / 63.85 | 45.83 | 43.82 | `0232f2f261cd7c104ad6710afb6bb9eabf18ce234032274488c17e91de6307a8` |
+| Q5_0 with concurrent verifier branches | 68.51 / 63.17 | 46.25 | 43.91 | `e7540ad5972f402971bb2dafcf02e4f812f0990b0cbd65efba1478b533a2db59` |
+
+Q5_0 kept 62 short K3 rounds against 64 for Q8_0. It needed 80
+rounds at 16K against 79 for Q8_0. Both heads used 78 rounds at 32K.
+The warm K3 medians were 65.71 and 62.93 tok/s with Q5_0 and Q8_0.
+Long-window speed changed much less. Use Q5_0 as a coding candidate
+and retain the Q8_0 reference.
+
+The concurrent schedule stages independent query, latent KV and
+attention gate projections together. It also overlaps router
+selection and shared activation preparation, then issues shared down
+alongside routed gate/up. Buffer joins retain the consumer ordering.
+It preserved the Q5_0 outputs and draft counts. Its warm medians were
+within 0.2%, and long decode changed by less than 1% against Q5_0
+alone. Keep the current verifier scheduling.
+
+### Qualify the typed Q5 option
+
+The isolated worker selects Q5_0 with `STARK_HY4_MTP_HEAD_Q5=1`.
+The unset option and `0` select Q8_0. Readiness reports the loaded
+derived format. The worker refused the invalid value `2` before
+model loading. The original BF16 target vocabulary path is shared
+by both options.
+
+On the same rebuilt executable, Q8_0 ran first and Q5_0 second.
+Both workers used an 8,192-position cap and five seconds of quiet time
+before each of the two warm K3 requests. All six outputs matched the
+192 TypeScript reference IDs. Q8_0 reached 57.95 tok/s cold and
+64.50/64.65 warm. Q5_0 reached 62.30 cold and 67.75/67.71 warm.
+The median warm gain was 4.9%, with 62 target rounds against 64.
+The earlier back-to-back screen retained the 68.58 tok/s peak.
+
+The Q5_0 lifecycle load matched all 64 reference IDs on both 4K
+requests, with 41 accepted drafts in 22 rounds. It reached
+55.05/58.28 decode tok/s and 653.94/632.53 prefill tok/s. Text
+continuations restored 4,096 positions with exact outputs. Both
+image answers matched with zero drafting and zero reuse. Invalid
+images and cancellation cleared the prefix and recovered.
+Observed pressure stayed at level 1 with stable 132 MiB swap.
+All three loads were nominal and free of named contenders.
+
+Adopt Q5_0 as an opt-in draft vocabulary. Keep Q8_0 as the default.
+The native source diff on `db01930d5`, isolated Rust 1.98.1 Hy4
+executable and harness have SHA-256
+`ac3baf2637b871f77ee6f6efa22e0f1331513d36945a93b9632cad121123e7d6`,
+`5ba73193746cb10b20640519f7f95e1d4aa393c565f4a69d8d764566a8653234`,
+and `f2d6bd82ce9b67ed427a5a82a44af51580f4001f741bd300581ad00c63f02bfb`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Rebuilt Q8_0 code | `18d9b6a2cc16e52300d06884e99e254f9c29d345e4d3c8699b71821571c9dd6e` |
+| Rebuilt Q5_0 code | `f3ef319340ac8b5d5052e338345a0d80f67b0dcf481200443c73fda4fb3fa101` |
+| Rebuilt Q5_0 image and prefix lifecycle | `4be28b6a414a2993147d3b87da4233eac886e20726db4d30ddb4ae247877d9ff` |
+| Invalid option refusal | `15857658517a1e47c1cc14f973b1d4de8f221a83dd30c762441aa12b43373349` |
+
+## 20261126-HY4NEXTN-11 · Isolate the exact verifier vocabulary projection
+
+The HY4FRAG-29 worker used the original target head and Q8_0 NextN.
+It sampled one in four mapped verification windows. The trunk,
+head preparation, vocabulary projection and argmax each used a
+separate encoder in sampled rounds. All other rounds used the existing
+command schedule. The private harness reused the prefill stage
+counters for attribution with ordinary prefill profiling off.
+All three requests matched their 192 reference IDs at pressure
+level 1 with stable swap and nominal thermal state.
+
+| Workload | Total rounds | Sampled rounds | Head prep ms | Vocabulary projection ms | Argmax ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Short K2 | 75 | 19 | 0.526 | 26.811 | 0.291 |
+| Short K3 | 64 | 16 | 0.471 | 25.776 | 0.253 |
+| 16K K2 | 79 | 20 | 0.674 | 28.722 | 0.448 |
+
+The sampled mean extrapolates to about 0.103 s of vocabulary projection
+over all short K3 rounds and 0.113 s over the 16K K2 rounds. The entire
+projection budget is below either gap to the target rate. Fusing argmax
+would remove a much smaller part of the cost. Keep the current exact
+head and defer vocabulary fusion as a primary speed lever.
+
+Profile receipt SHA-256
+`3c383deab0f19b80fb686de3104769a64fac21439b3ce70bc028e48da5c84980`.
+
+## 20261126-HY4NEXTN-12 · Screen a Q4_0 draft vocabulary
+
+The private Q4_0 variant derives the draft vocabulary from the original
+BF16 rows. The 208.8 MB head is 46.4 MB smaller than Q5_0. The target
+still uses the original BF16 vocabulary. The same feature-enabled Rust
+1.98.1 executable loaded both expert banks and the original projector.
+Each 8,192-position worker ran three K3 requests on the 75-input
+TypeScript fixture, with five seconds before each warm request. Q5_0
+ran first. All requests matched 192 reference IDs with zero reuse.
+
+| Head | First tok/s | Warm tok/s | Warm draft s | Warm verify s | Accepted / proposed / rounds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Q5_0 | 61.28 | 67.79 / 67.93 | 0.270 / 0.270 | 2.547 / 2.542 | 129 / 182 / 62 |
+| Q4_0 | 56.59 | 64.81 / 64.89 | 0.271 / 0.270 | 2.676 / 2.673 | 126 / 191 / 65 |
+
+Q4_0 reduced the warm median from 67.86 to 64.85 tok/s. It needed three
+additional target rounds and spent about 130 ms more in verification.
+Warm draft time stayed flat. Q5_0 started at fair thermal state and
+ended at nominal. Q4_0 stayed nominal. Both arms had zero named
+contenders, pressure level 1 and stable 132 MiB swap.
+Keep the Q5_0 opt-in and Q8_0 default. Remove the Q4_0 diagnostic.
+
+The source diff on `1998e09f8`, executable and harness have SHA-256
+`144dc5fcda202b147a9a650bc55f70b2628adb23175ea0ff12234ef1d0f5b917`,
+`cfcd6c2aeb6ed57508dc91672a8330a9dafc86cefa9dec4ece475961a28d0ee6`,
+and `2528b866601a7c5c7fe9541acd9c1a57e33871f8aecd03990c881a0544053ca9`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Q5_0 | `cb4deb71a8c9369d2f780ad1f388abfacd2a7c3487bdd8b0756c42ce201a4e64` |
+| Q4_0 | `569eac865b5dc06fd8dd0ad4599be18bfd0dc8d4fa413d5ed7c5d4582b6b2257` |
+
+## 20261126-HY4NEXTN-13 · Compare short-code request cadence
+
+The qualified Q5_0 worker ran the short TypeScript fixture five times
+at K3. Both expert banks and the original projector were loaded with
+an 8,192-position cap. After first use, the waits before each request
+were 5, 10, 10 and 5 seconds. Every request matched all 192 output
+IDs and had zero prefix reuse, 129 accepted drafts, 182 proposals
+and 62 verifier rounds.
+
+| Seconds before request | Decode tok/s | Verify s | Draft s |
+| --- | ---: | ---: | ---: |
+| First use | 61.30 | 2.680 | 0.435 |
+| 5 | 67.30 | 2.557 | 0.280 |
+| 10 | 67.35 | 2.555 | 0.280 |
+| 10 | 67.49 | 2.550 | 0.279 |
+| 5 | 67.46 | 2.551 | 0.279 |
+
+The five- and ten-second medians were 67.38 and 67.42 tok/s, a 0.07%
+difference. Thermal state stayed nominal with no named contenders,
+pressure level 1 and stable 132 MiB swap. Keep cadence fixed in future
+comparisons. A longer pause did not bring this fixture to 70 tok/s.
+
+The same executable is bound in [HY4NEXTN-10](#qualify-the-typed-q5-option).
+The cadence harness and complete receipt have SHA-256
+`b282dd5843e9096cb835781e7c85177e935940209d7972dd225f58404a1a5307`
+and `84de0391d3a0dd62ac1a693f394abd2bd4ad13b863df641642db7e9423efaf60`.
+The outer shell failed after the harness ended because its status
+variable name was reserved. The receipt contains all five measurements,
+both host snapshots and a passing terminal result.
+
+## 20261126-HY4NEXTN-14 · Recheck three drafts with the rebuilt 32K worker
+
+The previous wider verifier used a larger workspace and the older
+draft-cache projections. This run used the qualified Q5_0 head, both
+resident expert banks, the original projector, a 33,024-position cap
+and 1,024-row chunks. The same loaded worker alternated K2, K3, K3
+and K2. All four requests matched their 192 reference IDs with zero
+prefix reuse.
+
+| Depth in order | Decode tok/s | Verify s | Draft s | Catch-up s | Accepted / proposed / rounds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| K2 | 39.75 | 4.305 | 0.499 | 0.146 | 113 / 155 / 78 |
+| K3 | 44.51 | 3.806 | 0.485 | 0.135 | 126 / 193 / 65 |
+| K3 | 43.19 | 3.936 | 0.486 | 0.137 | 126 / 193 / 65 |
+| K2 | 43.33 | 3.983 | 0.425 | 0.140 | 113 / 155 / 78 |
+
+The K3 medians were 43.85 tok/s and 3.871 s of verification.
+K3 saved 13 rounds, and the second K3 request was slower than the
+closing K2 control. The K3 peak leaves about 0.26 s to reach 47.37
+tok/s over 191 useful tokens. Keep the K2 recommendation for long
+requests. Thermal state moved from nominal to fair with pressure
+at level 1 and stable 132 MiB swap.
+
+The executable and harness are bound in
+[HY4NEXTN-10](#qualify-the-typed-q5-option). The completed receipt has
+SHA-256 `a19d6446458f4c0923c3747de6a7bfcbb1ea2cde675585f65c34fc2c1a1267b0`.
+The shell wrapper hit the same post-run status-variable error as
+HY4NEXTN-13. The receipt contains all four results and passed.
+
+## 20261126-HY4NEXTN-15 · Price mapped verifier host work
+
+Recomputed the budget from the existing peak receipts in
+HY4NEXTN-09, HY4NEXTN-10 and HY4NEXTN-14. Each request produced
+191 useful outputs and had zero target host cuts. The unclassified
+time subtracts Metal encoding, commit, completion waits and Engram
+from target verification wall time. It includes construction and
+barrier pruning of the dispatch list.
+
+| Workload | Rounds | Dispatches | Metal encode ms | Unclassified ms | Wall time to recover ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Short K3 code at 68.58 tok/s | 62 | 120,826 | 45.35 | 21.37 | 56.40 |
+| 16K K2 at 46.36 tok/s | 79 | 159,383 | 63.42 | 26.53 | 259.03 |
+| 32K K3 at 44.51 tok/s | 65 | 131,353 | 57.17 | 24.50 | 259.36 |
+
+The controlled short-code cadence runs need about 105 ms and spent
+48–51 ms encoding. Descriptor reuse would recover a fraction of these
+host budgets. The existing ICB experiment also assumes direct grids
+and rejects inline arguments. The mapped route plan produces indirect
+grids and the verifier carries inline arguments. Defer descriptor and
+ICB work as a primary speed lever. This analysis uses the existing
+receipts and adds no new throughput samples.
+
+## 20261126-HY4NEXTN-16 · Compare two and three drafts at 16K
+
+The rebuilt Q5_0 worker used both resident expert banks, the original
+projector, the ordinary F32 FFN path, 1,024-row chunks and a
+16,640-position capacity. One loaded worker ran K2, K3, K3 and K2 on
+the identical 16K fixture. All four requests matched their 192
+reference IDs with zero prefix reuse. The host stayed fair with
+pressure level 1 and stable 48.4 MiB swap.
+
+| Depth in order | Decode tok/s | Verify s | Draft s | Catch-up s | Accepted / proposed / rounds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| K2 | 46.80 | 3.589 | 0.492 | 0.065 | 111 / 158 / 80 |
+| K3 | 45.84 | 3.745 | 0.421 | 0.065 | 123 / 202 / 68 |
+| K3 | 46.07 | 3.724 | 0.422 | 0.066 | 123 / 202 / 68 |
+| K2 | 47.65 | 3.659 | 0.348 | 0.065 | 111 / 158 / 80 |
+
+K3 saved 12 rounds and spent more total time verifying in both pairs.
+Keep K2. The 47.65 tok/s repeat leaves about 0.147 s to reach 49.47
+over 191 useful tokens. The smaller loaded cap was part of this run's
+configuration. This bracket varies draft depth alone.
+
+The executable and harness are bound in the
+[FFN option qualification](2026-11-25-hy4-grouped-fragments.md#qualify-the-typed-ffn-option).
+The exact 16K control receipt has SHA-256
+`eb83df672c790d2367d1b33f0d4e54270f77c6b0a8000575f700767eafd198f4`.
+
+## 20261126-HY4NEXTN-17 · Check short coding across three workloads
+
+The suite fixed three cases before timing. It used the existing short
+TypeScript task and added Python interval scheduling and Rust CSV
+parsing. The model's pinned chat template and tokenizer rendered all
+three. Each case produced 192 output IDs. The new cases used their
+opening serial requests as references and the closing serial requests
+checked the same hashes. TypeScript kept its previously frozen
+reference across all four requests.
+
+One loaded worker ran K0, K3, K3 and K0 per case with five seconds
+of quiet time before each request after the first in its case.
+It used both resident expert banks, the original projector, a
+Q5_0 draft head, 1,024-row chunks and an 8,192-position cap.
+All twelve requests returned exact IDs with zero prefix reuse.
+The host stayed nominal with pressure level 1 and peak swap
+0.375 MiB above its starting value.
+
+| Case | Input tokens | Serial tok/s | K3 tok/s | K3 accepted / proposed / rounds |
+| --- | ---: | ---: | ---: | ---: |
+| TypeScript task queue | 75 | 35.21 / 36.72 | 64.79 / 67.82 | 129 / 182 / 62 |
+| Python interval scheduling | 89 | 34.43 / 36.43 | 61.60 / 62.92 | 125 / 197 / 66 |
+| Rust CSV parsing | 82 | 34.84 / 36.51 | 59.97 / 61.16 | 123 / 204 / 68 |
+
+Faster code in this suite needed fewer verification rounds.
+The earlier TypeScript peak of 68.58 tok/s remains the best
+observed coding rate. The three-case suite produced no 70 tok/s
+request.
+
+The executable is bound in the
+[guarded FFN record](2026-11-25-hy4-grouped-fragments.md#20261126-hy4frag-33--bound-ffn-device-views-to-the-qualified-capacity).
+The suite harness and receipt have SHA-256
+`99cd26758eac2b63f7101129346a5722fa362de6f0f1ee676dab655a246c706a`
+and `4ff27105fda670a53b3a9dc41091ea42b6c78e2256f4fa3de903b697991d8aae`.
+
+## 20261126-HY4NEXTN-18 · Test vector loads in the Q8_0 verifier
+
+The candidate reads each packed Q8_0 code block through four
+two-byte-aligned `packed_ushort4` loads. It keeps the original
+34-byte block layout, half-scale read, F32 accumulation chains,
+lane reduction and K-split merge. The function constant applies to
+the attention gate and output in mapped text windows of one to
+four rows. It leaves prefill, draft and image operators unchanged.
+
+Both loads used the same executable, both resident banks, the
+original projector, Q5_0 NextN, a 16,640-position cap and 1,024-row
+chunks. Each ran short K3 code three times with five-second quiet
+intervals between requests, then one 16K K2 request. All eight
+output sequences matched their 192 reference IDs with zero reuse.
+The code used 62 rounds and the long fixture used 80 in both arms.
+
+| Load order | Arm | Short code first tok/s | Short code warm tok/s | 16K tok/s | 16K verify s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Existing scalar loads | 62.70 | 67.35 / 67.76 | 40.90 | 4.300 |
+| 2 | Vector loads | 60.35 | 66.91 / 66.87 | 45.21 | 3.886 |
+
+Warm code fell about 1%. The opening 16K control was well below
+the earlier 47.65 tok/s result, and its GPU spans accounted for
+most of the difference. Repeat the 16K fixture in reverse load
+order without preceding code requests.
+
+| Load order | Arm | 16K tok/s | Verify s | GPU span s |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Vector loads | 45.57 | 3.861 | 3.764 |
+| 2 | Existing scalar loads | 45.85 | 3.826 | 3.738 |
+
+Both reversed requests matched all 192 IDs and used the same
+80 rounds. All four loads stayed nominal at pressure level 1.
+Swap rose by at most 0.438 MiB. The reversal did not reproduce
+the initial 16K gain. Keep the original load instructions and
+leave the vector-load patch private.
+
+The patch on `37569441c`, Rust 1.98.1 release worker and harness
+have SHA-256 values
+`bff9a1cd98e7893b1ea88ee76b98139cca1de243fbfb5a1694ee3ad98521eaec`,
+`56dce574342d8011b1375bfb5b988018624448c627c2f5669da601287bcc05d8`
+and `8cdc303e5873e9f4fc68613214e920d0cc5fde9bc3313782dab6f6b287f8bc69`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Scalar first | `877db40c52f6ae3abbf815d429fdbaafa8c1bf10822ff50b597f8194e1fc1be1` |
+| Vector second | `ed79c8ae4ab39c52b6b9c3d4c15b90548eeaa6d58d1f41049d37ebdde0fdd26d` |
+| Vector first | `b90b0a79a9cd18cb213d5d7b2f11941fcd0ffcd01caf88b3845d1d6d43911890` |
+| Scalar second | `8dc16ccad0b39baef57dc97edf625ce24327299b514f0d19a0553fba5571e4bb` |

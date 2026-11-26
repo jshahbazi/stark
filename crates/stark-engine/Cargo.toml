@@ -21,6 +21,9 @@ default = ["cpu", "metal", "grammar"]
 # vendor/glm-exl3-bridge/UPSTREAM.md for the required staged library.
 glm-exl3 = ["metal"]
 
+# AngelSlim Hy4 Flash with the pinned in-process Metal GGUF graph.
+hy4 = ["metal"]
+
 # Scoring-only features. All six are enabled by stark-score's `optimized`
 # feature set and validated for bit-exact scoring parity; stark-generate is
 # built without them. See docs/TECHNICAL_OVERVIEW.md#engine-feature-flags.

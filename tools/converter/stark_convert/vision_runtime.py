@@ -32,6 +32,16 @@ _GEMMA4_PROFILES = {
 }
 GEMMA3_FAMILY_PROFILE = "gemma3-siglip-bf16-v1"
 LILY_FAMILY_PROFILE = "qwen38-lily-retained-bf16-vision-v1"
+HY4_VISION_PROFILE = "hy4-flash-gguf-bf16-vision-v1"
+_HY4_SOURCE = "AngelSlim/Hy4-flash-GGUF"
+_HY4_REVISION = "c50d4dd30be42f2b91138e5731de0e2f32ad56b2"
+_HY4_ARTIFACT_SHA256 = "f9a244c3a1f85e03847959b575528c3927ac05ab0a3f532b1c1831f9eb1ddd3c"
+_HY4_METADATA_HASHES = {
+    "config_sha256": "1f56ac1a3063f926e91ec43842bfdc0fd6d4401ef91bcdecd1fc27dd506ea968",
+    "tokenizer_sha256": "2e3f3d22065c2be5765ce99ab2410411ae338b32ce809ea20dcdb61d00198e83",
+    "processor_sha256": "cc5cc63da33e0ebf53b8ac035879982ba18c47965f82a5f341bc82d98759dc1d",
+    "template_sha256": "11b12531403da5726b7e1f6003f479043b05999e6746d39af949cbcdfd715c35",
+}
 _VISION_SCHEMAS = {
     "Qwen35VisionLanguageModelConfig": (2, 3),
     "Gemma4VisionLanguageModelConfig": (4,),
@@ -52,6 +62,7 @@ _FAMILY_VERSIONS = {
     "qwen35-moe-bf16-merged-v5": 5,
     LILY_FAMILY_PROFILE: 1,
     inkling_prepare.VISION_PROFILE: 1,
+    HY4_VISION_PROFILE: 1,
 }
 
 
@@ -67,6 +78,27 @@ _ARTIFACT_HASHES = {
     "template_sha256",
 }
 _RUNTIME_KEYS = {"backend", "device_name", "apple_gpu_family", "gpu_core_count", "supports_mxu"}
+_HY4_RUNTIME_KEYS = {
+    "hy4_load_profile",
+    "expert_storage",
+    "mapped_expert_residency",
+    "grouped_prefill_requested",
+    "grouped_prefill_operands",
+    "grouped_prefill_fragments_requested",
+    "gpu_expert_plan",
+    "prefill_chunk_tokens",
+    "prefill_stage_profile_requested",
+    "prefill_dense_packed_requested",
+    "prefill_dense_device_views_requested",
+    "prefill_dense_ffn_device_views_requested",
+    "prefill_tensor_mla_requested",
+    "token_embeddings_resident",
+    "draft_experts_resident",
+    "draft_head_format",
+    "streamed_expert_demand_retention",
+    "streamed_expert_arena_bytes",
+    "streamed_expert_arena_requested_bytes",
+}
 _RECORD_KEYS = _ARTIFACT_HASHES | {
     "repo",
     "revision",
@@ -79,10 +111,11 @@ _RECORD_KEYS = _ARTIFACT_HASHES | {
 }
 
 
-def _valid_runtime_identity(value: object) -> bool:
+def _valid_runtime_identity(value: object, family_profile: str | None = None) -> bool:
+    hy4 = family_profile == HY4_VISION_PROFILE
     return (
         isinstance(value, dict)
-        and set(value) == _RUNTIME_KEYS
+        and set(value) == (_RUNTIME_KEYS | _HY4_RUNTIME_KEYS if hy4 else _RUNTIME_KEYS)
         and value.get("backend") == "metal"
         and isinstance(value.get("device_name"), str)
         and 0 < len(value["device_name"]) <= 128
@@ -93,6 +126,33 @@ def _valid_runtime_identity(value: object) -> bool:
         and type(value.get("gpu_core_count")) is int
         and 1 <= value["gpu_core_count"] <= 512
         and type(value.get("supports_mxu")) is bool
+        and (
+            not hy4
+            or (
+                value.get("hy4_load_profile") in {"default", "streamed-prefill", "resident-decode"}
+                and value.get("expert_storage") in {"streamed", "mapped"}
+                and type(value.get("mapped_expert_residency")) is bool
+                and type(value.get("grouped_prefill_requested")) is bool
+                and value.get("grouped_prefill_operands") in {"off", "f32", "f16"}
+                and type(value.get("grouped_prefill_fragments_requested")) is bool
+                and type(value.get("gpu_expert_plan")) is bool
+                and type(value.get("prefill_chunk_tokens")) is int
+                and value["prefill_chunk_tokens"] in {1024, 4096}
+                and type(value.get("prefill_stage_profile_requested")) is bool
+                and type(value.get("prefill_dense_packed_requested")) is bool
+                and type(value.get("prefill_dense_device_views_requested")) is bool
+                and type(value.get("prefill_dense_ffn_device_views_requested")) is bool
+                and type(value.get("prefill_tensor_mla_requested")) is bool
+                and type(value.get("token_embeddings_resident")) is bool
+                and type(value.get("draft_experts_resident")) is bool
+                and value.get("draft_head_format") in {"q8_0", "q5_0"}
+                and type(value.get("streamed_expert_demand_retention")) is bool
+                and type(value.get("streamed_expert_arena_bytes")) is int
+                and 0 <= value["streamed_expert_arena_bytes"] <= 2**63 - 1
+                and type(value.get("streamed_expert_arena_requested_bytes")) is int
+                and 0 <= value["streamed_expert_arena_requested_bytes"] <= 2**63 - 1
+            )
+        )
     )
 
 
@@ -116,7 +176,7 @@ def image_input_contract(value: object) -> dict | None:
     if (
         value.get("version") != "mediaref-v1"
         or value.get("transport") != "owner-private-file-v1"
-        or not _valid_runtime_identity(value.get("runtime_identity"))
+        or not _valid_runtime_identity(value.get("runtime_identity"), value.get("family_profile"))
         or type(value.get("max_images")) is not int
         or value["max_images"] != 1
         or type(value.get("artifact_schema_version")) is not int
@@ -157,7 +217,9 @@ def image_input_contract(value: object) -> dict | None:
         return None
     if (value["artifact_schema_version"] == 6) != (value.get("family_profile") == LILY_FAMILY_PROFILE):
         return None
-    if (value["artifact_schema_version"] == 7) != (value.get("family_profile") == inkling_prepare.VISION_PROFILE):
+    if (value["artifact_schema_version"] == 7) != (
+        value.get("family_profile") in {inkling_prepare.VISION_PROFILE, HY4_VISION_PROFILE}
+    ):
         return None
     return dict(value)
 
@@ -169,6 +231,20 @@ def family_image_input_contract(value: object) -> bool:
     source, revision = value.get("model_source"), value.get("model_revision")
     gemma = value.get("family_profile") in _GEMMA4_PROFILES
     inkling = value.get("family_profile") == inkling_prepare.VISION_PROFILE
+    hy4 = value.get("family_profile") == HY4_VISION_PROFILE
+    if hy4 and (
+        value.get("artifact_schema_version") != 7
+        or (source, revision) != (_HY4_SOURCE, _HY4_REVISION)
+        or value.get("artifact_sha256") != _HY4_ARTIFACT_SHA256
+        or any(value.get(key) != digest for key, digest in _HY4_METADATA_HASHES.items())
+        or value.get("max_source_pixels") != 32_000_000
+        or value.get("max_source_dimension") != 16_384
+        or value.get("max_processed_pixels") != 4_194_304
+        or value.get("max_patches") != 16_384
+        or value.get("max_image_tokens") != 8_192
+        or not _valid_runtime_identity(value.get("runtime_identity"), HY4_VISION_PROFILE)
+    ):
+        return False
     if inkling and (
         value.get("artifact_schema_version") != 7
         or (source, revision) != (inkling_prepare.REPO, inkling_prepare.REVISION)
@@ -214,15 +290,18 @@ def family_image_input_contract(value: object) -> bool:
         and ".." not in source.split("/")
         and all(char.isascii() and (char.isalnum() or char in "_./-") for char in source)
         and (revision is None or isinstance(revision, str) and re.fullmatch(r"[0-9a-f]{40,64}", revision) is not None)
-        and _valid_runtime_identity(value.get("runtime_identity"))
+        and _valid_runtime_identity(value.get("runtime_identity"), value.get("family_profile"))
         and all(
             type(value.get(key)) is int and 0 < value[key] <= maximum
             for key, maximum in (
                 ("max_compressed_bytes", 20 * 1024 * 1024),
                 ("max_source_pixels", 32_000_000),
-                ("max_processed_pixels", 16_777_216 if retained else 1_638_400 if inkling else 1_048_576),
-                ("max_patches", 65_536 if retained else 4096),
-                ("max_image_tokens", 16_384 if retained else 1024),
+                (
+                    "max_processed_pixels",
+                    16_777_216 if retained else 4_194_304 if hy4 else 1_638_400 if inkling else 1_048_576,
+                ),
+                ("max_patches", 65_536 if retained else 16_384 if hy4 else 4096),
+                ("max_image_tokens", 16_384 if retained else 8_192 if hy4 else 1024),
             )
         )
     )
@@ -270,6 +349,13 @@ def model_image_family(config: object, model: Path) -> dict | None:
 
         if prepared_identity(model) is not None:
             return {"profile": inkling_prepare.VISION_PROFILE, "version": 1}
+        return None
+    if isinstance(config, dict) and config.get("model_type") == "hy_v4_flash":
+        from .hybrid_prepare import prepared_identity
+
+        identity = prepared_identity(model)
+        if identity is not None and identity.get("architecture") == "hy4_flash":
+            return {"profile": HY4_VISION_PROFILE, "version": 1}
         return None
     from .hybrid_vision import prepared_image_identity
 

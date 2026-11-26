@@ -65,6 +65,7 @@ mod tests;
 mod text_parity_tests;
 pub(crate) mod tower;
 
+pub use preprocess::{Hy4ImagePixels, prepare_hy4_image_rgb};
 use preprocess::{PreparedImage, PreprocessLimits, RgbImage, decode_image, prepare_image as prepare_patches};
 use tower::{VisionTower, VisionTowerConfig, VisionTowerError};
 

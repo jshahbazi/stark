@@ -210,6 +210,8 @@ pub(crate) struct PreparedImageMetadata {
     pub processed_dimensions: [u32; 2],
 }
 
+pub(crate) const HY4_VISION_PROFILE: &str = "hy4-flash-gguf-bf16-vision-v1";
+
 pub(crate) struct ImageArtifactIdentity<'a> {
     pub schema_version: u32,
     pub artifact_sha256: &'a str,
@@ -262,6 +264,7 @@ fn image_family_limits(
         ) => ((16, 3), 2520, 280),
         ("gemma3-siglip-bf16-v1", 1, 5) => ((14, 4), 4096, 256),
         ("inkling2-mini-native-v1", 1, 7) => ((20, 2), 4096, 1024),
+        (HY4_VISION_PROFILE, 1, 7) => ((16, 2), 16_384, 8_192),
         _ => return None,
     };
     (geometry == expected_geometry).then_some((patches, tokens, patches * geometry.0 * geometry.0))
@@ -269,7 +272,7 @@ fn image_family_limits(
 
 #[cfg(test)]
 mod image_family_tests {
-    use super::image_family_limits;
+    use super::{HY4_VISION_PROFILE, PreparedImageMetadata, image_family_limits, valid_image_metadata};
 
     #[test]
     fn family_handshakes_require_matching_schema_version_and_geometry() {
@@ -286,6 +289,7 @@ mod image_family_tests {
             ("gemma4-26b-a4b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
             ("gemma3-siglip-bf16-v1", 1, 5, (14, 4), (4096, 256, 802816)),
             ("inkling2-mini-native-v1", 1, 7, (20, 2), (4096, 1024, 1638400)),
+            (HY4_VISION_PROFILE, 1, 7, (16, 2), (16_384, 8192, 4_194_304)),
         ] {
             assert_eq!(image_family_limits(profile, version, schema, geometry), Some(expected));
             assert_eq!(image_family_limits(profile, version + 1, schema, geometry), None);
@@ -293,6 +297,21 @@ mod image_family_tests {
             assert_eq!(image_family_limits(profile, version, schema, (1, 1)), None);
         }
         assert_eq!(image_family_limits("unimplemented", 1, 5, (14, 4)), None);
+    }
+
+    #[test]
+    fn hy4_counts_a_projected_newline_after_every_merged_row() {
+        let mut metadata = PreparedImageMetadata {
+            input_tokens: 9,
+            image_tokens: 6,
+            grid: [1, 4, 4],
+            processed_dimensions: [64, 64],
+        };
+        assert!(valid_image_metadata(&metadata, (16, 2), HY4_VISION_PROFILE));
+        assert!(!valid_image_metadata(&metadata, (16, 2), "qwen35-dense-bf16-merged-v1"));
+        metadata.image_tokens = 4;
+        assert!(!valid_image_metadata(&metadata, (16, 2), HY4_VISION_PROFILE));
+        assert!(valid_image_metadata(&metadata, (16, 2), "qwen35-dense-bf16-merged-v1"));
     }
 }
 
@@ -307,23 +326,28 @@ struct PreparedRequest<P> {
 fn valid_image_metadata(
     metadata: &PreparedImageMetadata,
     geometry: (u32, u32),
+    profile: &str,
 ) -> bool {
     let (patch_size, merge_size) = geometry;
-    let (max_patches, max_image_tokens) = match geometry {
-        (16, 2) => (65_536, 16_384),
-        (16, 3) => (2520, 280),
-        (20, 2) => (4096, 1024),
-        (14, 4) if metadata.grid == [1, 64, 64] && metadata.processed_dimensions == [896, 896] => (4096, 256),
+    let (max_patches, max_image_tokens) = match (profile, geometry) {
+        (HY4_VISION_PROFILE, (16, 2)) => (16_384, 8192),
+        (HY4_VISION_PROFILE, _) => return false,
+        (_, (16, 2)) => (65_536, 16_384),
+        (_, (16, 3)) => (2520, 280),
+        (_, (20, 2)) => (4096, 1024),
+        (_, (14, 4)) if metadata.grid == [1, 64, 64] && metadata.processed_dimensions == [896, 896] => (4096, 256),
         _ => return false,
     };
     let [temporal, height, width] = metadata.grid;
+    let count_newline = u32::from(profile == HY4_VISION_PROFILE);
     temporal == 1
         && height > 0
         && width > 0
         && height.is_multiple_of(merge_size)
         && width.is_multiple_of(merge_size)
         && height.checked_mul(width).is_some_and(|patches| {
-            patches <= max_patches && patches / (merge_size * merge_size) == metadata.image_tokens
+            patches <= max_patches
+                && (height / merge_size) * (width / merge_size + count_newline) == metadata.image_tokens
         })
         && metadata.processed_dimensions[0].checked_div(patch_size) == Some(width)
         && metadata.processed_dimensions[1].checked_div(patch_size) == Some(height)
@@ -615,9 +639,13 @@ pub(crate) trait GenerationBackend {
     ) -> Option<u32> {
         None
     }
-    /// Whether requests may select adaptive depth or prompt lookup.
+    /// Whether requests may select adaptive depth.
     fn supports_mtp_scheduling(&self) -> bool {
         false
+    }
+    /// Whether requests may select prompt lookup independently of adaptive depth.
+    fn supports_mtp_lookup(&self) -> bool {
+        self.supports_mtp_scheduling()
     }
     /// The round schedule for a request with MTP on that names neither
     /// `mtp_policy` nor `mtp_lookup`. Fixed with lookup off unless the loaded
@@ -773,12 +801,18 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             || backend.max_context_length() == Some(0)
             || !valid_ids(backend.eos_token_ids(), backend.vocab_size())
             || (default_drafts > 0 && mtp.is_none_or(|caps| default_drafts as usize > caps.max_drafts))
-            || (!default_scheduling.is_default() && (mtp.is_none() || !backend.supports_mtp_scheduling()))
+            || (!default_scheduling.is_default()
+                && (mtp.is_none()
+                    || (default_scheduling.adaptive && !backend.supports_mtp_scheduling())
+                    || (default_scheduling.lookup && !backend.supports_mtp_lookup())))
             || mtp.is_some_and(|capabilities| {
                 capabilities.max_drafts == 0
                     || capabilities.max_drafts > u32::MAX as usize
                     || !(1..=capabilities.max_drafts).contains(&capabilities.recommended_drafts)
-                    || !matches!(capabilities.sampling, "exact-rejection-v1" | "native-target-draw-match-v1")
+                    || !matches!(
+                        capabilities.sampling,
+                        "exact-rejection-v1" | "native-target-draw-match-v1" | "greedy-target-match-v1"
+                    )
                     || capabilities.verification.is_empty()
                     || capabilities.verification.len() > 128
                     || !capabilities
@@ -909,7 +943,9 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         if *drafts == 0 {
             return Err("invalid_generation_request");
         }
-        if !self.backend.supports_mtp_scheduling() {
+        if (adaptive && !self.backend.supports_mtp_scheduling())
+            || (scheduling.lookup && !self.backend.supports_mtp_lookup())
+        {
             return Err("mtp_not_supported");
         }
         if adaptive && !explicit_drafts {
@@ -942,7 +978,10 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             return Err("invalid_generation_request");
         }
         self.resolve_mtp(None, Some(options.mtp_drafts))?;
-        if !options.mtp_scheduling.is_default() && (options.mtp_drafts == 0 || !self.backend.supports_mtp_scheduling())
+        if !options.mtp_scheduling.is_default()
+            && (options.mtp_drafts == 0
+                || (options.mtp_scheduling.adaptive && !self.backend.supports_mtp_scheduling())
+                || (options.mtp_scheduling.lookup && !self.backend.supports_mtp_lookup()))
         {
             return Err("invalid_generation_request");
         }
@@ -1365,15 +1404,12 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 if self.backend.cancelled(request_id)? {
                     return Err("generation_cancelled");
                 }
-                let limits = self.backend.image_family_profile().and_then(|(profile, version)| {
-                    image_family_limits(
-                        profile,
-                        version,
-                        self.backend.image_artifact_identity()?.schema_version,
-                        self.backend.image_geometry(),
-                    )
+                let (profile, version) =
+                    self.backend.image_family_profile().ok_or("invalid_image_preparation_output")?;
+                let limits = self.backend.image_artifact_identity().and_then(|identity| {
+                    image_family_limits(profile, version, identity.schema_version, self.backend.image_geometry())
                 });
-                if !valid_image_metadata(&metadata, self.backend.image_geometry())
+                if !valid_image_metadata(&metadata, self.backend.image_geometry(), profile)
                     || limits.is_none_or(|(patches, tokens, _)| {
                         metadata.grid[1].checked_mul(metadata.grid[2]).is_none_or(|count| count > patches)
                             || metadata.image_tokens > tokens
@@ -1650,11 +1686,17 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         None => json!({"supported":false,"max_drafts":0,"recommended_drafts":0,
             "default_drafts":0,"operations":[]}),
     };
-    if worker.mtp.is_some() && worker.backend.supports_mtp_scheduling() {
-        readiness["mtp"]["policies"] = json!(["fixed", "adaptive"]);
+    let adaptive = worker.backend.supports_mtp_scheduling();
+    let lookup = worker.backend.supports_mtp_lookup();
+    if worker.mtp.is_some() && (adaptive || lookup) {
+        readiness["mtp"]["policies"] = if adaptive {
+            json!(["fixed", "adaptive"])
+        } else {
+            json!(["fixed"])
+        };
         readiness["mtp"]["default_policy"] = json!(worker.default_mtp_scheduling.policy());
         readiness["mtp"]["default_lookup"] = json!(worker.default_mtp_scheduling.lookup);
-        readiness["mtp"]["lookup"] = json!(true);
+        readiness["mtp"]["lookup"] = json!(lookup);
     }
     if worker.media.is_some() && worker.backend.supports_images() {
         let identity = worker
@@ -1672,7 +1714,7 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             worker.backend.image_geometry(),
         )
         .ok_or("invalid_model_config")?;
-        let max_source_pixels = if identity.schema_version == 7 {
+        let max_source_pixels = if identity.schema_version == 7 && family_profile != HY4_VISION_PROFILE {
             max_processed_pixels
         } else {
             32_000_000
@@ -1816,6 +1858,7 @@ mod tests {
         plans: Vec<RecordedPlan>,
         planning_allowed: bool,
         mtp_scheduling: bool,
+        mtp_lookup_only: bool,
         scheduling_requests: Vec<MtpScheduling>,
         default_scheduling: MtpScheduling,
         sampling_tuned_drafts: Option<(u32, u32)>,
@@ -1914,6 +1957,9 @@ mod tests {
         }
         fn supports_mtp_scheduling(&self) -> bool {
             self.mtp_scheduling
+        }
+        fn supports_mtp_lookup(&self) -> bool {
+            self.mtp_lookup_only || self.mtp_scheduling
         }
         fn default_mtp_scheduling(&self) -> MtpScheduling {
             self.default_scheduling
@@ -2205,6 +2251,7 @@ mod tests {
             plans: Vec::new(),
             planning_allowed: true,
             mtp_scheduling: false,
+            mtp_lookup_only: false,
             scheduling_requests: Vec::new(),
             default_scheduling: MtpScheduling::default(),
             sampling_tuned_drafts: None,
@@ -2463,6 +2510,22 @@ mod tests {
         off["mtp_policy"] = json!("fixed");
         assert!(post(&mut worker, off).get("error").is_none());
         assert_eq!(worker.backend.generation_calls, calls + 1);
+    }
+
+    #[test]
+    fn mtp_lookup_can_run_without_adaptive_depth() {
+        let mut worker = mtp_worker(3, 2);
+        worker.backend.mtp_lookup_only = true;
+        let mut request = standard();
+        request["mtp_drafts"] = json!(2);
+        request["mtp_lookup"] = json!(true);
+        let reply = post(&mut worker, request.clone());
+        assert!(reply.get("error").is_none());
+        assert_eq!(reply["mtp"]["policy"], "fixed");
+        assert_eq!(reply["mtp"]["lookup"], true);
+        request["mtp_policy"] = json!("adaptive");
+        assert_eq!(post(&mut worker, request)["error"], "mtp_not_supported");
+        assert_eq!(worker.backend.generation_calls, 1);
     }
 
     const ADAPTIVE_LOOKUP: MtpScheduling = MtpScheduling {
@@ -3228,9 +3291,9 @@ mod tests {
             grid: [1, 3, 3],
             processed_dimensions: [48, 48],
         };
-        assert!(valid_image_metadata(&metadata, (16, 3)));
-        assert!(!valid_image_metadata(&metadata, (16, 2)));
-        assert!(!valid_image_metadata(&metadata, (16, 0)));
+        assert!(valid_image_metadata(&metadata, (16, 3), worker.backend.family_profile));
+        assert!(!valid_image_metadata(&metadata, (16, 2), worker.backend.family_profile));
+        assert!(!valid_image_metadata(&metadata, (16, 0), worker.backend.family_profile));
         worker.backend.image_schema = 3;
         assert_eq!(
             run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut Vec::new()),
@@ -3784,7 +3847,8 @@ mod tests {
                 grid: [1, 4, 4],
                 processed_dimensions: [64, 64],
             },
-            (16, 2)
+            (16, 2),
+            "qwen35-dense-bf16-merged-v1",
         ));
     }
 
@@ -3796,15 +3860,15 @@ mod tests {
             grid: [1, 64, 64],
             processed_dimensions: [896, 896],
         };
-        assert!(valid_image_metadata(&metadata, (14, 4)));
-        assert!(!valid_image_metadata(&metadata, (16, 2)));
+        assert!(valid_image_metadata(&metadata, (14, 4), "gemma3-siglip-bf16-v1"));
+        assert!(!valid_image_metadata(&metadata, (16, 2), "gemma3-siglip-bf16-v1"));
         metadata.grid = [1, 32, 64];
         metadata.processed_dimensions = [896, 448];
         metadata.image_tokens = 128;
-        assert!(!valid_image_metadata(&metadata, (14, 4)));
+        assert!(!valid_image_metadata(&metadata, (14, 4), "gemma3-siglip-bf16-v1"));
         metadata.grid = [1, 64, 64];
         metadata.processed_dimensions = [896, 896];
-        assert!(!valid_image_metadata(&metadata, (14, 4)));
+        assert!(!valid_image_metadata(&metadata, (14, 4), "gemma3-siglip-bf16-v1"));
     }
 
     #[test]

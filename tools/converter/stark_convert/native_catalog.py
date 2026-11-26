@@ -14,12 +14,15 @@ QWEN_CHOICE = "qwen38-mixed"
 FLINT_FAMILY_ID = "flint"
 FLINT_CHOICE = "flint-int4"
 RIPPLE_FAMILY_ID = "ricursive"
+HY4_FAMILY_ID = "hy4_flash"
+HY4_CHOICE = "hy4-q3-k"
 
 _NATIVE_CHOICES = {
     FAMILY_ID: (CHOICE,),
     QWEN_FAMILY_ID: (QWEN_CHOICE, "qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"),
     FLINT_FAMILY_ID: (FLINT_CHOICE,),
     RIPPLE_FAMILY_ID: ("ripple-q8", "ripple-q4-k-m"),
+    HY4_FAMILY_ID: (HY4_CHOICE,),
     # The 8-bit default only. The original (inkling_prepare.ORIGINAL_CHOICE) is a
     # preparation choice for reference work: it shares this item's repository and
     # revision, which the app's installed-model matching cannot tell apart.
@@ -48,19 +51,21 @@ def family_definition(family: str = FAMILY_ID) -> dict:
         "family_id": family,
         "name": "Ripple-65B Preview"
         if family == RIPPLE_FAMILY_ID
+        else "Hy4-flash"
+        if family == HY4_FAMILY_ID
         else "Inkling 2 Mini"
         if family == INKLING_FAMILY_ID
         else "Flint"
         if family == FLINT_FAMILY_ID
         else "GLM-5.3 Flash",
-        "architecture_aliases": [family],
+        "architecture_aliases": [family, "hy_v4_flash"] if family == HY4_FAMILY_ID else [family],
         "config_classes": [],
         "model_kind": "language",
         "conversion": {
             "status": "implemented",
             "containers": [".safetensors"] if family in {FLINT_FAMILY_ID, INKLING_FAMILY_ID} else [".gguf"],
             "source_formats": [source_for(choice)["quantization"] for choice in _NATIVE_CHOICES[family]]
-            if family in {RIPPLE_FAMILY_ID, INKLING_FAMILY_ID}
+            if family in {RIPPLE_FAMILY_ID, INKLING_FAMILY_ID, HY4_FAMILY_ID}
             else ["MLX affine INT4"]
             if family == FLINT_FAMILY_ID
             else ["UD-Q2_K_XL"],
@@ -78,11 +83,13 @@ def family_definition(family: str = FAMILY_ID) -> dict:
                 "caveats": [],
             },
             "vision-language": {
-                "status": "conditional" if family == INKLING_FAMILY_ID else "unsupported",
+                "status": "conditional" if family in {INKLING_FAMILY_ID, HY4_FAMILY_ID} else "unsupported",
                 "message": "Inkling 2 Mini includes its image tower."
                 if family == INKLING_FAMILY_ID
+                else "Hy4-flash includes its BF16 image projector."
+                if family == HY4_FAMILY_ID
                 else "Image input is not supported for this model family.",
-                "caveats": ["local_image_checks_required"] if family == INKLING_FAMILY_ID else [],
+                "caveats": ["local_image_checks_required"] if family in {INKLING_FAMILY_ID, HY4_FAMILY_ID} else [],
             },
         },
     }
@@ -98,6 +105,8 @@ def catalog_item(choice: str = CHOICE) -> dict:
         name = "GLM-5.3-Flash-GGUF"
     elif choice in {"ripple-q8", "ripple-q4-k-m"}:
         name = "Ripple-65B-Preview-GGUF"
+    elif choice == HY4_CHOICE:
+        name = "Hy4-flash AngelSlim Q3_K"
     elif choice == FLINT_CHOICE:
         name = "Flint INT4"
     elif choice == QWEN_CHOICE:
@@ -119,12 +128,12 @@ def catalog_item(choice: str = CHOICE) -> dict:
         "parameter_count": 64_782_689_360 if source["architecture"] == RIPPLE_FAMILY_ID else None,
         "weight_bytes": source["weight_bytes"],
         "quantization": source["quantization"],
-        "artifact_modes": ["text", "vision-language"]
+        "artifact_modes": ["vision-language"]
+        if choice in {INKLING_CHOICE, HY4_CHOICE}
+        else ["text", "vision-language"]
         if choice in {"qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"}
-        else ["vision-language"]
-        if choice == INKLING_CHOICE
         else ["text"],
-        "default_artifact_mode": "vision-language" if choice == INKLING_CHOICE else "text",
+        "default_artifact_mode": "vision-language" if choice in {INKLING_CHOICE, HY4_CHOICE} else "text",
         "downloadable": True,
         "model_group": None,
     }

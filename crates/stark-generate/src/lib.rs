@@ -2,6 +2,8 @@
 //! state unless the host enables consecutive prefix reuse.
 mod cancel;
 mod generation;
+#[cfg(all(feature = "hy4", target_os = "macos", target_arch = "aarch64"))]
+mod hy4;
 #[cfg(feature = "metal")]
 mod hybrid;
 #[cfg(all(feature = "metal", target_os = "macos"))]

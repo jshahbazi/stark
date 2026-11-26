@@ -202,7 +202,7 @@ class MetadataSizeError(ConversionError):
 
 def support_matrix() -> dict:
     """Return a fresh displayable inventory without granting model capability."""
-    from .native_catalog import FLINT_FAMILY_ID, INKLING_FAMILY_ID, RIPPLE_FAMILY_ID
+    from .native_catalog import FLINT_FAMILY_ID, HY4_FAMILY_ID, INKLING_FAMILY_ID, RIPPLE_FAMILY_ID
     from .native_catalog import family_definition as native_family_definition
 
     return {
@@ -216,6 +216,7 @@ def support_matrix() -> dict:
             native_family_definition(FLINT_FAMILY_ID),
             native_family_definition(RIPPLE_FAMILY_ID),
             native_family_definition(INKLING_FAMILY_ID),
+            native_family_definition(HY4_FAMILY_ID),
         ],
         "qualification": dict(_QUALIFICATION),
     }
