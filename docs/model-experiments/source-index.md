@@ -166,6 +166,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ## GLM, Flint and native hybrids
 
+- [Hy4-flash AngelSlim Q3_K performance write-up](speed-hy4.md) · Family history and decisions
 - [Hy4-flash AngelSlim Q3_K native adoption and llama.cpp parity](2026-11-25-hy4-native-q3-k.md) · Model experiment, 2026-11-25
 - [Hy4-flash AngelSlim Q3_K prefill and decode attribution](2026-11-25-hy4-prefill-decode-profile.md) · Model experiment, 2026-11-25
 - [Hy4-flash AngelSlim Q3_K routed prefill and expert retention](2026-11-25-hy4-dense-prefill-expert-retention.md) · Model experiment, 2026-11-25

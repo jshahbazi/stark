@@ -122,7 +122,7 @@ The 4K prefill, 4K decode and short-code peaks used an 8,192-position loaded
 window. Set `STARK_HY4_CONTEXT_LIMIT=8192` to bound the load for that geometry
 and check the selected capacity in readiness. Longer loaded windows use the
 original FFN projection for all chunks. Memory admission can refuse the
-requested arena or resident banks on a busy host. [Benchmark settings and results](model-experiments/speed-other-families.md#hy4-flash)
+requested arena or resident banks on a busy host. [Benchmark settings and results](model-experiments/speed-hy4.md)
 
 ### Individual Hy4 controls
 

@@ -51,6 +51,10 @@ These trials used different row counts, host paths and sampling policies across 
 
 ## Hy4-flash
 
+Start with the [Hy4-flash performance write-up](speed-hy4.md) for the retained
+profiles, prefill and decode results, failed approaches and remaining gates.
+The tables below index the individual trials.
+
 These are diagnostics on `codex/hy4-flash-q3-k`. The first set is also
 available at [`636aa42d70917473b9294b0812ab4ba94396a2b5`](https://github.com/jshahbazi/stark/tree/636aa42d70917473b9294b0812ab4ba94396a2b5).
 The native path uses AngelSlim Hy4-flash Q3_K at `c50d4dd30be42f2b91138e5731de0e2f32ad56b2`,
