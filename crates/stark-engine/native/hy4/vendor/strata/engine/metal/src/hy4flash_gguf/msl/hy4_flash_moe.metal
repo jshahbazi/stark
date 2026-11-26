@@ -60,6 +60,10 @@ struct Hy4FlashMoeArgs {
 
 // Mapped banks use expert ids as offsets. Sort by (expert, selection),
 // then emit the same sections as the CPU plan for chunk zero.
+// NextN's legacy CPU plan clamps bad ids to expert zero and copies the weight bits.
+constant bool HY4_FLASH_MOE_KEEP_WEIGHT [[function_constant(62)]];
+constant bool hy4_flash_moe_keep_weight = is_function_constant_defined(HY4_FLASH_MOE_KEEP_WEIGHT)
+                                       ? HY4_FLASH_MOE_KEEP_WEIGHT : false;
 kernel void hy4_flash_mapped_moe_plan(device const int* ids [[buffer(0)]],
     device const float* weights [[buffer(1)]], device int* plan [[buffer(2)]],
     device uint* indirect [[buffer(3)]], device atomic_uint* bad [[buffer(4)]],
@@ -91,7 +95,7 @@ kernel void hy4_flash_mapped_moe_plan(device const int* ids [[buffer(0)]],
         const bool valid = uint(ids[selection]) < geometry[0] && isfinite(weight);
         if (!valid) atomic_fetch_add_explicit(bad, 1u, memory_order_relaxed);
         plan[a.off_etok + tid] = int(selection / a.topk);
-        plan[a.off_ew + tid] = as_type<int>(valid ? weight : 0.0f);
+        plan[a.off_ew + tid] = as_type<int>(hy4_flash_moe_keep_weight || valid ? weight : 0.0f);
         plan[a.off_tokent + selection] = int(tid);
     }
     if (tid == 0) {

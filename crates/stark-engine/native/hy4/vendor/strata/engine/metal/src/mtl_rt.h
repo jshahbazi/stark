@@ -122,6 +122,8 @@ public:
     // offsets from the start of p: what lies between them is never wrapped, so it stays out of the GPU's working set
     Buffer wrap_ranges(void* page_aligned, const std::vector<std::pair<size_t, size_t>>& ranges);
     void free(Buffer& b);
+    bool begin_expert_residency(const std::vector<Buffer>& buffers);
+    void end_expert_residency();
 
     // Encodes `ds` into ONE compute encoder (serial or concurrent dispatch type) and ONE command buffer, `reps`
     // times over; commits and waits.  Returns the GPU time (GPUEndTime - GPUStartTime) in seconds.

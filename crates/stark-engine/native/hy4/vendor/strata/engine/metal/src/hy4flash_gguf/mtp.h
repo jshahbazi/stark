@@ -93,6 +93,8 @@ struct MtpStats {
 class Mtp {
 public:
     static constexpr int kCacheSlack = 16;
+    static constexpr uint64_t kExpertPoolBudgetBytes = 2000000000;
+    static uint64_t resident_expert_bytes(const hy4_flash::Geometry& geometry);
     Mtp() = default;
     ~Mtp();
     Mtp(const Mtp&) = delete;
@@ -101,7 +103,8 @@ public:
     /// `lib` is the trunk's compiled hy4-flash library (Forward::library).  `chunk` = rows per cache-only command buffer
     /// (the prompt's catch-up).  The MTP's dense tensors must be resident (open(..., with_mtp = true)).
     std::string open(Model& m, mtl::Context& cx, int lib, int chunk = 1024,
-                     const std::string& pack_dir = {});
+                     const std::string& pack_dir = {}, bool resident_experts = false);
+    std::string load_resident_experts();
     /// Forgets the rows and the pooled keys; hidden(0) = 0.
     void reset();
     /// hidden(q) = h_{q-1}: `n` rows of the trunk's result_norm for positions q-1 .. q+n-2.

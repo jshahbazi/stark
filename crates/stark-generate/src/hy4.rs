@@ -139,6 +139,7 @@ impl Hy4Backend {
         let storage = match std::env::var("STARK_HY4_EXPERT_STORAGE").as_deref() {
             Ok("streamed") | Err(std::env::VarError::NotPresent) => ExpertStorage::Streamed,
             Ok("mapped") => ExpertStorage::Mapped,
+            Ok("mapped-resident") => ExpertStorage::MappedResident,
             Ok("auto") => ExpertStorage::Auto,
             _ => return Err("invalid_hy4_expert_storage"),
         };
@@ -184,6 +185,8 @@ impl Hy4Backend {
         let tensor_mla = verify_switch("STARK_HY4_PREFILL_TENSOR_MLA", "invalid_hy4_prefill_tensor_mla", false)?;
         let resident_token_embeddings =
             verify_switch("STARK_HY4_EMBEDDINGS_RESIDENT", "invalid_hy4_embeddings_resident", false)?;
+        let resident_draft_experts =
+            verify_switch("STARK_HY4_MTP_RESIDENT_EXPERTS", "invalid_hy4_mtp_resident_experts", false)?;
         if routed_half && !grouped {
             return Err("invalid_hy4_prefill_routed_half");
         }
@@ -215,6 +218,7 @@ impl Hy4Backend {
                 dense_packed,
                 dense_device_views,
                 resident_token_embeddings,
+                resident_draft_experts,
                 tensor_mla,
                 max_drafts,
                 context_limit,
@@ -229,6 +233,7 @@ impl Hy4Backend {
             "gpu_core_count": identity.gpu_core_count,
             "supports_mxu": identity.supports_mxu,
             "expert_storage": if native.mapped_experts() { "mapped" } else { "streamed" },
+            "mapped_expert_residency": matches!(storage, ExpertStorage::MappedResident),
             "grouped_prefill_requested": grouped,
             "grouped_prefill_operands": if routed_half { "f16" } else if grouped { "f32" } else { "off" },
             "grouped_prefill_fragments_requested": routed_fragments,
@@ -239,6 +244,7 @@ impl Hy4Backend {
             "prefill_dense_device_views_requested": dense_device_views,
             "prefill_tensor_mla_requested": tensor_mla,
             "token_embeddings_resident": resident_token_embeddings,
+            "draft_experts_resident": resident_draft_experts,
             "streamed_expert_demand_retention": demand_retention,
             "streamed_expert_arena_bytes": native.arena_bytes(),
             "streamed_expert_arena_requested_bytes": arena_bytes_requested,

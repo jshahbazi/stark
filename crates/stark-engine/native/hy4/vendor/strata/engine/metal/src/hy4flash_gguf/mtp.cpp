@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -228,7 +229,7 @@ struct Mtp::Impl {
     int pools_done = 0;
 
     mtl::Pipeline p_rms_w, p_rope, p_glu, p_router, p_idx_w, p_idx_kpool, p_idx_score, p_idx_topk, p_argmax,
-        p_copy, p_store_half, p_add, p_gate_mul;
+        p_copy, p_store_half, p_add, p_gate_mul, p_gpu_plan;
     AttnPipes attn_sel;   // attn.h: the score row, the softmax, PV
     std::map<std::array<uint64_t, 3>, DenseGemvF32> gemv_;
     MoeF32 moe;
@@ -247,7 +248,8 @@ struct Mtp::Impl {
     size_t n_pool_max = 0;
 
     // the expert pool
-    mtl::Buffer pool;
+    mtl::Buffer pool, moe_indirect;
+    bool resident_experts = false;
     ExpertLru lru;
     uint64_t slot_bytes = 0, sl_off[3] = {0, 0, 0}, sl_bytes[3] = {0, 0, 0};
     uint64_t file_off[3] = {0, 0, 0};
@@ -343,7 +345,8 @@ struct Mtp::Impl {
         ds.push_back(d);
     }
 
-    std::string open(Model& mm, mtl::Context& c, int lib_, int chunk, const std::string& pack_dir);
+    std::string open(Model& mm, mtl::Context& c, int lib_, int chunk, const std::string& pack_dir,
+                     bool resident_bank);
     void encode_rows(std::vector<mtl::Dispatch>& ds, int q0, int T);
     void encode_full_a(std::vector<mtl::Dispatch>& ds, int q, int r);
     void encode_full_b(std::vector<mtl::Dispatch>& ds, int r);
@@ -353,17 +356,20 @@ struct Mtp::Impl {
     std::string load_experts(MtpStats& st);
     std::string read_slots(const std::vector<std::pair<int, int32_t>>& load);
     std::string preload_pool();
+    std::string preload_resident_bank();
     std::string pack;
     bool preload_pending = false;
     std::string preload_now() {
         if (!preload_pending) return {};
         preload_pending = false;
-        return preload_pool();
+        return resident_experts ? preload_resident_bank() : preload_pool();
     }
 };
 
-std::string Mtp::Impl::open(Model& mm, mtl::Context& c, int lib_, int chunk, const std::string& pack_dir) {
+std::string Mtp::Impl::open(Model& mm, mtl::Context& c, int lib_, int chunk, const std::string& pack_dir,
+                           bool resident_bank) {
     pack = pack_dir;
+    resident_experts = resident_bank;
     m = &mm;
     cx = &c;
     lib = lib_;
@@ -490,19 +496,31 @@ std::string Mtp::Impl::open(Model& mm, mtl::Context& c, int lib_, int chunk, con
         at += (sl_bytes[k] + 16383) / 16384 * 16384;
     }
     slot_bytes = at;
-    double gb = 2.0;
+    double gb = Mtp::kExpertPoolBudgetBytes / 1e9;
     if (const char* e = stark::hy4::vendor_option("HY4_FLASH_MTP_EXPERT_GB"))
         if (const double v = std::atof(e); v > 0) gb = v;
     int slots = (int) std::min<double>(n_experts, std::floor(gb * 1e9 / (double) slot_bytes));
     slots = std::max(slots, topk);
     if (const char* e = stark::hy4::vendor_option("HY4_FLASH_MTP_IO_THREADS"))
         if (const int v = std::atoi(e); v > 0) io_threads = v;
-    pool = cx->alloc((size_t) slots * slot_bytes);
-    lru.reset(slots, n_experts);
+    if (resident_experts) {
+        if (quant != 8 || topk < 1 || topk > 128 || n_experts < topk)
+            return "MTP: the resident bank requires Q8_0 experts and supported routing geometry";
+        const uint64_t bytes = Mtp::resident_expert_bytes(g);
+        if (bytes == 0 || bytes > cx->max_buffer_length()) return "MTP: the resident bank exceeds the Metal buffer limit";
+        pool = cx->alloc((size_t) bytes);
+        slots = n_experts;
+        p_gpu_plan = cx->pipeline(lib, "hy4_flash_mapped_moe_plan", mtl::Constants{}.b(62, true));
+        moe_indirect = cx->alloc(32);
+    } else {
+        pool = cx->alloc((size_t) slots * slot_bytes);
+        lru.reset(slots, n_experts);
+    }
     fd = ::open(expert_file.c_str(), O_RDONLY);
     if (fd < 0) return "cannot open " + expert_file;
     fcntl(fd, F_NOCACHE, 1);
-    if (const char* e = stark::hy4::vendor_option("HY4_FLASH_MTP_IO_POOL"); e == nullptr || std::strcmp(e, "0") != 0) {
+    if (const char* e = stark::hy4::vendor_option("HY4_FLASH_MTP_IO_POOL");
+        resident_experts || e == nullptr || std::strcmp(e, "0") != 0) {
         rpool = std::make_unique<ReadPool>();
         rpool->start(io_threads, fd);
     }
@@ -568,9 +586,9 @@ std::string Mtp::Impl::open(Model& mm, mtl::Context& c, int lib_, int chunk, con
     badflag = cx->alloc(16);
     std::fprintf(stderr,
                  "strata_hy4_flash_metal: MTP block %d: %d heads, its own MLA / indexer cache for %d rows, expert pool %d of %d "
-                 "BF16 experts (%.2f GB, %.2f MB each, HY4_FLASH_MTP_EXPERT_GB), cache-only rows %d a command buffer\n",
-                 L, H, rows_cap, slots, n_experts, (double) slots * (double) slot_bytes / 1e9,
-                 (double) slot_bytes / 1e6, C);
+                 "experts (%.2f GB, %s), cache-only rows %d a command buffer\n",
+                 L, H, rows_cap, slots, n_experts, (double) pool.bytes / 1e9,
+                 resident_experts ? "resident Q8_0" : "lazy", C);
     return {};
 }
 
@@ -988,6 +1006,25 @@ void Mtp::Impl::encode_full_b1(std::vector<mtl::Dispatch>& ds, int r) {
     ma.off_ew = 3 * (uint32_t) topk + 1;
     ma.off_tokent = 4 * (uint32_t) topk + 1;
     ma.limit = clamp;
+    if (resident_experts) {
+        // The sidecar has three contiguous banks indexed by expert id. The
+        // mapped plan preserves selection order for the existing FP32 combine.
+        ma.gate_off = 0;
+        ma.up_off = file_off[1] - kQ8Header;
+        ma.down_off = file_off[2] - kQ8Header;
+        ma.gu_stride = sl_bytes[0];
+        ma.d_stride = sl_bytes[2];
+        const std::array<uint32_t, 3> grid{
+            (uint32_t) n_experts, moe.gate_groups_x(), moe.down_groups_x(),
+        };
+        mtl::Dispatch d;
+        d.p = &p_gpu_plan;
+        d.args = {mtl::Arg::B(ids), mtl::Arg::B(rw), mtl::Arg::B(plan), mtl::Arg::B(moe_indirect),
+                  mtl::Arg::B(badflag, sizeof(uint32_t)), mtl::Arg::V(ma), mtl::Arg::V(grid)};
+        d.tg[0] = std::bit_ceil((uint32_t) topk);
+        mtl::require_fit(d, "hy4_flash_mapped_moe_plan (mtp)");
+        ds.push_back(d);
+    }
     moe.append(ds, ma, pool, plan, rdown, 0, xp, hbuf, hp, ye, mlat, 0);
     gvs(RUP).append(ds, *wr[RUP].buf, wr[RUP].off, mlat, (uint32_t) latent, upo, un, 0, 1);
     {
@@ -1128,6 +1165,18 @@ std::string Mtp::Impl::preload_pool() {
     return {};
 }
 
+std::string Mtp::Impl::preload_resident_bank() {
+    constexpr uint64_t read_bytes = 4ull << 20;
+    std::vector<ReadPool::Job> jobs;
+    for (uint64_t off = 0; off < pool.bytes; off += read_bytes)
+        jobs.push_back({pool.as<uint8_t>() + off, kQ8Header + off, std::min(read_bytes, pool.bytes - off)});
+    if (!rpool->run(jobs)) return "MTP: a resident expert read failed";
+    rpool.reset();
+    ::close(fd);
+    fd = -1;
+    return {};
+}
+
 // ---- the public face -----------------------------------------------------------------------------------------------
 Mtp::~Mtp() {
     if (im_ != nullptr) im_->rpool.reset();   // join the readers before their fd closes
@@ -1135,10 +1184,18 @@ Mtp::~Mtp() {
     delete im_;
 }
 
-std::string Mtp::open(Model& m, mtl::Context& cx, int lib, int chunk, const std::string& pack_dir) {
+uint64_t Mtp::resident_expert_bytes(const hy4_flash::Geometry& g) {
+    if (g.n_experts < 1 || g.expert_ff < 1 || g.expert_dim < 1) return 0;
+    return (uint64_t) g.n_experts
+           * (2 * (uint64_t) g.expert_ff * ref::row_bytes(8, g.expert_dim)
+              + (uint64_t) g.expert_dim * ref::row_bytes(8, g.expert_ff));
+}
+
+std::string Mtp::open(Model& m, mtl::Context& cx, int lib, int chunk, const std::string& pack_dir,
+                      bool resident_experts) {
     if (im_ != nullptr) return "already open";
     im_ = new Impl();
-    const std::string e = im_->open(m, cx, lib, chunk, pack_dir);
+    const std::string e = im_->open(m, cx, lib, chunk, pack_dir, resident_experts);
     if (!e.empty()) {
         im_->rpool.reset();   // join the readers, then close their fd (a profile error returns after it was opened)
         if (im_->fd >= 0) ::close(im_->fd);
@@ -1148,6 +1205,10 @@ std::string Mtp::open(Model& m, mtl::Context& cx, int lib, int chunk, const std:
     }
     reset();
     return {};
+}
+
+std::string Mtp::load_resident_experts() {
+    return im_->resident_experts ? im_->preload_now() : std::string{};
 }
 
 void Mtp::reset() {
@@ -1203,7 +1264,10 @@ std::string Mtp::step(const int32_t* tokens, int q, int32_t* draft) {
     std::vector<mtl::Dispatch> ds;
     im.encode_rows(ds, q0, T);
     im.encode_full_a(ds, q, T - 1);
-    if (!one_cb()) {   // HY4_FLASH_MTP_ONE_CB=0: two command buffers, the host's turn between them
+    if (im.resident_experts) {
+        im.encode_full_b(ds, T - 1);
+        im.cx->run_graph(ds);
+    } else if (!one_cb()) {   // HY4_FLASH_MTP_ONE_CB=0: two command buffers, the host's turn between them
         im.cx->run_graph(ds);
         if (const std::string e = im.load_experts(st_); !e.empty()) return e;
         ds.clear();

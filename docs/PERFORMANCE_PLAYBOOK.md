@@ -883,6 +883,10 @@ Measure an intermediate precision change against session drift even when it move
 
 Read fewer bytes only when doing so shortens the critical path. At 32K, disabling Hy4 read-ahead reduced recorded expert traffic from 83.89 to 43.71 GB while host cuts rose from 1.984 to 2.446 s in the one-way comparison. Blocking on a shared-event listener showed no decode gain. The packed F16-operand gate and output verifier changed the output and was removed. [Hy4 long verifier scheduling and projections](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-18--screen-long-verifier-scheduling-and-packed-projections)
 
+Price individual expert banks before trying partial residency. Hy4's three largest 32K cut bodies covered only 0.349 of 2.589 s. Both of the rendered long code cases offered zero prompt-lookup proposals. Preparing clean mapped pages before generation and requesting expert-buffer residency removed all target host cuts. The image-loaded 16K and 32K K2 cases reached 42.37 and 39.72 tok/s with exact outputs, normal pressure and stable swap. Count the 69.66 s readiness separately. [Hy4 bank attribution](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-19--attribute-streamed-verifier-cuts-by-expert-bank) · [Hy4 mapped residency](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-20--prepare-the-mapped-expert-banks-before-generation)
+
+Recheck draft depth after changing how the verifier or draft reads weights. Hy4's resident NextN reduced the 16K and 32K draft phases by 0.303 and 0.280 s in separate exact-output sessions. The mapped 32K target varied enough that decode stayed within drift. Short TypeScript reached 60.65 tok/s at depth three with both banks prepared, and depth four fell to 54.03. Keep the data split by workload and charge all additional draft-bank bytes at load. [Hy4 resident NextN](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-21--keep-nextn-experts-resident)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |

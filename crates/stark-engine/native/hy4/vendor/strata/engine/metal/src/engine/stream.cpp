@@ -35,6 +35,35 @@ int env_int(const char* n, int d) {
     const char* e = stark::hy4::vendor_option(n);
     return e && *e ? std::atoi(e) : d;
 }
+
+bool prepare_mapped_pages(const uint8_t* mapping,
+                          const std::vector<std::pair<uint64_t, uint64_t>>& ranges) {
+    constexpr uint64_t step = 128ull << 20;
+    constexpr uint64_t swap_allowance = 256ull << 20;
+    xsw_usage before{};
+    size_t before_size = sizeof before;
+    if (sysctlbyname("vm.swapusage", &before, &before_size, nullptr, 0) != 0) return false;
+    const volatile uint8_t* pages = mapping;
+    uint8_t touched = 0;
+    for (const auto& [lo, hi] : ranges) {
+        for (uint64_t first = lo; first < hi; first += step) {
+            int pressure = 0;
+            size_t level_size = sizeof pressure;
+            xsw_usage current{};
+            size_t current_size = sizeof current;
+            if (sysctlbyname("kern.memorystatus_vm_pressure_level", &pressure, &level_size, nullptr, 0) != 0 ||
+                pressure > 1 ||
+                sysctlbyname("vm.swapusage", &current, &current_size, nullptr, 0) != 0 ||
+                current.xsu_used > before.xsu_used + swap_allowance)
+                return false;
+            const uint64_t last = std::min(first + step, hi);
+            for (uint64_t page = first; page < last; page += PAGE)
+                touched ^= pages[page];
+        }
+    }
+    (void) touched;
+    return true;
+}
 }  // namespace
 
 bool ExpertStream::wanted(const gguf::File& f, const mtl::Context& cx) {
@@ -61,6 +90,7 @@ ExpertStream::~ExpertStream() {
     cv_.notify_all();
     for (auto& t : io_) t.join();
     if (mapped_context_) {
+        mapped_context_->end_expert_residency();
         for (auto& layer : mapped_layers_) mapped_context_->free(layer.buffer);
         if (mapped_file_) munmap(mapped_file_, mapped_bytes_);
     }
@@ -207,7 +237,7 @@ uint64_t ExpertStream::expert_bytes(int l) const {
     return x.gs + x.us + x.ds;
 }
 
-bool ExpertStream::map_experts(mtl::Context& cx, uint64_t budget) {
+bool ExpertStream::map_experts(mtl::Context& cx, uint64_t budget, bool prepare_residency) {
     struct stat file{};
     if (mapped() || ready() || fstat(fd_, &file) != 0 || file.st_size <= 0) return false;
     std::vector<std::pair<uint64_t, uint64_t>> ranges;
@@ -227,6 +257,10 @@ bool ExpertStream::map_experts(mtl::Context& cx, uint64_t budget) {
     fcntl(fd_, F_RDAHEAD, 1);
     auto* bytes = static_cast<uint8_t*>(mmap(nullptr, static_cast<size_t>(file.st_size), PROT_READ, MAP_PRIVATE, fd_, 0));
     if (bytes == MAP_FAILED) return false;
+    if (prepare_residency && !prepare_mapped_pages(bytes, ranges)) {
+        munmap(bytes, static_cast<size_t>(file.st_size));
+        return false;
+    }
     // The inherited keepalive references every buffer. Keep cold mapped
     // weights out of idle commands and release references before munmap.
     cx.stop_keepalive();
@@ -240,6 +274,12 @@ bool ExpertStream::map_experts(mtl::Context& cx, uint64_t budget) {
         mapped_layers_.push_back({
             cx.wrap(bytes + lo, hi - lo), layer.g - lo, layer.u - lo, layer.d - lo, layer.gs, layer.ds,
         });
+    }
+    if (prepare_residency) {
+        std::vector<mtl::Buffer> buffers;
+        buffers.reserve(mapped_layers_.size());
+        for (const auto& layer : mapped_layers_) buffers.push_back(layer.buffer);
+        if (!cx.begin_expert_residency(buffers)) return false;
     }
     prefetch_ = false;
     pre_k2_ = 0;

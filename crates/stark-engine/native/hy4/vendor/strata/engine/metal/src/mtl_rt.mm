@@ -42,6 +42,7 @@ struct Context::Impl {
     id<MTLDevice> dev;
     id<MTLCommandQueue> q;
     id<MTLCommandQueue> q2 = nil;   // run_graph_async's queue
+    id<MTLResidencySet> expert_residency = nil;
     std::vector<id<MTLLibrary>> libs;
     std::vector<id<MTLComputePipelineState>> pipelines;
     id<MTLSharedEvent> ev = nil;   // run_graph_seg's handshake timeline
@@ -421,6 +422,37 @@ Buffer Context::map(size_t bytes) {
         out.ptr = ptr;
         out.bytes = bytes;
         return out;
+    }
+}
+
+bool Context::begin_expert_residency(const std::vector<Buffer>& buffers) {
+    if (@available(macOS 15.0, *)) {
+        @autoreleasepool {
+            MTLResidencySetDescriptor* descriptor = [MTLResidencySetDescriptor new];
+            descriptor.initialCapacity = buffers.size();
+            id<MTLResidencySet> set = [impl_->dev newResidencySetWithDescriptor:descriptor error:nullptr];
+            if (set == nil) return false;
+            for (const auto& buffer : buffers) {
+                if (buffer.handle == nullptr || buffer.chunks) return false;
+                [set addAllocation:(__bridge id<MTLBuffer>) buffer.handle];
+            }
+            [set commit];
+            [impl_->q addResidencySet:set];
+            [set requestResidency];
+            impl_->expert_residency = set;
+            return true;
+        }
+    }
+    return false;
+}
+
+void Context::end_expert_residency() {
+    if (@available(macOS 15.0, *)) {
+        id<MTLResidencySet> set = impl_->expert_residency;
+        if (set == nil) return;
+        [impl_->q removeResidencySet:set];
+        [set endResidency];
+        impl_->expert_residency = nil;
     }
 }
 

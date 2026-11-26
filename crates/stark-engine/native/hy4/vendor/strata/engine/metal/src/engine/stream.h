@@ -83,7 +83,7 @@ public:
     // Wrap each layer's original GGUF banks if its complete resident
     // footprint fits the supplied budget. Returns false without touching the
     // arena when streaming is needed.
-    bool map_experts(mtl::Context& cx, uint64_t budget);
+    bool map_experts(mtl::Context& cx, uint64_t budget, bool prepare_residency);
     // the arena's buffers (at most 4, each within the device's maxBufferLength): chunk(i) for i >= count is chunk 0
     const mtl::Buffer& chunk(int i) const { return chunks_[(size_t) i < chunks_.size() ? (size_t) i : 0]; }
     // How many there really are.  A caller that dispatches one kernel per buffer needs it: dispatching for four

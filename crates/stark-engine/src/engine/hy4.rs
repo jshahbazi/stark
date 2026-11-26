@@ -27,6 +27,7 @@ pub enum ExpertStorage {
     Auto,
     Streamed,
     Mapped,
+    MappedResident,
 }
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -117,6 +118,7 @@ pub struct Options {
     pub dense_packed: bool,
     pub dense_device_views: bool,
     pub resident_token_embeddings: bool,
+    pub resident_draft_experts: bool,
     pub tensor_mla: bool,
     pub max_drafts: usize,
     pub context_limit: Option<u32>,
@@ -201,6 +203,7 @@ unsafe extern "C" {
         max_drafts: c_int,
         routed_fragments: c_int,
         dense_device_views: c_int,
+        resident_draft_experts: c_int,
         select_context: unsafe extern "C" fn(*const ContextMemory, *mut c_void) -> u32,
         sizing: *mut c_void,
         session: *mut *mut c_void,
@@ -300,6 +303,7 @@ impl Session {
                 options.max_drafts as c_int,
                 c_int::from(options.routed_fragments),
                 c_int::from(options.dense_device_views),
+                c_int::from(options.resident_draft_experts),
                 select_context,
                 ptr::from_mut(&mut selection).cast(),
                 &mut inner,

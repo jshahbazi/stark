@@ -859,3 +859,162 @@ qualified timing.
 | 32K packed verifier | `661ef5a86e8f851b71b5eec04a8eed91578247eac75efaefca5e2fe16c6c730c` |
 | 16K lock refusal | `acc99af5cf66c67057f3abdb47da077b5c9ca66cd0165162fc1757d4f991d7af` |
 | 16K host eligibility refusal | `870791e768607a58eff53897bebb905926ff76ffdf6ad7d0fd71cbd6360bcff2` |
+
+## 20261125-HY4FRAG-19 · Attribute streamed verifier cuts by expert bank
+
+A private scalar profiler attributes the first and second host cuts to
+the routed expert ordinal. It uses demand-miss bytes and wait counters
+owned by the host execution thread. It records scalar decode stages.
+
+The image-loaded worker used K2, a 44 GB arena and a 34,816-position
+capacity. It ran the rendered 32K and then 16K code cases in a single
+worker with zero prefix reuse. Each result matched all 192 output IDs
+from the earlier 48 GB control. Both fixtures returned zero proposals
+in the in-memory replay of four-token lookup at maximum depth seven.
+The session went from nominal to fair with zero named contenders in
+both snapshots. Treat these instrumented rates as diagnostic.
+
+| Context | Target cuts | Cut body ms | Demand wait ms | Read-ahead wait ms | Demand miss GB | Top three banks, ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 32K | 6,355 | 2,588.5 | 2,287.4 | 73.7 | 24.41 | 349.2 |
+| 16K | 6,437 | 2,256.1 | 1,914.0 | 64.5 | 19.28 | 247.1 |
+
+Ordinal 1 led both workloads with 136.3 ms at 32K and 84.8 ms at 16K.
+Most cut time lay across many banks. Use ordinal 1 for a bounded bank
+trial only if full residency fails live admission. The top three banks
+combined account for 13.5% of the observed 32K cut time before any
+capacity tradeoff. Addressing only these banks would leave most of the
+gap to the target.
+
+The Sol agent's profiler patch has SHA-256
+`43361fc8dd7c7a900164e6ec6244e791e70dc89b88a153e267f659d2585d4b7c`.
+The combined patch on `e6672affb` has SHA-256
+`af13fcee8bfe924a938fe2cec553dc774ee573187dd6a3b8bd56c4c29c8a19f0`.
+The locked Rust 1.98.1 worker and harness have SHA-256
+`6c8750cdb8e3e29c7b94e2a43d682aef0f8cc6f69e68122e357e4144c359362a`
+and `d5e4a3a505fb4f854328529a7a98956344025b26f06efe8a8849a1cda5924290`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Earlier 16K replay host refusal | `c857a90076b7ed6bfd186fcbacdb84daa3fe860f8c7efc4cd3251fa7df002d81` |
+| Initial profile host refusal | `ce1f61f45f1e9c35d2e44dac2e3fdcdef37a71ebf5a94fec2d01aad92f328e64` |
+| Both completed profiles and lookup replays | `53c53c10368f7976541a3fd6ad8d8cfc2f3d97f4cf3bb74033487d151967477e` |
+
+## 20261125-HY4FRAG-20 · Prepare the mapped expert banks before generation
+
+The screening worker leaves quantized weights in their clean GGUF
+mappings. At load it faults in weight pages in 128 MiB intervals, checks
+pressure and swap between intervals, then puts only the expert buffers
+in a Metal residency set. Engram rows load lazily. The change uses the
+existing mapped-load and context admission limits and host settings.
+One owned worker ran at a time and a private
+watchdog checked pressure and swap through generation.
+
+The first 4K attempt was refused for background cargo activity. The
+retry allowed the sleeping cargo process at entry and found no named
+contender at exit. Both process thermal snapshots were nominal. The
+original-projector worker loaded in 61.29 s at a 5,120-position cap.
+The host pressure sample stayed at level 1 and swap stayed at 4,191
+MiB. Both requests matched the 64 reference IDs and accepted 41 of 42
+proposals in 22 target rounds.
+
+| Request | Prefill tok/s | K2 decode tok/s | Target host cuts |
+| --- | ---: | ---: | ---: |
+| First 4K | 611.35 | 50.28 | 0 |
+| Warm 4K | 566.14 | 54.41 | 0 |
+
+The 4K result is a provisional observation with the HY4FRAG-19 worker
+and harness. Readiness includes prewarming. Prior mapped trials used
+different initialization, and one failed with sustained swapping.
+Keep the established streamed default while checking long-window
+speed, pressure, cache restoration and image lifecycle.
+
+The separate 34,816-position ladder loaded in 69.66 s. All three
+192-output requests matched the earlier 48 GB streamed output hashes
+and reported zero target host-cut time. The process snapshots both
+reported fair thermal state and zero named contenders. Observed
+pressure stayed at level 1 and swap at 4,191 MiB. The 48 GB streamed
+rows are earlier sessions with different memory plans.
+
+| Case | Earlier streamed K2 tok/s | Prepared mapped K2 tok/s | Mapped verify s | Mapped draft s |
+| --- | ---: | ---: | ---: | ---: |
+| Short TypeScript | 34.76 | 49.41 | 3.133 | 0.732 |
+| 16K rendered code | 31.67 | 42.37 | 3.658 | 0.848 |
+| 32K rendered code | 29.47 | 39.72 | 3.748 | 1.059 |
+
+The 32K request spent 0.441 s of its draft time constructing the NextN
+state. It needs another 0.777 s of total decode savings to reach 47.37
+tok/s. The typed worker selector is `mapped-resident`. Lifecycle checks
+and a build receipt for that selector follow separately.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Initial host refusal | `6fce1feb6de4c65b8807c57be3c7607be2a16a84fb9785e29fb711bc4a8cb5df` |
+| 4K provisional mapped pair | `5867730a311032bbbeaf34dd4f30f7f35b686c2fa42f2b62ffc3a6e895dc19a6` |
+| Mapped 34,816-position ladder | `9b348d71260489cf4d1a931c9cd37c5a288d4d2ec9927a5b68820a213ea6ac22` |
+
+## 20261125-HY4FRAG-21 · Keep NextN experts resident
+
+The optional draft mode loads the verified Q8_0 sidecar as one shared
+Metal buffer, keeping the three tensor banks and the source bytes. It
+charges about 1.85 GB beyond the lazy pool before selecting the window.
+The existing GPU planner sorts routed entries by expert and selection
+slot. The draft specialization preserves the CPU plan's weight bits.
+Draft GEMV and combine use their existing arithmetic and slot order.
+
+The prepared mapped worker advertised 34,816 positions with the
+original projector and took 85.45 s to report readiness. It ran K2, K3,
+K4 and K2 again on the short TypeScript fixture, then K2 once at each
+long length. Every arm matched the earlier 192 output IDs. The 16K and
+32K runs matched the earlier draft counts as well. The host snapshots
+found zero named contenders and nominal thermal state at exit.
+Pressure stayed at level 1 and swap at 4,191 MiB.
+
+| Case | Drafts | Decode tok/s | Verify s | Draft s | Accepted / proposed / rounds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Short TypeScript, first | 2 | 57.05 | 2.906 | 0.441 | 116 / 149 / 75 |
+| Short TypeScript | 3 | 60.65 | 2.847 | 0.301 | 127 / 188 / 64 |
+| Short TypeScript | 4 | 54.03 | 3.166 | 0.368 | 133 / 228 / 58 |
+| Short TypeScript, repeat | 2 | 58.91 | 2.999 | 0.242 | 116 / 149 / 75 |
+| 16K rendered code | 2 | 44.10 | 3.785 | 0.544 | 112 / 156 / 79 |
+| 32K rendered code | 2 | 39.19 | 4.093 | 0.779 | 113 / 154 / 78 |
+
+Against the separate prepared-target run in HY4FRAG-20, draft time
+decreased by 0.303 s at 16K and 0.280 s at 32K. Target verify time
+varied across loads. At 32K the end-to-end rate stayed within drift
+despite the shorter draft phase. Keep this option for the coding
+improvement and constant output. Keep the two-draft recommendation
+pending wider, repeated evidence. The published 70 tok/s coding and
+long-window targets remain open on these local fixtures.
+
+Sol patch SHA-256 on `e6672affb`
+`6b88fa916596b78f9ca837796ae15a416b9fc4ffef6640e419a4649908139909`.
+Combined screening patch SHA-256
+`b780b221168b445c9936bae8e549e9db2e92acfeca4cf0cc698466aa0aa0fbd9`.
+The locked Rust 1.98.1 executable and harness SHA-256 are
+`143deca1ec89a66dcf19794ee8fae151094028994ab93a0ffacad7ea90124c9a`
+and `1b9befaa98da54968a5fe9ae74a01258ccb5f8ba7b834ef0a679d9ff338da0a9`.
+Receipt SHA-256 `e095c533dbdd5601e7fa5d438e1e7523680a71585519f57a79e292f4f622c7a7`.
+
+The typed selectors were then rebuilt without the experimental kernels.
+The 8,192-position worker used `STARK_HY4_EXPERT_STORAGE=mapped-resident`
+and `STARK_HY4_MTP_RESIDENT_EXPERTS=1` with the original projector.
+Readiness took 75.60 s. The two fixed 4K K2 requests measured 54.72
+and 54.06 decode tok/s, with 622.25 and 603.47 prefill tok/s. Both
+matched all 64 reference IDs. Both host snapshots reported nominal
+thermal state and zero named contenders. Pressure stayed at level 1
+and swap at 4,175 MiB.
+
+The same worker restored 4,096 text positions at K4 and reproduced the
+fresh continuation. Both pinned images produced the expected answers
+with zero proposals and zero reuse. Image completion, invalid-image
+rejection and image cancellation each cleared the preceding prefix.
+Subsequent text decoding reproduced the fresh continuation and restored
+4,096 positions after reprime. Adopt both selectors as opt-in modes.
+
+The typed source patch on `e6672affb` has SHA-256
+`09445dd45201f737c7125f17450301fcf99ebf38f3d83e795f92dcf8a320b075`.
+The locked Rust 1.98.1 executable, lifecycle harness and receipt have
+SHA-256 `732909369aa360df0656cb05877e64e45ae6a7a513c15a225ed6e0d893dce165`,
+`5a34b4e16030b5ae0b56681ca0226824d98fd2e10eef5995e86ee956015e8717`
+and `619c9a4c572afa9b8876927049cce0088698af116a7b0f82a8c9695c8910c7bd`.

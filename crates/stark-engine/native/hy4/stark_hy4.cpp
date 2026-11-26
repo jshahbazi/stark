@@ -94,16 +94,20 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
                                int storage, int grouped, int gpu_plan, int profile_prefill, uint64_t arena_bytes_requested,
                                int demand_retention, int routed_half, int dense_packed, int resident_token_embeddings,
                                int tensor_mla, int max_drafts, int routed_fragments, int dense_device_views,
+                               int resident_draft_experts,
                                uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
                                StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
                                uint64_t* arena_bytes) noexcept {
     *output = nullptr;
     try {
         if ((chunk != 1024 && chunk != 4096) ||
+            storage < 0 || storage > 3 ||
             ((arena_bytes_requested || demand_retention) && storage != 1) ||
             max_drafts < kRecommendedDrafts || max_drafts > kMaxDrafts) return 1;
         auto session = std::make_unique<StarkHy4>();
         auto& s = *session;
+        const bool resident_experts = storage == 3;
+        const bool require_mapped = storage == 2 || resident_experts;
         s.metal.lock_safe_math();
         if (!open(s.model, model, 0, true, resident_token_embeddings != 0).empty()) return 1;
         const auto& geo = s.model.geo;
@@ -120,19 +124,23 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         // draft expert pool and fixed draft scratch, and the largest supported image before fitting.
         const size_t dense_view_bytes = dense_device_views ? Forward::dense_device_scratch_bytes(geo, chunk) : 0;
         const double future = 2.0 * kGiB * (chunk / 1024.0) + s.vision.reserved_bytes() + dense_view_bytes;
-        constexpr double draft_and_decode_reserve = 3.0 * kGiB;
+        const uint64_t draft_bank_bytes = resident_draft_experts ? Mtp::resident_expert_bytes(geo) : 0;
+        if (resident_draft_experts && (draft_bank_bytes == 0 || draft_bank_bytes > s.metal.max_buffer_length()))
+            return 5;
+        const double draft_and_decode_reserve = 3.0 * kGiB +
+            std::max(0.0, static_cast<double>(draft_bank_bytes) - Mtp::kExpertPoolBudgetBytes);
         const auto initial = plan_arena(s.model, s.metal);
         const double workspace = future + draft_and_decode_reserve;
         const double room =
             std::min({initial.gpu_room, initial.ram_room, initial.default_cap - initial.base}) - workspace;
         double context_room = room - std::min(initial.arena, room / 2.0);
         if (arena_bytes_requested != 0) context_room = room - static_cast<double>(arena_bytes_requested);
-        if (storage == 2) {
+        if (require_mapped) {
             // The context and scratch use the anonymous budget. The clean expert pages
             // also have to fit within the separate file-backed and Metal headroom.
             context_room = std::min(room, mapped_expert_room(initial) - initial.expert_total - workspace);
         }
-        if (context_room <= 0) return arena_bytes_requested != 0 ? 9 : storage == 2 ? 8 : 10;
+        if (context_room <= 0) return arena_bytes_requested != 0 ? 9 : require_mapped ? 8 : 10;
         const auto memory = context_memory(geo, s.metal, chunk, static_cast<uint64_t>(context_room));
         if (memory.engine_context < 2) return 10;
         const uint32_t selected = select_context(&memory, sizing);
@@ -150,7 +158,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         prefill.dense_device_views = dense_device_views != 0;
         prefill.tensor_mla = tensor_mla != 0;
         if (!s.forward.open(s.model, s.metal, pack, prefill).empty()) return 4;
-        if (!s.mtp.open(s.model, s.metal, s.forward.library(), 1024, pack).empty()) return 5;
+        if (!s.mtp.open(s.model, s.metal, s.forward.library(), 1024, pack, resident_draft_experts != 0).empty()) return 5;
         if (!s.vision.build(s.metal, s.forward.library()).empty()) return 3;
         auto arena = plan_arena(s.model, s.metal);
         // Stark's resident expert paths budget shared allocation and leave
@@ -159,11 +167,10 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         const uint64_t pool_rows = selected / memory.pool_size + 1;
         const double pending = future + sizeof(float) * chunk * pool_rows;
         const double mapped_room = mapped_expert_room(arena) - pending;
-        if (storage != 1 && mapped_room > 0) {
-            s.model.stream.map_experts(s.metal, static_cast<uint64_t>(mapped_room));
-        }
-        if (storage == 2 && !s.model.stream.mapped()) return 8;
-        *mapped = s.model.stream.mapped() ? 1 : 0;
+        const bool loaded_mapped = storage != 1 && mapped_room > 0 &&
+                                   s.model.stream.map_experts(s.metal, static_cast<uint64_t>(mapped_room), resident_experts);
+        if (require_mapped && !loaded_mapped) return 8;
+        *mapped = loaded_mapped ? 1 : 0;
         const int slots = 2 * s.model.stream.n_experts();
         if (!*mapped) {
             if (arena_bytes_requested != 0) {
@@ -183,6 +190,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
             }
         }
         if (!s.forward.attach_prefill().empty()) return 6;
+        if (!s.mtp.load_resident_experts().empty()) return 5;
         *arena_bytes = s.model.stream.arena_used_bytes();
         const auto& vg = s.vision.geometry();
         *vision = {static_cast<uint32_t>(vg.image_token), static_cast<uint32_t>(vg.patch),
