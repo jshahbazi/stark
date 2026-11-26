@@ -764,3 +764,98 @@ out of the branch. The source-order sparse suffix remains active.
 | Teacher-forced top-1 at masked positions | `3547b13269c5fc2a1fb75b8227109d4984e9f9964c1efd5996487003e46a2bc7` |
 | Images, prefix hits and cancellation | `a1ae8c7de11815e804f248b78059621dcbcccea9b6272d3875d3fcf17fbfc439` |
 | 40 GB follow-up | `e44d9ff80777cc9008a12dee3c13f3e9c8bd522fbd2823c3d569005ea31b5401` |
+
+## 20261125-HY4FRAG-17 · Store the routed SwiGLU intermediate in F16
+
+The packed expert down projection already rounds its input to F16 on
+load. This candidate rounds at the gate/up store, following Inkling's
+grouped activation layout. It keeps F32 SwiGLU and accumulation, route
+scaling and combine order. The F32-sized allocation stays in place for
+this screen. The candidate halves the logical intermediate size.
+
+The original-projector worker used a 39,996,981,248-byte arena at 5,120
+positions and K2. Both measured sessions reported nominal process
+thermal state at entry and exit and zero named contenders. All four
+requests matched the 64 reference output IDs with 41 accepted proposals
+out of 42 and 22 target rounds.
+
+| Arm and order | First prefill tok/s | Warm prefill tok/s |
+| --- | ---: | ---: |
+| F32 store and F16 load conversion | 620.64 | 576.64 |
+| F16 store and direct F16 load | 627.44 | 584.16 |
+
+The gain was 1.1% first and 1.3% warm in one pair. The first-use gain
+was 71.6 ms. This is below observed session drift and the remaining
+prefill budget. Leave the original path in place.
+
+The screening patch on `2a172b77a` has SHA-256
+`20eb3f1db8f26f390f19fd6678bf1217dd5d19d0c004f6836e6dbd5ad26c20c0`.
+The Sol agent's half-intermediate patch SHA-256 is
+`5f477c9e8ad2bea81e3d6af832ac6da46227b17e90ed8a662866e79c8dfd765d`.
+The offline, locked Rust 1.98.1 release worker has SHA-256
+`47e56a432be8f8fd54e1dfb349bbb073249004b1688c24d5990304709d56b525`.
+The harness and shared request helper have SHA-256
+`3a4d7964153e336de8b8bff5160676ed6af5267a0b16bd0b83b828bedd2f7c56`
+and `f58ec93d44678da9c6e84f8a2daf608fb157a8916d406455a529ebbcaa81d736`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Control | `e6770923cb10520c9aea5748153ed57ea064d79a8709586c089b2632ba27d4a8` |
+| F16 intermediate | `079524266e42ec09d00c08d479ddb745ca879e50f028a297bf775c9fb952a418` |
+
+## 20261125-HY4FRAG-18 · Screen long verifier scheduling and packed projections
+
+This screen used the HY4FRAG-17 worker and harness, with the original
+projector, a 43,997,151,232-byte arena, a 34,816-position cap and K2.
+Each 32,768-position request came from a fresh worker and allowed 192
+output IDs. The variants independently enabled Strata's event listener
+after a 50-microsecond spin, disabled Strata's predicted-router
+read-ahead, or sent the Q8_0 attention gate and output through the
+existing packed tensor kernel at two 32-lane SIMD groups. The last arm
+uses F16 operands and F32 accumulation only in widths two through
+eight. Single-row forwards keep the existing projection.
+
+| Arm and order | Decode tok/s | Verify s | Target host cuts s | Recorded decode reads GB |
+| --- | ---: | ---: | ---: | ---: |
+| Control | 27.90 | 5.709 | 1.984 | 83.89 |
+| Event listener | 27.50 | 5.786 | 1.941 | 84.61 |
+| No read-ahead | 26.42 | 6.062 | 2.446 | 43.71 |
+| Packed gate and output | 21.75 | 7.623 | 1.831 | 88.77 |
+
+The event and no-read-ahead arms matched the control's 192 output IDs,
+with 113 accepted of 154 proposals in 78 target rounds. The control
+stayed nominal, the event run went from nominal to fair, and the
+no-read-ahead run stayed fair. The host snapshots reported no named
+contenders. The event run showed no throughput gain. Disabling
+read-ahead cut the recorded reads by 47.9%, with 0.462 s more host-cut
+time in this one-way comparison. Keep the normal scheduling.
+
+The packed verifier changed the output hash, accepted 114 of 152
+proposals and used 77 rounds. Its lower speed is directional because its
+output changed. It stayed in fair process thermal state with no named
+contenders. Reject it on parity alone. The Sol agent's packed verifier
+patch SHA-256 is
+`00b2a0b1079c3e179d72cf155c688af57647111b93c82bfff759adbeba098549`.
+
+An in-memory seven-token lookup replay on the 32K control offered zero
+proposals across 191 output positions. This rules out a lookup speedup
+on this fixture at the existing four-token match rule. The separate 16K
+replay was refused first by the active benchmark lock and then by the
+host eligibility check. The earlier 48 GB
+control used this same input and output and was faster at 29.47 tok/s.
+Its 6.482 s decode would need to fall to 4.032 s to reach 47.37 tok/s.
+Even removing its full observed 1.658 s host-cut body leaves 0.792 s to
+recover. Use per-layer cut and demand-read time to choose a bounded
+resident bank before attempting full mapped residency again. Price
+event boundaries independently where the GPU can build the expert
+plan without a host cut. The earlier mapped failure produced no
+qualified timing.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| 32K control | `d04b3218f542a2bc17d41e2913a7c0289f6ff128c46d40e46399c5ca1b8fb89b` |
+| 32K event listener | `c5081e5cc30365ebe2710d8fb4284f997cfe62ee5c97ceb86227d83defbf54ba` |
+| 32K no read-ahead | `a2087d407a19540a0e83624497a98ea262c8243cd7114f5172c184184e3958ef` |
+| 32K packed verifier | `661ef5a86e8f851b71b5eec04a8eed91578247eac75efaefca5e2fe16c6c730c` |
+| 16K lock refusal | `acc99af5cf66c67057f3abdb47da077b5c9ca66cd0165162fc1757d4f991d7af` |
+| 16K host eligibility refusal | `870791e768607a58eff53897bebb905926ff76ffdf6ad7d0fd71cbd6360bcff2` |

@@ -879,6 +879,10 @@ Screen a companion draft head against the requested target artifact before porti
 
 Match natural-text positions to the kernel's actual admission range. Masked F16 tensor MLA improved a fair-state 4K reversal by 10.3% first use and 6.1% warm while preserving all 64 reference IDs. Its natural-text gate at 2,120–2,408 positions agreed on 12 of 13 top-1 results despite equal accuracy. Keep the existing sparse arithmetic. [Hy4 masked sparse prefill](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-16--reuse-tensor-attention-with-the-exact-sparse-selection-mask)
 
+Measure an intermediate precision change against session drift even when it moves an existing cast. Storing the routed Hy4 SwiGLU output in F16 saved 72 ms on first 4K prefill and 91 ms on the warm request in a nominal-state pair. All 64 output IDs and MTP counts matched. Keep the F32 intermediate at this scale of observed gain. [Hy4 routed intermediate screen](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-17--store-the-routed-swiglu-intermediate-in-f16)
+
+Read fewer bytes only when doing so shortens the critical path. At 32K, disabling Hy4 read-ahead reduced recorded expert traffic from 83.89 to 43.71 GB while host cuts rose from 1.984 to 2.446 s in the one-way comparison. Blocking on a shared-event listener showed no decode gain. The packed F16-operand gate and output verifier changed the output and was removed. [Hy4 long verifier scheduling and projections](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-18--screen-long-verifier-scheduling-and-packed-projections)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |
