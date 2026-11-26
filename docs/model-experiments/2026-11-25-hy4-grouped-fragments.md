@@ -1018,3 +1018,49 @@ The locked Rust 1.98.1 executable, lifecycle harness and receipt have
 SHA-256 `732909369aa360df0656cb05877e64e45ae6a7a513c15a225ed6e0d893dce165`,
 `5a34b4e16030b5ae0b56681ca0226824d98fd2e10eef5995e86ee956015e8717`
 and `619c9a4c572afa9b8876927049cce0088698af116a7b0f82a8c9695c8910c7bd`.
+
+## 20261125-HY4FRAG-22 · Isolate sparse MLA value precision and expand direct projections
+
+The value-product candidate leaves the sparse selector, compact gather
+order, F32 query-key dot and F32 softmax in place. It uses F16
+probability and value operands with F32 accumulation for the value
+product at positions 2,048–4,095. The other candidate reuses the
+existing packed Q8_0 device-view matrix multiply for the query A,
+query B and KV A projections where the shape fits the allocated
+workspace.
+
+The HY4FRAG-21 screening executable ran separate image-loaded workers
+at a 5,120-position cap and a 39,996,981,248-byte streamed arena. All
+six requests matched the 64 reference IDs with K2. The control and
+tensor value-product snapshots stayed nominal. The direct projection
+arm moved from nominal to fair. The snapshots found zero contenders.
+
+| Arm and order | First prefill tok/s | Warm prefill tok/s |
+| --- | ---: | ---: |
+| Control | 584.33 | 546.41 |
+| Tensor value product | 612.58 | 601.37 |
+| Direct query and KV views | 517.16 | 526.57 |
+
+The value-product arm improved prefill by 4.8% first and 10.1% warm
+in this one-way screen. The direct projections showed no gain and
+were removed. Two natural-text invocations requested 8,192 positions
+from a 5,120-position worker. The corrected fixture helper submitted
+the admitted capacity throughout. Its thirteen test rows exercised
+positions 2,120–2,408. The candidate matched 12 of 13 control top-1
+results and predicted the true next token on five rows against six for
+the control. Keep the existing F32 value-product path. Holding
+query-key and softmax arithmetic fixed was insufficient for parity.
+
+The Sol agent's value-product patch SHA-256 is
+`3cf07e79cf67a0bf81d88bc55d1bbc0e88d4b5917211769182afac6763fb0a08`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Control | `c23610082092b89b80354b5b45986f21a81894a3227eb0ad11ae1a6a46713544` |
+| Tensor value product | `780a069c014035ac32f9ad2916a0806ec05b30c47de54bfe6d41029b8cf31d06` |
+| Direct query and KV views | `4138508663fb89373b631af40d5cde25a04733334980eb1cecc5397c84120f82` |
+| Natural-text context refusals | `7c8ba13e0d618432731ecb5ec865f286cae2d8f1c4cd52b1c83b064709dd3af8` |
+| Correct-capacity natural-text comparison | `b317761940f05cb6a1aca721487f816b7f2ef58cb25eb408ae3ac79159a0b1ac` |
+
+Corrected natural-text harness SHA-256
+`4b5ffc08ece1ffbf3659a97ef054b760965580b06c7b0e315d6b23058b12840c`.

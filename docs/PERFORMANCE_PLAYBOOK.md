@@ -887,6 +887,8 @@ Price individual expert banks before trying partial residency. Hy4's three large
 
 Recheck draft depth after changing how the verifier or draft reads weights. Hy4's resident NextN reduced the 16K and 32K draft phases by 0.303 and 0.280 s in separate exact-output sessions. The mapped 32K target varied enough that decode stayed within drift. Short TypeScript reached 60.65 tok/s at depth three with both banks prepared, and depth four fell to 54.03. Keep the data split by workload and charge all additional draft-bank bytes at load. [Hy4 resident NextN](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-21--keep-nextn-experts-resident)
 
+Test attention value precision independently of the query-key score and softmax. Hy4's tensor value product kept the F32 score and softmax and improved warm 4K prefill by 10.1% in one screen. It matched all 64 reference IDs and 12 of 13 natural-text top-1 rows. True-next accuracy went from six to five rows. Keep the F32 value product. Extending direct device views to small Q/KV projections showed no gain. [Hy4 value precision and projection screen](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-22--isolate-sparse-mla-value-precision-and-expand-direct-projections)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |
