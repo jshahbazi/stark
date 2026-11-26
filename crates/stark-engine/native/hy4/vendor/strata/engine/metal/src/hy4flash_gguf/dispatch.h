@@ -85,7 +85,8 @@ struct MmArgs {
 /// one MMA dispatch with F32 accumulation.  OPT-IN PER SHAPE (`allow_mm`), because "more than 8 rows"
 /// alone does NOT mean prefill: Mtp::catch_up builds the draft block's cache 1024 rows at a time (mtp.cpp
 /// encode_rows), and that feeds drafting, which is decode.  Forward's dense shapes opt in (its only windows above
-/// kMaxWindow are prefill chunks); Mtp's do not, so every MTP value stays bitwise what it was.
+/// kMaxWindow are prefill chunks). Resident NextN can opt in for the five aligned Q8_0 cache projections
+/// when packed dense prefill is enabled. All short windows keep the same GEMV reduction.
 ///
 /// Prefill tolerates the different sum order from GEMV. The default keeps the operands in F32; the experimental
 /// packed Q8_0 attention MMA and half staging round operands to F16. HY4_FLASH_PREFILL_DENSE_MM=0 keeps the GEMV path.
@@ -262,9 +263,8 @@ public:
             std::abort();
         }
         if (n_tok > (uint32_t) strata_hy4_flash_metal::kHy4FlashGemvMaxTok && mm_ok_ && prefill_mm_enabled()) {
-            // a prefill chunk: one MMA dispatch for all n_tok rows (decode and MTP verify never get here -
-            // their windows are at most kHy4FlashGemvMaxTok rows; MTP's own 1024-row cache rows do not either, because
-            // Mtp's shapes are built without allow_mm)
+            // A prefill chunk or a bulk NextN cache window uses one MMA dispatch. Target verification and
+            // short draft steps use GEMV.
             if ((x_base % 4) != 0 || (x_stride % 4) != 0) {
                 std::fprintf(stderr, "hy4_flash dense mm: x is not float4-aligned (base %zu, stride %u)\n", x_base,
                              x_stride);

@@ -317,3 +317,75 @@ activation loads for three verifier rows. This arm moved from fair
 to nominal thermal state. Its draft phase stayed within 6 ms of the
 packed-only arm and target verification cost rose by 2.586 s. Remove
 the pairing and keep the existing gate geometry.
+
+### Qualify the packed cache in the rebuilt worker
+
+The isolated build enables the five eligible packed Q8_0 projections
+when resident NextN experts and packed dense prefill are both selected.
+It reuses the same Metal library and F16 operands with F32 accumulation.
+Individual draft steps and bulk windows at or below eight rows use
+the existing GEMV. No persistent buffer or cache layout changes.
+
+The 8,192-position lifecycle worker matched all 64 reference IDs on
+both K2 4K requests and kept 41 accepted drafts in 22 rounds. It restored
+4,096 positions with exact continuation, matched both image answers,
+and recovered after an invalid image and image cancellation. Text reuse
+and drafting were off for the image requests. Readiness took 83.27 s.
+
+| Workload | Prefill tok/s | Decode tok/s | NextN catch-up s |
+| --- | ---: | ---: | ---: |
+| 4K K2 first use | 645.33 | 53.75 | 0.025 |
+| 4K K2 repeat | 630.08 | 57.88 | 0.015 |
+| Short TypeScript K3 | | 64.46 / 60.10 | 0.000 |
+| 16K K2 | 468.75 | 45.14 | 0.067 |
+| 32K K2 | 451.65 | 43.60 | 0.138 |
+
+The long worker admitted 33,024 positions with 1,024-row prefill chunks
+and matched all 192 output IDs and draft counts in each case. Both
+workers retained the original projector and both resident banks.
+Both host snapshots from each load were nominal with zero contenders.
+Sampled pressure stayed at level 1 and swap at 140 MiB.
+
+Adopt this path under the two existing opt-in settings. The native
+source diff on `4fb3b10dc`, isolated release build, and harness have
+SHA-256 `5d221ffc79f36ad34de44917338e4accf44a73a274a82e65c8236b00eba8a087`,
+`84e9dce6da7820e02b0993e93f13eac5d0974619dcf320355c7e539a27360310`,
+and `aa42853ff32588aa0f73529dc65039ec1e49379815c15ae671e154db097f56e3`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Rebuilt 4K and image/prefix lifecycle | `819dc994f0932ed91e6de890c02474b5844de29d0c376b2bd69ad19a18c70f00` |
+| Rebuilt long-window and code requests | `2f2944ea928643e73f070e4de7e102c4791c9080cfa82d49d074cc011b32f262` |
+
+## 20261126-HY4NEXTN-08 · Share Q8 byte expansion across three and four verifier rows
+
+The current streaming Q8 GEMV already loads packed weight units once.
+The candidate removes the second byte expansion when three or four
+rows share those units, keeping each row's F32 FMA and lane-reduction
+order. Its safe-math Metal AIR uses 256 bytes of source working arrays
+per lane against 128 in the paired kernel. Final register allocation
+was unavailable from the offline toolchain.
+
+Both workers admitted 33,024 positions with 1,024-row prefill chunks,
+resident target and NextN banks, packed draft cache projections and
+the original projector. K3 TypeScript followed a K2 request, then K2
+ran at 16K and 32K. Both host snapshots on each load were nominal with
+zero contenders. Pressure stayed at level 1 and swap at 140 MiB.
+Every output and draft-work count matched its reference.
+
+| Arm | Short K3 tok/s | 16K K2 tok/s | 32K K2 tok/s | Receipt SHA-256 |
+| --- | ---: | ---: | ---: | --- |
+| Current Q8 pairs | 63.77 / 59.32 | 45.75 | 44.06 | `50bb11139b37e7c96d049aa70bc26edfee14f418fad940190b1482ede631ccc3` |
+| Shared byte expansion | 63.83 / 60.14 | 44.00 | 43.70 | `169c044ecd3f338fe556c331e98ef554585c2355ce485a56c6d724dce858501a` |
+
+The code gain stayed within drift. Target verification increased from
+3.797 to 3.963 s at 16K and from 3.882 to 3.920 s at 32K. The draft
+catch-up times stayed within 1 ms. Keep the established Q8 pairs.
+The packed control extends the 1,024-row memory check to 32K and
+records a 45.75 tok/s 16K peak in this experiment.
+
+The source diff on `3c7c973a0`, isolated locked Rust 1.98.1 release
+executable, and harness have SHA-256
+`1c224e86c7a46a4e7da3b137a3f3ffc23af5b9659ee24fb71bf269153a0993d0`,
+`4c73bd4e5da9242d5c9183d3775bc1f1aee7d7121896816a4f9ba298932cecf4`,
+and `61c22b485cc191b51058be50077e2b9a5cbf3e0620f4c7c26b6411ee999cbf41`.

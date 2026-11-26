@@ -22,4 +22,8 @@ Stark adds opt-in Metal stage-boundary samples to the prefill graph. They retain
 
 An optional prefill policy selects the existing Strata 64 × 32 F16 operand, F32 accumulation kernels for grouped routed experts. The packed GGUF banks stay in their original format. The optional streamed decode policy ranks repeatedly demanded resident experts ahead of speculative loads while preserving the existing fence and in-flight read checks. [Precision and retention validation](../../../../docs/model-experiments/2026-11-25-hy4-dense-prefill-expert-retention.md)
 
+With resident NextN experts and packed dense prefill enabled together, bulk NextN cache windows use the same packed
+Q8_0 matrix multiply for eligible cache projections. The kernel stages weights and activations in F16 and
+accumulates in F32. Cache windows of up to eight rows use GEMV. [Packed cache qualification](../../../../docs/model-experiments/2026-11-25-hy4-decode-cache-construction.md#qualify-the-packed-cache-in-the-rebuilt-worker)
+
 The optional dense device views pack the attention gate and output projection operands into contiguous 64-element K slabs. The Metal tensor products keep their F16 inputs, F32 accumulation order and scratch allocation. [Dense layout qualification](../../../../docs/model-experiments/2026-11-25-hy4-grouped-fragments.md#qualify-the-rebuilt-dense-layout)

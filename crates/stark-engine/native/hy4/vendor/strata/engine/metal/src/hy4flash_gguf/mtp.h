@@ -101,9 +101,11 @@ public:
     Mtp& operator=(const Mtp&) = delete;
 
     /// `lib` is the trunk's compiled hy4-flash library (Forward::library).  `chunk` = rows per cache-only command buffer
-    /// (the prompt's catch-up).  The MTP's dense tensors must be resident (open(..., with_mtp = true)).
+    /// (the prompt's catch-up). The MTP's dense tensors must be resident (open(..., with_mtp = true)).
+    /// Packed cache projections require the packed Q8_0 prefill pipeline in lib.
     std::string open(Model& m, mtl::Context& cx, int lib, int chunk = 1024,
-                     const std::string& pack_dir = {}, bool resident_experts = false);
+                     const std::string& pack_dir = {}, bool resident_experts = false,
+                     bool packed_cache_projections = false);
     std::string load_resident_experts();
     /// Forgets the rows and the pooled keys; hidden(0) = 0.
     void reset();

@@ -159,7 +159,9 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         prefill.dense_device_views = dense_device_views != 0;
         prefill.tensor_mla = tensor_mla != 0;
         if (!s.forward.open(s.model, s.metal, pack, prefill).empty()) return 4;
-        if (!s.mtp.open(s.model, s.metal, s.forward.library(), 1024, pack, resident_draft_experts != 0).empty()) return 5;
+        const bool resident_nextn = resident_draft_experts != 0;
+        if (!s.mtp.open(s.model, s.metal, s.forward.library(), 1024, pack, resident_nextn,
+                        resident_nextn && prefill.dense_packed).empty()) return 5;
         if (!s.vision.build(s.metal, s.forward.library()).empty()) return 3;
         auto arena = plan_arena(s.model, s.metal);
         // Stark's resident expert paths budget shared allocation and leave

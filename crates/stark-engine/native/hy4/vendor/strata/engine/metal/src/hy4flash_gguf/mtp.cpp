@@ -227,11 +227,12 @@ struct Mtp::Impl {
     int32_t topk = 0, n_experts = 0, latent = 0, eff = 0, idx_dim = 0, idx_heads = 0, kpool = 0, idx_topk = 0;
     float eps = 0, tscale = 0, clamp = 0;
     int pools_done = 0;
+    bool packed_cache_projections = false;
 
     mtl::Pipeline p_rms_w, p_rope, p_glu, p_router, p_idx_w, p_idx_kpool, p_idx_score, p_idx_topk, p_argmax,
         p_copy, p_store_half, p_add, p_gate_mul, p_gpu_plan;
     AttnPipes attn_sel;   // attn.h: the score row, the softmax, PV
-    std::map<std::array<uint64_t, 3>, DenseGemvF32> gemv_;
+    std::map<std::array<uint64_t, 4>, DenseGemvF32> gemv_;
     MoeF32 moe;
 
     enum {
@@ -263,11 +264,12 @@ struct Mtp::Impl {
         for (size_t i = 1; i < w->shape.size(); ++i) rows *= w->shape[i];
         return gv(w->type, n_in, (uint32_t) rows);
     }
-    const DenseGemvF32& gv(int type, uint32_t n_in, uint32_t n_out) {
-        const std::array<uint64_t, 3> k{(uint64_t) type, n_in, n_out};
+    const DenseGemvF32& gv(int type, uint32_t n_in, uint32_t n_out, bool packed_cache = false) {
+        const std::array<uint64_t, 4> k{(uint64_t) type, n_in, n_out, packed_cache};
         auto it = gemv_.find(k);
         if (it == gemv_.end())
-            it = gemv_.emplace(k, DenseGemvF32(*cx, lib, type, n_in, n_out, (uint32_t) ref::row_bytes(type, (int) n_in)))
+            it = gemv_.emplace(k, DenseGemvF32(*cx, lib, type, n_in, n_out, (uint32_t) ref::row_bytes(type, (int) n_in),
+                                               GemvHeads{}, /*allow_mm=*/packed_cache, /*packed_prefill=*/packed_cache))
                      .first;
         return it->second;
     }
@@ -292,11 +294,12 @@ struct Mtp::Impl {
         int type = 0;
     };
     WRef wr[64];
-    const DenseGemvF32& gvs(int slot) {
+    const DenseGemvF32& gvs(int slot, bool bulk_cache = false) {
         const gguf::Tensor* w = t[slot];
         uint64_t rows = 1;
         for (size_t i = 1; i < w->shape.size(); ++i) rows *= w->shape[i];
-        return gv(wr[slot].type, (uint32_t) w->shape[0], (uint32_t) rows);
+        const bool packed_cache = bulk_cache && wr[slot].type == ref::Q8_0 && w->shape[0] % 32 == 0;
+        return gv(wr[slot].type, (uint32_t) w->shape[0], (uint32_t) rows, packed_cache);
     }
     // the quantized copies: the block's dense matrices and the MTP head; the experts come from a file
     mtl::Buffer qdense, qhead;
@@ -346,7 +349,7 @@ struct Mtp::Impl {
     }
 
     std::string open(Model& mm, mtl::Context& c, int lib_, int chunk, const std::string& pack_dir,
-                     bool resident_bank);
+                     bool resident_bank, bool use_packed_cache_projections);
     void encode_rows(std::vector<mtl::Dispatch>& ds, int q0, int T);
     void encode_full_a(std::vector<mtl::Dispatch>& ds, int q, int r);
     void encode_full_b(std::vector<mtl::Dispatch>& ds, int r);
@@ -367,9 +370,10 @@ struct Mtp::Impl {
 };
 
 std::string Mtp::Impl::open(Model& mm, mtl::Context& c, int lib_, int chunk, const std::string& pack_dir,
-                           bool resident_bank) {
+                           bool resident_bank, bool use_packed_cache_projections) {
     pack = pack_dir;
     resident_experts = resident_bank;
+    packed_cache_projections = resident_bank && use_packed_cache_projections;
     m = &mm;
     cx = &c;
     lib = lib_;
@@ -777,13 +781,14 @@ std::string Mtp::Impl::embed(const int32_t* tokens, int q0, int T) {
 /// and the pooled key of every group they complete.  The block's own `anorm` / `state` rows stay for a full row.
 void Mtp::Impl::encode_rows(std::vector<mtl::Dispatch>& ds, int q0, int T) {
     const uint32_t uT = (uint32_t) T, un = (uint32_t) n;
+    const bool bulk_cache = packed_cache_projections && T > strata_hy4_flash_metal::kHy4FlashGemvMaxTok;
     // [rms(embd) * enorm ; rms(h) * hnorm] -> eh_proj (llama.cpp's ggml_concat(enorm(tok), hnorm(h)))
     rms(ds, emb, 0, un, ENORM, joined, 0, 2 * un, un, T);
     rms(ds, hist, 4 * (size_t) q0 * n, un, HNORM, joined, 4 * (size_t) n, 2 * un, un, T);
-    gvs(EH).append(ds, *wr[EH].buf, wr[EH].off, joined, 2 * un, state, un, 0, uT);
+    gvs(EH, bulk_cache).append(ds, *wr[EH].buf, wr[EH].off, joined, 2 * un, state, un, 0, uT);
     rms(ds, state, 0, un, ATTN_NORM, anorm, 0, un, un, T);
     // the shared key: rope on its tail, the latent normed, both into the f16 cache
-    gvs(KV_A).append(ds, *wr[KV_A].buf, wr[KV_A].off, anorm, un, kvp, (uint32_t) kv_w, 0, uT);
+    gvs(KV_A, bulk_cache).append(ds, *wr[KV_A].buf, wr[KV_A].off, anorm, un, kvp, (uint32_t) kv_w, 0, uT);
     rope(ds, kvp, 1, (uint32_t) kv_w, (uint32_t) kv_lora, (uint32_t) kv_w, pos, T);
     rms(ds, kvp, 0, (uint32_t) kv_w, KV_A_NORM, kvn, 0, (uint32_t) kv_lora, (uint32_t) kv_lora, T);
     const size_t kv_row = (size_t) q0 * (size_t) kv_w;
@@ -798,10 +803,10 @@ void Mtp::Impl::encode_rows(std::vector<mtl::Dispatch>& ds, int q0, int T) {
              a2.n, T, "hy4_flash_store_half (mtp k_pe)");
     }
     // the indexer's key side
-    gvs(IK).append(ds, *wr[IK].buf, wr[IK].off, anorm, un, ik, (uint32_t) idx_dim, 0, uT);
+    gvs(IK, bulk_cache).append(ds, *wr[IK].buf, wr[IK].off, anorm, un, ik, (uint32_t) idx_dim, 0, uT);
     rms(ds, ik, 0, (uint32_t) idx_dim, IK_NORM, ik, 0, (uint32_t) idx_dim, (uint32_t) idx_dim, T);
-    gvs(ICV).append(ds, *wr[ICV].buf, wr[ICV].off, ik, (uint32_t) idx_dim, iv, (uint32_t) idx_dim, 0, uT);
-    gvs(ICG).append(ds, *wr[ICG].buf, wr[ICG].off, ik, (uint32_t) idx_dim, ig, (uint32_t) idx_dim, 0, uT);
+    gvs(ICV, bulk_cache).append(ds, *wr[ICV].buf, wr[ICV].off, ik, (uint32_t) idx_dim, iv, (uint32_t) idx_dim, 0, uT);
+    gvs(ICG, bulk_cache).append(ds, *wr[ICG].buf, wr[ICG].off, ik, (uint32_t) idx_dim, ig, (uint32_t) idx_dim, 0, uT);
     const size_t irow = (size_t) q0 * 3ull * (size_t) idx_dim;
     ElemArgs ia{(uint32_t) idx_dim, (uint32_t) idx_dim, 0, 3u * (uint32_t) idx_dim};
     elem(ds, p_store_half, {mtl::Arg::B(iv), mtl::Arg::B(idxc, 2 * irow), mtl::Arg::V(ia), mtl::Arg::B(badflag)},
@@ -1192,10 +1197,10 @@ uint64_t Mtp::resident_expert_bytes(const hy4_flash::Geometry& g) {
 }
 
 std::string Mtp::open(Model& m, mtl::Context& cx, int lib, int chunk, const std::string& pack_dir,
-                      bool resident_experts) {
+                      bool resident_experts, bool packed_cache_projections) {
     if (im_ != nullptr) return "already open";
     im_ = new Impl();
-    const std::string e = im_->open(m, cx, lib, chunk, pack_dir, resident_experts);
+    const std::string e = im_->open(m, cx, lib, chunk, pack_dir, resident_experts, packed_cache_projections);
     if (!e.empty()) {
         im_->rpool.reset();   // join the readers, then close their fd (a profile error returns after it was opened)
         if (im_->fd >= 0) ::close(im_->fd);
