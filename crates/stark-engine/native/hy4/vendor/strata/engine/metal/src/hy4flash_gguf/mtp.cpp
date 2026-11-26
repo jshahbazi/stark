@@ -394,7 +394,7 @@ std::string Mtp::Impl::open(Model& mm, mtl::Context& c, int lib_, int chunk, con
     eps = g.rms_norm_eps;
     tscale = std::pow(g.rope_theta_sparse, -2.0f / (float) g.rope_dim);
     clamp = g.swiglu_clamp;
-    rows_cap = g.max_context + 16;
+    rows_cap = g.max_context + Mtp::kCacheSlack;
 
     const std::string p = "blk." + std::to_string(L) + ".";
     std::string missing;

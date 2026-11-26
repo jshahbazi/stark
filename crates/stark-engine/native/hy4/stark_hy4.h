@@ -6,6 +6,18 @@
 
 struct StarkHy4;
 
+struct StarkHy4ContextMemory {
+    uint32_t checkpoint_context;
+    uint32_t engine_context;
+    uint32_t pool_size;
+    uint32_t draft_slack;
+    uint64_t budget;
+    uint64_t cache_bytes_per_token;
+    uint64_t draft_cache_bytes_per_token;
+    uint64_t pool_bytes_per_row;
+    uint64_t draft_pool_bytes_per_row;
+};
+
 struct StarkHy4VisionGeometry {
     uint32_t image_token;
     uint32_t patch;
@@ -60,9 +72,10 @@ struct StarkHy4Stats {
 };
 
 extern "C" {
-int stark_hy4_open(const char* model, const char* projector, const char* pack, int context, int chunk,
-                   int storage, int grouped, int gpu_plan, int profile_prefill, int larger_arena,
-                   int demand_retention, int routed_half,
+int stark_hy4_open(const char* model, const char* projector, const char* pack, int chunk,
+                   int storage, int grouped, int gpu_plan, int profile_prefill, uint64_t arena_bytes_requested,
+                   int demand_retention, int routed_half, int dense_packed,
+                   uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
                    StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
                    uint64_t* arena_bytes) noexcept;
 void stark_hy4_close(StarkHy4* session) noexcept;

@@ -9,8 +9,9 @@ use std::{
     slice,
 };
 
+use super::context::ContextSizing;
+
 pub const VOCAB: usize = 120_832;
-pub const CONTEXT: u32 = 8192;
 pub const PREFILL_CHUNK: usize = 1024;
 pub const MAX_DRAFTS: usize = 2;
 pub const SHARD: &str = "Hy4-flash-Q3_K-00001-of-00002.gguf";
@@ -107,9 +108,71 @@ pub struct Options {
     pub grouped: bool,
     pub gpu_plan: bool,
     pub profile_prefill: bool,
-    pub larger_arena: bool,
+    pub arena_bytes_requested: u64,
     pub demand_retention: bool,
     pub routed_half: bool,
+    pub dense_packed: bool,
+    pub context_limit: Option<u32>,
+}
+
+#[repr(C)]
+struct ContextMemory {
+    checkpoint_context: u32,
+    engine_context: u32,
+    pool_size: u32,
+    draft_slack: u32,
+    budget: u64,
+    cache_bytes_per_token: u64,
+    draft_cache_bytes_per_token: u64,
+    pool_bytes_per_row: u64,
+    draft_pool_bytes_per_row: u64,
+}
+
+impl ContextMemory {
+    fn estimate(
+        &self,
+        context: u32,
+    ) -> Option<usize> {
+        let context = u64::from(context);
+        let draft = context + u64::from(self.draft_slack);
+        let pool = u64::from(self.pool_size);
+        usize::try_from(
+            context * self.cache_bytes_per_token
+                + draft * self.draft_cache_bytes_per_token
+                + (context / pool + 1) * self.pool_bytes_per_row
+                + (draft / pool + 1) * self.draft_pool_bytes_per_row,
+        )
+        .ok()
+    }
+}
+
+struct ContextSelection {
+    limit: Option<u32>,
+    sizing: Option<ContextSizing>,
+}
+
+unsafe extern "C" fn select_context(
+    memory: *const ContextMemory,
+    selection: *mut c_void,
+) -> u32 {
+    // The native open call owns the borrowed inventory and calls this synchronously.
+    let memory = unsafe { &*memory };
+    let selection = unsafe { &mut *selection.cast::<ContextSelection>() };
+    let budget = stark_resource_budget::inference_memory_budget(memory.budget as usize);
+    let Some(mut sizing) = ContextSizing::fit(
+        memory.checkpoint_context,
+        memory.engine_context,
+        memory.checkpoint_context.min(memory.engine_context),
+        budget,
+        |context| memory.estimate(context),
+    ) else {
+        return 0;
+    };
+    if let Some(limit) = selection.limit {
+        sizing.context_tokens = sizing.context_tokens.min(limit);
+    }
+    selection.sizing = Some(sizing);
+    sizing.context_tokens
 }
 
 unsafe extern "C" {
@@ -117,15 +180,17 @@ unsafe extern "C" {
         model: *const c_char,
         projector: *const c_char,
         pack: *const c_char,
-        context: c_int,
         chunk: c_int,
         storage: c_int,
         grouped: c_int,
         gpu_plan: c_int,
         profile_prefill: c_int,
-        larger_arena: c_int,
+        arena_bytes_requested: u64,
         demand_retention: c_int,
         routed_half: c_int,
+        dense_packed: c_int,
+        select_context: unsafe extern "C" fn(*const ContextMemory, *mut c_void) -> u32,
+        sizing: *mut c_void,
         session: *mut *mut c_void,
         vision: *mut VisionGeometry,
         mapped: *mut c_int,
@@ -169,6 +234,7 @@ pub struct Session {
     vision: VisionGeometry,
     mapped_experts: bool,
     arena_bytes: u64,
+    sizing: ContextSizing,
 }
 
 fn path_arg(path: &Path) -> Result<CString, &'static str> {
@@ -192,6 +258,10 @@ impl Session {
         let mut vision = VisionGeometry::default();
         let mut mapped = 0;
         let mut arena_bytes = 0;
+        let mut selection = ContextSelection {
+            limit: options.context_limit,
+            sizing: None,
+        };
         // The path arguments remain alive throughout initialization. The returned
         // handle owns all model data and the device queue.
         let code = unsafe {
@@ -199,15 +269,17 @@ impl Session {
                 shard.as_ptr(),
                 projector.as_ptr(),
                 prepare.as_ptr(),
-                CONTEXT as c_int,
                 c_int::try_from(options.chunk).map_err(|_| "invalid_hy4_prefill_chunk")?,
                 options.storage as c_int,
                 c_int::from(options.grouped),
                 c_int::from(options.gpu_plan),
                 c_int::from(options.profile_prefill),
-                c_int::from(options.larger_arena),
+                options.arena_bytes_requested,
                 c_int::from(options.demand_retention),
                 c_int::from(options.routed_half),
+                c_int::from(options.dense_packed),
+                select_context,
+                ptr::from_mut(&mut selection).cast(),
                 &mut inner,
                 &mut vision,
                 &mut mapped,
@@ -224,6 +296,7 @@ impl Session {
                 6 => "hy4_expert_arena_load_failed",
                 8 => "hy4_mapped_experts_exceed_budget",
                 9 => "hy4_larger_arena_exceeds_budget",
+                10 => "resource_budget_exceeded",
                 _ => "hy4_native_load_failed",
             });
         }
@@ -232,6 +305,7 @@ impl Session {
             vision,
             mapped_experts: mapped != 0,
             arena_bytes,
+            sizing: selection.sizing.expect("successful Hy4 open selected a context"),
         })
     }
 
@@ -245,6 +319,10 @@ impl Session {
 
     pub fn arena_bytes(&self) -> u64 {
         self.arena_bytes
+    }
+
+    pub fn context_sizing(&self) -> ContextSizing {
+        self.sizing
     }
     pub fn begin(
         &mut self,

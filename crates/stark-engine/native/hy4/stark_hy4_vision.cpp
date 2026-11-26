@@ -66,14 +66,14 @@ uint64_t StarkHy4Vision::reserved_bytes() const {
     const uint64_t patches = pixels / (kPatch * kPatch);
     const uint64_t cells = patches / (kMerge * kMerge);
     const uint64_t rows = 2 * cells;  // one newline per merged row, at most one per cell
-    // Keep the full projector mapping and peak tower/request scratch in the arena budget.
+    // The loaded projector mapping is already counted by the Metal context.
+    // Reserve peak tower and request scratch.
     // The score block in the pinned tower is capped at 16 Mi float elements.
     constexpr uint64_t score_floats = 16ull << 20;
     const uint64_t patch_planes = patches * (3 * kPatch * kPatch + 5 * geo.hidden + geo.ffn);
     const uint64_t projector_planes = cells * (2 * geo.hidden * kMerge * kMerge + geo.out_hidden);
     const uint64_t output_planes = 2 * rows * geo.out_hidden;  // Metal output and owned CPU rows
-    return shard_.weights.bytes + 6 * pixels + sizeof(float) * (patch_planes + projector_planes + output_planes +
-                                                                score_floats);
+    return 6 * pixels + sizeof(float) * (patch_planes + projector_planes + output_planes + score_floats);
 }
 
 StarkHy4ImagePrompt::~StarkHy4ImagePrompt() {

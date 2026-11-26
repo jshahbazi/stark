@@ -2,8 +2,8 @@
 schema = "stark-benchmark-profile-v1"
 key = "hy4-flash"
 title = "Hy4-flash AngelSlim Q3_K"
-# Rendering, the native image path and natural-text quality need validation
-# before this profile can measure a standard standing.
+# Matched chat rendering, drafting policy and natural-text quality still
+# need validation for a standard standing.
 status = "draft"
 reference_arm = "llama-q3-k"
 
@@ -27,9 +27,10 @@ drafting = "engine-default"
 default_artifact = "q3-k"
 
 [stark.context]
-# Initial native admission and the local Metal reference use 8192 positions.
+# Per-request input and output must fit. 34,816 holds a 32K prompt and decode
+# on hosts whose worker context plan admits that capacity.
 minimum = 8192
-maximum = 8192
+maximum = 34816
 burst = 2048
 
 [stark.artifacts.q3-k]
@@ -64,7 +65,3 @@ record = "docs/model-experiments/2026-11-25-hy4-native-q3-k.md"
 [quality]
 reference_artifact = "q3-k"
 reference_path = "llama-cpp"
-
-[notes]
-context_8k = "The initial native worker's 8,192-position limit must also hold generated tokens."
-prefill_8800_native = "The initial worker cannot hold this 8,800-ID control."

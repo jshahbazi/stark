@@ -81,15 +81,14 @@ struct MmArgs {
     uint32_t n_in, n_out, n_tok, row_bytes, x_stride, y_stride;
 };
 
-/// Prefill's dense GEMMs on the matrix units (msl/hy4_flash_mm.metal): a window of more than kHy4FlashGemvMaxTok rows runs as
-/// ONE fp32 MMA dispatch instead of ceil(T / 8) GEMVs.  OPT-IN PER SHAPE (`allow_mm`), because "more than 8 rows"
+/// Prefill's dense GEMMs on the matrix units: a window of more than kHy4FlashGemvMaxTok rows runs as
+/// one MMA dispatch with F32 accumulation.  OPT-IN PER SHAPE (`allow_mm`), because "more than 8 rows"
 /// alone does NOT mean prefill: Mtp::catch_up builds the draft block's cache 1024 rows at a time (mtp.cpp
 /// encode_rows), and that feeds drafting, which is decode.  Forward's dense shapes opt in (its only windows above
 /// kMaxWindow are prefill chunks); Mtp's do not, so every MTP value stays bitwise what it was.
 ///
-/// The result is NOT bitwise the GEMV's (the sums are ordered differently; no operand is rounded, see the .metal),
-/// which prefill tolerates rather than requires to match.  HY4_FLASH_PREFILL_DENSE_MM=0 keeps the GEMV path (an A/B, and
-/// the bitwise behaviour).
+/// Prefill tolerates the different sum order from GEMV. The default keeps the operands in F32; the experimental
+/// packed Q8_0 attention MMA and half staging round operands to F16. HY4_FLASH_PREFILL_DENSE_MM=0 keeps the GEMV path.
 /// (tests flip it with set_prefill_mm to compare against the GEMV split; the engine only reads the environment)
 inline bool& prefill_mm_flag() {
     static bool on = [] {
@@ -192,7 +191,7 @@ class DenseGemvF32 {
 public:
     DenseGemvF32() = default;
     DenseGemvF32(mtl::Context& cx, int lib, int ggml_type, uint32_t n_in, uint32_t n_out, uint32_t row_bytes,
-                 GemvHeads heads = {}, bool allow_mm = false)
+                 GemvHeads heads = {}, bool allow_mm = false, bool packed_prefill = false)
         : type_(ggml_type),
           // a per-head weight (append_heads, grid = {row groups, H}) takes gemv_head_tile, which gives the narrow
           // band NR 2 for the one geometry its guard admits.  Same tile for every T.  NOTE for anyone reading a
@@ -200,7 +199,8 @@ public:
           // gemv_30_8_2_4_1 rather than gemv_30_8_1_4_1.
           tile_(heads.any() ? strata_hy4_flash_metal::gemv_head_tile(ggml_type, n_in, n_out)
                             : strata_hy4_flash_metal::gemv_tile(ggml_type, n_in, n_out)),
-          n_in_(n_in), n_out_(n_out), row_bytes_(row_bytes), heads_(heads) {
+          n_in_(n_in), n_out_(n_out), row_bytes_(row_bytes), heads_(heads),
+          packed_mm_(packed_prefill && ggml_type == ref::Q8_0) {
         const bool h = heads.any();
         if (h && !strata_hy4_flash_metal::gemv_f32_raw_x(ggml_type)) {
             // gemv.metal offsets the s16 plane like x, which is only right for formats that never read it
@@ -225,7 +225,9 @@ public:
             mm_slot_ = rg.slot(cx, "type " + std::to_string(ggml_type) + " " + std::to_string(n_in) + "x" +
                                        std::to_string(n_out) + (h ? " (per head)" : ""));
             if (mm_slot_ >= 0) c.b(13, true).u(14, (uint32_t) mm_slot_);
-            pm_ = cx.pipeline(lib, (prefill_mm_half() ? "hy4_flash_mmh_" : "hy4_flash_mm_") + std::to_string(ggml_type), c);
+            packed_mm_ = packed_mm_ && mm_slot_ < 0;
+            pm_ = cx.pipeline(lib, packed_mm_ ? "stark_hy4_flash_dense_q8_packed" :
+                              (prefill_mm_half() ? "hy4_flash_mmh_" : "hy4_flash_mm_") + std::to_string(ggml_type), c);
         } else {
             mm_ok_ = false;
         }
@@ -256,7 +258,7 @@ public:
             std::abort();
         }
         if (n_tok > (uint32_t) strata_hy4_flash_metal::kHy4FlashGemvMaxTok && mm_ok_ && prefill_mm_enabled()) {
-            // a prefill chunk: ONE fp32 MMA dispatch for all n_tok rows (decode and MTP verify never get here -
+            // a prefill chunk: one MMA dispatch for all n_tok rows (decode and MTP verify never get here -
             // their windows are at most kHy4FlashGemvMaxTok rows; MTP's own 1024-row cache rows do not either, because
             // Mtp's shapes are built without allow_mm)
             if ((x_base % 4) != 0 || (x_stride % 4) != 0) {
@@ -271,7 +273,7 @@ public:
             d.args = {mtl::Arg::B(W, w_off), mtl::Arg::B(x, xo), mtl::Arg::B(y, yo), mtl::Arg::V(a)};
             if (mm_slot_ >= 0) d.args.push_back(mtl::Arg::B(MmRange::get().buffer()));
             d.grid[0] = (n_out_ + 63) / 64;
-            d.grid[1] = (n_tok + 31) / 32;
+            d.grid[1] = packed_mm_ ? (n_tok + 63) / 64 : (n_tok + 31) / 32;
             d.grid[2] = n_heads;
             d.tg[0] = 128;
             mtl::require_fit(d, "hy4_flash dense mm");
@@ -310,6 +312,7 @@ private:
     GemvHeads heads_;
     mtl::Pipeline p_[strata_hy4_flash_metal::kHy4FlashGemvMaxTok];
     bool mm_ok_ = false;
+    bool packed_mm_ = false;
     int mm_slot_ = -1;
     mtl::Pipeline pm_;
 };

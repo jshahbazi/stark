@@ -52,10 +52,14 @@ With `--image`, the CLI reads one regular local file with a 4 MiB limit and acce
 
 On Apple Silicon, the `hy4` feature runs the original Q3_K split GGUF and BF16
 projector in the generation worker. It uses the Strata Metal graph and Stark's
-request serialization, sampling, cancellation and prefix reuse. The trial
-worker admits up to 8,192 positions. It always loads the projector. Text can
-request up to two greedy NextN draft tokens per round. Image requests use
-target-only generation and invalidate the preceding text prefix.
+request serialization, sampling, cancellation and prefix reuse. At load the
+worker sizes its context from the checkpoint, Metal buffer limits and available
+memory after reserving the expert arena and workspace. It publishes that
+capacity and the sizing inputs in `context_sizing` for the life of the worker.
+`STARK_HY4_CONTEXT_LIMIT` can lower the advertised capacity before allocation.
+The worker always loads the projector. Text can request up to two greedy
+NextN draft tokens per round. Image requests use target-only generation and
+invalidate the preceding text prefix.
 
 Put the two verified Q3_K shards and their original BF16 projector in one
 local directory. Prepare that directory and build the worker from the source
@@ -84,8 +88,10 @@ experimental read-only banks under Metal and live RAM limits. Mapped decode
 uses the GPU expert planner. Its first prompt can incur substantial page-fault
 latency and system swap. `STARK_HY4_PREFILL_CHUNK=4096` selects a 4,096-token
 boundary for a prefill comparison. With `STARK_HY4_EXPERT_STORAGE=streamed`,
-`STARK_HY4_STREAM_ARENA_36GB=1` requests a larger expert cache under the existing
-memory limits. Readiness reports the actual arena allocation in bytes. Set
+`STARK_HY4_STREAM_ARENA_GB` requests an expert cache in whole decimal GB under
+the memory limits. `STARK_HY4_STREAM_ARENA_36GB=1` is the equivalent legacy
+setting for 36 GB. Select one arena setting per worker. Readiness reports
+the requested size and actual arena allocation in bytes. Set
 `STARK_HY4_PROFILE_PREFILL=1` to capture aggregate GPU stage timings. Use a
 separate run with the profiler off to measure throughput, since stage sampling
 changes encoder boundaries. The [4K experiment
@@ -100,6 +106,12 @@ decode and verification windows keep their existing paths.
 with streamed storage. Both are opt-in. The diagnostic rates apply to the
 36 GB arena and 4,096-row prefill geometry. [Routed precision and
 retention record](model-experiments/2026-11-25-hy4-dense-prefill-expert-retention.md)
+
+`STARK_HY4_PREFILL_DENSE_PACKED=1` selects experimental Metal 4 tensor
+projections for packed Q8_0 attention weights during prefill. The kernel
+uses F16 operands and F32 accumulation. The [context ladder and projection
+record](model-experiments/2026-11-25-hy4-context-ladder.md) covers the measured
+4K comparison and the 32K prompt.
 
 ## Image qualification
 

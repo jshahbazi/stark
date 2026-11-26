@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -20,6 +21,49 @@ using namespace strata::hy4_flash;
 namespace {
 constexpr int kVocab = 120832;
 constexpr int kMaxDrafts = 2;
+constexpr uint64_t kGiB = 1ull << 30;
+
+double mapped_expert_room(const ArenaPlan& arena) {
+    const double system_reserve = 24.0 * kGiB;
+    const double live_room = strata::metal_engine::sys_file_backed_room(arena.avail) - 4.0 * kGiB;
+    return std::min({arena.gpu_room, live_room, arena.phys - arena.base - system_reserve});
+}
+
+StarkHy4ContextMemory context_memory(const Geometry& g, const mtl::Context& metal, int chunk, uint64_t budget) {
+    const auto trunk_end = g.layers.begin() + g.trunk_blocks;
+    const uint64_t indexed = std::count_if(g.layers.begin(), trunk_end,
+                                           [](const LayerSpec& layer) { return layer.has_indexer; });
+    const uint64_t kv = sizeof(uint16_t) * g.kv_a_width;
+    const uint64_t index = sizeof(uint16_t) * 3 * g.idx_key_dim;
+    const uint64_t draft_hidden = sizeof(float) * g.hidden_dim;
+    const uint64_t pooled = sizeof(float) * g.idx_key_dim;
+    const uint64_t max_buffer = metal.max_buffer_length();
+    const uint64_t slack = Mtp::kCacheSlack;
+    if (max_buffer < draft_hidden * (slack + 1)) return {};
+    const uint64_t draft_rows = std::min({max_buffer / kv, max_buffer / index, max_buffer / draft_hidden - 1});
+    const uint64_t max_pool_rows = max_buffer / (sizeof(float) * chunk);
+    if (draft_rows <= slack || max_pool_rows == 0) return {};
+    // All of these buffers are contiguous, even though their offsets select different layers or tokens.
+    const uint64_t engine_context = std::min({
+        max_buffer / (kv * g.trunk_blocks),
+        max_buffer / (index * indexed),
+        draft_rows - slack,
+        max_pool_rows * g.idx_kpool - 1,
+        static_cast<uint64_t>(std::numeric_limits<int>::max()) - slack,
+    });
+    return {
+        static_cast<uint32_t>(g.max_context),
+        static_cast<uint32_t>(engine_context),
+        static_cast<uint32_t>(g.idx_kpool),
+        static_cast<uint32_t>(slack),
+        budget,
+        // Full trunk KV and IndexPool state plus token and image-position bookkeeping on the host.
+        kv * g.trunk_blocks + index * indexed + 6 * sizeof(int32_t),
+        draft_hidden + kv + index,
+        pooled + sizeof(float) * (chunk + Forward::kMaxWindow),
+        pooled + sizeof(float),
+    };
+}
 }
 
 // Members are destroyed in reverse dependency order. Metal submissions complete
@@ -43,29 +87,59 @@ struct StarkHy4 {
     ~StarkHy4() { metal.stop_keepalive(); }
 };
 
-extern "C" int stark_hy4_open(const char* model, const char* projector, const char* pack, int context, int chunk,
-                               int storage, int grouped, int gpu_plan, int profile_prefill, int larger_arena,
-                               int demand_retention, int routed_half,
+extern "C" int stark_hy4_open(const char* model, const char* projector, const char* pack, int chunk,
+                               int storage, int grouped, int gpu_plan, int profile_prefill, uint64_t arena_bytes_requested,
+                               int demand_retention, int routed_half, int dense_packed,
+                               uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
                                StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
                                uint64_t* arena_bytes) noexcept {
     *output = nullptr;
     try {
-        if ((chunk != 1024 && chunk != 4096) || ((larger_arena || demand_retention) && storage != 1)) return 1;
+        if ((chunk != 1024 && chunk != 4096) ||
+            ((arena_bytes_requested || demand_retention) && storage != 1)) return 1;
         auto session = std::make_unique<StarkHy4>();
         auto& s = *session;
         s.metal.lock_safe_math();
-        if (!open(s.model, model, context, true).empty()) return 1;
+        if (!open(s.model, model, 0, true).empty()) return 1;
         const auto& geo = s.model.geo;
-        if (geo.vocab_size != kVocab || geo.hidden_dim != 3072 || geo.idx_kpool <= 0 || chunk % geo.idx_kpool != 0)
+        if (geo.vocab_size != kVocab || geo.hidden_dim != 3072 || geo.idx_kpool <= 0 || geo.idx_key_dim <= 0 ||
+            geo.kv_a_width <= 0 || geo.max_context < 2 || geo.trunk_blocks < 1 ||
+            chunk % geo.idx_kpool != 0 ||
+            std::none_of(geo.layers.begin(), geo.layers.begin() + geo.trunk_blocks,
+                         [](const LayerSpec& layer) { return layer.has_indexer; }))
             return 1;
         if (!load_dense(s.model, s.metal).empty() || !open_experts(s.model).empty()) return 2;
         if (!s.vision.open(s.metal, model, projector, geo.hidden_dim, geo.rope_dim).empty()) return 3;
+        // The prompt may need a standalone workspace when it cannot borrow expert slots. Its score
+        // rows grow with context and are included in context_memory. Reserve the fixed planes, the
+        // draft expert pool and fixed draft scratch, and the largest supported image before fitting.
+        const double future = 2.0 * kGiB * (chunk / 1024.0) + s.vision.reserved_bytes();
+        constexpr double draft_and_decode_reserve = 3.0 * kGiB;
+        const auto initial = plan_arena(s.model, s.metal);
+        const double workspace = future + draft_and_decode_reserve;
+        const double room =
+            std::min({initial.gpu_room, initial.ram_room, initial.default_cap - initial.base}) - workspace;
+        double context_room = room - std::min(initial.arena, room / 2.0);
+        if (arena_bytes_requested != 0) context_room = room - static_cast<double>(arena_bytes_requested);
+        if (storage == 2) {
+            // The context and scratch use the anonymous budget. The clean expert pages
+            // also have to fit within the separate file-backed and Metal headroom.
+            context_room = std::min(room, mapped_expert_room(initial) - initial.expert_total - workspace);
+        }
+        if (context_room <= 0) return arena_bytes_requested != 0 ? 9 : storage == 2 ? 8 : 10;
+        const auto memory = context_memory(geo, s.metal, chunk, static_cast<uint64_t>(context_room));
+        if (memory.engine_context < 2) return 10;
+        const uint32_t selected = select_context(&memory, sizing);
+        if (selected < 2 || selected > memory.engine_context || selected > memory.checkpoint_context) return 10;
+        const int context = static_cast<int>(selected);
+        s.model.geo.max_context = context;
         Prefill prefill;
         prefill.chunk = chunk;
         prefill.grouped_k_quant = grouped != 0;
         prefill.mapped_gpu_plan = gpu_plan != 0;
         prefill.profile_stages = profile_prefill != 0;
         prefill.routed_half = routed_half != 0;
+        prefill.dense_packed = dense_packed != 0;
         if (!s.forward.open(s.model, s.metal, pack, prefill).empty()) return 4;
         if (!s.mtp.open(s.model, s.metal, s.forward.library(), 1024, pack).empty()) return 5;
         if (!s.vision.build(s.metal, s.forward.library()).empty()) return 3;
@@ -73,11 +147,9 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         // Stark's resident expert paths budget shared allocation and leave
         // clean file mappings outside the anonymous arena. Count the pending
         // mapped-prefill workspace and image scratch before admitting banks.
-        const double future = (2.0 * (1ull << 30)) * (chunk / 1024.0)
-            + s.vision.reserved_bytes() - 1'044'397'440ull;
-        const double system_reserve = 24.0 * (1ull << 30);
-        const double live_room = strata::metal_engine::sys_file_backed_room(arena.avail) - 4.0 * (1ull << 30);
-        const double mapped_room = std::min({arena.gpu_room, live_room, arena.phys - arena.base - system_reserve}) - future;
+        const uint64_t pool_rows = selected / memory.pool_size + 1;
+        const double pending = future + sizeof(float) * chunk * pool_rows;
+        const double mapped_room = mapped_expert_room(arena) - pending;
         if (storage != 1 && mapped_room > 0) {
             s.model.stream.map_experts(s.metal, static_cast<uint64_t>(mapped_room));
         }
@@ -85,15 +157,16 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         *mapped = s.model.stream.mapped() ? 1 : 0;
         const int slots = 2 * s.model.stream.n_experts();
         if (!*mapped) {
-            if (larger_arena) {
-                constexpr double candidate_bytes = 36e9;
-                const double spare = std::min({arena.gpu_room, arena.ram_room, arena.default_cap - arena.base}) - future;
+            if (arena_bytes_requested != 0) {
+                const double candidate_bytes = static_cast<double>(arena_bytes_requested);
+                const double spare = std::min({arena.gpu_room, arena.ram_room, arena.default_cap - arena.base}) - pending;
                 if (spare < candidate_bytes || arena.expert_total < candidate_bytes) return 9;
                 // The existing live anonymous-arena shrink and grow guards
                 // remain active while the larger candidate allocates.
                 arena.arena = candidate_bytes;
             }
-            arena.arena = std::min(arena.arena, arena.gpu_room - future);
+            arena.arena = std::min(arena.arena, std::min({arena.gpu_room, arena.ram_room,
+                                                        arena.default_cap - arena.base}) - pending);
             if (arena.arena <= 0 || !make_arena(s.model, s.metal, arena, "", slots + 64).empty()) return 6;
             s.model.stream.set_demand_retention(demand_retention != 0);
             for (int c = 0; c < s.model.stream.n_classes(); ++c) {

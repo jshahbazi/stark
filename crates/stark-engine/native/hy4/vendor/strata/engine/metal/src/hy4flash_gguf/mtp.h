@@ -92,6 +92,7 @@ struct MtpStats {
 
 class Mtp {
 public:
+    static constexpr int kCacheSlack = 16;
     Mtp() = default;
     ~Mtp();
     Mtp(const Mtp&) = delete;

@@ -17,9 +17,7 @@ use stark_engine::{
     backends::metal::Metal,
     engine::{
         Engine,
-        hy4::{
-            CONTEXT, DraftStats, ExpertStorage, ImageInput, MAX_DRAFTS, Options, PREFILL_CHUNK, SHARD, Session, VOCAB,
-        },
+        hy4::{DraftStats, ExpertStorage, ImageInput, MAX_DRAFTS, Options, PREFILL_CHUNK, SHARD, Session, VOCAB},
         hybrid::activity::InferenceActivity,
     },
 };
@@ -78,6 +76,18 @@ fn verify_switch(
     }
 }
 
+fn optional_bound(
+    name: &str,
+    bounds: std::ops::RangeInclusive<u32>,
+    error: &'static str,
+) -> Result<Option<u32>, &'static str> {
+    match std::env::var(name) {
+        Ok(value) => value.parse().ok().filter(|value| bounds.contains(value)).map(Some).ok_or(error),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(_) => Err(error),
+    }
+}
+
 pub(crate) struct Hy4Backend {
     native: Session,
     tokenizer: Tokenizer,
@@ -125,14 +135,28 @@ impl Hy4Backend {
         };
         let profile_prefill = verify_switch("STARK_HY4_PROFILE_PREFILL", "invalid_hy4_prefill_profile", false)?;
         let larger_arena = verify_switch("STARK_HY4_STREAM_ARENA_36GB", "invalid_hy4_stream_arena", false)?;
+        let arena_gb = optional_bound("STARK_HY4_STREAM_ARENA_GB", 1..=128, "invalid_hy4_stream_arena")?;
+        if larger_arena && arena_gb.is_some() {
+            return Err("invalid_hy4_stream_arena");
+        }
+        let arena_bytes_requested = u64::from(arena_gb.unwrap_or(if larger_arena {
+            36
+        } else {
+            0
+        })) * 1_000_000_000;
+        let context_limit = optional_bound("STARK_HY4_CONTEXT_LIMIT", 2..=u32::MAX, "invalid_hy4_context_limit")?;
         let demand_retention =
             verify_switch("STARK_HY4_STREAM_DEMAND_RETENTION", "invalid_hy4_stream_demand_retention", false)?;
         let routed_half = verify_switch("STARK_HY4_PREFILL_ROUTED_HALF", "invalid_hy4_prefill_routed_half", false)?;
+        let dense_packed = verify_switch("STARK_HY4_PREFILL_DENSE_PACKED", "invalid_hy4_prefill_dense_packed", false)?;
         if routed_half && !grouped {
             return Err("invalid_hy4_prefill_routed_half");
         }
         if demand_retention && !matches!(storage, ExpertStorage::Streamed) {
             return Err("invalid_hy4_stream_demand_retention");
+        }
+        if arena_bytes_requested != 0 && !matches!(storage, ExpertStorage::Streamed) {
+            return Err("invalid_hy4_stream_arena");
         }
         let native = Session::load(
             path,
@@ -143,9 +167,11 @@ impl Hy4Backend {
                 grouped,
                 gpu_plan,
                 profile_prefill,
-                larger_arena,
+                arena_bytes_requested,
                 demand_retention,
                 routed_half,
+                dense_packed,
+                context_limit,
             },
         )?;
         source.verify_unchanged()?;
@@ -161,8 +187,10 @@ impl Hy4Backend {
             "gpu_expert_plan": gpu_plan && native.mapped_experts(),
             "prefill_chunk_tokens": chunk,
             "prefill_stage_profile_requested": profile_prefill,
+            "prefill_dense_packed_requested": dense_packed,
             "streamed_expert_demand_retention": demand_retention,
             "streamed_expert_arena_bytes": native.arena_bytes(),
+            "streamed_expert_arena_requested_bytes": arena_bytes_requested,
         });
         Ok(Self {
             native,
@@ -186,7 +214,10 @@ impl Hy4Backend {
         mut on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
         let limit = options.context_tokens as usize;
-        if input.is_empty() || input.len() >= limit || options.context_tokens > CONTEXT {
+        if input.is_empty()
+            || input.len() >= limit
+            || options.context_tokens > self.native.context_sizing().context_tokens
+        {
             return Err("context_overflow");
         }
         let _activity = InferenceActivity::begin().map_err(|_| "inference_activity_unavailable")?;
@@ -307,7 +338,10 @@ impl GenerationBackend for Hy4Backend {
         VOCAB
     }
     fn max_context_length(&self) -> Option<u32> {
-        Some(CONTEXT)
+        Some(self.native.context_sizing().context_tokens)
+    }
+    fn context_sizing_metadata(&self) -> Option<Value> {
+        Some(json!(self.native.context_sizing()))
     }
     fn eos_token_ids(&self) -> &[u32] {
         EOS
