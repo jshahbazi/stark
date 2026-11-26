@@ -152,3 +152,120 @@ switch and keep the independent fragments and depth controls.
 The 40 GB screen ran on Rust 1.98.1 release binary SHA-256
 `44ce4436b4148f3348a4aba0baf2f26efc78f7e6ce73030b405cfdd076de7f2f`.
 The 48 GB bracket used the HY4FRAG-01 worker with the depth sweep harness.
+
+## 20261125-HY4FRAG-04 · Share packed attention weights across four query stripes
+
+The gate and output weights account for 73% of the multiply work across
+the seven trunk attention projection shapes. The candidate shares one
+Q8_0 tile across four query stripes for these two projections. It stages
+only weights, preserves the packed path's F16 conversions and K16 F32
+accumulation order, and uses a double-buffered 18,432-byte threadgroup
+tile with no additional arena allocation.
+
+An image-loaded 40 GB 4K bracket with the routed fragments enabled ran
+four arms with all 64 reference IDs and the same draft work. Every host
+snapshot included a separate `cargo` job, so this is an exploratory
+comparison under contention. The shared path was slower in both
+first-use samples and had no clear warm gain. It was removed.
+
+| Arm in run order | First prefill tok/s | Warm prefill tok/s |
+| --- | ---: | ---: |
+| Shared first | 456.18 | 468.19 |
+| Control first | 540.32 | 503.37 |
+| Control last | 567.73 | 464.17 |
+| Shared last | 439.30 | 455.31 |
+
+The separate dense candidate before wrapper wiring is
+`678ece2902b85b61f6878040cb33bb9a756ca1a0a81f2d10adf9b6014a39aa2b`.
+The full source patch on `1da97be52` is
+`19536ead91f769686eb7ab4ad239ba4f87c795bfff428b669cdf8baf0231d4bf`.
+Locked offline Rust 1.98.1 release worker SHA-256
+`afd79b60d4b45ce50c3a69933c1abed6541fd66ad315214106c3d532f491e605`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Shared first | `93c19d4674dcae6da0f76a80a459e5b65f032b2aa11b0b81fe0f68a3d9b3c689` |
+| Control first | `3df081fd507fe46ed1475ce5d7fdf9376b71b8e897cc16f05328a0ad367aa292` |
+| Control last | `9ebc9d0c0e27818665e4f68df102a6901ff0069a09a743230c4a3a75bd3d9750` |
+| Shared last | `95540c4293684cea42afa43a0544883f636ed3200bc8c80d936170dbbf1fe288` |
+
+## 20261125-HY4FRAG-05 · Skip duplicate route capture in the native verifier
+
+The private candidate skips copying target routes and sorting a second
+copy of the read-ahead predictions for diagnostic capture. Demand,
+read-ahead, and the GPU plan still consume the same data. All nine 4K
+requests at the 48 GB arena matched the reference with the same draft
+work in each depth. Background build activity was present at each load.
+
+| Arm | Depth four, first tok/s | Depth four, repeat tok/s | Repeat host cuts s |
+| --- | ---: | ---: | ---: |
+| Skip first | 42.45 | 46.26 | 0.320 |
+| Control | 37.38 | 46.17 | 0.357 |
+| Skip last | 45.94 | 41.15 | 0.530 |
+
+The repeat moved in both directions across the bracket. The run did not
+establish a throughput gain. Keep this candidate out of the native worker.
+The route capture patch SHA-256 is
+`d76bd66890453679e8897fba0afb4c8b4539c36d9e2d12f8f13cc105addacef9`.
+This ran on the HY4FRAG-04 build. The trial harness SHA-256 is
+`23678012ef69de36ea31394772057447f8dd2fbdca4903dde7b6b14420b90e16`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Skip first | `fda0dbb659ed5927a9b1fda081a3b62561898c36e8f92b466243b81ed448e0ab` |
+| Control | `be9bf2a3177d58fe3d0ba4007e648b5e6505e2676fc45cb535a421a5dd7d246b` |
+| Skip last | `30171161e4e9a41ed837a97f6ffb8bc7b145620f24ae8324d7b7c4638ed944a2` |
+
+## 20261125-HY4FRAG-06 · Reuse the prefill IndexPool scorer in long verification
+
+The target verifier tried Strata's F32 prefill score kernel once it had
+2,048 completed pools. It shares pooled key reads and changes the F32
+reduction order. The NextN scorer and sparse selector stayed on their
+existing paths. The image-loaded HY4FRAG-04 build admitted 34,816
+positions with a 46 GB streamed arena. Each completed row used the
+same rendered input and generated the requested 192 tokens at depth two.
+
+| Input | Control tok/s | Prefill score kernel tok/s | Exact to control |
+| --- | ---: | ---: | --- |
+| 16K | 18.57 | 28.21 | Yes |
+| 32K | 27.08 | 30.63 | No |
+
+The control started with concurrent build activity. Its 16K host cuts
+accounted for 4.66 seconds against 2.26 in the candidate. The timing arms
+are exploratory. The 32K output and accepted draft count changed. Remove
+this scorer from verification and test a batched score that preserves
+the source reduction before drawing a performance conclusion.
+
+The private verification patch SHA-256 is
+`29eeca941679f3789276addcdd22e7a31aa18f99199820df1d98a427a80ee34e4`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Long control | `52af56c2257187e954ac3646fa98423e6ef344e9c36b161fd12f4f3f445d148f` |
+| Long candidate | `16a847b35aab2543e715cfa494f416d703ae38ed172197a5510b495868ec3850` |
+
+### 32K verifier attribution
+
+A separate nominal-host sample instrumented the original target scorer.
+It covered 390 target graph segments in 78 target rounds, matching the
+32K control output. The 192-token request spent 7.169 seconds in decode,
+including 2.201 seconds in target host cuts and 1.127 seconds in draft
+work. The draft timing includes 0.434 seconds of history catch-up.
+The encoder samples include only the target path. Sampling splits
+encoders and changes the execution schedule.
+
+| Target GPU stage | Seconds |
+| --- | ---: |
+| Routed expert products and combine | 1.170 |
+| Attention projections | 1.040 |
+| Dense FFN, shared and latent projections, and vocabulary head | 0.354 |
+| MLA | 0.276 |
+| IndexPool | 0.232 |
+| Attention elementwise work | 0.187 |
+| Remaining elementwise work and Engram | 0.144 |
+| Router | 0.109 |
+
+IndexPool optimization can address a portion of the gap. The largest
+measured time budgets are streamed-expert stalls, routed expert products,
+and attention projections. Profile receipt SHA-256
+`1c0f172794d61f39f5298d1a807cab3f293704b41fc407c4f4a622513b46d433`.

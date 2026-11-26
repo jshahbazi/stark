@@ -855,6 +855,12 @@ Reuse the gathered fragment layout for grouped Q3_K and Q4_K experts. The Hy4 ke
 
 Measure depth on both high-acceptance and coding fixtures. On Hy4's fixed 4K fixture, four NextN drafts reduced target rounds from 22 to 13 and raised decode from 33–39 to 44–46 tok/s on the 40 GB arena. The short TypeScript fixture kept its best rate at depth two. Keep the deeper ceiling opt-in. At 48 GB, retaining experts from the final 256 prompt rows produced more expert reads and slightly longer host cuts in the observed repeats. Keep retention driven by decode demand. [Hy4 depth and retention screens](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-02--verify-three-and-four-nextn-drafts-per-round)
 
+Sharing a packed dense weight tile across more query stripes increases reuse and changes threadgroup occupancy. On the Hy4 Q8_0 attention gate and output, the four-stripe, weight-only layout preserved all 64 reference IDs but fell from 540–568 to 439–456 tok/s on the first requests in the exploratory 4K bracket. Warm timing had no clear gain. The packed register path remains the baseline. [Hy4 shared dense weight screen](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-04--share-packed-attention-weights-across-four-query-stripes)
+
+Removing duplicate route capture in Hy4's verifier gave no clear 4K depth-four repeat gain under host contention. The existing layer read-ahead and GPU plan always ran, and all 64 reference IDs matched. [Hy4 duplicate route capture screen](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-05--skip-duplicate-route-capture-in-the-native-verifier)
+
+For long decode, profile the verifier separately from prefill and compare both wall and stage samples. The Hy4 32K depth-two profile measured 2.20 s in target host cuts, 1.17 s in routed products, 1.04 s in dense attention projections, and 0.23 s in IndexPool over 192 outputs. Reusing the F32 prefill score kernel changed the 32K output and stayed out. [Hy4 32K verifier profile and score screen](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-06--reuse-the-prefill-indexpool-scorer-in-long-verification)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |
