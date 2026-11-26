@@ -895,6 +895,10 @@ Retest the stage named by a one-way speedup. Loading routed prefill weights dire
 
 When profiler timing improves, isolate its execution changes before reusing them. Hy4's stage encoder boundaries with sampling disabled reduced 4K warm median prefill from 579.23 to 535.17 tok/s in four matched loads. All outputs matched. Keep profile and throughput runs separate. [Hy4 encoder boundary isolation](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-25--isolate-prefill-encoder-boundaries-from-sampling)
 
+Pack dense operands so each tensor tile reads a compact span. Hy4's K64 layout kept its existing F16 operands and F32 accumulation, saved 0.50 and 0.55 s in paired first 4K requests, and reduced profiled attention projection time from 1.677 to 1.479 s first and from 1.848 to 1.704 s warm. Warm worker rates split across the uninstrumented pairs. The layout passed the natural-text screen, and the isolated build passed exact 4K and the image and prefix lifecycle. Wider mapped QK and PV tiles and SIMD expert sorting preserved output and failed to improve long decode. [Hy4 dense layout and mapped tile study](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-26--pack-dense-prefill-k-tiles-and-test-wider-mapped-verification)
+
+Reprice draft cache construction after embedding storage is stable. With both Hy4 expert banks and the packed token table resident, batching five NextN projections reduced 32K catch-up from 0.419 to 0.127 s and raised K2 decode from 41.60 to 44.32 tok/s in one pair. Target outputs and draft counts matched. Keep catch-up charged to decode. The sampled verifier load hit pressure level 2, so it provides no stage attribution. [Hy4 resident draft cache projection study](model-experiments/2026-11-25-hy4-decode-cache-construction.md#20261125-hy4nextn-07--batch-the-resident-drafts-cache-projections)
+
 
 ## Ideas not yet tried
 

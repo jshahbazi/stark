@@ -4,6 +4,17 @@
 #include <metal_tensor>
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 
+constant constexpr uint STARK_HY4_DENSE_DEVICE_K = 64;
+
+// Packed order is [K64 slab][source row][64 values]. Each tensor operand
+// can then address a compact span while keeping the same reduction order.
+static inline uint2 stark_hy4_dense_device_pack_index(uint index, uint rows) {
+    constexpr uint stride = STARK_HY4_DENSE_DEVICE_K / 4;
+    const uint tile_row = index / stride;
+    const uint slab = tile_row / rows;
+    return uint2(tile_row - slab * rows, slab * stride + index % stride);
+}
+
 // Pack both complete operands once, using the same casts as the packed
 // fragment kernel. These two projections have contiguous input rows.
 kernel void stark_hy4_dense_pack_device(
@@ -12,9 +23,11 @@ kernel void stark_hy4_dense_pack_device(
     constant Hy4FlashDenseMmArgs& shape [[buffer(4)]], uint i [[thread_position_in_grid]]) {
     const uint row4 = shape.n_in / 4, weights4 = shape.n_out * row4;
     if (i < weights4) {
-        packed_weights[i] = stark_hy4_q8_fragment(weights + ulong(i / row4) * shape.row_bytes, 4 * (i % row4));
+        const uint2 at = stark_hy4_dense_device_pack_index(i, shape.n_out);
+        packed_weights[i] = stark_hy4_q8_fragment(weights + ulong(at.x) * shape.row_bytes, 4 * at.y);
     } else if (i - weights4 < shape.n_tok * row4) {
-        packed_input[i - weights4] = half4(input[i - weights4]);
+        const uint2 at = stark_hy4_dense_device_pack_index(i - weights4, shape.n_tok);
+        packed_input[i - weights4] = half4(input[ulong(at.x) * row4 + at.y]);
     }
 }
 
@@ -22,7 +35,7 @@ kernel void stark_hy4_dense_device_views(
     device half* input [[buffer(0)]], device half* weight [[buffer(1)]],
     device float* output [[buffer(2)]], constant Hy4FlashDenseMmArgs& shape [[buffer(3)]],
     uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]]) {
-    constexpr uint K = 64, N = 32, M = 16;
+    constexpr uint K = STARK_HY4_DENSE_DEVICE_K, N = 32, M = 16;
     const uint row0 = group.y * 128 + (simd / 2) * 32, col0 = group.x * 64 + (simd % 2) * 32;
     if (row0 >= shape.n_tok) return;
     const int upper_rows = int(min(M, shape.n_tok - row0));
@@ -40,13 +53,15 @@ kernel void stark_hy4_dense_device_views(
         upper[i] = 0.0f;
         lower[i] = 0.0f;
     }
-    const Strides strides{1, int(shape.n_in)};
+    const Strides strides{1, int(K)};
     for (uint k = 0; k < shape.n_in; k += K) {
-        auto rhs = Tile(weight + ulong(col0) * shape.n_in + k, Shape(K, N), strides);
-        auto top = Tile(input + ulong(row0) * shape.n_in + k, Shape(K, upper_rows), strides);
+        const ulong weight_base = ulong(k) * shape.n_out;
+        const ulong input_base = ulong(k) * shape.n_tok;
+        auto rhs = Tile(weight + weight_base + ulong(col0) * K, Shape(K, N), strides);
+        auto top = Tile(input + input_base + ulong(row0) * K, Shape(K, upper_rows), strides);
         product.run(top, rhs, upper);
         if (lower_rows > 0) {
-            auto bottom = Tile(input + ulong(row0 + M) * shape.n_in + k, Shape(K, lower_rows), strides);
+            auto bottom = Tile(input + input_base + ulong(row0 + M) * K, Shape(K, lower_rows), strides);
             product.run(bottom, rhs, lower);
         }
     }

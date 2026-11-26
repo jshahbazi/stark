@@ -1266,3 +1266,99 @@ The corrected locked Rust 1.98.1 executable explicitly enabled
 The unified source diff on `ec81193fb` and harness have SHA-256
 `aa0b8e8cb0161e3feb201b9933f4c6ff35f1d5a1c96bc08ed4b39b43ce28a386`
 and `41428073bf0ffeef4ee997860541e5731cd78f9aa0fd10c18ed6c360f0ff5164`.
+
+## 20261125-HY4FRAG-26 · Pack dense prefill K tiles and test wider mapped verification
+
+The dense candidate packs the existing F16 weight and activation values
+in contiguous 64-element K slabs. The two large Q8_0 attention
+projections keep their F32 accumulation order, output strides, dispatch
+geometry and scratch allocation. An offline address check covered
+168,042 four-element source coordinates, including partial row tiles.
+
+Four 5,120-position loads used the 40 GB streamed arena, original
+projector and 4,096-row chunks. All eight K2 requests matched all 64
+reference IDs. Both host snapshots from each load were nominal, with
+zero named contenders.
+
+| Order and arm | First use tok/s | Warm tok/s | Receipt SHA-256 |
+| --- | ---: | ---: | --- |
+| 1. Control | 561.85 | 596.76 | `2945d60bb34c675f35acb1e375c00cbb106cf7faa0df9cfa837cdb8ea3fa354a` |
+| 2. K64 layout | 603.18 | 572.61 | `c68311e532a3abca8442ad4a383a5652fe3defd0eebbd638b998f402c1244d60` |
+| 3. K64 layout | 675.87 | 616.22 | `f1a389bffc54f34ed5bfddef72f1dc025992b89638f4d67245d4d860ce989f35` |
+| 4. Control | 619.45 | 576.47 | `862cf11a3cf5188ce3741065a8884816d1c3752bf56bf2673dfdf483f68bacad` |
+
+First-use wall time fell by 0.50 and 0.55 seconds in the paired orders.
+The median was 639.53 tok/s against 590.65. Warm timings moved in
+opposite directions. The 675.87 tok/s endpoint remains below 743.2.
+
+In a separate K64-first stage profile with 42 sampled blocks per
+request, dense attention projections fell from 1.677 to 1.479 s on
+first use and from 1.848 to 1.704 s on repeat. All output IDs matched.
+The earlier overlapping profiling launch was refused by the exclusive
+benchmark lock and produced no timing. The refusal, K64 profile and
+control profile receipts have SHA-256
+`44a280667cc4db0a1bd4bbd13620cda8bd5d18d5296b44db4ca8bb2f21c46f09`,
+`bea33526566ec86d7317e60cd9440a290b94e151a7f5d7546fdac2e95a940440`,
+and `ccd4ea1e80b28eca41b34fa20fc6803f30fb889a5f8fb5979b221535c4cc17c2`.
+
+The natural-text check at 552–840 positions exercised the device-view
+path on all thirteen rows. All top-1 decisions matched, with eight
+true next tokens predicted in each arm. The harness and receipt have
+SHA-256 `468d5ec8e4ddbadedd51fdd1a76ae50934766c99d512d3774fa679bd168dd495`
+and `a79bd5030507371beb8619e00398a3b05eb76271445b42e939eef254cfd9d260`.
+
+The independent decode candidate shared each latent-cache load across
+more heads, preserving F32 reduction order. It also reused SIMD lanes
+for the routed expert planner's compare and exchange stages. Offline
+emulation matched 4,000 reference plans across all verifier widths.
+Both 33,024-position loads verified target and NextN residency and
+retained the projector. Fixture and output hashes matched the earlier
+pinned references for every 192-output request. Thermal state was
+nominal and pressure stayed at level 1 with stable swap.
+
+| Arm | Short TypeScript K3 tok/s | 16K K2 tok/s | 32K K2 tok/s | Receipt SHA-256 |
+| --- | ---: | ---: | ---: | --- |
+| Wide attention and SIMD sort | 63.50 / 60.02 | 43.85 | 40.63 | `e1b8238dbf5f30668ffaf492f44bd860350361c877a936706c55d16dcd74db81` |
+| Control | 64.22 / 59.19 | 44.62 | 41.97 | `3ed17c63f8bfb066b6c7f54edbff3d761864a9ea19923ab37b4f4a333066376d` |
+
+The long candidate increased target verify time from 3.757 to 3.833 s
+at 16K and from 3.804 to 3.946 s at 32K with the same round counts.
+The warm coding medians differed by less than 0.1 tok/s. Keep the
+existing mapped attention tiles and plan sorter.
+
+The integrated source diff on `ec81193fb`, locked Rust 1.98.1 Hy4
+executable and test harness have SHA-256
+`447d941802390deb78a66676cc5f74b9fb417eb9f163cf2847049794aec336e0`,
+`aa9b589738bb2f7b9ed37dc4366d7f981cafbb174444690d0ac5c8b978450668`,
+and `7d36fea9906106dd77e09c7eda0cfc0ce9c6c12e01c73eb1ebfe4c3208432a3d`.
+The private in-process memory probe SHA-256 is
+`1b3a1d16a2cbcbafc8263a7ca5f6fc0981bd60a079e14e872e636e53468053fa`.
+
+### Qualify the rebuilt dense layout
+
+The isolated build uses the slab layout whenever the existing opt-in
+dense device-view path is enabled. The 5,120-position streamed worker
+reached 644.05 tok/s on its first 4K prefill and 601.56 on its repeat.
+The separate 8,192-position mapped-resident worker reached 658.59
+and 613.64 tok/s. Its K2 decode reached 53.37 and 55.04 tok/s.
+All requests matched the 64 reference IDs. These are absolute rates
+from the rebuilt workers. Both thermal snapshots on each run were
+nominal with zero contenders.
+
+The mapped worker retained both banks and the original projector.
+It restored 4,096 text positions with exact continuation, matched
+both image answers with drafting and text reuse off, and recovered from
+invalid images and image cancellation. Readiness took 74.24 s.
+Pressure remained at level 1 and swap stayed at 4,222 MiB.
+
+Adopt the K64 layout for dense device views. The source diff on
+`2f9db649c`, the locked Rust 1.98.1 isolated release build, and the
+private validation harness have SHA-256
+`8e75eb302885e3a3aa3250261764f87765820a0a6bc2a0ac335aced32f3e12af`,
+`a9dff56bf298a26430be738d368e864f4d4625bb2e265a8f0b35755f17a2feb8`,
+and `99500045d487c7d755edf2fbbca21ad9974d566dcf682dc86379ca5339eaa7a3`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Rebuilt 4K streamed worker | `a0a934485d04dd2a1b6964fbdda02bae8d1ff8a2b2baee5d6946a8628cf42fa1` |
+| Rebuilt 4K and mapped lifecycle | `588dec1ee968dff06bab944277fed986a9e73384ff305c10de7f402aa40d15d5` |

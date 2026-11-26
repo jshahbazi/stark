@@ -201,3 +201,61 @@ Harness SHA-256 `9a52cbd9018ad9bab9f8eb9d8df3f3aa885b2b7ad7e23be1345bafd79ec1d4f
 | Wider tile | `3ca84a52faa5454b75dc1b962a586131fc69e2d3e6e18b05711937d2c02bcf31` |
 | Control end | `b072e4a96c614a97dcc862ee13945bedba4c1f00540aecd88035e74a4277f678` |
 | Wider tile profile | `a062e6f306872e02bd36dbc3ed11bb4ebcadfbaae7662e4bd1438a8c3c452105` |
+
+## 20261125-HY4NEXTN-07 · Batch the resident draft's cache projections
+
+The mapped K2 verifier keeps the target GGUF arithmetic. The candidate
+uses the existing Metal 4 packed Q8_0 projections for NextN's EH, KV A,
+index-key, index-value and index-gate cache rows. These projections use
+F16 operands and F32 accumulation. The original GEMVs handle at most
+eight rows. A complete 1,024-row chunk uses five matrix dispatches in
+place of 640 GEMVs. The original prepared expert banks, resident token
+embeddings, prefill options and BF16 projector are shared by both arms.
+
+Two fresh workers from the same executable admitted 33,024 positions.
+The packed arm ran first. Both ran the pinned 16K and 32K requests in
+that order with K2 and no prefix reuse. All four outputs matched the
+192 reference IDs. Both cases kept the same accepted and proposed
+counts and target round counts. Both workers reported fair thermal
+state, zero contenders and pressure level 1 with stable swap.
+
+| Case and arm | Decode tok/s | Catch-up s | Draft s | Target verify s |
+| --- | ---: | ---: | ---: | ---: |
+| 16K packed | 44.97 | 0.075 | 0.591 | 3.656 |
+| 16K control | 43.06 | 0.200 | 0.712 | 3.723 |
+| 32K packed | 44.32 | 0.127 | 0.452 | 3.857 |
+| 32K control | 41.60 | 0.419 | 0.756 | 3.834 |
+
+The one-way pair saved 0.125 s of catch-up at 16K and 0.292 s at
+32K. End-to-end decode improved 4.4% and 6.5%. At 32K the target phase
+cost stayed similar and the rate remains 3.05 tok/s below the published
+47.37. Retain the private candidate for order reversal and lifecycle
+checks before adoption. Hold GPU embedding gathers off to keep
+attribution on the five projections.
+
+The separate mapped attribution run sampled every fourth target
+verification with staged encoders and prefill profiling off. Its
+owned-worker watchdog stopped it after readiness when pressure reached
+level 2 and observed swap grew by 33.94 MiB. The stopped run produced no
+stage or throughput result. The earlier two loads remained eligible.
+
+The private Q5_0 draft vocabulary scout reduced the derived draft head
+from 394.4 MB to 255.2 MB. Offline layout tests matched 4,101 reference
+blocks. The 26.2 GB theoretical read reduction over 188 proposals is
+about 48 ms at peak memory bandwidth. An additional verifier round could
+erase it. The compiled option stayed off during the timed runs. Defer its
+native screen and keep the target and draft vocabulary kernels unchanged.
+
+The private source diff on `ec81193fb`, locked Rust 1.98.1 Hy4 build,
+and harness have SHA-256
+`abfb37b2edc035525dc680950bd0e50a352c53d49be05beae8023a81ce8b8470`,
+`992b81a18e43a63e4d3b60e1a18b33a14951aabc8f572ccb75592224a475404b`,
+and `b701cd263d87a96d2a431f46d38d18b206498fbbf26b1856acbf8b2c5fe3f98d`.
+The pinned prior reference receipt SHA-256 is
+`fa9d741e7c8b65464713449e1f8fe9677ee46b37b892c8f2715bddbdf33acd66`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Packed projections | `5cf280c1f993a9de8d663b6bb9f9bf9a717e5c8776f248673c0fb0ba5aeedf1d` |
+| Control | `9b7b2c06f552e68e45ed74b8fef9ca420ba032d6ba9d908e3861c1d5c1143645` |
+| Sampled verifier pressure stop | `972a8506e1c58f84fadc6ea686b22da38276e32c16301cc6eb72d068e4da33bb` |
