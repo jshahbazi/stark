@@ -415,3 +415,38 @@ The rebuilt executable, harness and bracket receipt have SHA-256
 `84e9dce6da7820e02b0993e93f13eac5d0974619dcf320355c7e539a27360310`,
 `aa42853ff32588aa0f73529dc65039ec1e49379815c15ae671e154db097f56e3`,
 and `51c4b378ab4f28829e0d4f1d16a8dfef054b10273c603e3422130ddb8c3e102d`.
+
+## 20261126-HY4NEXTN-10 · Price Q5_0 for the draft vocabulary
+
+The scout quantizes a derived copy of the NextN vocabulary projection
+to Q5_0 from the original BF16 rows. The target keeps the source BF16
+weights and the same greedy verifier. The derived head occupies
+255.2 MB against 394.4 MB for Q8_0. The original draft expert bank and
+the rest of the draft block are shared.
+
+With both expert banks and the BF16 projector loaded, one executable
+ran three full K3 TypeScript requests on each of two 8,192-position
+workers. Q5_0 ran first. All six outputs matched the 192 reference IDs.
+Both loads stayed at nominal thermal state, pressure level 1 and
+132 MiB swap with zero named contenders.
+
+| Draft head | Cold tok/s | Warm tok/s | Warm draft seconds | Accepted / proposed / rounds |
+| --- | ---: | ---: | ---: | ---: |
+| Q5_0 | 58.16 | 68.58 / 63.96 | 0.239 / 0.243 | 129 / 182 / 62 |
+| Q8_0 | 59.74 | 64.45 / 60.17 | 0.295 / 0.297 | 127 / 188 / 64 |
+
+Warm medians were 66.27 and 62.31 tok/s. In this order the Q5_0 arm
+saved about 55 ms of draft work on each warm request and finished in
+two fewer target rounds. This measures one coding fixture. The cold
+request was 2.6% slower with Q5_0. Repeat the pair in reverse order
+and check long-window acceptance and lifecycle before promotion.
+
+The existing isolated Hy4 executable and harness are bound in
+[HY4NEXTN-07](#20261125-hy4nextn-07--batch-the-resident-drafts-cache-projections).
+The draft-head patch SHA-256 is
+`934ac2e6aaf394d747fa2cf5359b7fa93c112e3bbe52b87fc53f72e6d34d7ece`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Q5_0 | `e4ab1e21883f28c1eb982c5ea967f2325f8613868df1624923313e1e27787e3d` |
+| Q8_0 | `1261cd80e66013660148b62a9a4bae120dd8c3fe2cc6ef435e2c6dac8982a994` |

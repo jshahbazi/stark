@@ -1434,3 +1434,33 @@ and `846cc698dba05bab7566f33a74cc01d05982961929379573d2ea3e9079558d94`.
 The combined and existing product profile receipt hashes are
 `c3d0ce3683c39c01a8f5d1e634d670ab23f3693e7c81c4b417a577fbc723444e`
 and `513272308dfa6e2537e5010f7a4417f6ed37f641fbee9560066dc7732a51ddc6`.
+
+## 20261126-HY4FRAG-29 · Share packed expert bytes across K16 fragments
+
+The prefill candidate reads shared low-code bytes once for each pair
+of Q3_K and Q4_K fragments. Q3_K also shares its high-mask loads.
+It keeps the original scales, F16 staging layout and F32 product
+order. Offline checks covered 524,288 packed-byte, mask and coordinate
+cases and verified that staging writes each coordinate once.
+
+Four fresh 5,120-position workers used the original projector, 40 GB
+streamed arena and K2. The engine ran two full 4K requests per worker.
+All eight outputs matched the 64 reference IDs. Both host snapshots
+from each load reported nominal thermal state.
+
+| Order and arm | First use tok/s | Warm tok/s | Receipt SHA-256 |
+| --- | ---: | ---: | --- |
+| 1. Existing fragment loads | 620.97 | 608.11 | `81f9745bc3bf28f9db335ed557e7d82d496dc7136ddf1137cf17d0a912e3c13e` |
+| 2. Shared packed loads | 580.22 | 542.03 | `a93b5ae98fe87f1e05da425f88ac571c4f645b1a6390e00a2f97b0731291b199` |
+| 3. Shared packed loads | 595.19 | 556.67 | `0853ca67253fac88f3794dfaa3eda3dacb1e37072725dac4e74207cd095f9142` |
+| 4. Existing fragment loads | 550.70 | 565.63 | `7c77229597d4621c8247626c67ec2b49c4005db02d698742a26089a297675b48` |
+
+First-use results fell inside the control range and warm results were
+lower in both orders. Keep the existing fragment loads. Sharing the
+logical byte loads did not recover the 4K prefill gap.
+
+The source diff on `4d024cb38`, isolated Rust 1.98.1 Hy4 executable
+and harness have SHA-256
+`ec3dd25db6b3fd152de488d401b0ef655397530ec5a812c343cdfbcbc234fece`,
+`5d95b571c362beb0f09c7b7721363934c86332b985bf5da1482055703d026d4b`,
+and `669fc50a21f2c6211ba72194c266309ce97cf353bdf8d235db0e0bfb02ada882`.
