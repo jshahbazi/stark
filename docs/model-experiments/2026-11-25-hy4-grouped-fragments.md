@@ -1064,3 +1064,40 @@ The Sol agent's value-product patch SHA-256 is
 
 Corrected natural-text harness SHA-256
 `4b5ffc08ece1ffbf3659a97ef054b760965580b06c7b0e315d6b23058b12840c`.
+
+## 20261125-HY4FRAG-23 · Consolidate mapped verification work
+
+Three Sol patches were screened together with both resident banks and
+the original projector. Per-table Engram inputs let mapped verification
+submit one command buffer per target round. Paired Q8 GEMV rows reuse
+weight decoding with the original per-row F32 accumulation. Indexed
+attention below the selection cutoff uses the same contiguous causal
+cells and keeps writing pooled history. This screen applies the
+contiguous shortcut only to ordinary decode.
+
+The worker used a 34,816-position cap. All six outputs matched the
+previous 192-token hashes and draft counts. The snapshots reported
+fair thermal state and zero named contenders. Pressure stayed at
+level 1 and swap stayed at 4,175 MiB. Each target round used one
+command buffer, down from five in HY4FRAG-21.
+
+| Workload | Earlier resident tok/s | Combined screen tok/s | Target rounds / command buffers |
+| --- | ---: | ---: | ---: |
+| Short TypeScript, K2 first / repeat | 57.05 / 58.91 | 56.90 / 59.57 | 75 / 75 |
+| Short TypeScript, K3 | 60.65 | 64.00 | 64 / 64 |
+| Short TypeScript, K4 | 54.03 | 53.68 | 58 / 58 |
+| 16K rendered code, K2 | 44.10 | 45.04 | 79 / 79 |
+| 32K rendered code, K2 | 39.19 | 42.12 | 78 / 78 |
+
+The combined screen improves the strongest short-code and long-window
+results. The one-way comparison leaves attribution and control drift
+open. Keep the candidate private pending paired timing and lifecycle
+checks. At the measured rates, the remaining gaps for 191 useful
+outputs are 0.26 s for code, 0.38 s at 16K, and 0.50 s at 32K.
+
+The screening diff on `24ca8ba51` has SHA-256
+`25b3b96a2947eff8b1398087be509df8ebcd86851e37628a6878e3471c6e8e0d`.
+The locked Rust 1.98.1 worker, harness and receipt have SHA-256
+`f8d4c6ff5967d335e1cfc1b1ea87a3c70a5994f1b2c47d60ce40ed1e94ad66b7`,
+`bbc32032c59eee93fd06adf8fc64fe6136d83c31f9d9aad7cec34619376aec6a`
+and `fa9d741e7c8b65464713449e1f8fe9677ee46b37b892c8f2715bddbdf33acd66`.

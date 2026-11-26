@@ -889,6 +889,8 @@ Recheck draft depth after changing how the verifier or draft reads weights. Hy4'
 
 Test attention value precision independently of the query-key score and softmax. Hy4's tensor value product kept the F32 score and softmax and improved warm 4K prefill by 10.1% in one screen. It matched all 64 reference IDs and 12 of 13 natural-text top-1 rows. True-next accuracy went from six to five rows. Keep the F32 value product. Extending direct device views to small Q/KV projections showed no gain. [Hy4 value precision and projection screen](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-22--isolate-sparse-mla-value-precision-and-expand-direct-projections)
 
+Once all target experts are resident, check for command splits that serve the old streaming path. Staging Hy4's Engram inputs separately reduced mapped verification from five command buffers to one per round. A combined screen with ordered Q8 row pairing and a contiguous IndexPool shortcut kept all output IDs and reached 64.00 tok/s on short code and 42.12 at 32K. Pair and isolate the changes before adoption. [Hy4 mapped verification screen](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-23--consolidate-mapped-verification-work)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |
