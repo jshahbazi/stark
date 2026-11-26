@@ -45,3 +45,17 @@ and a smaller memory-fitted window.
 | Resident aggregate | `139aeedf00125184abef17d374869716a81695a152e7549e58cf5510868be51f` |
 | Resident host pressure samples | `ebc9eced03c66853aef5f656f256f7c3d515c6f7d2f579924cd80c7edea470ab` |
 | Harness with aggregate stage counters | `815bfdcc60559097133b1b667581690f7b00c4f3f2717495379d878d440ba0b4` |
+
+## Proposed default
+
+On Metal 4, the automatic profile tries resident decode with this run's
+4,096-token prefill and prefix boundaries and fits context from live memory.
+It falls back through tuned streaming and the legacy graph on memory
+admission errors. Explicit load profiles keep their own settings and
+admission errors. A streaming or storage override starts automatic selection
+at tuned streaming.
+
+The proposed tuned defaults also request [compensated sparse prefill](2026-11-26-hy4-compensated-sparse-mla.md).
+The rates and output matches above come from the earlier worker with the
+original sparse kernel. An exact-artifact replay of the combined defaults
+and a live low-headroom fallback smoke test remain open.

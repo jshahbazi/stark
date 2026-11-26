@@ -118,16 +118,20 @@ struct LookupStats {
 
 const STREAMED_PREFILL_ARENA_GB: u32 = 40;
 
-fn resolve_load_profile(
+fn resolve_load_profiles(
     setting: Result<&str, &std::env::VarError>,
     supports_metal4: bool,
-) -> Result<&'static str, &'static str> {
+    storage_override: bool,
+) -> Result<&'static [&'static str], &'static str> {
     match setting {
-        Ok("default") => Ok("default"),
-        Ok("streamed-prefill") => Ok("streamed-prefill"),
-        Ok("resident-decode") => Ok("resident-decode"),
-        Err(std::env::VarError::NotPresent) if supports_metal4 => Ok("streamed-prefill"),
-        Err(std::env::VarError::NotPresent) => Ok("default"),
+        Ok("default") => Ok(&["default"]),
+        Ok("streamed-prefill") => Ok(&["streamed-prefill"]),
+        Ok("resident-decode") => Ok(&["resident-decode"]),
+        Err(std::env::VarError::NotPresent) if supports_metal4 && !storage_override => {
+            Ok(&["resident-decode", "streamed-prefill", "default"])
+        },
+        Err(std::env::VarError::NotPresent) if supports_metal4 => Ok(&["streamed-prefill", "default"]),
+        Err(std::env::VarError::NotPresent) => Ok(&["default"]),
         _ => Err("invalid_hy4_load_profile"),
     }
 }
@@ -135,7 +139,10 @@ fn resolve_load_profile(
 fn load_memory_failure(result: &Result<Session, &'static str>) -> bool {
     matches!(
         result,
-        Err("hy4_larger_arena_exceeds_budget" | "hy4_expert_arena_load_failed" | "resource_budget_exceeded")
+        Err("hy4_mapped_experts_exceed_budget"
+            | "hy4_larger_arena_exceeds_budget"
+            | "hy4_expert_arena_load_failed"
+            | "resource_budget_exceeded")
     )
 }
 
@@ -219,7 +226,7 @@ impl Hy4Backend {
         let compensated_sparse_mla = verify_switch(
             "STARK_HY4_PREFILL_COMPENSATED_SPARSE_MLA",
             "invalid_hy4_prefill_compensated_sparse_mla",
-            false,
+            tuned,
         )?;
         let resident_token_embeddings =
             verify_switch("STARK_HY4_EMBEDDINGS_RESIDENT", "invalid_hy4_embeddings_resident", tuned)?;
@@ -293,24 +300,35 @@ impl Hy4Backend {
         let identity = engine.metal_device_identity();
         let profile_setting = std::env::var("STARK_HY4_LOAD_PROFILE");
         let automatic = matches!(profile_setting, Err(std::env::VarError::NotPresent));
-        let mut load_profile = resolve_load_profile(profile_setting.as_deref(), engine.supports_metal4())?;
+        let storage_override = [
+            "STARK_HY4_EXPERT_STORAGE",
+            "STARK_HY4_STREAM_ARENA_GB",
+            "STARK_HY4_STREAM_ARENA_36GB",
+            "STARK_HY4_STREAM_DEMAND_RETENTION",
+        ]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some());
+        let mut profiles =
+            resolve_load_profiles(profile_setting.as_deref(), engine.supports_metal4(), storage_override)?
+                .iter()
+                .copied()
+                .peekable();
         drop(engine);
         let lookup_enabled = verify_switch("STARK_HY4_MTP_LOOKUP", "invalid_hy4_mtp_lookup", false)?;
-        let (mut options, profile_arena) = Self::load_options(load_profile, lookup_enabled)?;
-        let mut native = Session::load(path, path, options);
-        if automatic && load_profile == "streamed-prefill" {
-            // A busy host can reject the larger arena while admitting the tuned graph.
-            if profile_arena && load_memory_failure(&native) {
+        let (load_profile, options, native) = loop {
+            let load_profile = profiles.next().ok_or("invalid_hy4_load_profile")?;
+            let (mut options, profile_arena) = Self::load_options(load_profile, lookup_enabled)?;
+            let mut native = Session::load(path, path, options);
+            // A busy host can reject the built-in larger arena while admitting the tuned graph.
+            if automatic && profile_arena && load_memory_failure(&native) {
                 options.arena_bytes_requested = 0;
                 native = Session::load(path, path, options);
             }
-            if load_memory_failure(&native) {
-                load_profile = "default";
-                (options, _) = Self::load_options(load_profile, lookup_enabled)?;
-                native = Session::load(path, path, options);
+            if profiles.peek().is_some() && load_memory_failure(&native) {
+                continue;
             }
-        }
-        let native = native?;
+            break (load_profile, options, native?);
+        };
         source.verify_unchanged()?;
         let lookup_newline = lookup_enabled.then(|| Arc::new(NewlineTokens::from_tokenizer(&tokenizer, VOCAB)));
         let runtime = json!({
@@ -698,21 +716,30 @@ impl GenerationBackend for Hy4Backend {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_memory_failure, resolve_load_profile};
+    use super::{load_memory_failure, resolve_load_profiles};
 
     #[test]
-    fn implicit_load_profile_uses_metal4_path() {
+    fn implicit_load_prefers_resident_then_streamed_on_metal4() {
         let unset = Err(&std::env::VarError::NotPresent);
-        assert_eq!(resolve_load_profile(unset, true), Ok("streamed-prefill"));
-        assert_eq!(resolve_load_profile(unset, false), Ok("default"));
-        assert_eq!(resolve_load_profile(Ok("default"), true), Ok("default"));
-        assert_eq!(resolve_load_profile(Ok("streamed-prefill"), false), Ok("streamed-prefill"));
-        assert_eq!(resolve_load_profile(Ok("resident-decode"), true), Ok("resident-decode"));
-        assert_eq!(resolve_load_profile(Ok("map"), true), Err("invalid_hy4_load_profile"));
+        assert_eq!(
+            resolve_load_profiles(unset, true, false),
+            Ok(&["resident-decode", "streamed-prefill", "default"][..])
+        );
+        assert_eq!(resolve_load_profiles(unset, true, true), Ok(&["streamed-prefill", "default"][..]));
+        assert_eq!(resolve_load_profiles(unset, false, false), Ok(&["default"][..]));
+    }
+
+    #[test]
+    fn explicit_load_profile_selects_one_candidate() {
+        assert_eq!(resolve_load_profiles(Ok("default"), true, false), Ok(&["default"][..]));
+        assert_eq!(resolve_load_profiles(Ok("streamed-prefill"), false, false), Ok(&["streamed-prefill"][..]));
+        assert_eq!(resolve_load_profiles(Ok("resident-decode"), true, true), Ok(&["resident-decode"][..]));
+        assert_eq!(resolve_load_profiles(Ok("map"), true, false), Err("invalid_hy4_load_profile"));
     }
 
     #[test]
     fn implicit_load_can_retry_memory_admission_errors() {
+        assert!(load_memory_failure(&Err("hy4_mapped_experts_exceed_budget")));
         assert!(load_memory_failure(&Err("hy4_larger_arena_exceeds_budget")));
         assert!(load_memory_failure(&Err("hy4_expert_arena_load_failed")));
         assert!(load_memory_failure(&Err("resource_budget_exceeded")));

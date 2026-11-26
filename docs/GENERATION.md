@@ -95,18 +95,20 @@ has its own worker and artifact evidence in the
 
 ### Tested Hy4 load profiles
 
-With `STARK_HY4_LOAD_PROFILE` unset, Stark selects `streamed-prefill` on Metal 4.
-It first tries a 40 GB expert arena. If memory admission fails, it retries the
-tuned path with the ordinary arena, then tries the legacy profile if the tuned
-path still exceeds the budget. Older Metal hardware selects the legacy profile.
-The worker fits the context at load using the memory and workspace of the
-selected profile.
+With `STARK_HY4_LOAD_PROFILE` unset, Stark tries `resident-decode` first on
+Metal 4. If the resident banks or context exceed the memory budget, it tries
+`streamed-prefill` with a 40 GB arena, then with its ordinary arena, then the
+legacy profile. An expert-storage or streaming option starts the automatic
+selection at `streamed-prefill`. Older Metal hardware selects the legacy
+profile. The worker fits the context at load using the memory and workspace
+of the selected profile. Check the loaded profile and capacity in readiness.
 
-`STARK_HY4_LOAD_PROFILE` can select an explicit profile. Individual Hy4 options
-override its defaults. The tuned profiles require Metal 4 and use the original
+`STARK_HY4_LOAD_PROFILE` selects one profile explicitly. Individual Hy4 options
+override its defaults. The tuned profiles require Metal 4 for their optimized
+prefill kernels and use the original
 Q3_K target and BF16 projector, the Q5_0 NextN vocabulary projection, resident
-token embeddings, grouped routed fragments, packed dense attention and tensor
-MLA.
+token embeddings, grouped routed fragments, packed dense attention, tensor
+MLA and compensated indexed sparse prefill.
 
 | Profile | Worker settings |
 | --- | --- |
@@ -151,11 +153,13 @@ record](model-experiments/2026-11-25-hy4-prefill-decode-profile.md) covers the
 observed benefit and remaining qualification. The verification and worker
 gates remain artifact-specific.
 
-`STARK_HY4_PREFILL_COMPENSATED_SPARSE_MLA=1` selects an experimental
-Metal 4 kernel for indexed sparse prefill. It splits queries and probabilities
-into F16 operands and keeps F32 accumulation and the original F16 K/V cache.
-It has passed synthetic GPU accuracy checks. Full-model parity and speed are
-still to be measured. [Compensated sparse MLA record](model-experiments/2026-11-26-hy4-compensated-sparse-mla.md)
+The tuned profiles request compensated indexed sparse prefill on Metal 4.
+The kernel splits queries and probabilities into F16 operands and keeps F32
+accumulation and the original F16 K/V cache. The worker uses the original
+kernel if the compensated pipeline is unavailable. Set
+`STARK_HY4_PREFILL_COMPENSATED_SPARSE_MLA=0` to select the original kernel
+explicitly. The compensated kernel has passed synthetic GPU accuracy checks.
+Full-model parity and speed are still to be measured. [Compensated sparse MLA record](model-experiments/2026-11-26-hy4-compensated-sparse-mla.md)
 
 `STARK_HY4_PREFILL_ROUTED_HALF=1` selects F16 operands with F32 accumulation
 for eligible grouped routed experts. Dense projections and the small

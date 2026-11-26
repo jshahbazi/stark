@@ -8,11 +8,17 @@ The build embeds the quant definitions and Metal shader sources in the library. 
 
 The original expert stream reads packed banks into its Metal arena. Stark also wraps read-only GGUF expert ranges directly when the mapped banks fit the live host and Metal budgets. The layer records retain the original gate, up and down offsets and strides. The vision integration reuses Strata’s GGUF projector, vision tower and M-RoPE encoder. Stark provides the resized RGB input and token spans through the native request interface.
 
-The generation worker offers `STARK_HY4_LOAD_PROFILE=streamed-prefill` and
-`STARK_HY4_LOAD_PROFILE=resident-decode` for the measured configurations.
-Both use the existing context fitter before allocating the graph and accept
-different request windows within the selected capacity. See [tested load
-profiles](../../../../docs/GENERATION.md#tested-hy4-load-profiles).
+The generation worker tries `resident-decode` before `streamed-prefill` on
+Metal 4. It uses the existing context fitter before allocating each graph
+and accepts different request windows within the selected capacity. A draft
+bank that exceeds the Metal buffer limit enters the memory-admission
+fallback. See [tested load profiles](../../../../docs/GENERATION.md#tested-hy4-load-profiles).
+
+The tuned profiles request the compensated sparse MLA specialization for
+selected-cell prefill. It retains Strata's indexing and the F16 cache.
+The original selected-cell specialization is available when the device
+cannot build the compensated pipeline or support its required threadgroup
+size. [Arithmetic provenance and validation](../../../../docs/model-experiments/2026-11-26-hy4-compensated-sparse-mla.md)
 
 The pinned GGUF graph stores latent MLA rows by absolute position, including the sliding-attention blocks. Its IndexPool cache writes a pooled key into the first row of a complete group. At a complete group boundary Stark can rewind the text sequence by clamping the pooled-key counts and replacing the suffix. The next prefill supplies a fresh head output. MTP truncates its row count and retains the verified trunk hidden rows before the same boundary. Request identity and invalidation are tracked by the Stark caller.
 
@@ -26,7 +32,7 @@ With GPU planning enabled, ordinary mapped-resident verification uses separate E
 
 Set `STARK_HY4_MTP_RESIDENT_EXPERTS=1` to load the original NextN block's derived Q8_0 expert bank ahead of generation. The GPU builds the draft expert plan and preserves top-k slot order. Context admission reserves about 1.85 GB more than for the lazy draft pool. [NextN residency experiment](../../../../docs/model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-21--keep-nextn-experts-resident)
 
-Set `STARK_HY4_MTP_HEAD_Q5=1` to build a Q5_0 vocabulary projection for NextN. It uses the existing F32 GEMV activations and accumulation. The target verifier uses the original BF16 vocabulary weights. Leaving the switch unset or setting it to `0` selects Q8_0. The worker reports the loaded copy as `draft_head_format`. [Draft vocabulary qualification](../../../../docs/model-experiments/2026-11-25-hy4-decode-cache-construction.md#qualify-the-typed-q5-option)
+The tuned profiles build a Q5_0 vocabulary projection for NextN. It uses the existing F32 GEMV activations and accumulation. The target verifier uses the original BF16 vocabulary weights. Set `STARK_HY4_MTP_HEAD_Q5=0` to select Q8_0, which is also the legacy-profile default. The worker reports the loaded copy as `draft_head_format`. [Draft vocabulary qualification](../../../../docs/model-experiments/2026-11-25-hy4-decode-cache-construction.md#qualify-the-typed-q5-option)
 
 Stark adds opt-in Metal stage-boundary samples to the prefill graph. They retain the command buffer and host events while splitting compute encoders. The worker exports aggregate stage durations and tile occupancy. Target decode timing excludes draft-graph commands, and invalid command-buffer timestamp intervals are counted and excluded from the GPU span totals. The original streamed arena also accepts a bounded 36 GB request through the worker. These local changes and their measurements are recorded in the [4K experiment](../../../../docs/model-experiments/2026-11-25-hy4-prefill-decode-profile.md).
 

@@ -128,8 +128,8 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         const size_t dense_view_bytes = dense_device_views ? Forward::dense_device_scratch_bytes(geo, chunk) : 0;
         const double future = 2.0 * kGiB * (chunk / 1024.0) + s.vision.reserved_bytes() + dense_view_bytes;
         const uint64_t draft_bank_bytes = resident_draft_experts ? Mtp::resident_expert_bytes(geo) : 0;
-        if (resident_draft_experts && (draft_bank_bytes == 0 || draft_bank_bytes > s.metal.max_buffer_length()))
-            return 5;
+        if (resident_draft_experts && draft_bank_bytes == 0) return 5;
+        if (draft_bank_bytes > s.metal.max_buffer_length()) return 10;
         const double draft_and_decode_reserve = 3.0 * kGiB +
             std::max(0.0, static_cast<double>(draft_bank_bytes) - Mtp::kExpertPoolBudgetBytes);
         const auto initial = plan_arena(s.model, s.metal);

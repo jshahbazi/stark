@@ -43,7 +43,7 @@ Each arm returned 180,224 finite values. The ordinary bounds were
 30,464 B of static threadgroup memory versus 26,240 B in the existing
 pipeline. The existing kernel had lower error on the extreme-query case.
 
-## Disposition and follow-up
+## Prototype disposition
 
 Keep the specialization opt-in at `STARK_HY4_PREFILL_COMPENSATED_SPARSE_MLA=1`.
 The synthetic test establishes kernel execution and bounded error for this
@@ -64,3 +64,19 @@ ignored.
 | Source assembler | `99689ed324bcd967fdee3e02a2b0f87434954fc346d9a202ce4cc83e51af95d2` |
 | Validation harness | `dfe26b8e48d6b65a2eb0a416ea30616fc99ada7066016497c212fa69047933dc` |
 | Aggregate validation receipt | `f04309d78fa2b333bc085ae31594451f240d8b2ff6b8840c21a08d20c7b497c7` |
+
+## Proposed default
+
+The tuned Metal 4 profiles request this specialization by default. The worker
+uses the original selected-cell kernel if Metal rejects the pipeline or
+reports a limit below the required 1,024 threads. Set
+`STARK_HY4_PREFILL_COMPENSATED_SPARSE_MLA=0` for an explicit control.
+The follow-up dispatch of all eleven synthetic cases passed using the same
+assembled shader SHA-256 and aggregate receipt as above. The locked Rust
+1.98.1 release worker SHA-256 for the proposed policy was
+`e5fccfce3394dcb10a56d0b0c72198064a2cd6cf7406fc000f0f4acd325c8e94`.
+
+The local Q3_K weights were removed after the resident OpenCode bracket.
+On the exact artifact, compare natural-text teacher-forced top-1 and
+generated outputs, verify reuse and image transitions, and measure sparse
+stage and whole-request throughput at 16K and 27K before merging.
