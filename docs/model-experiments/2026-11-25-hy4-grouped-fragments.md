@@ -1677,3 +1677,43 @@ and `64f20d7c0ccbc2fe83057223003a27b8e3f32e0c460e27bf248e2c95495cc49e`.
 | Stale source receipt refusal | `a11fb1497c2b4a5554734e94ad1f69c8dc3527d3feca8abf14834f56f4362e0d` |
 | Resident pressure stop | `e29fd466e017c00ba1f4f62b5c66412735554cac00ad97b28765940c07537217` |
 | Streamed 4K and lifecycle | `112ed826f5ad1b6eea7c1a850de7fb2e37e496f7adbd5381a3f8ea6c5016b4db` |
+
+## 20261126-HY4FRAG-33 · Bound FFN device views to the qualified capacity
+
+The next 16K check used the rebuilt FFN executable with both expert
+banks resident, the original projector, Q5_0 NextN, 1,024-row chunks
+and a 16,640-position cap. All three completed requests with FFN
+views enabled returned 192 IDs that differed from the pinned
+reference sequence. This occurred with both K2 and K3. The owned
+worker stopped before the last planned K2 request. These requests
+provide precision evidence and no eligible rates.
+
+With the option disabled, the same executable and geometry matched
+all 192 reference IDs on all four depth-bracket requests.
+[16K depth bracket](2026-11-25-hy4-decode-cache-construction.md#20261126-hy4nextn-16--compare-two-and-three-drafts-at-16k)
+
+The FFN option therefore uses the selected loaded capacity to admit
+the new operands. At capacities above 8,192 positions, every chunk
+uses the original FFN products. The condition is fixed for a model
+instance, including chunks used to prime a prefix. The attention
+device views keep their existing eligibility. The readiness field
+continues to report the requested option.
+
+The FFN-enabled 16K precision refusal receipt is
+`5fd8f40858f8ff57630d122a431fd25aef4afff0ba2c8e6a6ebfdc32dff8945d`.
+The capacity-scope source diff on `e8baa08b7` and its harness have
+SHA-256 `64a3ae30e4d5712889fc446ff34c57e76f8a875800b05a5165b75ae8eb35df1d`
+and `7e6d66e514bc16e6389ec145b36a8a8826c2f1f43ad3ad5f35340c66b9979df3`.
+
+The guarded Rust 1.98.1 release worker reached 711.61 tok/s first
+and 653.47 warm at the 8,192-position limit with the 40 GB streamed
+arena, 4,096-row chunks, Q5_0 NextN and the original projector.
+Both 4K requests matched 64 output IDs with zero reuse, 41 accepted
+proposals and 22 rounds. The subsequent lifecycle restored 4,096
+positions on exact text continuations and passed both image answers
+with zero drafts and reuse. Invalid and cancelled images cleared
+prefix state and recovered. The host stayed fair.
+
+The guarded executable and lifecycle receipt have SHA-256
+`a3986098915cbc158f9f3ae2bc2e7e9cafcfc546f300ccea012edd8a2729c081`
+and `40606422eae03a35374698427d30dbd32be6b75f6024c4c29ffd6e97d886696b`.

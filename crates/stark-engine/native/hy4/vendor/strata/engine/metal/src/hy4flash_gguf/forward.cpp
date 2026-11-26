@@ -712,8 +712,10 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
         return "attention.key_length (" + std::to_string(kv_w) + ") is not kv_lora_rank + rope_dim";
 
     mut = Mut::from_env();
-    dense_ffn_device_views = pf.dense_ffn_device_views && mut.none && pf.probe == 0 &&
-                             prefill_mm_enabled() && !prefill_mm_half() && !MmRange::get().on();
+    // Gate the qualified FFN path on the loaded capacity so all chunks use one precision policy.
+    constexpr int kDenseFfnDeviceMaxContext = 8192;
+    dense_ffn_device_views = pf.dense_ffn_device_views && ctx <= kDenseFfnDeviceMaxContext && mut.none &&
+                             pf.probe == 0 && prefill_mm_enabled() && !prefill_mm_half() && !MmRange::get().on();
     if (!mut.none && mut.name[0] == '?')
         return "HY4_FLASH_MUT=" + mut.name.substr(1) + " is not one of the third gate's mutations (plan P0.3 §6: "
                "no_sinks, rope_theta, engram_delta2, router_biased, clamp7, no_ape, no_tail, pool_rope_last, "

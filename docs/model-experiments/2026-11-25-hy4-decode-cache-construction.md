@@ -659,3 +659,29 @@ and rejects inline arguments. The mapped route plan produces indirect
 grids and the verifier carries inline arguments. Defer descriptor and
 ICB work as a primary speed lever. This analysis uses the existing
 receipts and adds no new throughput samples.
+
+## 20261126-HY4NEXTN-16 · Compare two and three drafts at 16K
+
+The rebuilt Q5_0 worker used both resident expert banks, the original
+projector, the ordinary F32 FFN path, 1,024-row chunks and a
+16,640-position capacity. One loaded worker ran K2, K3, K3 and K2 on
+the identical 16K fixture. All four requests matched their 192
+reference IDs with zero prefix reuse. The host stayed fair with
+pressure level 1 and stable 48.4 MiB swap.
+
+| Depth in order | Decode tok/s | Verify s | Draft s | Catch-up s | Accepted / proposed / rounds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| K2 | 46.80 | 3.589 | 0.492 | 0.065 | 111 / 158 / 80 |
+| K3 | 45.84 | 3.745 | 0.421 | 0.065 | 123 / 202 / 68 |
+| K3 | 46.07 | 3.724 | 0.422 | 0.066 | 123 / 202 / 68 |
+| K2 | 47.65 | 3.659 | 0.348 | 0.065 | 111 / 158 / 80 |
+
+K3 saved 12 rounds and spent more total time verifying in both pairs.
+Keep K2. The 47.65 tok/s repeat leaves about 0.147 s to reach 49.47
+over 191 useful tokens. The smaller loaded cap was part of this run's
+configuration. This bracket varies draft depth alone.
+
+The executable and harness are bound in the
+[FFN option qualification](2026-11-25-hy4-grouped-fragments.md#qualify-the-typed-ffn-option).
+The exact 16K control receipt has SHA-256
+`eb83df672c790d2367d1b33f0d4e54270f77c6b0a8000575f700767eafd198f4`.
