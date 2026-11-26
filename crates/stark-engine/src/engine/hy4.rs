@@ -14,7 +14,8 @@ use super::context::ContextSizing;
 pub const VOCAB: usize = 120_832;
 pub const PREFILL_CHUNK: usize = 1024;
 pub const RECOMMENDED_DRAFTS: usize = 2;
-pub const MAX_DRAFTS: usize = 4;
+pub const MAX_NEXTN_DRAFTS: usize = 4;
+pub const MAX_DRAFTS: usize = 7;
 pub const SHARD: &str = "Hy4-flash-Q3_K-00001-of-00002.gguf";
 pub const ENGRAM_SHARD: &str = "Hy4-flash-Q3_K-00002-of-00002.gguf";
 pub const PROJECTOR: &str = "mmproj-Hy4-flash-bf16.gguf";
@@ -235,6 +236,7 @@ unsafe extern "C" {
     fn stark_hy4_verify(
         session: *mut c_void,
         count: c_int,
+        lookup: *const u32,
         tokens: *mut u32,
     ) -> c_int;
     fn stark_hy4_stats(session: *mut c_void) -> DraftStats;
@@ -409,12 +411,21 @@ impl Session {
     pub fn verify(
         &mut self,
         rows: usize,
+        lookup: &[u32],
         output: &mut [u32; MAX_DRAFTS + 1],
     ) -> Result<usize, &'static str> {
         if !(1..=output.len()).contains(&rows) {
             return Err("invalid_generation_output");
         }
-        let count = unsafe { stark_hy4_verify(self.inner.as_ptr(), rows as c_int, output.as_mut_ptr()) };
+        if !lookup.is_empty() && lookup.len() != rows - 1 {
+            return Err("invalid_generation_output");
+        }
+        let lookup = if lookup.is_empty() {
+            ptr::null()
+        } else {
+            lookup.as_ptr()
+        };
+        let count = unsafe { stark_hy4_verify(self.inner.as_ptr(), rows as c_int, lookup, output.as_mut_ptr()) };
         (count > 0 && count as usize <= rows).then_some(count as usize).ok_or("native_generation_failed")
     }
 

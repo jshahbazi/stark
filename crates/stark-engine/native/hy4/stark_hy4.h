@@ -88,6 +88,7 @@ int stark_hy4_prefill(StarkHy4* session, int rows) noexcept;
 int stark_hy4_greedy(const StarkHy4* session) noexcept;
 const float* stark_hy4_logits(const StarkHy4* session) noexcept;
 int stark_hy4_append(StarkHy4* session, uint32_t token) noexcept;
-int stark_hy4_verify(StarkHy4* session, int count, uint32_t* output) noexcept;
+// When present, lookup supplies exactly count - 1 proposals for target verification.
+int stark_hy4_verify(StarkHy4* session, int count, const uint32_t* lookup, uint32_t* output) noexcept;
 StarkHy4Stats stark_hy4_stats(StarkHy4* session) noexcept;
 }

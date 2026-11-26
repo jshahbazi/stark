@@ -21,7 +21,7 @@ using namespace strata::hy4_flash;
 namespace {
 constexpr int kVocab = 120832;
 constexpr int kRecommendedDrafts = 2;
-constexpr int kMaxDrafts = 4;
+constexpr int kMaxDrafts = 7;
 static_assert(kMaxDrafts + 1 <= Forward::kMaxWindow && kMaxDrafts < Mtp::kCacheSlack);
 constexpr uint64_t kGiB = 1ull << 30;
 
@@ -309,7 +309,7 @@ extern "C" int stark_hy4_append(StarkHy4* session, uint32_t token) noexcept {
 // One exact greedy verification round adapted from Strata's speculative_greedy.
 // The last committed token becomes the next input. Rejected rows are overwritten
 // by the next window and the index pool is clamped at that window's start.
-extern "C" int stark_hy4_verify(StarkHy4* session, int count, uint32_t* output) noexcept {
+extern "C" int stark_hy4_verify(StarkHy4* session, int count, const uint32_t* lookup, uint32_t* output) noexcept {
     auto& s = *session;
     try {
         const int start = s.position;
@@ -319,11 +319,19 @@ extern "C" int stark_hy4_verify(StarkHy4* session, int count, uint32_t* output) 
         auto& stats = s.mtp.stats();
         double t = mtl::now_s();
         std::array<int32_t, kMaxDrafts> proposals{};
-        for (int i = 0; i < k; ++i) {
-            const int row = start + i;
-            if (i > 0) s.mtp.set_hidden(row, 1, s.mtp.state());
-            if (!s.mtp.step(s.tokens.data(), row, &proposals[i]).empty()) return -1;
-            s.tokens.push_back(proposals[i]);
+        if (lookup != nullptr) {
+            if (k == 0 || !std::all_of(lookup, lookup + k, [](uint32_t t) { return t < kVocab; })) return -1;
+            std::copy_n(lookup, k, proposals.begin());
+            s.tokens.insert(s.tokens.end(), proposals.begin(), proposals.begin() + k);
+            // The draft cache can lag here. The target history below contains
+            // every committed hidden row that NextN needs to catch up later.
+        } else {
+            for (int i = 0; i < k; ++i) {
+                const int row = start + i;
+                if (i > 0) s.mtp.set_hidden(row, 1, s.mtp.state());
+                if (!s.mtp.step(s.tokens.data(), row, &proposals[i]).empty()) return -1;
+                s.tokens.push_back(proposals[i]);
+            }
         }
         s.mtp.truncate(start + 1);
         stats.draft_ms += (mtl::now_s() - t) * 1e3;

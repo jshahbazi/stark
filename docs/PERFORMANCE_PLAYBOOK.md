@@ -871,6 +871,10 @@ Measure occupancy and useful time when widening the routed row tile. Hy4's 128-r
 
 Replay the existing lookup gate before adding a new scheduler. Hy4's repeated-text benchmark could cover 63 useful outputs in eight target rounds with ideal lookup at a maximum of seven proposals. Its short and 4K rendered coding fixtures offered zero lookup tokens. Depth four reduced 16K and 32K target round counts by 22–23% and had lower observed throughput on the separate long runs. [Hy4 depth and lookup replay](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-12--test-deeper-verification-and-replay-the-prompt-lookup-gate)
 
+Keep lookup and ordinary coding fixtures separate. Live seven-draft lookup reached 60.61–61.18 tok/s on the repeated-text 4K Hy4 fixture, with all 64 reference IDs exact. A 1,898-token full-source code edit reached 43.75–44.96 tok/s with lookup, compared with 43.26 for ordinary K7. Include deferred draft cache work, cap lookup at the requested depth, and verify prefix mode isolation. [Hy4 live lookup](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-13--verify-request-local-prompt-lookup-with-the-native-target)
+
+Removed logical traffic needs a wall-time check. Fusing the Hy4 gate and eliminating an estimated 38.65 GB of intermediate traffic at 4K produced first-use rates within control drift and no repeat gain. Keep direct device views with the existing gate epilogue. [Hy4 fused gate screen](model-experiments/2026-11-25-hy4-grouped-fragments.md#20261125-hy4frag-14--fuse-the-dense-attention-gate-into-the-device-view-epilogue)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |

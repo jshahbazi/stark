@@ -69,6 +69,9 @@ def mtp_capabilities(readiness: Any) -> dict[str, Any]:
                 (_HY4_SAMPLING, _HY4_VERIFICATION, 2),
                 (_HY4_SAMPLING, _HY4_VERIFICATION, 3),
                 (_HY4_SAMPLING, _HY4_VERIFICATION, 4),
+                (_HY4_SAMPLING, _HY4_VERIFICATION, 5),
+                (_HY4_SAMPLING, _HY4_VERIFICATION, 6),
+                (_HY4_SAMPLING, _HY4_VERIFICATION, 7),
             )
         )
         or not isinstance(verification, str)

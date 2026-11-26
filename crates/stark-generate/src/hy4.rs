@@ -8,6 +8,7 @@ use std::{
     fs::File,
     io::{self, BufReader},
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -18,10 +19,13 @@ use stark_engine::{
     engine::{
         Engine,
         hy4::{
-            DraftStats, ExpertStorage, ImageInput, MAX_DRAFTS, Options, PREFILL_CHUNK, RECOMMENDED_DRAFTS, SHARD,
-            Session, VOCAB,
+            DraftStats, ExpertStorage, ImageInput, MAX_DRAFTS, MAX_NEXTN_DRAFTS, Options, PREFILL_CHUNK,
+            RECOMMENDED_DRAFTS, SHARD, Session, VOCAB,
         },
-        hybrid::activity::InferenceActivity,
+        hybrid::{
+            activity::InferenceActivity,
+            mtp_lookup::{NewlineTokens, PromptLookup},
+        },
     },
 };
 use tokenizers::Tokenizer;
@@ -96,11 +100,20 @@ pub(crate) struct Hy4Backend {
     tokenizer: Tokenizer,
     cancellation: Option<CancelSignal>,
     mapper: ProbabilityMapper,
-    retained: Option<PrefixEntry<u32>>,
-    pending: Option<PrefixEntry<u32>>,
+    retained: Option<PrefixEntry<(u32, bool)>>,
+    pending: Option<PrefixEntry<(u32, bool)>>,
     stats: DraftStats,
+    lookup_stats: LookupStats,
+    lookup_newline: Option<Arc<NewlineTokens>>,
     runtime: Value,
     chunk: usize,
+}
+
+#[derive(Default, serde::Serialize)]
+struct LookupStats {
+    proposed: usize,
+    accepted: usize,
+    rounds: usize,
 }
 
 impl Hy4Backend {
@@ -150,9 +163,15 @@ impl Hy4Backend {
         let context_limit = optional_bound("STARK_HY4_CONTEXT_LIMIT", 2..=u32::MAX, "invalid_hy4_context_limit")?;
         let demand_retention =
             verify_switch("STARK_HY4_STREAM_DEMAND_RETENTION", "invalid_hy4_stream_demand_retention", false)?;
+        let lookup_enabled = verify_switch("STARK_HY4_MTP_LOOKUP", "invalid_hy4_mtp_lookup", false)?;
+        let draft_limit = if lookup_enabled {
+            MAX_DRAFTS
+        } else {
+            MAX_NEXTN_DRAFTS
+        };
         let max_drafts = optional_bound(
             "STARK_HY4_MTP_MAX_DRAFTS",
-            RECOMMENDED_DRAFTS as u32..=MAX_DRAFTS as u32,
+            RECOMMENDED_DRAFTS as u32..=draft_limit as u32,
             "invalid_hy4_mtp_max_drafts",
         )?
         .unwrap_or(RECOMMENDED_DRAFTS as u32) as usize;
@@ -202,6 +221,7 @@ impl Hy4Backend {
             },
         )?;
         source.verify_unchanged()?;
+        let lookup_newline = lookup_enabled.then(|| Arc::new(NewlineTokens::from_tokenizer(&tokenizer, VOCAB)));
         let runtime = json!({
             "backend": identity.backend,
             "device_name": identity.device_name,
@@ -231,6 +251,8 @@ impl Hy4Backend {
             retained: None,
             pending: None,
             stats: DraftStats::default(),
+            lookup_stats: LookupStats::default(),
+            lookup_newline,
             runtime,
             chunk,
         })
@@ -261,6 +283,7 @@ impl Hy4Backend {
         self.retained = None;
         self.pending = None;
         self.stats = DraftStats::default();
+        self.lookup_stats = LookupStats::default();
         if self.cancelled(options.request_id)? {
             return Err("generation_cancelled");
         }
@@ -285,6 +308,13 @@ impl Hy4Backend {
         let mapper = &mut self.mapper;
         let greedy = matches!(options.sampling, Sampling::Greedy {});
         let drafts = options.mtp_drafts as usize;
+        let mut lookup = if options.mtp_scheduling.lookup {
+            let newline = self.lookup_newline.as_ref().ok_or("mtp_not_supported")?;
+            Some(PromptLookup::new(input.to_vec(), Arc::clone(newline)))
+        } else {
+            None
+        };
+        let mut lookup_stats = LookupStats::default();
         let tokens = std::iter::from_fn(|| {
             Some((|| {
                 if let Some(token) = previous.take() {
@@ -300,13 +330,28 @@ impl Hy4Backend {
                     token
                 } else {
                     if next_verified == verified_len {
-                        verified_len = native.verify((drafts + 1).min(budget - sampled), &mut verified)?;
+                        let limit = drafts.min(budget - sampled - 1);
+                        let proposed = lookup.as_ref().map_or_else(Vec::new, |lookup| lookup.propose(limit));
+                        let rows = if proposed.is_empty() {
+                            limit + 1
+                        } else {
+                            proposed.len() + 1
+                        };
+                        verified_len = native.verify(rows, &proposed, &mut verified)?;
+                        if !proposed.is_empty() {
+                            lookup_stats.proposed += proposed.len();
+                            lookup_stats.accepted += verified_len - 1;
+                            lookup_stats.rounds += 1;
+                        }
                         next_verified = 0;
                     }
                     let token = verified[next_verified];
                     next_verified += 1;
                     token
                 };
+                if let Some(lookup) = &mut lookup {
+                    lookup.push(token);
+                }
                 sampled += 1;
                 Ok(u64::from(token))
             })())
@@ -349,12 +394,18 @@ impl Hy4Backend {
             result.text = Some(stop.text().to_owned());
         }
         self.stats = self.native.stats();
+        self.lookup_stats = lookup_stats;
         result.reused_input_tokens = reused;
         let boundary = prefix_cache::chunk_boundary(input.len(), self.chunk);
         if let Some(scope) = options.cache_scope.filter(|_| image.is_none() && boundary > 0) {
             self.native.retain_prefix(boundary)?;
-            self.pending =
-                Some(PrefixEntry::with_chunk(options.mtp_drafts, scope, options.context_tokens, input, self.chunk));
+            self.pending = Some(PrefixEntry::with_chunk(
+                (options.mtp_drafts, options.mtp_scheduling.lookup),
+                scope,
+                options.context_tokens,
+                input,
+                self.chunk,
+            ));
         } else {
             self.native.clear();
         }
@@ -498,7 +549,14 @@ impl GenerationBackend for Hy4Backend {
         })
     }
     fn mtp_metadata(&self) -> Option<Value> {
-        Some(json!({"stats": self.stats}))
+        Some(if self.lookup_newline.is_some() {
+            json!({"stats": self.stats, "lookup_stats": self.lookup_stats})
+        } else {
+            json!({"stats": self.stats})
+        })
+    }
+    fn supports_mtp_lookup(&self) -> bool {
+        self.lookup_newline.is_some()
     }
     fn prefix_cache_supported(&self) -> bool {
         true
@@ -507,7 +565,11 @@ impl GenerationBackend for Hy4Backend {
         self.chunk
     }
     fn prefix_cache_key(&self) -> &'static str {
-        "model-instance+context-tokens+cache-scope+mtp-drafts"
+        if self.lookup_newline.is_some() {
+            "model-instance+context-tokens+cache-scope+mtp-drafts+mtp-lookup"
+        } else {
+            "model-instance+context-tokens+cache-scope+mtp-drafts"
+        }
     }
     fn prefix_cache_plan(
         &self,
@@ -516,7 +578,7 @@ impl GenerationBackend for Hy4Backend {
     ) -> usize {
         self.retained
             .as_ref()
-            .filter(|entry| entry.state == options.mtp_drafts)
+            .filter(|entry| entry.state == (options.mtp_drafts, options.mtp_scheduling.lookup))
             .map_or(0, |entry| entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()))
     }
     fn publish_prefix_cache(&mut self) {

@@ -495,3 +495,116 @@ workloads separate from the repeat-text test.
 
 Replay helper SHA-256
 `04410bdf5613f9ad03ab66b38d21c275f8f5d66afcadcfb4d7d2ee7d75cb62df`.
+
+## 20261125-HY4FRAG-13 · Verify request-local prompt lookup with the native target
+
+Hy4 reuses Stark's request-scoped 4-gram index. Lookup hits skip NextN
+proposals and use the same greedy target comparison. The target records
+committed hidden rows. A later lookup miss advances the draft cache
+from that history. The worker keeps the lookup index in memory for one
+request. Depth and lookup mode bind the generation prefix key.
+
+Set `STARK_HY4_MTP_LOOKUP=1` and `STARK_HY4_MTP_MAX_DRAFTS=7` at load
+to request greedy `mtp_drafts: 7` with `mtp_lookup: true`. The loaded
+worker recommends two drafts. The normal depth-four ceiling applies
+when the lookup worker flag is off.
+
+The original-projector worker used a 48 GB arena and an 8,192-position
+cap. In the same loaded worker, each input ran K2, K4, K7, twice K7
+with lookup, then K4. All output IDs matched across modes for each
+input. The 4K fixed fixture also matched all 64 reference IDs. The
+code-edit case is a 1,898-position full-source JavaScript edit of
+`554a6a249:website/public/app.js`. Its 192-token generated prefix
+contained the requested clipboard message in every arm.
+
+| Input | K2 tok/s | K4 tok/s | K7 tok/s | K7 lookup tok/s | Lookup proposals / accepted / rounds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Fixed repeated-text 4K | 27.84 | 45.58–46.87 | 48.67 | 61.18 / 60.61 | 55 / 55 / 8 |
+| Copy-heavy code edit | 32.31 | 40.65–41.45 | 43.26 | 44.96 / 43.75 | 120 / 110 / 18 |
+
+The 4K lookup repeats exceeded 50.34 tok/s. Use the result for this
+repeated-text diagnostic. The ordinary coding fixtures had zero lookup
+eligibility in HY4FRAG-12. Host snapshots found no named contenders.
+Process thermal state moved from fair at entry to nominal at exit.
+
+The first attempt was refused for concurrent build work. An exploratory
+restart on the first binary completed ordinary decode and refused the
+lookup request at option validation. The corrected binary recognizes
+lookup support independently of adaptive depth. An intermediate run
+under background build activity completed all arms with exact outputs.
+It measured 52.73 and 47.87 tok/s on the 4K lookup repeats and 32.50
+and 40.55 on the code edit.
+
+Sol agent patch SHA-256
+`bafcd91e8d538d4460cc0771ecb4b2de766e760a48335a1b09998cb48915ffa6`.
+Full measured source patch on `554a6a249` SHA-256
+`6bfe3561951c0d841ca04a5875e8620c6428b1f0f8a9308d0bf9cecadc0db3a8`.
+Rust 1.98.1 locked release worker SHA-256
+`3ba43f4498ed49baaeae723f04d5dcc959ce01d9daa8eee712bfa6bea15909cf`.
+Lookup harness SHA-256 `b24af044817faa0b3ede7a046ff16b88f0d40450426b18efa3fe9f97e290ae06`.
+Code edit fixture helper SHA-256
+`1f81c5855634363fa958063fde5f0c8a3805f19f54557220fa507c3a23cb2944`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Host refusal | `1451298298ce41b5535159e30737dcd047086fd588e9cfe4c3bb193f4ed76ad5` |
+| Initial lookup validation refusal | `33119c2cb777d27024cf68218fddb2a89bba3582eaa932777e5df5cb945cb39d` |
+| Contended exact-output comparison | `a80179866f01bfa91b54f970e2892e62ab9b412976bef88cf7e464a78908ee82` |
+| Lookup comparison without named contenders | `f0a2d27ef6b9dd1317ce6b512a8511c6d9299056d8405cdabacda5ae2984d86c` |
+
+The same candidate restored a 4,096-token prefix at depth seven and
+matched a fresh continuation exactly. A change of lookup mode, depth,
+or context used zero cached tokens and produced the same continuation.
+The exact-fit request exercised the context boundary. Both original
+projector cases generated the expected outputs with zero proposals.
+Image generation, invalid-image rejection, and image cancellation cleared
+the text prefix. Retain the request-level lookup flag. The lookup-only
+source patch SHA-256 is
+`54db6769996940dfa6ff643376648284bc8c186b2cd823e92f0d4e99fde603d7`.
+
+| Validation receipt | SHA-256 |
+| --- | --- |
+| Images and text prefix transitions | `52b666c983910868021deaabf5effb6a01927fce7ab062fef79f252e0be89277` |
+| Same-mode reuse, context boundary and mode changes | `d832faedd3a0bcb8dace33d405ebb1b942d178c2aea67ce63c1556da8b25104e` |
+
+## 20261125-HY4FRAG-14 · Fuse the dense attention gate into the device-view epilogue
+
+The candidate keeps the original precise sigmoid and F32 multiply, with
+one F16 cast before the output product. Its second ingress packs only
+weights and reuses the existing gate scratch. The 4K logical traffic
+estimate fell by 38.65 GB across all gate outputs with no extra scratch.
+
+The first bracket was blocked by a concurrent compile. An exploratory
+bracket while the unrelated build process remained present had mixed
+first-use timing and favored fusion on repeats. A separate bracket with
+no named contender began at nominal thermal state and ended at fair.
+It matched all 64 reference IDs in all eight requests.
+
+| Arm | First prefill tok/s | Warm prefill tok/s |
+| --- | ---: | ---: |
+| Control first | 649.90 | 461.51 |
+| Fused first | 654.68 | 443.35 |
+| Fused last | 654.12 | 465.50 |
+| Control last | 655.39 | 473.68 |
+
+First use was within control drift. The repeats established no gain.
+Remove the fusion. Agent patch SHA-256
+`5f3b12c6bc53b29798bf2783349fa6ebabacaf2550b0807adb923386424a9469`.
+The initial bracket used binary SHA-256
+`affff6b217653194a606068749be2a23b34c04c8cc67ddbcfb302a4da108d90c`
+and source patch `d2d58b547560d21310158c9b254c261e183e3df9cb1cbb1e0a675ac81f3b364b`.
+The later bracket used the HY4FRAG-13 binary and harness SHA-256
+`312f497936818ccde27342ca59ccf2074093e5d3a63bf28838f826d8676ca1e7`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| First two host refusals | `529f91a492bbae61a77ff7f168f7aa2f6afe55b4ee64b5c5d3dff4e81b1d0fe5` |
+| Last two host refusals | `881fe50398bc9be13b97c905ddcfac9210e56b72ba8002fd1a7022cd1a3cddc9` |
+| Exploratory control first | `c6649381e18d20ddf154cb75b18a5b5bc0677db58e2ca058ccb945d43399cc2d` |
+| Exploratory fused first | `cbf5dbbafb9e62c87fec5545e88456680b764c66da4066f9795feb9e9b7a2d94` |
+| Exploratory fused last | `1ed0f390cff4c28cb2de919a320448a1eec217fe9395a21ba2ef89c1ac16e45c` |
+| Exploratory control last | `6405b54c9f49d61ee425b92bc9fe08a28241c3d99143d106b9e76e6adfceba92` |
+| Control first | `cfa3283d71866ff49fc92ccc2734842de2fe2d51dc8d73aac461642d6f4b04a9` |
+| Fused first | `fe4f1c84d205e32e1f21b64ccc898934b8bbba68fce493e34a4becc16894de3f` |
+| Fused last | `8bdb60f6347625afc3038e8e7d4bbcb7003cbd29f673dd1f2ef1147864d92bcb` |
+| Control last | `2fef753e73efb57241597a66f7fdb86e4dc41dbe11744f469b85a93eeabd828e` |

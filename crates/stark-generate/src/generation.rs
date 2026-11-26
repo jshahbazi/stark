@@ -639,9 +639,13 @@ pub(crate) trait GenerationBackend {
     ) -> Option<u32> {
         None
     }
-    /// Whether requests may select adaptive depth or prompt lookup.
+    /// Whether requests may select adaptive depth.
     fn supports_mtp_scheduling(&self) -> bool {
         false
+    }
+    /// Whether requests may select prompt lookup independently of adaptive depth.
+    fn supports_mtp_lookup(&self) -> bool {
+        self.supports_mtp_scheduling()
     }
     /// The round schedule for a request with MTP on that names neither
     /// `mtp_policy` nor `mtp_lookup`. Fixed with lookup off unless the loaded
@@ -797,7 +801,10 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             || backend.max_context_length() == Some(0)
             || !valid_ids(backend.eos_token_ids(), backend.vocab_size())
             || (default_drafts > 0 && mtp.is_none_or(|caps| default_drafts as usize > caps.max_drafts))
-            || (!default_scheduling.is_default() && (mtp.is_none() || !backend.supports_mtp_scheduling()))
+            || (!default_scheduling.is_default()
+                && (mtp.is_none()
+                    || (default_scheduling.adaptive && !backend.supports_mtp_scheduling())
+                    || (default_scheduling.lookup && !backend.supports_mtp_lookup())))
             || mtp.is_some_and(|capabilities| {
                 capabilities.max_drafts == 0
                     || capabilities.max_drafts > u32::MAX as usize
@@ -936,7 +943,9 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         if *drafts == 0 {
             return Err("invalid_generation_request");
         }
-        if !self.backend.supports_mtp_scheduling() {
+        if (adaptive && !self.backend.supports_mtp_scheduling())
+            || (scheduling.lookup && !self.backend.supports_mtp_lookup())
+        {
             return Err("mtp_not_supported");
         }
         if adaptive && !explicit_drafts {
@@ -969,7 +978,10 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             return Err("invalid_generation_request");
         }
         self.resolve_mtp(None, Some(options.mtp_drafts))?;
-        if !options.mtp_scheduling.is_default() && (options.mtp_drafts == 0 || !self.backend.supports_mtp_scheduling())
+        if !options.mtp_scheduling.is_default()
+            && (options.mtp_drafts == 0
+                || (options.mtp_scheduling.adaptive && !self.backend.supports_mtp_scheduling())
+                || (options.mtp_scheduling.lookup && !self.backend.supports_mtp_lookup()))
         {
             return Err("invalid_generation_request");
         }
@@ -1674,11 +1686,17 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         None => json!({"supported":false,"max_drafts":0,"recommended_drafts":0,
             "default_drafts":0,"operations":[]}),
     };
-    if worker.mtp.is_some() && worker.backend.supports_mtp_scheduling() {
-        readiness["mtp"]["policies"] = json!(["fixed", "adaptive"]);
+    let adaptive = worker.backend.supports_mtp_scheduling();
+    let lookup = worker.backend.supports_mtp_lookup();
+    if worker.mtp.is_some() && (adaptive || lookup) {
+        readiness["mtp"]["policies"] = if adaptive {
+            json!(["fixed", "adaptive"])
+        } else {
+            json!(["fixed"])
+        };
         readiness["mtp"]["default_policy"] = json!(worker.default_mtp_scheduling.policy());
         readiness["mtp"]["default_lookup"] = json!(worker.default_mtp_scheduling.lookup);
-        readiness["mtp"]["lookup"] = json!(true);
+        readiness["mtp"]["lookup"] = json!(lookup);
     }
     if worker.media.is_some() && worker.backend.supports_images() {
         let identity = worker
@@ -1840,6 +1858,7 @@ mod tests {
         plans: Vec<RecordedPlan>,
         planning_allowed: bool,
         mtp_scheduling: bool,
+        mtp_lookup_only: bool,
         scheduling_requests: Vec<MtpScheduling>,
         default_scheduling: MtpScheduling,
         sampling_tuned_drafts: Option<(u32, u32)>,
@@ -1938,6 +1957,9 @@ mod tests {
         }
         fn supports_mtp_scheduling(&self) -> bool {
             self.mtp_scheduling
+        }
+        fn supports_mtp_lookup(&self) -> bool {
+            self.mtp_lookup_only || self.mtp_scheduling
         }
         fn default_mtp_scheduling(&self) -> MtpScheduling {
             self.default_scheduling
@@ -2229,6 +2251,7 @@ mod tests {
             plans: Vec::new(),
             planning_allowed: true,
             mtp_scheduling: false,
+            mtp_lookup_only: false,
             scheduling_requests: Vec::new(),
             default_scheduling: MtpScheduling::default(),
             sampling_tuned_drafts: None,
@@ -2487,6 +2510,22 @@ mod tests {
         off["mtp_policy"] = json!("fixed");
         assert!(post(&mut worker, off).get("error").is_none());
         assert_eq!(worker.backend.generation_calls, calls + 1);
+    }
+
+    #[test]
+    fn mtp_lookup_can_run_without_adaptive_depth() {
+        let mut worker = mtp_worker(3, 2);
+        worker.backend.mtp_lookup_only = true;
+        let mut request = standard();
+        request["mtp_drafts"] = json!(2);
+        request["mtp_lookup"] = json!(true);
+        let reply = post(&mut worker, request.clone());
+        assert!(reply.get("error").is_none());
+        assert_eq!(reply["mtp"]["policy"], "fixed");
+        assert_eq!(reply["mtp"]["lookup"], true);
+        request["mtp_policy"] = json!("adaptive");
+        assert_eq!(post(&mut worker, request)["error"], "mtp_not_supported");
+        assert_eq!(worker.backend.generation_calls, 1);
     }
 
     const ADAPTIVE_LOOKUP: MtpScheduling = MtpScheduling {
