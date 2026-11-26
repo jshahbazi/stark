@@ -75,6 +75,7 @@ extern "C" {
 int stark_hy4_open(const char* model, const char* projector, const char* pack, int chunk,
                    int storage, int grouped, int gpu_plan, int profile_prefill, uint64_t arena_bytes_requested,
                    int demand_retention, int routed_half, int dense_packed, int resident_token_embeddings,
+                   int tensor_mla,
                    uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
                    StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
                    uint64_t* arena_bytes) noexcept;

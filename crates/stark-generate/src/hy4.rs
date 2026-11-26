@@ -149,6 +149,7 @@ impl Hy4Backend {
             verify_switch("STARK_HY4_STREAM_DEMAND_RETENTION", "invalid_hy4_stream_demand_retention", false)?;
         let routed_half = verify_switch("STARK_HY4_PREFILL_ROUTED_HALF", "invalid_hy4_prefill_routed_half", false)?;
         let dense_packed = verify_switch("STARK_HY4_PREFILL_DENSE_PACKED", "invalid_hy4_prefill_dense_packed", false)?;
+        let tensor_mla = verify_switch("STARK_HY4_PREFILL_TENSOR_MLA", "invalid_hy4_prefill_tensor_mla", false)?;
         let resident_token_embeddings =
             verify_switch("STARK_HY4_EMBEDDINGS_RESIDENT", "invalid_hy4_embeddings_resident", false)?;
         if routed_half && !grouped {
@@ -174,6 +175,7 @@ impl Hy4Backend {
                 routed_half,
                 dense_packed,
                 resident_token_embeddings,
+                tensor_mla,
                 context_limit,
             },
         )?;
@@ -191,6 +193,7 @@ impl Hy4Backend {
             "prefill_chunk_tokens": chunk,
             "prefill_stage_profile_requested": profile_prefill,
             "prefill_dense_packed_requested": dense_packed,
+            "prefill_tensor_mla_requested": tensor_mla,
             "token_embeddings_resident": resident_token_embeddings,
             "streamed_expert_demand_retention": demand_retention,
             "streamed_expert_arena_bytes": native.arena_bytes(),

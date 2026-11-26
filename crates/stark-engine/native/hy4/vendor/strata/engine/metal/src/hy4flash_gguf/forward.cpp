@@ -214,6 +214,10 @@ struct AttnArgs {
     uint32_t n_head, d_qk, d_v, kv_stride, q_stride, o_stride, sel_stride, sc_stride, window;
     float kq_scale;
 };
+struct PrefillTensorMlaArgs {
+    uint32_t n_tok, q_stride, kv_stride, o_stride, window;
+    float scale;
+};
 struct ArgmaxArgs {
     uint32_t n, stride;
 };
@@ -276,6 +280,7 @@ struct Forward::Impl {
         p_gate_mul, p_eng_rows, p_eng_gate, p_eng_delta;
     AttnPipes attn_range, attn_sel;   // attn.h: the score row, the softmax, PV
     mtl::Pipeline attn_pf_range, attn_pf_sel;   // the prefill MMA attention (hy4_flash_attn_pf.metal), prompt chunks only
+    mtl::Pipeline attn_pf_tensor;
     bool pf_mma_ok = false, pf_mma_idx_ok = false;
     std::map<std::array<uint64_t, 4>, DenseGemvF32> gemv_;
     std::map<std::array<uint64_t, 6>, DenseGemvF32> gemvh_;   // per-head weights, one dispatch for all heads
@@ -599,6 +604,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     pack = pack_dir;
     pf = p;
     if (pf.dense_packed && !c.supports_metal4()) return "packed attention prefill needs Metal 4";
+    if (pf.tensor_mla && !c.supports_metal4()) return "tensor MLA prefill needs Metal 4";
     // The sub-batch sizes are clamped to [kMaxWindow, tcap]: a decode window must fit in ONE sub-batch of each
     // stage, or the "prefill is bitwise decode" claim would rest on a path decode never takes.
     tcap = std::max(Forward::kMaxWindow, pf.chunk);
@@ -660,6 +666,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
                              "control and its output is WRONG ON PURPOSE (goal §1)\n", mut.name.c_str());
     auto kernel_files = strata_hy4_flash_metal::hy4_flash_kernel_files(mm_supported);
     if (pf.dense_packed) kernel_files.emplace_back("stark_hy4_flash_dense_packed.metal");
+    if (pf.tensor_mla) kernel_files.emplace_back("stark_hy4_flash_mla_prefill.metal");
     lib = cx->compile(kernel_files, strata_hy4_flash_metal::hy4_flash_prelude(), false);
     p_rms_w = cx->pipeline(lib, "hy4_flash_rmsnorm", mtl::Constants().b(40, true));
     p_rms_nw = cx->pipeline(lib, "hy4_flash_rmsnorm", mtl::Constants().b(40, false));
@@ -719,6 +726,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
         attn_pf_range = cx->pipeline(lib, "hy4_flash_mla_pf5_s32", mtl::Constants().b(43, false));
         attn_pf_sel = cx->pipeline(lib, "hy4_flash_mla_pf5_s32", mtl::Constants().b(43, true));
     }
+    if (pf.tensor_mla && pf_mma_ok) attn_pf_tensor = cx->pipeline(lib, "stark_hy4_mla_prefill_tensor");
     if (pf_mma_idx_ok) p_idx_score_pf = cx->pipeline(lib, "hy4_flash_indexer_score_pf");
     p_idx_topk = cx->pipeline(lib, "hy4_flash_indexer_topk",
                               mut.no_tail ? mtl::Constants().i(51, 3) : mtl::Constants());
@@ -1303,19 +1311,45 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     // multiple of 32 keeps the decode attention (its last partial block would write the next token's rows).
     stage(tm.pf_attention_mla_ms);
     const bool attn_mma = pf_mma_ok && T > Forward::kMaxWindow && H % 32 == 0;
-    for (int t0 = 0; t0 < T; t0 += (attn_mma ? T : asub)) {
+    AttnArgs a{H,
+               (uint32_t) kv_w,
+               (uint32_t) kv_lora,
+               (uint32_t) kv_w,
+               H * (uint32_t) kv_w,
+               H * (uint32_t) kv_lora,
+               (uint32_t) Forward::kSelCap,
+               (uint32_t) Forward::kSelCap,
+               b.sliding ? (uint32_t) (m->geo.sliding_window +
+                                     (mut.swa_plus1 || (pf.probe == 3 && pr_in_chunk) ? 1 : 0)) : 0u,
+               1.0f / std::sqrt((float) qk)};
+    int tensor_rows = 0;
+    if (pf.tensor_mla && attn_mma && mut.none && pf.probe == 0 && inj == nullptr) {
+        if (b.sliding) {
+            tensor_rows = T;
+        } else if (b.has_indexer && m->geo.idx_select_tail && idx_kpool > 0) {
+            // The selector's group budget is floor(top_k / kpool) - 1.
+            // Below that cutoff all completed groups plus the current tail
+            // are exactly the causal range. Keep the normal IndexPool updates
+            // so later sparse rows can score history written by these queries.
+            const int cutoff = (idx_topk / idx_kpool) * idx_kpool;
+            tensor_rows = std::clamp(cutoff - p0, 0, T);
+        }
+    }
+    if (tensor_rows > 0) {
+        PrefillTensorMlaArgs args{(uint32_t) tensor_rows, a.q_stride, a.kv_stride, a.o_stride, a.window, a.kq_scale};
+        mtl::Dispatch d;
+        d.p = &attn_pf_tensor;
+        d.args = {mtl::Arg::B(Q), mtl::Arg::B(kv, 2 * (size_t) b.kv_off),
+                  mtl::Arg::B(m->dense, b.t[W_SINKS]->offset), mtl::Arg::B(pos_b), mtl::Arg::B(attn_o),
+                  mtl::Arg::V(args)};
+        d.grid[0] = ((uint32_t) tensor_rows + 15) / 16;
+        d.grid[1] = H;
+        d.tg[0] = 256;
+        mtl::require_fit(d, "stark_hy4_mla_prefill_tensor");
+        ds.push_back(d);
+    }
+    for (int t0 = tensor_rows; t0 < T; t0 += (attn_mma ? T : asub)) {
         const uint32_t nt = (uint32_t) std::min(attn_mma ? T : asub, T - t0);
-        AttnArgs a{H,
-                   (uint32_t) kv_w,
-                   (uint32_t) kv_lora,
-                   (uint32_t) kv_w,
-                   H * (uint32_t) kv_w,
-                   H * (uint32_t) kv_lora,
-                   (uint32_t) Forward::kSelCap,
-                   (uint32_t) Forward::kSelCap,
-                   b.sliding ? (uint32_t) (m->geo.sliding_window +
-                                         (mut.swa_plus1 || (pf.probe == 3 && pr_in_chunk) ? 1 : 0)) : 0u,
-                   1.0f / std::sqrt((float) qk)};
         const size_t probe_pos = pf.probe == 1 && pr_in_chunk ? 0 : 4 * (size_t) t0;
         // the bound on a row's key count: the window for a sliding block, the scratch row for a selection
         const uint32_t n_cap = !b.has_indexer && a.window != 0 ? a.window : (uint32_t) Forward::kSelCap;

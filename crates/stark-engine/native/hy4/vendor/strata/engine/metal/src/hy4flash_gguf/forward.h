@@ -75,6 +75,7 @@ struct Prefill {
     bool mapped_gpu_plan = false;  ///< Build decode/verify expert groups on Metal for mapped banks
     bool routed_half = false;       ///< Stage grouped expert GEMM operands as F16, keeping F32 accumulation
     bool dense_packed = false;      ///< Read packed Q8_0 attention projections into prefill tensor fragments
+    bool tensor_mla = false;        ///< Use multi-query tensor attention for contiguous prefill ranges
     bool grouped_k_quant = false;   ///< Q3_K/Q4_K gate/up with Q4_K down, on Metal 4
     /// A WRONG DECISION, ON PURPOSE, IN THE PREFILL PATH ONLY (HY4_FLASH_PREFILL_PROBE), so that
     /// `--prefill-consistency` has a case it must FAIL on.  A bitwise check that has never been seen to fail is

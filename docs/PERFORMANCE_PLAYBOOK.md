@@ -849,6 +849,8 @@ Reprofile after landing a different operand path. With packed projections, group
 
 The wider Hy4 routed tile cut the number of output tiles and K steps with the same precision. Its 443.13 tok/s warm 4K K2 result beat the first control by about 2% in a bracket with about 6% control drift. The change was removed. Isolate any admission gain from the exact scratch estimate in a separate live memory comparison. [Wide tile and scratch sizing screen](model-experiments/2026-11-25-hy4-decode-cache-construction.md#20261125-hy4nextn-06--wider-routed-tile-and-exact-scratch-estimate)
 
+Reuse contiguous MLA tiles across query rows where the selector already exposes a complete range. Hy4 Q3_K uses a 16-query tensor kernel on sliding and initial causal indexed rows, and reuses its sparse kernel past the cutoff. On the 4K K2 bracket with packed projections and a 40 GB arena, first-use prefill improved 7–13% and warm prefill 6–14%, with all 64 reference IDs matching. Retain the kernel opt-in. A separate stage sample measured 0.910 s of MLA against 1.880 s on the preceding profiled build. [Hy4 multi-query MLA prefill](model-experiments/2026-11-25-hy4-multi-query-prefill.md)
+
 ## Ideas not yet tried
 
 | Idea | Why it is open |
@@ -936,6 +938,7 @@ The [experiment selection table](#choose-a-performance-experiment) links the GLM
 | 2026-11-25 | [Hy4-flash routed prefill and expert retention](model-experiments/2026-11-25-hy4-dense-prefill-expert-retention.md) | Attention decomposition, opt-in F16 routed operands and warm decode retention, rejected dense F16 and narrower read-ahead |
 | 2026-11-25 | [Hy4-flash context ladder and packed Q8_0 prefill](model-experiments/2026-11-25-hy4-context-ladder.md) | Matched-input ladder through 32K, NextN catch-up attribution, retained packed Q8_0 projections and rejected decode file caching |
 | 2026-11-25 | [Hy4-flash NextN cache construction and verify attention](model-experiments/2026-11-25-hy4-decode-cache-construction.md) | Resident packed token embeddings, rejected cache MMA, history batching and fused verifier attention |
+| 2026-11-25 | [Hy4-flash multi-query MLA prefill](model-experiments/2026-11-25-hy4-multi-query-prefill.md) | Opt-in tensor kernel for contiguous sliding and causal keys, stage attribution and 4K exact-output bracket |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 

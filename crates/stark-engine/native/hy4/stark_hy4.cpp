@@ -90,6 +90,7 @@ struct StarkHy4 {
 extern "C" int stark_hy4_open(const char* model, const char* projector, const char* pack, int chunk,
                                int storage, int grouped, int gpu_plan, int profile_prefill, uint64_t arena_bytes_requested,
                                int demand_retention, int routed_half, int dense_packed, int resident_token_embeddings,
+                               int tensor_mla,
                                uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
                                StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
                                uint64_t* arena_bytes) noexcept {
@@ -140,6 +141,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         prefill.profile_stages = profile_prefill != 0;
         prefill.routed_half = routed_half != 0;
         prefill.dense_packed = dense_packed != 0;
+        prefill.tensor_mla = tensor_mla != 0;
         if (!s.forward.open(s.model, s.metal, pack, prefill).empty()) return 4;
         if (!s.mtp.open(s.model, s.metal, s.forward.library(), 1024, pack).empty()) return 5;
         if (!s.vision.build(s.metal, s.forward.library()).empty()) return 3;

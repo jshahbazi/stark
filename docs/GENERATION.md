@@ -113,6 +113,12 @@ uses F16 operands and F32 accumulation. The [context ladder and projection
 record](model-experiments/2026-11-25-hy4-context-ladder.md) covers the measured
 4K comparison and the 32K prompt.
 
+`STARK_HY4_PREFILL_TENSOR_MLA=1` selects the experimental Metal 4
+multi-query kernel for sliding and fully causal indexed prefill rows.
+It uses F16 query and probability operands with F32 accumulation and
+preserves each row's visible keys. Indexed rows past the causal region
+use the existing sparse selector. [Prefill MLA experiment](model-experiments/2026-11-25-hy4-multi-query-prefill.md)
+
 `STARK_HY4_EMBEDDINGS_RESIDENT=1` loads the original packed Q8_0 token
 embedding table into the dense allocation. Target and NextN share the table.
 The extra 394 MB is counted before context sizing. See the [NextN cache

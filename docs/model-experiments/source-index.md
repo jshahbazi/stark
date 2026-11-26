@@ -171,6 +171,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Hy4-flash AngelSlim Q3_K routed prefill and expert retention](2026-11-25-hy4-dense-prefill-expert-retention.md) · Model experiment, 2026-11-25
 - [Hy4-flash AngelSlim Q3_K context ladder and decode residency](2026-11-25-hy4-context-ladder.md) · Model experiment, 2026-11-25
 - [Hy4-flash AngelSlim Q3_K NextN cache construction and verify attention](2026-11-25-hy4-decode-cache-construction.md) · Model experiment, 2026-11-25
+- [Hy4-flash AngelSlim Q3_K multi-query MLA prefill](2026-11-25-hy4-multi-query-prefill.md) · Model experiment, 2026-11-25
 - [GLM EXL3 throughput comparison and gap investigation](../benchmarks/2026-11-04-glm-mlx-stream-comparison.md) · Benchmark, 2026-11-04
 - [GLM-5.3 Batched Prefill Experiment](../benchmarks/GLM53_BATCHED_PREFILL_2026_11_02.md) · Benchmark, 2026-11-02
 - [Native GLM and Qwen GPU decode graphs](../benchmarks/GLM_QWEN_DECODE_GRAPH_2026_10_28.md) · Benchmark, 2026-10-28
