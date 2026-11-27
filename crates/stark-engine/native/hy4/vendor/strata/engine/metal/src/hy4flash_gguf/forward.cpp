@@ -1049,7 +1049,7 @@ void Forward::Impl::alloc_scratch(int Tm, int as, int ms, const std::function<mt
     attn_out = f32((size_t) Tm * n_embd);
     kvp = f32((size_t) Tm * kv_w);
     kvn = f32((size_t) Tm * kv_lora);
-    constexpr size_t stq_mla_partial_rows = (Forward::kSelCap + 255) / 256 * (512 + 2);
+    constexpr size_t stq_mla_partial_rows = (static_cast<size_t>(Forward::kSelCap) + 255) / 256 * (512 + 2);
     size_t scores = (size_t) as * Forward::kSelCap;
     if (pf.stq_verify_register_mla) scores = std::max(scores, Forward::kMaxWindow * stq_mla_partial_rows);
     sc = f32(max_heads * scores);
