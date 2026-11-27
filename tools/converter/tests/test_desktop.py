@@ -1926,6 +1926,41 @@ def test_stale_epoch_and_expired_deadline_preserve_worker(desktop, model):
     assert desktop.worker.process is process and process.poll() is None
 
 
+@pytest.mark.parametrize("worker_busy_seconds, expires", [(45, False), (121, True)])
+def test_api_queue_allows_long_turns_and_keeps_a_deadline(desktop, monkeypatch, worker_busy_seconds, expires):
+    import threading
+
+    from stark_convert.local_api import APIError
+
+    elapsed = 0.0
+    active_job = object()
+
+    def wait(seconds):
+        nonlocal elapsed
+        elapsed += seconds
+        if elapsed >= worker_busy_seconds:
+            desktop.job = None
+
+    with monkeypatch.context() as clock:
+        clock.setattr("stark_convert.desktop.time.monotonic", lambda: elapsed)
+        clock.setattr(desktop.api_condition, "wait", wait)
+        with desktop.lock:
+            desktop.job = active_job
+            control = threading.Event()
+            if expires:
+                with pytest.raises(APIError) as error:
+                    desktop.reserve_api_request(desktop.epoch, desktop.active_model, control)
+                assert (error.value.status, error.value.code) == (429, "queue_timeout")
+                assert desktop.job is active_job
+                assert elapsed == 120
+            else:
+                desktop.reserve_api_request(desktop.epoch, desktop.active_model, control)
+                assert desktop.job is threading.current_thread()
+                assert elapsed >= worker_busy_seconds
+            assert desktop.api_queue == []
+            desktop.job = None
+
+
 def test_api_fifo_queue_and_waiter_cancellation(desktop, model):
     import threading
 

@@ -322,7 +322,7 @@ tool calls private until that validation completes.
 ## Limits, queueing and cancellation
 
 - The server accepts at most 16 concurrent connections. Excess connections receive a bare 429 with `Retry-After: 1` and no `X-Request-Id` header.
-- One worker request runs at a time. Up to eight more chat or Decision requests wait in FIFO order; a ninth receives 429 `queue_full`, and a queued request that waits more than 30 seconds receives 429 `queue_timeout`.
+- One worker request runs at a time. Up to eight more chat or Decision requests wait in FIFO order. A ninth receives 429 `queue_full`. A request still queued after 120 seconds receives 429 `queue_timeout`.
 - After its body has been read and parsed, each request has a 300-second inactivity deadline covering queueing and execution. Validated native chat progress renews it, including progress during prefill; an active chat request can run longer than five minutes. A stalled request returns 504 `request_timeout`.
 - The handler polls the client connection every 50 ms while a request runs. A disconnected or timed-out queued request is removed and leaves the loaded model available. Cancelling or timing out a running chat request follows the chat worker's cancellation behavior. Cancelling or timing out a running Decision request terminates and reaps the native Decider worker; the model must be run again before another decision. When a response can still be written, cancellation returns 499 `request_cancelled`.
 - Stopping or changing the model in Stark fences waiting and running requests with 503 `model_changed`.

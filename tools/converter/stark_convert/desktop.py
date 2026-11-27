@@ -560,7 +560,7 @@ class Desktop:
         self.api_condition = threading.Condition(self.lock)
         self.api_queue = []
         self.api_queue_limit = 8
-        self.api_queue_timeout = 30
+        self.api_queue_timeout = 120
         self.api_context = self.context_limit
         self.api_maximum = self.output_limit
         self.api_vocab = 0
