@@ -70,7 +70,8 @@ class ExpertProgram {
 public:
     // Round incoming activations for both formats and final dense outputs to BF16.
     bool open(mtl::Context& metal, bool round_bf16 = false, bool pair1_decode = false,
-              bool fused_finish_reduce = false, bool split_spec1 = false, bool wide_attention = false);
+              bool fused_finish_reduce = false, bool split_spec1 = false, bool wide_attention = false,
+              bool wide_routed = false);
     bool pair1_decode_enabled() const { return decode_.handle != nullptr; }
     static constexpr uint32_t kFusedFinishMinTokens = 1024;
     bool fuses_finish_reduce(uint32_t tokens) const {
@@ -116,6 +117,7 @@ public:
 
 private:
     mtl::Pipeline prepare_, project_, decode_, finish_, prepare_down_, combine_, finish_reduce_;
+    mtl::Pipeline prepare_register_, project_prefill_, prepare_down_register_;
     mtl::Pipeline dense_k4_, dense_k6_, dense_finish_, dense_split_, dense_split_finish_, dense_prefill_;
     mtl::Pipeline attention_gate_prepare_;
 };

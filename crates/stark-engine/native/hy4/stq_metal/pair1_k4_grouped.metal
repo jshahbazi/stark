@@ -35,15 +35,15 @@ static inline vec<half, 8> stark_hy4_pair1_k4_fragment(device const uint* words,
     return vec<half, 8>(a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y);
 }
 
-template <typename Fragment>
+template <uint Offset = 0, typename Fragment>
 static inline void stark_hy4_stq_load_activation(thread Fragment& target,
     device const half* row0, device const half* row1, uint offset) {
     const half4 a = *(device const half4*)(row0 + offset);
     const half4 b = *(device const half4*)(row1 + offset);
     #pragma clang loop unroll(full)
     for (uint i = 0; i < 4; ++i) {
-        target[i] = a[i];
-        target[i + 4] = b[i];
+        target[Offset + i] = a[i];
+        target[Offset + i + 4] = b[i];
     }
 }
 
@@ -131,5 +131,100 @@ kernel void stark_hy4_stq_pair1_k4_grouped(
         stark_hy4_pair1_k4_project<true>(weights, input, output, job, shape, channel, lane);
     } else {
         stark_hy4_pair1_k4_project<false>(weights, input, output, job, shape, channel, lane);
+    }
+}
+
+template <typename Fragment>
+static inline void stark_hy4_pair1_store_tile(const thread Fragment& source,
+    device half* output, uint width, uint live_rows) {
+    const auto first = source.get_multidimensional_index(ushort(0));
+    #pragma clang loop unroll(full)
+    for (uint run = 0; run < 4; ++run) {
+        const uint row = first[1] + (run & 1u) * 8u;
+        if (row < live_rows) {
+            const uint i = run * 4u;
+            device half* destination = output + ulong(row) * width + first[0] + (run & 2u) * 8u;
+            *(device half4*)destination = half4(half(source[i]), half(source[i + 1u]),
+                                               half(source[i + 2u]), half(source[i + 3u]));
+        }
+    }
+}
+
+// Consume two adjacent K16 slabs from the pair-major bank per MMA. Keep
+// the accumulator in F32 and round at the existing F16 output boundary.
+template <bool TwoTiles>
+static inline void stark_hy4_pair1_k4_project_wide(device const uint* weights,
+    device const half* input, device half* output, uint3 job, uint2 shape, uint channel, uint lane) {
+    constexpr uint K = 32, Rows = 16, TileWords = 32;
+    constexpr auto descriptor = matmul2d_descriptor(Rows, 32, K, false, true, true,
+        matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<descriptor, execution_simdgroup> product;
+    auto left = product.get_left_input_cooperative_tensor<half, half, float>();
+    auto right = product.get_right_input_cooperative_tensor<half, half, float>();
+    using Left = remove_addrspace_t<decltype(left)>;
+    using Right = remove_addrspace_t<decltype(right)>;
+    auto top = product.get_destination_cooperative_tensor<Left, Right, float>();
+    auto bottom = product.get_destination_cooperative_tensor<Left, Right, float>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < top.get_capacity(); ++i) {
+        top[i] = 0.0f;
+        if constexpr (TwoTiles) bottom[i] = 0.0f;
+    }
+
+    const uint row = ((lane >> 2u) & 4u) | ((lane >> 1u) & 3u);
+    const uint col = (((lane >> 2u) & 2u) | (lane & 1u)) * 4u;
+    const uint last = job.z - 1u;
+    device const half* input_start = input + ulong(job.y) * shape.x + col;
+    device const half* top0 = input_start + ulong(min(row, last)) * shape.x;
+    device const half* top1 = input_start + ulong(min(row + 8u, last)) * shape.x;
+    device const half* bottom0 = input_start + ulong(min(row + Rows, last)) * shape.x;
+    device const half* bottom1 = input_start + ulong(min(row + Rows + 8u, last)) * shape.x;
+    const ulong pair = ulong(job.x) * (shape.y / 32u) + channel / 32u;
+    device const uint* tiles = weights + pair * (shape.x / K) * (4u * TileWords);
+
+    #pragma clang loop unroll(disable)
+    for (uint k = 0; k < shape.x; k += K, tiles += 4u * TileWords) {
+        const auto low0 = stark_hy4_pair1_k4_fragment(tiles, lane);
+        const auto low1 = stark_hy4_pair1_k4_fragment(tiles + TileWords, lane);
+        const auto high0 = stark_hy4_pair1_k4_fragment(tiles + 2u * TileWords, lane);
+        const auto high1 = stark_hy4_pair1_k4_fragment(tiles + 3u * TileWords, lane);
+        #pragma clang loop unroll(full)
+        for (uint i = 0; i < 8; ++i) {
+            right[i] = low0[i];
+            right[i + 8u] = low1[i];
+            right[i + 16u] = high0[i];
+            right[i + 24u] = high1[i];
+        }
+        stark_hy4_stq_load_activation(left, top0, top1, k);
+        stark_hy4_stq_load_activation<8>(left, top0, top1, k + 16u);
+        product.run(left, right, top);
+        if constexpr (TwoTiles) {
+            stark_hy4_stq_load_activation(left, bottom0, bottom1, k);
+            stark_hy4_stq_load_activation<8>(left, bottom0, bottom1, k + 16u);
+            product.run(left, right, bottom);
+        }
+    }
+
+    device half* out = output + ulong(job.y) * shape.y + channel;
+    stark_hy4_pair1_store_tile(top, out, shape.y, min(job.z, Rows));
+    if constexpr (TwoTiles) {
+        stark_hy4_pair1_store_tile(bottom, out + ulong(Rows) * shape.y, shape.y, job.z - Rows);
+    }
+}
+
+// Same buffers and dispatch grid as the grouped K16 projection. The routed
+// banks have input channels divisible by K32.
+kernel void stark_hy4_stq_pair1_k4_prefill(
+    device const uint* weights [[buffer(0)]], device const half* input [[buffer(1)]],
+    device half* output [[buffer(2)]], device const uint4* jobs [[buffer(3)]],
+    constant uint2& shape [[buffer(4)]], uint3 group [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint3 job = jobs[group.y].xyz;
+    const uint channel = group.x * 128u + sg * 32u;
+    if (job.z == 0u || job.z > 32u || channel >= shape.y) return;
+    if (job.z > 16u) {
+        stark_hy4_pair1_k4_project_wide<true>(weights, input, output, job, shape, channel, lane);
+    } else {
+        stark_hy4_pair1_k4_project_wide<false>(weights, input, output, job, shape, channel, lane);
     }
 }

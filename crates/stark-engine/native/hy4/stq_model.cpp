@@ -95,7 +95,7 @@ bool Trunk::begin_residency(mtl::Context& metal) const {
 std::string load_trunk(strata::hy4_flash::Model& model, mtl::Context& metal,
                        std::span<const WeightSource> weights,
                        std::span<const ProjectionSource> experts, bool round_bf16, bool pair1_decode,
-                       bool fused_finish_reduce, bool split_spec1, bool wide_attention) {
+                       bool fused_finish_reduce, bool split_spec1, bool wide_attention, bool wide_routed) {
     constexpr size_t trunk_weights = 1256, draft_weights = 92;
     if ((weights.size() != trunk_weights && weights.size() != trunk_weights + draft_weights) ||
         experts.size() != 123 || model.stq) return "invalid STQ weight inventory";
@@ -163,7 +163,8 @@ std::string load_trunk(strata::hy4_flash::Model& model, mtl::Context& metal,
             !trunk->experts[i / 3][i % 3].open(metal, p.trellis, p.suh, p.svh))
             return "cannot map STQ expert bank " + std::to_string(i);
     }
-    if (!trunk->program.open(metal, round_bf16, pair1_decode, fused_finish_reduce, split_spec1, wide_attention) ||
+    if (!trunk->program.open(metal, round_bf16, pair1_decode, fused_finish_reduce, split_spec1,
+                             wide_attention, wide_routed) ||
         !trunk->embedding.open(metal))
         return "cannot compile STQ Metal projections";
     model.stq = std::move(trunk);

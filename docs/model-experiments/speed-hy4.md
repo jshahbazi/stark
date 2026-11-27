@@ -6,6 +6,8 @@ The Sushi STQ 4bpw pack has separate 16K and 27K OpenCode measurements, a five-d
 
 The STQ dense attention follow-up saved 2.49 s of fresh 27K OpenCode prefill in a same-binary pair using the direct packed K32 product and fused gate preparation. The absorbed-head trials stayed out of the worker. [Dense attention measurements](2026-11-27-hy4-stq-dense-attention-prefill.md)
 
+The STQ routed follow-up used K32 PAIR1 products and register H128 preparation at 1,024 prompt rows and up. The repeated same-binary fresh 27K OpenCode pair went from 34.20 to 32.93 s of prefill with identical outputs and draft counts. Long-context MLA geometry variants produced no integrated change. [Routed and MLA measurements](2026-11-27-hy4-stq-routed-attention-prefill.md)
+
 ## Artifact and reference
 
 - **Artifact.** `AngelSlim/Hy4-flash-GGUF` at `c50d4dd30be42f2b91138e5731de0e2f32ad56b2`. The two Q3_K shards and original BF16 projector total 156,415,403,072 bytes. Keep the original packed expert tensors, FP8 Engram table and NextN block. The target vocabulary projection remains BF16 across draft-head experiments. [Artifact inventory and digests](2026-11-25-hy4-native-q3-k.md#artifact-and-runtime-identities)

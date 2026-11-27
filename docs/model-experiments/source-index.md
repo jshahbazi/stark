@@ -176,6 +176,10 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Hy4-flash AngelSlim Q3_K grouped expert fragments](2026-11-25-hy4-grouped-fragments.md) · Model experiment, 2026-11-25
 - [Hy4-flash catalog install and packaged generation](2026-11-26-hy4-desktop-catalog.md) · Model experiment, 2026-11-26
 - [Hy4-Flash Sushi STQ metadata preflight](2026-11-26-hy4-sushi-stq-preflight.md) · Format inventory only, 2026-11-26
+- [Hy4-Flash Sushi STQ native bring-up](2026-11-27-hy4-stq-native.md) · Model experiment, 2026-11-27
+- [Hy4-Flash Sushi STQ OpenCode performance](2026-11-27-hy4-stq-open-code-performance.md) · Model experiment, 2026-11-27
+- [Hy4-Flash Sushi STQ dense attention prefill](2026-11-27-hy4-stq-dense-attention-prefill.md) · Model experiment, 2026-11-27
+- [Hy4-Flash Sushi STQ routed experts and long-context attention](2026-11-27-hy4-stq-routed-attention-prefill.md) · Model experiment, 2026-11-27
 - [Hy4-flash AngelSlim Q3_K tool calling](2026-11-26-hy4-tool-calling.md) · Model experiment, 2026-11-26
 - [Hy4-flash defaults through OpenCode](2026-11-26-hy4-opencode-defaults.md) · Model experiment, 2026-11-26
 - [Resident Hy4-flash through OpenCode](2026-11-26-hy4-resident-opencode.md) · Model experiment, 2026-11-26

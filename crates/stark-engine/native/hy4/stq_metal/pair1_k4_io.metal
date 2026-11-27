@@ -184,3 +184,59 @@ kernel void stark_hy4_stq_pair1_finish_reduce(
         for (uint i = 0; i < 4; ++i) output[at + 32u * i] = sum[i];
     }
 }
+
+static inline float4 stark_hy4_stq_hadamard_lane4(float4 value, ushort lane) {
+    #pragma clang loop unroll(full)
+    for (ushort step = 1; step < 32; step <<= 1) {
+        const float4 peer(simd_shuffle_xor(value.x, step), simd_shuffle_xor(value.y, step),
+                          simd_shuffle_xor(value.z, step), simd_shuffle_xor(value.w, step));
+        value = lane & step ? peer - value : value + peer;
+    }
+    const float a = value.x + value.y, b = value.x - value.y;
+    const float c = value.z + value.w, d = value.z - value.w;
+    return float4(a + c, b + d, a - c, b - d) * 0.08838834764831845f;
+}
+
+template<typename T>
+static inline float4 stark_hy4_stq_lane4_load(device const T* base) {
+    return float4(base[0], base[32], base[64], base[96]);
+}
+
+static inline void stark_hy4_stq_lane4_store(device half* base, float4 v) {
+    base[0] = half(v.x); base[32] = half(v.y); base[64] = half(v.z); base[96] = half(v.w);
+}
+
+kernel void stark_hy4_stq_pair1_prepare_register(
+    device const float* input [[buffer(0)]], device const half* scales [[buffer(1)]],
+    device const uint2* row_map [[buffer(2)]], device half* output [[buffer(3)]],
+    constant uint& width [[buffer(4)]], uint2 group [[threadgroup_position_in_grid]],
+    ushort simd [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
+    const uint channel = (group.x * 4u + simd) * 128u + lane;
+    const uint2 entry = row_map[group.y];
+    float4 values = stark_hy4_stq_lane4_load(input + ulong(entry.y) * width + channel);
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < 4; ++i) values[i] = stark_hy4_stq_projection_boundary(values[i]);
+    values *= stark_hy4_stq_lane4_load(scales + ulong(entry.x) * width + channel);
+    stark_hy4_stq_lane4_store(output + ulong(group.y) * width + channel,
+                             stark_hy4_stq_hadamard_lane4(values, lane));
+}
+
+kernel void stark_hy4_stq_pair1_prepare_down_register(
+    device const half* gate [[buffer(0)]], device const half* up [[buffer(1)]],
+    device const half* gate_svh [[buffer(2)]], device const half* up_svh [[buffer(3)]],
+    device const half* down_suh [[buffer(4)]], device const uint2* row_map [[buffer(5)]],
+    device half* prepared [[buffer(6)]], constant uint& width [[buffer(7)]],
+    constant float& limit [[buffer(8)]], uint2 group [[threadgroup_position_in_grid]],
+    ushort simd [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
+    const uint channel = (group.x * 4u + simd) * 128u + lane;
+    const ulong route_index = ulong(group.y) * width + channel;
+    const ulong scale_index = ulong(row_map[group.y].x) * width + channel;
+    const float4 g = stark_hy4_stq_hadamard_lane4(stark_hy4_stq_lane4_load(gate + route_index), lane) *
+                     stark_hy4_stq_lane4_load(gate_svh + scale_index);
+    const float4 u = stark_hy4_stq_hadamard_lane4(stark_hy4_stq_lane4_load(up + route_index), lane) *
+                     stark_hy4_stq_lane4_load(up_svh + scale_index);
+    const float4 gv = min(g, limit);
+    const float4 activation = (gv * (1.0f / (1.0f + precise::exp(-gv)))) * clamp(u, -limit, limit);
+    const float4 weighted = activation * stark_hy4_stq_lane4_load(down_suh + scale_index);
+    stark_hy4_stq_lane4_store(prepared + route_index, stark_hy4_stq_hadamard_lane4(weighted, lane));
+}

@@ -110,7 +110,7 @@ bool DenseBank::open(mtl::Context& metal, Format rate, uint32_t input_width, uin
 }
 
 bool ExpertProgram::open(mtl::Context& metal, bool round_bf16, bool pair1_decode, bool fused_finish_reduce,
-                         bool split_spec1, bool wide_attention) {
+                         bool split_spec1, bool wide_attention, bool wide_routed) {
     if (!metal.supports_metal4()) return false;
     try {
         std::vector<std::string> sources{"pair1_k4_grouped.metal", "pair1_k4_io.metal", "spec1_dense.metal"};
@@ -121,6 +121,12 @@ bool ExpertProgram::open(mtl::Context& metal, bool round_bf16, bool pair1_decode
         if (round_bf16) boundary.b(0, true);
         prepare_ = metal.pipeline(library, "stark_hy4_stq_pair1_prepare", boundary);
         project_ = metal.pipeline(library, "stark_hy4_stq_pair1_k4_grouped");
+        project_prefill_ = wide_routed ?
+            metal.pipeline(library, "stark_hy4_stq_pair1_k4_prefill") : mtl::Pipeline{};
+        prepare_register_ = wide_routed ?
+            metal.pipeline(library, "stark_hy4_stq_pair1_prepare_register", boundary) : mtl::Pipeline{};
+        prepare_down_register_ = wide_routed ?
+            metal.pipeline(library, "stark_hy4_stq_pair1_prepare_down_register") : mtl::Pipeline{};
         finish_ = metal.pipeline(library, "stark_hy4_stq_pair1_finish");
         dense_finish_ = round_bf16 ? metal.pipeline(library, "stark_hy4_stq_pair1_finish", boundary) : finish_;
         prepare_down_ = metal.pipeline(library, "stark_hy4_stq_pair1_prepare_down");
@@ -138,6 +144,9 @@ bool ExpertProgram::open(mtl::Context& metal, bool round_bf16, bool pair1_decode
         return prepare_.max_threads >= 128 && project_.max_threads >= 128 && finish_.max_threads >= 128 &&
                prepare_down_.max_threads >= 128 && combine_.max_threads >= 128 &&
                dense_k4_.max_threads >= 128 && dense_k6_.max_threads >= 128 && dense_finish_.max_threads >= 128 &&
+               (!wide_routed || (project_prefill_.max_threads >= 128 && project_prefill_.simd_width == 32 &&
+                                 prepare_register_.max_threads >= 128 && prepare_register_.simd_width == 32 &&
+                                 prepare_down_register_.max_threads >= 128 && prepare_down_register_.simd_width == 32)) &&
                (!pair1_decode || (decode_.max_threads >= 128 && decode_.simd_width == 32)) &&
                (!fused_finish_reduce || (finish_reduce_.max_threads >= 512 && finish_reduce_.simd_width == 32)) &&
                (!split_spec1 || (dense_split_.max_threads >= 128 && dense_split_.simd_width == 32 &&
@@ -181,6 +190,8 @@ bool ExpertProgram::append_routed(std::vector<mtl::Dispatch>& commands, const Ex
                                   const mtl::Buffer& routed, const mtl::Buffer& output,
                                   const mtl::Buffer* projection_grid) const {
     constexpr uint32_t width = ExpertBank::width, blocks = width / 128, topk = 16, max_tokens = 4096;
+    constexpr uint32_t min_wide_tokens = 1024;
+    static_assert(width % 512 == 0);
     constexpr float clamp = 10.0f;
     const size_t positions = size_t(tokens) * width;
     const size_t slots = size_t(tokens) * topk;
@@ -203,25 +214,30 @@ bool ExpertProgram::append_routed(std::vector<mtl::Dispatch>& commands, const Ex
         const uint32_t shape[2] = {width, width};
         const bool use_decode = pair1_decode_enabled() && tokens == 1 && rows == topk && job_count == topk &&
                                 projection_grid == nullptr;
+        const bool wide = project_prefill_.handle && tokens >= min_wide_tokens;
+        const auto& prefill_project = wide ? project_prefill_ : project_;
+        const auto& prepare_input = wide ? prepare_register_ : prepare_;
+        const auto& prepare_down = wide ? prepare_down_register_ : prepare_down_;
+        const uint32_t prepare_blocks = wide ? blocks / 4 : blocks;
         auto project = [&](const ExpertBank& bank, const mtl::Buffer& raw, bool use_gemv = false) {
-            const auto& projection = use_gemv ? decode_ : project_;
+            const auto& projection = use_gemv ? decode_ : prefill_project;
             const uint32_t projection_width = use_gemv ? width / 32 : blocks;
             commands.push_back({&projection, {bank.trellis.argument(), Arg::B(prepared), Arg::B(raw), Arg::B(jobs),
                                                Arg::V(shape)}, {projection_width, job_count, 1}, {128, 1, 1}});
             commands.back().indirect = projection_grid;
         };
         auto prepare = [&](const ExpertBank& bank) {
-            commands.push_back({&prepare_, {Arg::B(input), bank.suh.argument(), Arg::B(row_map), Arg::B(prepared),
-                                           Arg::V(width)}, {blocks, rows, 1}, {128, 1, 1}});
+            commands.push_back({&prepare_input, {Arg::B(input), bank.suh.argument(), Arg::B(row_map), Arg::B(prepared),
+                                               Arg::V(width)}, {prepare_blocks, rows, 1}, {128, 1, 1}});
         };
         prepare(gate);
         project(gate, gate_raw);
         prepare(up);
         project(up, up_raw);
-        commands.push_back({&prepare_down_, {Arg::B(gate_raw), Arg::B(up_raw), gate.svh.argument(),
-                                            up.svh.argument(), down.suh.argument(), Arg::B(row_map),
-                                            Arg::B(prepared), Arg::V(width), Arg::V(clamp)},
-                            {blocks, rows, 1}, {128, 1, 1}});
+        commands.push_back({&prepare_down, {Arg::B(gate_raw), Arg::B(up_raw), gate.svh.argument(),
+                                           up.svh.argument(), down.suh.argument(), Arg::B(row_map),
+                                           Arg::B(prepared), Arg::V(width), Arg::V(clamp)},
+                            {prepare_blocks, rows, 1}, {128, 1, 1}});
         project(down, gate_raw, use_decode);
         if (fused_finish) {
             commands.push_back({&finish_reduce_, {Arg::B(gate_raw), down.svh.argument(), Arg::B(row_map),

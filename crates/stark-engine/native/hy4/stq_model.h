@@ -40,6 +40,6 @@ std::string load_trunk(strata::hy4_flash::Model& model, mtl::Context& metal,
                        std::span<const WeightSource> weights,
                        std::span<const ProjectionSource> experts, bool round_bf16 = false,
                        bool pair1_decode = false, bool fused_finish_reduce = false, bool split_spec1 = false,
-                       bool wide_attention = false);
+                       bool wide_attention = false, bool wide_routed = false);
 
 } // namespace stark::hy4::stq

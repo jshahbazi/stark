@@ -121,6 +121,7 @@ fn run_trunk(
                 verify_register_mla: env::var_os("STARK_HY4_STQ_VERIFY_MLA").is_some(),
                 cache_engram_pages: env::var_os("STARK_HY4_STQ_ENGRAM_PAGE_CACHE").is_some(),
                 wide_attention: env::var_os("STARK_HY4_STQ_WIDE_ATTENTION").is_some(),
+                wide_routed: env::var_os("STARK_HY4_STQ_WIDE_ROUTED").is_some(),
             },
         )
     }?;
