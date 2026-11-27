@@ -29,6 +29,8 @@ constexpr uint32_t kHeads = 32, kNope = 192, kRope = 64, kQk = kNope + kRope;
 constexpr uint32_t kQr = 1024, kLatent = 512, kKv = kLatent + kRope, kValue = 256, kFf = 9216;
 constexpr uint32_t kRows = kDflyMaxDrafts + 1, kPoolCutoff = 2048, kMaxSelection = 2051;
 constexpr uint32_t kMaxKeys = kMaxSelection + kRows;
+constexpr uint32_t kMlaPartition = 256, kMlaPartialWidth = kLatent + 2;
+constexpr uint32_t kMaxMlaParts = (kMaxKeys + kMlaPartition - 1) / kMlaPartition;
 constexpr size_t kKvBytes = kKv * sizeof(uint16_t);
 constexpr uint32_t kTg = 256;
 constexpr float kEps = 1e-5f;
@@ -77,6 +79,7 @@ struct Dfly2::Impl {
     const gguf::Tensor *enorm, *hnorm, *fusion_gate, *final_norm, *embed_norm, *hidden_norm, *conf_weight, *conf_bias;
     const DenseBank *fusion, *correction_gate, *correction_up, *correction_down, *embed, *head;
     Pipeline p_norm, p_rope, p_kv, p_copy, p_add, p_gate, p_glu, p_argmax;
+    Pipeline p_register_mla, p_mla_finish, p_stitch;
     DenseGemvF32 raw_kv, key_absorb, value_absorb;
     strata::hy4_flash::AttnPipes attention;
     Buffer ids, row_map, positions, compact_positions, unused, bad, best;
@@ -155,7 +158,7 @@ struct Dfly2::Impl {
         if (!buffer.ptr) throw std::runtime_error("STQ DFly2 scratch allocation failed");
     }
 
-    void initialize(int library) {
+    void initialize(int library, bool register_mla) {
         bind();
         auto build = [&](const char* name) { return metal.pipeline(library, name); };
         p_norm = metal.pipeline(library, "hy4_flash_rmsnorm", mtl::Constants().b(40, true));
@@ -167,6 +170,13 @@ struct Dfly2::Impl {
         p_glu = build("hy4_flash_swiglu_clamp");
         p_argmax = build("hy4_flash_argmax");
         attention = strata::hy4_flash::attn_pipes(&metal, library, false);
+        if (register_mla) {
+            p_register_mla = metal.pipeline(library, "stark_hy4_stq_register_mla", mtl::Constants().b(43, false));
+            p_mla_finish = build("stark_hy4_stq_register_mla_finish");
+            p_stitch = build("stark_hy4_stq_dfly_stitch");
+            if (p_register_mla.max_threads < 288 || p_mla_finish.max_threads < kTg || p_stitch.max_threads < 64)
+                throw std::runtime_error("STQ DFly2 register MLA pipeline unavailable");
+        }
         raw_kv = DenseGemvF32(metal, library, ref::BF16, kWidth, kKv, kWidth * sizeof(uint16_t));
         key_absorb = DenseGemvF32(metal, library, ref::BF16, kNope, kLatent, kNope * sizeof(uint16_t),
                                  GemvHeads{kLatent * kNope * sizeof(uint16_t), kQk, kKv});
@@ -196,7 +206,7 @@ struct Dfly2::Impl {
         floats(q_abs, kRows * kHeads * kKv);
         floats(kv_raw, kRows * kKv);
         floats(kv_norm, kRows * kLatent);
-        floats(score, kRows * kHeads * kMaxKeys);
+        floats(score, kRows * kHeads * (register_mla ? kMaxMlaParts * kMlaPartialWidth : kMaxKeys));
         floats(attended, kRows * kHeads * kLatent);
         floats(gate, kRows * kFf);
         floats(up, kRows * kFf);
@@ -261,6 +271,15 @@ struct Dfly2::Impl {
         const uint32_t n = source.selected.empty() ? target.position : static_cast<uint32_t>(source.selected.size());
         if (source.selected.empty()) {
             std::memcpy(dst, from, n * kKvBytes);
+        } else if (p_stitch.handle && source.selected_rows && source.selected_rows->handle &&
+                   source.byte_offset % 16 == 0) {
+            if (source.selected_offset % alignof(uint32_t) != 0 ||
+                source.selected_offset > source.selected_rows->bytes ||
+                n > (source.selected_rows->bytes - source.selected_offset) / sizeof(uint32_t))
+                throw std::runtime_error("invalid STQ DFly2 selected rows view");
+            push(commands, p_stitch, {Arg::B(*source.kv, source.byte_offset),
+                Arg::B(*source.selected_rows, source.selected_offset), Arg::B(stitched[layer]), Arg::B(bad),
+                Arg::V(target.position)}, n, 1, 64);
         } else {
             for (uint32_t i = 0; i < n; ++i) {
                 const auto row = source.selected[i];
@@ -300,11 +319,22 @@ struct Dfly2::Impl {
                              Arg::B(stitched[i], shared * kKvBytes), Arg::B(positions), Arg::B(bad), Arg::V(kv)}, rows, 1, kTg);
         const AttnArgs args{kHeads, kKv, kLatent, kKv, kHeads * kKv, kHeads * kLatent, kMaxKeys, kMaxKeys,
                             0, 1.0f / std::sqrt(float(kQk))};
-        using strata::hy4_flash::append_attn;
-        append_attn(commands, attention, {Arg::B(q_abs), Arg::B(stitched[i]), Arg::B(model.dense, l.sinks->offset),
-                    Arg::B(unused), Arg::B(unused), Arg::B(compact_positions, i * kRows * sizeof(int32_t)),
-                    Arg::B(score), Arg::B(attended), Arg::V(args)}, kHeads, rows, shared + rows, kMaxKeys,
-                    kKv, kLatent, kKv, "STQ DFly2 absorbed MLA");
+        const auto position = Arg::B(compact_positions, i * kRows * sizeof(int32_t));
+        if (p_register_mla.handle) {
+            const uint32_t parts = (shared + rows + kMlaPartition - 1) / kMlaPartition;
+            Dispatch d{&p_register_mla, {Arg::B(q_abs), Arg::B(stitched[i]), Arg::B(model.dense, l.sinks->offset),
+                        Arg::B(unused), Arg::B(unused), position, Arg::B(score), Arg::V(args), Arg::V(parts)},
+                       {rows, kHeads / 16, parts}, {288, 1, 1}};
+            mtl::require_fit(d, "STQ DFly2 partitioned MLA");
+            commands.push_back(std::move(d));
+            push(commands, p_mla_finish, {Arg::B(score), Arg::B(attended), Arg::V(args), Arg::V(parts)},
+                 rows, kHeads, kTg);
+        } else {
+            strata::hy4_flash::append_attn(commands, attention, {
+                Arg::B(q_abs), Arg::B(stitched[i]), Arg::B(model.dense, l.sinks->offset), Arg::B(unused), Arg::B(unused),
+                position, Arg::B(score), Arg::B(attended), Arg::V(args)}, kHeads, rows, shared + rows, kMaxKeys,
+                kKv, kLatent, kKv, "STQ DFly2 absorbed MLA");
+        }
         value_absorb.append_heads(commands, model.dense, l.value->offset, attended, kHeads * kLatent,
                                   up, kHeads * kValue, 0, rows, kHeads);
         project(l.attention_gate, normed, gate, rows);
@@ -330,6 +360,7 @@ struct Dfly2::Impl {
     void propose(const DflyTargetView& target, uint32_t anchor, std::span<int32_t> proposals,
                  std::span<float> confidence_out) {
         const uint32_t rows = static_cast<uint32_t>(proposals.size() + 1);
+        *bad.as<uint32_t>() = 0;
         std::array<uint32_t, kDflyTargetBlocks.size()> shared;
         for (size_t i = 0; i < shared.size(); ++i) shared[i] = stitch_target(i, target, rows);
         for (uint32_t i = 0; i < rows; ++i) positions.as<int32_t>()[i] = static_cast<int32_t>(target.position + i);
@@ -341,6 +372,7 @@ struct Dfly2::Impl {
         rms(fused, 0, hnorm, concat, kWidth * sizeof(float), kWidth, 1);
         project(fusion, concat, fused, 1);
         execute();
+        if (*bad.as<uint32_t>() != 0) throw std::runtime_error("uncommitted STQ DFly2 target row");
 
         // Preserve the unmodified anchor embedding for hidden correction.
         std::memcpy(previous.ptr, x.ptr, kWidth * sizeof(float));
@@ -383,7 +415,7 @@ struct Dfly2::Impl {
 Dfly2::Dfly2() = default;
 Dfly2::~Dfly2() = default;
 
-std::string Dfly2::open(strata::hy4_flash::Model& model, mtl::Context& metal, int shared_library) {
+std::string Dfly2::open(strata::hy4_flash::Model& model, mtl::Context& metal, int shared_library, bool register_mla) {
     if (impl_ || !model.stq || shared_library < 0 || model.geo.trunk_blocks != 42 || model.geo.layers.size() != 42 ||
         model.geo.hidden_dim != kWidth || model.geo.vocab_size != kVocab || model.geo.kv_a_width != kKv ||
         !std::all_of(kDflyTargetBlocks.begin(), kDflyTargetBlocks.end(), [&](int32_t block) {
@@ -391,7 +423,7 @@ std::string Dfly2::open(strata::hy4_flash::Model& model, mtl::Context& metal, in
         })) return "invalid STQ DFly2 model";
     try {
         auto impl = std::make_unique<Impl>(model, metal);
-        impl->initialize(shared_library);
+        impl->initialize(shared_library, register_mla);
         impl_ = std::move(impl);
         return {};
     } catch (const std::exception& e) {

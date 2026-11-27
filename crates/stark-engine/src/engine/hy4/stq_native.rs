@@ -185,6 +185,9 @@ pub struct StqOptions {
     pub cache_engram_pages: bool,
     pub wide_attention: bool,
     pub wide_routed: bool,
+    pub draft_register_mla: bool,
+    pub wide_ffn: bool,
+    pub fast_verify: bool,
 }
 
 unsafe extern "C" {
@@ -307,7 +310,10 @@ impl Session {
                     | (u32::from(options.verify_register_mla) << 5)
                     | (u32::from(options.cache_engram_pages) << 6)
                     | (u32::from(options.wide_attention) << 7)
-                    | (u32::from(options.wide_routed) << 8),
+                    | (u32::from(options.wide_routed) << 8)
+                    | (u32::from(options.draft_register_mla) << 9)
+                    | (u32::from(options.wide_ffn) << 10)
+                    | (u32::from(options.fast_verify) << 11),
                 select_context,
                 ptr::from_mut(&mut selection).cast(),
                 &mut inner,

@@ -280,7 +280,8 @@ extern "C" int stark_hy4_open_stq_diagnostic(
         s.model.geo.max_context = int32_t(context);
         if (auto error = load_trunk(s.model, s.metal, {weights, weight_count}, {experts, expert_count},
                                     round_bf16 != 0, pair1_decode != 0, (tuning & 8u) != 0, (tuning & 16u) != 0,
-                                    (tuning & 128u) != 0, (tuning & 256u) != 0);
+                                    (tuning & 128u) != 0, (tuning & 256u) != 0, (tuning & 1024u) != 0,
+                                    (tuning & 2048u) != 0);
             !error.empty())
             return fail(error);
         if (auto error = bind_engram(s.model, {tables, 4}, {token_map, map_len}); !error.empty())
@@ -293,10 +294,12 @@ extern "C" int stark_hy4_open_stq_diagnostic(
         prefill.stq_register_mla = (tuning & 4u) != 0;
         prefill.stq_verify_register_mla = (tuning & 32u) != 0;
         prefill.stq_cache_engram_pages = (tuning & 64u) != 0;
+        prefill.stq_draft_register_mla = (tuning & 512u) != 0;
         if (auto error = s.forward.open(s.model, s.metal, "", prefill); !error.empty()) return fail(error);
         if (auto error = s.vision.build(s.metal, s.forward.library()); !error.empty()) return fail(error);
         if (s.model.stq->has_dfly) {
-            if (auto error = s.dfly.open(s.model, s.metal, s.forward.library()); !error.empty()) return fail(error);
+            if (auto error = s.dfly.open(s.model, s.metal, s.forward.library(), prefill.stq_draft_register_mla);
+                !error.empty()) return fail(error);
             s.max_drafts = int(kDflyMaxDrafts);
         }
         if (resident && !s.model.stq->begin_residency(s.metal)) return fail("cannot make the STQ mapped banks resident");

@@ -440,6 +440,10 @@ impl Hy4Backend {
             verify_switch("STARK_HY4_STQ_ENGRAM_PAGE_CACHE", "invalid_hy4_stq_engram_cache", false)?;
         let wide_attention = verify_switch("STARK_HY4_STQ_WIDE_ATTENTION", "invalid_hy4_stq_wide_attention", false)?;
         let wide_routed = verify_switch("STARK_HY4_STQ_WIDE_ROUTED", "invalid_hy4_stq_wide_routed", false)?;
+        let draft_register_mla =
+            verify_switch("STARK_HY4_STQ_DRAFT_REGISTER_MLA", "invalid_hy4_stq_draft_register_mla", false)?;
+        let wide_ffn = verify_switch("STARK_HY4_STQ_WIDE_FFN", "invalid_hy4_stq_wide_ffn", false)?;
+        let fast_verify = verify_switch("STARK_HY4_STQ_FAST_VERIFY", "invalid_hy4_stq_fast_verify", false)?;
         let tail_prefix_enabled =
             verify_switch("STARK_HY4_PREFILL_TAIL_PREFIX", "invalid_hy4_prefill_tail_prefix", false)?;
         // This opt-in validation run borrows an explicitly pinned, immutable
@@ -463,6 +467,9 @@ impl Hy4Backend {
                     cache_engram_pages,
                     wide_attention,
                     wide_routed,
+                    draft_register_mla,
+                    wide_ffn,
+                    fast_verify,
                 },
             )
         }
@@ -490,6 +497,9 @@ impl Hy4Backend {
             "cache_engram_pages": cache_engram_pages,
             "prefill_stq_wide_attention": wide_attention,
             "prefill_stq_wide_routed": wide_routed,
+            "draft_register_mla": draft_register_mla,
+            "prefill_stq_wide_ffn": wide_ffn,
+            "verify_stq_fast": fast_verify,
             "prefill_stage_profile_requested": profile,
             "draft_head_format": "spec1-k4-dfly2",
         });

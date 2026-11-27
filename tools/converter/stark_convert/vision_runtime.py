@@ -147,6 +147,9 @@ def _valid_runtime_identity(value: object, family_profile: str | None = None) ->
             "cache_engram_pages",
             "prefill_stq_wide_attention",
             "prefill_stq_wide_routed",
+            "draft_register_mla",
+            "prefill_stq_wide_ffn",
+            "verify_stq_fast",
         }
         if stq
         else set()

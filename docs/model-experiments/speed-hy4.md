@@ -8,6 +8,8 @@ The STQ dense attention follow-up saved 2.49 s of fresh 27K OpenCode prefill in 
 
 The STQ routed follow-up used K32 PAIR1 products and register H128 preparation at 1,024 prompt rows and up. The repeated same-binary fresh 27K OpenCode pair went from 34.20 to 32.93 s of prefill with identical outputs and draft counts. Long-context MLA geometry variants produced no integrated change. [Routed and MLA measurements](2026-11-27-hy4-stq-routed-attention-prefill.md)
 
+The 27K same-loaded follow-up observed 49.15 tok/s median warm decode with wide routing and 46.58 with it off. The exact OpenCode replays reused 24,576 tokens and split the four adjacent decode pairs evenly. The earlier separate-process decode penalty did not reproduce. New FFN and verifier work is recorded with its own component and end-to-end evidence. [Decode attribution and FFN follow-up](2026-11-27-hy4-stq-decode-prefill-followup.md)
+
 ## Artifact and reference
 
 - **Artifact.** `AngelSlim/Hy4-flash-GGUF` at `c50d4dd30be42f2b91138e5731de0e2f32ad56b2`. The two Q3_K shards and original BF16 projector total 156,415,403,072 bytes. Keep the original packed expert tensors, FP8 Engram table and NextN block. The target vocabulary projection remains BF16 across draft-head experiments. [Artifact inventory and digests](2026-11-25-hy4-native-q3-k.md#artifact-and-runtime-identities)

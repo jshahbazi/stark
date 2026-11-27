@@ -72,20 +72,21 @@ static inline void stark_hy4_spec1_store(const thread Fragment& source, device O
     }
 }
 
-template <uint Rate, bool TwoTiles, typename Output>
+template <uint Rate, bool TwoTiles, uint K = 16, typename Output>
 static inline void stark_hy4_spec1_project(device const uint* weights, device const half* input,
     device Output* output, uint2 widths, uint first_row, uint live_rows, uint channel, uint lane,
     uint begin_k, uint end_k) {
-    constexpr uint K = 16, Rows = 16, TileWords = Rate * 8;
+    static_assert(!TwoTiles || K == 16, "The narrow product uses a single row stripe");
+    constexpr uint Tile = 16, Rows = 16, TileWords = Rate * 8;
     constexpr auto descriptor = matmul2d_descriptor(Rows, 32, K, false, true, true,
         matmul2d_descriptor::mode::multiply_accumulate);
     matmul2d<descriptor, execution_simdgroup> product;
-    auto left = product.get_left_input_cooperative_tensor<half, half, float>();
-    auto right = product.get_right_input_cooperative_tensor<half, half, float>();
+    auto left = product.template get_left_input_cooperative_tensor<half, half, float>();
+    auto right = product.template get_right_input_cooperative_tensor<half, half, float>();
     using Left = remove_addrspace_t<decltype(left)>;
     using Right = remove_addrspace_t<decltype(right)>;
-    auto top = product.get_destination_cooperative_tensor<Left, Right, float>();
-    auto bottom = product.get_destination_cooperative_tensor<Left, Right, float>();
+    auto top = product.template get_destination_cooperative_tensor<Left, Right, float>();
+    auto bottom = product.template get_destination_cooperative_tensor<Left, Right, float>();
     #pragma clang loop unroll(full)
     for (ushort i = 0; i < top.get_capacity(); ++i) {
         top[i] = 0.0f;
@@ -101,10 +102,10 @@ static inline void stark_hy4_spec1_project(device const uint* weights, device co
     device const half* bottom0 = start + ulong(min(row + Rows, last)) * widths.x;
     device const half* bottom1 = start + ulong(min(row + Rows + 8u, last)) * widths.x;
     const ulong tile_stride = ulong(widths.y / 16u) * TileWords;
-    device const uint* tiles = weights + (begin_k / K) * tile_stride + (channel / K) * TileWords;
+    device const uint* tiles = weights + (begin_k / Tile) * tile_stride + (channel / Tile) * TileWords;
 
     #pragma clang loop unroll_count(2)
-    for (uint k = begin_k; k < end_k; k += K, tiles += tile_stride) {
+    for (uint k = begin_k; k < end_k; k += K, tiles += (K / Tile) * tile_stride) {
         const auto w0 = stark_hy4_spec1_fragment<Rate>(tiles, lane);
         const auto w1 = stark_hy4_spec1_fragment<Rate>(tiles + TileWords, lane);
         #pragma clang loop unroll(full)
@@ -112,7 +113,17 @@ static inline void stark_hy4_spec1_project(device const uint* weights, device co
             right[i] = w0[i];
             right[i + 8] = w1[i];
         }
+        if constexpr (K == 32) {
+            const auto w2 = stark_hy4_spec1_fragment<Rate>(tiles + tile_stride, lane);
+            const auto w3 = stark_hy4_spec1_fragment<Rate>(tiles + tile_stride + TileWords, lane);
+            #pragma clang loop unroll(full)
+            for (uint i = 0; i < 8; ++i) {
+                right[i + 16] = w2[i];
+                right[i + 24] = w3[i];
+            }
+        }
         stark_hy4_spec1_load(left, top0, top1, k);
+        if constexpr (K == 32) stark_hy4_spec1_load<8>(left, top0, top1, k + Tile);
         product.run(left, right, top);
         if constexpr (TwoTiles) {
             stark_hy4_spec1_load(left, bottom0, bottom1, k);
@@ -251,6 +262,8 @@ kernel void stark_hy4_stq_spec1_k6_prefill(
 // [rows, output channels]. The F16 round occurs after the ordered split reduction.
 // shape is (input channels, output channels, rows <= 16, split count).
 // Launch (output channels / 128, split count, 1) groups of 128.
+// K32 requires each split to span an even number of source K16 tiles.
+template <uint K>
 kernel void stark_hy4_stq_spec1_k6_split(
     device const uint* weights [[buffer(0)]], device const half* input [[buffer(1)]],
     device float* partials [[buffer(2)]], constant uint4& shape [[buffer(3)]],
@@ -261,5 +274,10 @@ kernel void stark_hy4_stq_spec1_k6_split(
     const uint begin_k = (group.y * tiles / shape.w) * 16u;
     const uint end_k = ((group.y + 1u) * tiles / shape.w) * 16u;
     device float* plane = partials + ulong(group.y) * shape.z * shape.y;
-    stark_hy4_spec1_project<6, false>(weights, input, plane, shape.xy, 0u, shape.z, channel, lane, begin_k, end_k);
+    stark_hy4_spec1_project<6, false, K>(weights, input, plane, shape.xy, 0u, shape.z, channel, lane, begin_k, end_k);
 }
+
+template [[host_name("stark_hy4_stq_spec1_k6_split")]] kernel decltype(stark_hy4_stq_spec1_k6_split<16>)
+    stark_hy4_stq_spec1_k6_split<16>;
+template [[host_name("stark_hy4_stq_spec1_k6_split_k32")]] kernel decltype(stark_hy4_stq_spec1_k6_split<32>)
+    stark_hy4_stq_spec1_k6_split<32>;

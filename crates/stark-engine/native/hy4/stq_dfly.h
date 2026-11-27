@@ -21,6 +21,8 @@ struct DflyTargetLayer {
     // Absolute target row IDs in the target attention's read order. Empty
     // means the full available prefix, only valid through the IndexPool cutoff.
     std::span<const uint32_t> selected;
+    const mtl::Buffer* selected_rows = nullptr;
+    size_t selected_offset = 0;
 };
 
 struct DflyTargetView {
@@ -38,7 +40,8 @@ public:
 
     // Uses the existing packed trunk weights/program for embeddings and head.
     // The model and Metal context outlive the drafter.
-    std::string open(strata::hy4_flash::Model& model, mtl::Context& metal, int shared_library);
+    std::string open(strata::hy4_flash::Model& model, mtl::Context& metal, int shared_library,
+                     bool register_mla = false);
     bool ready() const { return bool(impl_); }
 
     // Propose for the causal block [anchor, mask ...]. Uses scratch only. The

@@ -209,6 +209,21 @@ kernel void stark_hy4_stq_register_mla(
 #undef TSRC
 }
 
+// Copy the already rotated F16 rows in IndexPool order. The DFly graph
+// appends its local KV after this compact shared history.
+kernel void stark_hy4_stq_dfly_stitch(
+    device const uint4* kv [[buffer(0)]], device const uint* indices [[buffer(1)]],
+    device uint4* stitched [[buffer(2)]], device metal::atomic_uint* bad [[buffer(3)]],
+    constant uint& limit [[buffer(4)]], uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]]) {
+    constexpr uint stride = 72; // 576 F16 values as 16-byte vectors
+    const uint key = indices[row];
+    if (key >= limit && lane == 0)
+        metal::atomic_fetch_or_explicit(bad, 1u, metal::memory_order_relaxed);
+    for (uint i = lane; i < stride; i += 64)
+        stitched[ulong(row) * stride + i] = key < limit ? kv[ulong(key) * stride + i] : uint4(0);
+}
+
 // Merge independent key runs. Only the first run includes the sink.
 kernel void stark_hy4_stq_register_mla_finish(
     device const float* partials [[buffer(0)]], device float* output [[buffer(1)]],

@@ -488,7 +488,7 @@ struct Forward::Impl {
                 if (bank.inputs != n_in || bank.outputs != n_out ||
                     !m->stq->program.append_dense(ds, bank, input, stq_identity, n_tok,
                                                   stq_dense_input, stq_dense_output, output, boundaries,
-                                                  attention && pr_in_chunk))
+                                                  pr_in_chunk))
                     throw std::runtime_error("invalid STQ dense dispatch for " + w->name);
                 return;
             }
@@ -755,7 +755,8 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     if (pf.dense_packed) kernel_files.emplace_back("stark_hy4_flash_dense_packed.metal");
     if (pf.dense_device_views) kernel_files.emplace_back("stark_hy4_flash_dense_device.metal");
     if (pf.tensor_mla) kernel_files.emplace_back("stark_hy4_flash_mla_prefill.metal");
-    if (pf.stq_register_mla || pf.stq_verify_register_mla) kernel_files.emplace_back("stq_mla_register.metal");
+    if (pf.stq_register_mla || pf.stq_verify_register_mla || pf.stq_draft_register_mla)
+        kernel_files.emplace_back("stq_mla_register.metal");
     if (pf.routed_fragments) kernel_files.emplace_back("stark_hy4_flash_moe_fragments.metal");
     lib = cx->compile(kernel_files, strata_hy4_flash_metal::hy4_flash_prelude(), false);
     p_rms_w = cx->pipeline(lib, "hy4_flash_rmsnorm", mtl::Constants().b(40, true));
@@ -1646,14 +1647,20 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     projection(Gate);
     const gguf::Tensor* ag = b.t[W_AGATE];
     const gguf::Tensor* ao = b.t[W_AOUT];
-    const bool fuse_gate = m->stq && pr_in_chunk && !want_dump && m->stq->program.fuses_attention_gate(uT);
+    uint32_t split_gate = 0;
+    if (m->stq && m->stq->program.verify_attention_gate_enabled() && !pr_in_chunk && !images() && !want_dump) {
+        split_gate = m->stq->program.verify_attention_gate_splits(*m->stq->dense.at(ag->name),
+            *m->stq->dense.at(ao->name), uT, stq_dense_output);
+    }
+    const bool fuse_gate = split_gate || (m->stq && pr_in_chunk && !want_dump && m->stq->program.fuses_attention_gate(uT));
     using stark::hy4::stq::DenseBoundaries;
     append_dense_projection(ds, ag, anorm, (uint32_t) n_embd, gproj, H * (uint32_t) v_mla, uT, true,
-                            fuse_gate ? DenseBoundaries::raw_output : DenseBoundaries::full);
+                            split_gate ? DenseBoundaries::split_output :
+                                fuse_gate ? DenseBoundaries::raw_output : DenseBoundaries::full);
     stage(tm.pf_attention_misc_ms);
     if (fuse_gate) {
         if (!m->stq->program.append_attention_gate_prepare(ds, *m->stq->dense.at(ag->name),
-                *m->stq->dense.at(ao->name), uT, stq_dense_output, kqv, stq_dense_input))
+                *m->stq->dense.at(ao->name), uT, stq_dense_output, kqv, stq_dense_input, split_gate))
             throw std::runtime_error("invalid STQ attention gate preparation");
     } else {
         ElemArgs a{H * (uint32_t) v_mla, H * (uint32_t) v_mla, H * (uint32_t) v_mla, H * (uint32_t) v_mla};
@@ -1671,16 +1678,28 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     // ---- the FFN half
     stage(tm.pf_other_ms);
     hc_pre(ds, b, hc_mid, 1, T, b.t[W_FFN_NORM], &fnorm, eps);   // + ffn_norm(cur) -> fnorm
+    const auto fused_ffn = [&](const gguf::Tensor* gate, const gguf::Tensor* up, const gguf::Tensor* down,
+                               const mtl::Buffer& output) {
+        if (!m->stq || !pr_in_chunk || want_dump || !m->stq->program.fuses_ffn(uT)) return false;
+        const auto& banks = m->stq->dense;
+        // The routed gate scratch is available before the routed experts and after their combine.
+        if (!m->stq->program.append_ffn(ds, *banks.at(gate->name), *banks.at(up->name), *banks.at(down->name),
+                                        fnorm, stq_identity, uT, stq_dense_input, stq_gate, stq_dense_output, output))
+            throw std::runtime_error("invalid STQ fused FFN dispatch for " + gate->name);
+        return true;
+    };
     const mtl::Buffer* ffn_result = nullptr;
     if (b.dense_ffn) {
         stage(tm.pf_dense_ms);
         const gguf::Tensor* wg = b.t[W_FGATE];
         const gguf::Tensor* wu = b.t[W_FUP];
         const gguf::Tensor* wd = b.t[W_FDOWN];
-        append_dense_projection(ds, wg, fnorm, (uint32_t) n_embd, dg, (uint32_t) m->geo.dense_ff, uT, false);
-        append_dense_projection(ds, wu, fnorm, (uint32_t) n_embd, du, (uint32_t) m->geo.dense_ff, uT, false);
-        glu(ds, dg, du, da, (uint32_t) m->geo.dense_ff, T, INFINITY);   // the dense FFN does NOT clamp
-        append_dense_projection(ds, wd, da, (uint32_t) m->geo.dense_ff, ffn_sum, (uint32_t) n_embd, uT, false);
+        if (!fused_ffn(wg, wu, wd, ffn_sum)) {
+            append_dense_projection(ds, wg, fnorm, (uint32_t) n_embd, dg, (uint32_t) m->geo.dense_ff, uT, false);
+            append_dense_projection(ds, wu, fnorm, (uint32_t) n_embd, du, (uint32_t) m->geo.dense_ff, uT, false);
+            glu(ds, dg, du, da, (uint32_t) m->geo.dense_ff, T, INFINITY);
+            append_dense_projection(ds, wd, da, (uint32_t) m->geo.dense_ff, ffn_sum, (uint32_t) n_embd, uT, false);
+        }
         ffn_result = &ffn_sum;
     } else {
         stage(tm.pf_moe_route_ms);
@@ -1746,6 +1765,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         const gguf::Tensor* su = b.t[W_SH_U];
         const gguf::Tensor* sd = b.t[W_SH_D];
         auto shared_expert = [&] {
+            if (fused_ffn(sg, su, sd, sho)) return;
             append_dense_projection(ds, sg, fnorm, (uint32_t) n_embd, shg, (uint32_t) expert_ff, uT, false);
             append_dense_projection(ds, su, fnorm, (uint32_t) n_embd, shu, (uint32_t) expert_ff, uT, false);
             glu(ds, shg, shu, sha, (uint32_t) expert_ff, T, INFINITY);
@@ -2559,7 +2579,8 @@ bool Forward::dfly_target(int position, stark::hy4::stq::DflyTargetView& view) c
         const size_t count = im.dfly_counts.as<uint32_t>()[at];
         if (!count || count > kSelCap || count > size_t(position)) return false;
         view.layers[i] = {&im.kv, sizeof(uint16_t) * im.blk.at(size_t(targets[i])).kv_off,
-                          {im.dfly_selected.as<uint32_t>() + at * kSelCap, count}};
+                          {im.dfly_selected.as<uint32_t>() + at * kSelCap, count},
+                          &im.dfly_selected, sizeof(uint32_t) * at * kSelCap};
     }
     return true;
 }

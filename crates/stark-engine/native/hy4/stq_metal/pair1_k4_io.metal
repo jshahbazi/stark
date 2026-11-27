@@ -65,6 +65,16 @@ kernel void stark_hy4_stq_pair1_finish(
 // The attention gate's finish, sigmoid product and output projection prepare
 // share the same 128-channel block. Keep the two Hadamard workspaces and all
 // precision boundaries while avoiding the intermediate F32 planes.
+static inline half stark_hy4_stq_apply_attention_gate(
+    half raw_gate, float gate_scale, float value, float input_scale, uint lane,
+    threadgroup float* gate_work, threadgroup float* output_work) {
+    const float gate = stark_hy4_stq_projection_boundary(
+        stark_hy4_stq_hadamard128(float(raw_gate), lane, gate_work) * gate_scale);
+    const float gated = value * (1.0f / (1.0f + precise::exp(-gate)));
+    const float source = stark_hy4_stq_projection_boundary(gated) * input_scale;
+    return half(stark_hy4_stq_hadamard128(source, lane, output_work));
+}
+
 kernel void stark_hy4_stq_attention_gate_prepare(
     device const half* raw_gate [[buffer(0)]], device const half* gate_scale [[buffer(1)]],
     device const float* value [[buffer(2)]], device const half* input_scale [[buffer(3)]],
@@ -74,11 +84,8 @@ kernel void stark_hy4_stq_attention_gate_prepare(
     threadgroup float output_work[128];
     const uint channel = group.x * 128u + channel_in_group;
     const ulong index = ulong(group.y) * width + channel;
-    const float gate = stark_hy4_stq_projection_boundary(
-        stark_hy4_stq_hadamard128(float(raw_gate[index]), channel_in_group, gate_work) * float(gate_scale[channel]));
-    const float gated = value[index] * (1.0f / (1.0f + precise::exp(-gate)));
-    const float source = stark_hy4_stq_projection_boundary(gated) * float(input_scale[channel]);
-    prepared[index] = half(stark_hy4_stq_hadamard128(source, channel_in_group, output_work));
+    prepared[index] = stark_hy4_stq_apply_attention_gate(raw_gate[index], float(gate_scale[channel]),
+        value[index], float(input_scale[channel]), channel_in_group, gate_work, output_work);
 }
 
 static inline half stark_hy4_stq_spec1_split_round(device const float* partials, ulong offset,
@@ -86,6 +93,22 @@ static inline half stark_hy4_stq_spec1_split_round(device const float* partials,
     float sum = partials[offset];
     for (uint split = 1u; split < splits; ++split) sum += partials[ulong(split) * plane_size + offset];
     return half(sum);
+}
+
+// The verifier preserves the same ordered split reduction, F16 product,
+// gate, and output preparation as the three separate dispatches.
+kernel void stark_hy4_stq_attention_gate_prepare_split(
+    device const float* partials [[buffer(0)]], device const half* gate_scale [[buffer(1)]],
+    device const float* value [[buffer(2)]], device const half* input_scale [[buffer(3)]],
+    device half* prepared [[buffer(4)]], constant uint4& shape [[buffer(5)]],
+    uint2 group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
+    threadgroup float gate_work[128];
+    threadgroup float output_work[128];
+    const uint channel = group.x * 128u + lane;
+    const ulong index = ulong(group.y) * shape.y + channel;
+    const half raw_gate = stark_hy4_stq_spec1_split_round(partials, index, ulong(shape.y) * shape.z, shape.w);
+    prepared[index] = stark_hy4_stq_apply_attention_gate(raw_gate, float(gate_scale[channel]),
+        value[index], float(input_scale[channel]), lane, gate_work, output_work);
 }
 
 // SPEC1 split-K restores the F16 product boundary before H128/SVH. A split
@@ -204,6 +227,32 @@ static inline float4 stark_hy4_stq_lane4_load(device const T* base) {
 
 static inline void stark_hy4_stq_lane4_store(device half* base, float4 v) {
     base[0] = half(v.x); base[32] = half(v.y); base[64] = half(v.z); base[96] = half(v.w);
+}
+
+// Finish the dense or shared gate and up projections, then prepare the
+// down projection without storing three intermediate F32 planes.
+kernel void stark_hy4_stq_ffn_prepare_down(
+    device const half* gate [[buffer(0)]], device const half* up [[buffer(1)]],
+    device const half* gate_svh [[buffer(2)]], device const half* up_svh [[buffer(3)]],
+    device const half* down_suh [[buffer(4)]], device half* prepared [[buffer(5)]],
+    constant uint& width [[buffer(6)]], uint2 group [[threadgroup_position_in_grid]],
+    ushort simd [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
+    const uint channel = (group.x * 4u + simd) * 128u + lane;
+    const ulong offset = ulong(group.y) * width + channel;
+    float4 g = stark_hy4_stq_hadamard_lane4(stark_hy4_stq_lane4_load(gate + offset), lane) *
+               stark_hy4_stq_lane4_load(gate_svh + channel);
+    float4 u = stark_hy4_stq_hadamard_lane4(stark_hy4_stq_lane4_load(up + offset), lane) *
+               stark_hy4_stq_lane4_load(up_svh + channel);
+    // Match hy4_flash_swiglu_clamp with an infinite limit and its division order.
+    float4 activation;
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < 4; ++i) {
+        const float gv = min(stark_hy4_stq_projection_boundary(g[i]), INFINITY);
+        const float uv = clamp(stark_hy4_stq_projection_boundary(u[i]), -INFINITY, INFINITY);
+        activation[i] = stark_hy4_stq_projection_boundary((gv / (1.0f + precise::exp(-gv))) * uv);
+    }
+    activation *= stark_hy4_stq_lane4_load(down_suh + channel);
+    stark_hy4_stq_lane4_store(prepared + offset, stark_hy4_stq_hadamard_lane4(activation, lane));
 }
 
 kernel void stark_hy4_stq_pair1_prepare_register(
