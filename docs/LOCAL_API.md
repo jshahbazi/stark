@@ -333,6 +333,12 @@ tool calls private until that validation completes.
 - The image service starts the worker with an empty, owner-private 0700 staging directory and stages each accepted image as a 0600 regular file with an opaque identifier. The worker validates the reference, owner, type, private permissions, size, link count, stable metadata and image signature, then immediately unlinks the name. It retains the opened-file lease through completion. Host cleanup removes remaining staged names when the transaction exits; worker teardown removes only opaque, owner-private, single-link regular files in its pinned directory. Media references and image bytes are not logged.
 - Image preparation, generation, streaming reads, frame writes and discard share one worker inactivity deadline, with a 300-second default. Validated generation progress or deltas renew it; operation boundaries and activity after cancellation do not. Local image verification retains its absolute time limit. Recoverable cancellation drains native work and clears prepared state before reuse; a protocol or cleanup failure closes and reaps the worker before another request can run.
 
+The secondary slot reserves at most 49,152 positions. Set
+`STARK_HY4_CONTEXT_LIMIT=49152` alongside the preview flag to use the benchmarked
+shared window on a host that fits both slots. The loaded context remains a
+ceiling for flexible requests. A single-slot load with no user cap uses its
+ordinary automatic memory fit.
+
 ### Prefix reuse
 
 Each chat request is tokenized in full. For eligible text models, the worker can then reuse the state of the prompt prefix that the request shares with the immediately preceding request, and process only the remainder. Native Decider questions use full attention and do not reuse prefixes between questions or requests; see [Decider execution limits](DECIDER.md#execution-and-limits).
