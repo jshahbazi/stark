@@ -881,6 +881,12 @@ class Desktop:
                 or any(ord(char) < 32 or ord(char) == 127 for char in reason)
             ):
                 raise ValueError()
+            if "download_revision" in item and (
+                not item["downloadable"]
+                or not isinstance(item["download_revision"], str)
+                or re.fullmatch(r"[0-9a-f]{40}", item["download_revision"]) is None
+            ):
+                raise ValueError()
             original = item.get("original_repo")
             if original is not None:
                 # Only a row that cannot be downloaded may point at another

@@ -34,8 +34,9 @@ use self::vision::Hy4PreparedImage;
 use crate::{
     cancel::CancelSignal,
     generation::{
-        FinishReason, GeneratedTokens, GenerationBackend, GenerationOptions, HY4_VISION_PROFILE, ImageArtifactIdentity,
-        MtpCapabilities, PreparedImageMetadata, ProgressCallback, Sampling, TextCallback, collect_tokens_controlled,
+        ContextCapacity, FinishReason, GeneratedTokens, GenerationBackend, GenerationOptions, HY4_VISION_PROFILE,
+        ImageArtifactIdentity, MtpCapabilities, PreparedImageMetadata, ProgressCallback, Sampling, TextCallback,
+        collect_tokens_controlled,
     },
     hybrid::{ProbabilityMapper, report_prefill_progress, sample_with_mapper},
     prefix_cache::{self, PrefixEntry},
@@ -534,12 +535,10 @@ impl GenerationBackend for Hy4Backend {
     fn vocab_size(&self) -> usize {
         VOCAB
     }
-    fn max_context_length(&self) -> Option<u32> {
-        Some(self.native.context_sizing().context_tokens)
+    fn context_capacity(&self) -> ContextCapacity {
+        ContextCapacity::Shared(self.native.context_sizing())
     }
-    fn context_sizing_metadata(&self) -> Option<Value> {
-        Some(json!(self.native.context_sizing()))
-    }
+
     fn supports_automatic_context_planning(&self) -> bool {
         // The native graph budgets and allocates the full capacity at load.
         // Individual text requests can use any smaller logical window.

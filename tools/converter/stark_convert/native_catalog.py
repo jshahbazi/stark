@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 
 from .inkling_prepare import CHOICE as INKLING_CHOICE
+from .inkling_prepare import DOWNLOAD_REVISION as INKLING_DOWNLOAD_REVISION
 from .inkling_prepare import FAMILY as INKLING_FAMILY_ID
 
 FAMILY_ID = "glm5_next"
@@ -123,6 +124,7 @@ def catalog_item(choice: str = CHOICE) -> dict:
         "id": hashlib.sha256((repo + "@" + revision).encode()).hexdigest()[:32],
         "repo": repo,
         "revision": revision,
+        **({"download_revision": INKLING_DOWNLOAD_REVISION} if choice == INKLING_CHOICE else {}),
         "name": name,
         "size_label": "65B" if source["architecture"] == RIPPLE_FAMILY_ID else None,
         "parameter_count": 64_782_689_360 if source["architecture"] == RIPPLE_FAMILY_ID else None,

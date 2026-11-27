@@ -535,6 +535,10 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
     pub fn generation_config(&self) -> &crate::config::model::generation::GenerationConfig {
         self.language_model.generation_config()
     }
+    pub fn generation_cache_context_bound(&self) -> Option<super::super::context::BackendContextBound> {
+        self.language_model.generation_cache_context_bound()
+    }
+
     pub fn max_context_length(&self) -> Option<u32> {
         self.language_model.max_context_length()
     }

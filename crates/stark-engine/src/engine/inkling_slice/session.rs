@@ -291,6 +291,14 @@ impl Session {
         Self::supported_context(&self.runtime)
     }
 
+    pub fn context_limit_source(&self) -> &'static str {
+        if self.runtime.pinned_m5 {
+            "inkling_m5_layout_metal_buffer_or_i32_index"
+        } else {
+            "inkling_alternate_layout"
+        }
+    }
+
     /// Bytes remaining in Metal's recommended working set after resident allocations.
     /// Zero indicates no headroom or an unavailable recommendation.
     pub fn metal_memory_headroom_bytes(&self) -> usize {

@@ -4,8 +4,10 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
+
 from stark_convert import desktop as desktop_module
-from stark_convert import hybrid_prepare, model_catalog, native_catalog
+from stark_convert import hybrid_prepare, inkling_prepare, model_catalog, native_catalog
 from stark_convert.desktop import Desktop
 
 
@@ -17,18 +19,31 @@ def test_legacy_glm_catalog_api_remains_compatible():
     assert native_catalog.allowed_choice(native_catalog.CHOICE)
 
 
-def test_inkling_catalog_binds_original_target_and_draft_to_default_vision_mode():
+def test_inkling_catalog_binds_original_target_and_draft_to_default_vision_mode(tmp_path, monkeypatch):
     family = native_catalog.INKLING_FAMILY_ID
     choice = native_catalog.INKLING_CHOICE
     [item] = native_catalog.catalog_items(family)
     assert item["artifact_modes"] == ["vision-language"]
     assert item["default_artifact_mode"] == "vision-language"
     assert item["repo"] == "thinkingmachines/Inkling-2-Mini"
+    assert item["revision"] == inkling_prepare.REVISION
+    assert item["download_revision"] == inkling_prepare.DOWNLOAD_REVISION
     assert hybrid_prepare.SOURCES[choice]["required_weight_files"] == [
         "model-00001-of-00001.safetensors",
         "mtp.safetensors",
     ]
     assert native_catalog.source_choice(family, item) == choice
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    report = model_catalog.family_catalog(family, hub=object())
+    host = Desktop(tmp_path / "unused-worker", tmp_path / "library", io.StringIO())
+    try:
+        [published] = host.catalog_report(report, family)["items"]
+        assert published["download_revision"] == inkling_prepare.DOWNLOAD_REVISION
+        report["items"][0]["download_revision"] = "main"
+        with pytest.raises(ValueError):
+            host.catalog_report(report, family)
+    finally:
+        host.stop(quiet=True)
 
 
 def test_hy4_catalog_binds_exact_split_source_and_image_projector():

@@ -386,9 +386,6 @@ impl<B: Backend> Mixer<B> for Attention<B> {
         &self,
         context_tokens: u32,
     ) -> Option<usize> {
-        if self.max_rope_length.is_some_and(|maximum| context_tokens > maximum) {
-            return None;
-        }
         crate::encodable_block::memory::attention_cache_buffer_bytes(
             context_tokens,
             self.head_dim,

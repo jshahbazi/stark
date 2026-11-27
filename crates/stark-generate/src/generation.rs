@@ -557,6 +557,65 @@ fn collect_tokens_with_clock_and_callback(
     Ok(result)
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ContextCapacity {
+    #[cfg(feature = "metal")]
+    Shared(stark_engine::engine::context::ContextSizing),
+    Undeclared,
+    #[cfg(any(test, all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64")))]
+    BackendFixed {
+        checkpoint_context_tokens: u32,
+        backend_context_tokens: u32,
+        source: &'static str,
+    },
+}
+
+impl ContextCapacity {
+    fn limit(self) -> Option<u32> {
+        match self {
+            #[cfg(feature = "metal")]
+            Self::Shared(sizing) => Some(sizing.context_tokens),
+            Self::Undeclared => None,
+            #[cfg(any(test, all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64")))]
+            Self::BackendFixed {
+                checkpoint_context_tokens,
+                backend_context_tokens,
+                ..
+            } => Some(checkpoint_context_tokens.min(backend_context_tokens)),
+        }
+    }
+
+    fn policy(self) -> &'static str {
+        match self {
+            #[cfg(feature = "metal")]
+            Self::Shared(_) => "shared_memory",
+            Self::Undeclared => "undeclared",
+            #[cfg(any(test, all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64")))]
+            Self::BackendFixed {
+                ..
+            } => "backend_fixed",
+        }
+    }
+
+    fn sizing_metadata(self) -> Option<Value> {
+        match self {
+            #[cfg(feature = "metal")]
+            Self::Shared(sizing) => Some(json!(sizing)),
+            Self::Undeclared => None,
+            #[cfg(any(test, all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64")))]
+            Self::BackendFixed {
+                checkpoint_context_tokens,
+                backend_context_tokens,
+                source,
+            } => Some(json!({
+                "context_tokens": self.limit(),
+                "checkpoint_context_tokens": checkpoint_context_tokens,
+                "backend_bound": {"context_tokens": backend_context_tokens, "source": source},
+            })),
+        }
+    }
+}
+
 pub(crate) trait GenerationBackend {
     type PreparedImage;
 
@@ -569,7 +628,7 @@ pub(crate) trait GenerationBackend {
         Ok(())
     }
     fn vocab_size(&self) -> usize;
-    fn max_context_length(&self) -> Option<u32>;
+    fn context_capacity(&self) -> ContextCapacity;
     /// Select a safe context capacity for text generation. Backends with a
     /// finite model limit can use that limit; unknown unbounded models must
     /// provide a memory-aware implementation.
@@ -580,7 +639,7 @@ pub(crate) trait GenerationBackend {
         _memory_budget_bytes: usize,
     ) -> Option<u32> {
         let minimum = input_tokens.checked_add(1)?;
-        let capacity = self.max_context_length()?.min(maximum);
+        let capacity = self.context_capacity().limit()?.min(maximum);
         (capacity >= minimum).then_some(capacity)
     }
     fn plan_context_length(
@@ -659,9 +718,6 @@ pub(crate) trait GenerationBackend {
     fn loaded_memory_metadata(&self) -> Option<Value> {
         None
     }
-    fn context_sizing_metadata(&self) -> Option<Value> {
-        None
-    }
     fn context_allocation_metadata(&self) -> Option<Value> {
         None
     }
@@ -726,6 +782,10 @@ pub(crate) trait GenerationBackend {
     /// less this tail. At least one.
     fn prefix_cache_tail_tokens(&self) -> usize {
         1
+    }
+    /// Physical chunk spacing and minimum suffix for an interior snapshot.
+    fn prefix_cache_midpoint_restore_geometry(&self) -> Option<(usize, usize)> {
+        None
     }
     /// What a retained state must match, as reported in readiness.
     fn prefix_cache_key(&self) -> &'static str {
@@ -794,11 +854,13 @@ impl<B: GenerationBackend> GenerationWorker<B> {
     ) -> Result<Self, &'static str> {
         let mtp = backend.mtp_capabilities();
         let budget = Budget::from_environment()?;
+        if backend.context_capacity().limit().is_some_and(|limit| limit < 2 || limit == u32::MAX) {
+            return Err("invalid_finite_context_limit");
+        }
         let default_drafts = backend.default_mtp_drafts();
         let default_scheduling = backend.default_mtp_scheduling();
         if backend.vocab_size() == 0
             || backend.vocab_size() > u32::MAX as usize
-            || backend.max_context_length() == Some(0)
             || !valid_ids(backend.eos_token_ids(), backend.vocab_size())
             || (default_drafts > 0 && mtp.is_none_or(|caps| default_drafts as usize > caps.max_drafts))
             || (!default_scheduling.is_default()
@@ -985,7 +1047,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         {
             return Err("invalid_generation_request");
         }
-        if self.backend.max_context_length().is_some_and(|max| options.context_tokens > max) {
+        if self.backend.context_capacity().limit().is_some_and(|max| options.context_tokens > max) {
             return Err("context_overflow");
         }
         options.sampling.validate(self.backend.vocab_size())
@@ -1235,7 +1297,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 let maximum = input_tokens
                     .saturating_add(token_limit)
                     .min(context_tokens)
-                    .min(self.backend.max_context_length().unwrap_or(u32::MAX));
+                    .min(self.backend.context_capacity().limit().unwrap_or(u32::MAX));
                 if input_tokens == 0 || input_tokens > token_limit || maximum <= input_tokens {
                     return Err("invalid_generation_request");
                 }
@@ -1287,7 +1349,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 }
                 Ok(json!({"context_tokens":capacity,
                     "max_new_tokens":capacity - input_tokens,
-                    "context_capacity_known":self.backend.max_context_length().is_some(),
+                    "context_capacity_known":self.backend.context_capacity().limit().is_some(),
                     "budget_kind":"memory"}))
             },
             Request::Generate {
@@ -1641,8 +1703,8 @@ pub(crate) fn run_lines<B: GenerationBackend>(
     let mut readiness = json!({"ready":true,"engine":"stark","version":env!("CARGO_PKG_VERSION"),
         "mode":"text-generation-v1","operations":["tokenize","decode","generate"],
         "state_policy":"fresh-per-request","vocab_size":worker.backend.vocab_size(),
-        "max_context_tokens":worker.backend.max_context_length().unwrap_or(u32::MAX),
-        "max_new_tokens":worker.backend.max_context_length().unwrap_or(u32::MAX).saturating_sub(1)
+        "max_context_tokens":worker.backend.context_capacity().limit().unwrap_or(u32::MAX),
+        "max_new_tokens":worker.backend.context_capacity().limit().unwrap_or(u32::MAX).saturating_sub(1)
             .min((worker.budget.input_bytes / std::mem::size_of::<u32>()).min(u32::MAX as usize) as u32),
         "max_request_bytes":worker.budget.wire_bytes,"request_budget_bytes":worker.budget.input_bytes,
         "eos_token_ids":worker.backend.eos_token_ids(),
@@ -1655,6 +1717,10 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             "tail_tokens":worker.backend.prefix_cache_tail_tokens(),"idle_seconds":prefix_cache::IDLE_SECONDS,
             "key":worker.backend.prefix_cache_key()});
         if enabled {
+            if let Some((physical_chunk, min_suffix)) = worker.backend.prefix_cache_midpoint_restore_geometry() {
+                readiness["prefix_cache"]["physical_chunk_tokens"] = json!(physical_chunk);
+                readiness["prefix_cache"]["midpoint_restore_min_suffix_tokens"] = json!(min_suffix);
+            }
             readiness["state_policy"] = json!(prefix_cache::POLICY);
             readiness["operations"] = json!(["tokenize", "decode", "generate", "reset_cache"]);
         }
@@ -1675,7 +1741,9 @@ pub(crate) fn run_lines<B: GenerationBackend>(
     if let Some(memory) = worker.backend.loaded_memory_metadata() {
         readiness["loaded_memory"] = memory;
     }
-    if let Some(sizing) = worker.backend.context_sizing_metadata() {
+    let capacity = worker.backend.context_capacity();
+    readiness["context_sizing_policy"] = json!(capacity.policy());
+    if let Some(sizing) = capacity.sizing_metadata() {
         readiness["context_sizing"] = sizing;
     }
     readiness["mtp"] = match worker.mtp {
@@ -1854,6 +1922,7 @@ mod tests {
         prefix_pending: Option<prefix_cache::PrefixEntry<usize>>,
         state_allocations: usize,
         prefix_chunk: usize,
+        prefix_midpoint_restore_geometry: Option<(usize, usize)>,
         prefix_reuse_override: Option<usize>,
         plans: Vec<RecordedPlan>,
         planning_allowed: bool,
@@ -1891,8 +1960,12 @@ mod tests {
         fn vocab_size(&self) -> usize {
             8
         }
-        fn max_context_length(&self) -> Option<u32> {
-            self.max_context
+        fn context_capacity(&self) -> ContextCapacity {
+            self.max_context.map_or(ContextCapacity::Undeclared, |limit| ContextCapacity::BackendFixed {
+                checkpoint_context_tokens: limit,
+                backend_context_tokens: limit,
+                source: "test_fixture",
+            })
         }
         fn automatic_context_length(
             &self,
@@ -2078,6 +2151,10 @@ mod tests {
             self.prefix_chunk
         }
 
+        fn prefix_cache_midpoint_restore_geometry(&self) -> Option<(usize, usize)> {
+            self.prefix_midpoint_restore_geometry
+        }
+
         fn prefix_cache_plan(
             &self,
             input: &[u32],
@@ -2247,6 +2324,7 @@ mod tests {
             prefix_pending: None,
             state_allocations: 0,
             prefix_chunk: prefix_cache::PREFILL_CHUNK_TOKENS,
+            prefix_midpoint_restore_geometry: None,
             prefix_reuse_override: None,
             plans: Vec::new(),
             planning_allowed: true,
@@ -3879,6 +3957,8 @@ mod tests {
         run_lines(&mut worker, &mut std::io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
         let ready: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(ready["max_context_tokens"], 262_144);
+        assert_eq!(ready["context_sizing_policy"], "backend_fixed");
+        assert_eq!(ready["context_sizing"]["context_tokens"], 262_144);
 
         let mut request = standard();
         request["context_tokens"] = json!(262_144);
@@ -3893,6 +3973,30 @@ mod tests {
     }
 
     #[test]
+    fn explicit_glm_bridge_capacity_reports_the_admitted_window() {
+        let capacity = ContextCapacity::BackendFixed {
+            checkpoint_context_tokens: 262_144,
+            backend_context_tokens: 32_768,
+            source: "glm_exl3_bridge",
+        };
+        assert_eq!(capacity.limit(), Some(32_768));
+        assert_eq!(capacity.policy(), "backend_fixed");
+        let metadata = capacity.sizing_metadata().unwrap();
+        assert_eq!(metadata["context_tokens"], 32_768);
+        assert_eq!(metadata["backend_bound"]["context_tokens"], 32_768);
+        assert_eq!(metadata["backend_bound"]["source"], "glm_exl3_bridge");
+    }
+
+    #[test]
+    fn invalid_finite_worker_capacity_fails_before_readiness() {
+        for limit in [0, 1, u32::MAX] {
+            let mut backend = worker().backend;
+            backend.max_context = Some(limit);
+            assert!(matches!(GenerationWorker::new(backend), Err("invalid_finite_context_limit")));
+        }
+    }
+
+    #[test]
     fn context_without_a_finite_model_maximum_uses_the_protocol_integer_range() {
         let mut worker = worker();
         worker.backend.max_context = None;
@@ -3900,6 +4004,8 @@ mod tests {
         run_lines(&mut worker, &mut std::io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
         let ready: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(ready["max_context_tokens"], u32::MAX);
+        assert_eq!(ready["context_sizing_policy"], "undeclared");
+        assert!(ready.get("context_sizing").is_none());
         let mut request = standard();
         request["context_tokens"] = json!(u32::MAX);
         assert_eq!(post(&mut worker, request)["finish_reason"], "eos");
@@ -4148,6 +4254,24 @@ mod tests {
                 "key":"model-instance+context-tokens+cache-scope"})
         );
         assert_eq!(enabled["operations"], json!(["tokenize", "decode", "generate", "reset_cache"]));
+    }
+
+    #[test]
+    fn prefix_cache_readiness_reports_midpoint_restore_geometry() {
+        let mut worker = prefix_worker(true);
+        worker.backend.prefix_chunk = 2048;
+        worker.backend.prefix_midpoint_restore_geometry = Some((4096, 17));
+        let active = readiness(&mut worker);
+        assert_eq!(active["prefix_cache"]["chunk_tokens"], 2048);
+        assert_eq!(active["prefix_cache"]["tail_tokens"], 1);
+        assert_eq!(active["prefix_cache"]["physical_chunk_tokens"], 4096);
+        assert_eq!(active["prefix_cache"]["midpoint_restore_min_suffix_tokens"], 17);
+        worker.backend.prefix_chunk = 4096;
+        worker.backend.prefix_midpoint_restore_geometry = None;
+        let stock = readiness(&mut worker);
+        assert_eq!(stock["prefix_cache"]["chunk_tokens"], 4096);
+        assert!(stock["prefix_cache"].get("physical_chunk_tokens").is_none());
+        assert!(stock["prefix_cache"].get("midpoint_restore_min_suffix_tokens").is_none());
     }
 
     #[test]

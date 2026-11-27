@@ -10,19 +10,20 @@ use std::{
 
 use rayon::prelude::*;
 use stark_engine::engine::{
-    context::{self, ContextSizing},
+    context,
     hybrid::{
-        Model, MtpRoundOptions, NativeSampling, PrefixSnapshot, PreparedHybridImage, finite_guard, mtp_lookup,
-        mtp_policy, profile,
+        GenerationContextSizing, Model, MtpRoundOptions, NativeSampling, PrefixSnapshot, PreparedHybridImage,
+        finite_guard, mtp_lookup, mtp_policy, profile,
     },
 };
 
 use crate::{
     cancel::CancelSignal,
     generation::{
-        ContextPlanningRequest, GeneratedTokens, GenerationBackend, GenerationOptions, GenerationProgress,
-        ImageArtifactIdentity, MtpCapabilities, MtpScheduling, PreparedImageMetadata, ProgressCallback, Sampling,
-        TextCallback, admit_request_memory, collect_tokens_controlled, native_result_after_cleanup,
+        ContextCapacity, ContextPlanningRequest, GeneratedTokens, GenerationBackend, GenerationOptions,
+        GenerationProgress, ImageArtifactIdentity, MtpCapabilities, MtpScheduling, PreparedImageMetadata,
+        ProgressCallback, Sampling, TextCallback, admit_request_memory, collect_tokens_controlled,
+        native_result_after_cleanup,
     },
     prefix_cache::{self, BoundaryEntry},
     text_stop::StopFilter,
@@ -82,7 +83,7 @@ fn native_sampling(options: &GenerationOptions) -> Option<NativeSampling> {
 
 pub(crate) struct HybridBackend {
     model: Model,
-    context_sizing: Option<ContextSizing>,
+    context_capacity: ContextCapacity,
     cancellation: Option<CancelSignal>,
     profile_output: Option<ProfileOutput>,
     profile_mode: Option<AggregateProfileMode>,
@@ -388,7 +389,11 @@ impl HybridBackend {
         } else {
             Model::load_with_native_decode(path, true)
         }
-        .map_err(|_| "hybrid_model_load_failed")?;
+        .map_err(|error| match error {
+            stark_engine::engine::hybrid::Error::InvalidContextLimit => "invalid_finite_context_limit",
+            stark_engine::engine::hybrid::Error::GlmExl3Unavailable => "glm_exl3_backend_unavailable",
+            _ => "hybrid_model_load_failed",
+        })?;
 
         let image_runtime_identity = if images {
             if !model.supports_images() {
@@ -405,13 +410,26 @@ impl HybridBackend {
         if profile_mode.is_some_and(AggregateProfileMode::enables_bf16_stage_profile) {
             model.set_bf16_stage_profiling(true).map_err(|_| "native_profile_initialization_failed")?;
         }
+        let context_capacity =
+            match model.context_sizing(context::current_memory_budget(context::metal_memory_headroom()))? {
+                GenerationContextSizing::Shared(sizing) => ContextCapacity::Shared(sizing),
+                #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+                GenerationContextSizing::BackendFixed {
+                    checkpoint_context_tokens,
+                    backend_context_tokens,
+                    source,
+                } => ContextCapacity::BackendFixed {
+                    checkpoint_context_tokens,
+                    backend_context_tokens,
+                    source,
+                },
+            };
         if profile_output.is_some() {
             profile::enable(true);
         }
-        let context_sizing = model.context_sizing(context::current_memory_budget(context::metal_memory_headroom()))?;
         Ok(Self {
             model,
-            context_sizing,
+            context_capacity,
             cancellation,
             profile_output,
             profile_mode,
@@ -820,12 +838,10 @@ impl GenerationBackend for HybridBackend {
     fn vocab_size(&self) -> usize {
         self.model.vocab_size()
     }
-    fn max_context_length(&self) -> Option<u32> {
-        Some(self.context_sizing.map_or_else(|| self.model.max_context_length(), |sizing| sizing.context_tokens))
+    fn context_capacity(&self) -> ContextCapacity {
+        self.context_capacity
     }
-    fn context_sizing_metadata(&self) -> Option<serde_json::Value> {
-        self.context_sizing.map(|sizing| serde_json::json!(sizing))
-    }
+
     fn automatic_context_length(
         &self,
         input_tokens: u32,
@@ -1074,6 +1090,9 @@ impl GenerationBackend for HybridBackend {
     }
     fn prefix_cache_chunk_tokens(&self) -> usize {
         self.model.prefix_chunk_tokens().unwrap_or(prefix_cache::PREFILL_CHUNK_TOKENS)
+    }
+    fn prefix_cache_midpoint_restore_geometry(&self) -> Option<(usize, usize)> {
+        self.model.prefix_midpoint_restore_geometry()
     }
     fn prefix_cache_key(&self) -> &'static str {
         PREFIX_CACHE_KEY

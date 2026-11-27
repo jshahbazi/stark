@@ -780,6 +780,7 @@ struct FamilyModelCatalog {
         let id: String
         let repo: String
         let revision: String
+        let downloadRevision: String?
         let name: String
         let sizeLabel: String?
         let parameterCount: Int64?
@@ -813,6 +814,12 @@ struct FamilyModelCatalog {
             guard artifactModes.count == modes.count else { return nil }
             let unavailableReason = SupportMetadata.string(raw["unavailable_reason"], maximum: 240)
             guard downloadable ? raw["unavailable_reason"] == nil : unavailableReason != nil else { return nil }
+            if let value = raw["download_revision"] {
+                guard downloadable, let parsed = SupportMetadata.revision(value) else { return nil }
+                downloadRevision = parsed
+            } else {
+                downloadRevision = nil
+            }
             if let size = raw["size_label"], !(size is NSNull), SupportMetadata.string(size, maximum: 64) == nil { return nil }
             for key in ["parameter_count", "weight_bytes"] {
                 if let value = raw[key], !(value is NSNull), SupportMetadata.integer(value) == nil { return nil }

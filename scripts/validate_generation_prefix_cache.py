@@ -22,6 +22,9 @@ Add ``--reuse boundary`` for backends that resume only from a snapshot at the
 previous prompt's last full prefill chunk (native hybrid models).
 Add ``--vision`` to qualify text prefix reuse on an image-capable artifact,
 including invalidation across a completed synthetic image request.
+Use ``--mode lily-midpoint --vision --reuse boundary`` for the pinned Lily
+artifact's interior and physical restore edges. This mode uses the candidate
+for fresh greedy comparisons and also checks midpoint-disabled readiness.
 Add ``--mtp-policy adaptive`` and/or ``--mtp-lookup`` to also send the opt-in
 MTP round-scheduling selectors on extra cases. Those cases compare the cached
 worker with the same build without reuse; greedy ones must also equal the
@@ -300,7 +303,8 @@ class Worker:
     """One private worker process; replies are parsed in memory only."""
 
     def __init__(
-        self, binary, model, *, prefix_cache=False, timeout=900, progress=False, vision=False
+        self, binary, model, *, prefix_cache=False, timeout=900, progress=False, vision=False,
+        lily_midpoint=None,
     ):
         self.timeout = timeout
         self.model = Path(model)
@@ -314,6 +318,9 @@ class Worker:
         )
         if self.staging_root is not None:
             command.extend(["--vision-staging-root", str(self.staging_root)])
+        env = dict(os.environ, STARK_CANCEL_FD=str(self.cancel_read))
+        if lily_midpoint is not None:
+            env["STARK_LILY_PREFIX_MIDPOINT"] = str(int(lily_midpoint))
         try:
             self.process = subprocess.Popen(
                 command,
@@ -321,7 +328,7 @@ class Worker:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 pass_fds=(self.cancel_read,),
-                env=dict(os.environ, STARK_CANCEL_FD=str(self.cancel_read)),
+                env=env,
             )
         except BaseException:
             os.close(self.cancel_read)
@@ -613,6 +620,19 @@ def advertised_tail(settings, chunk):
     return tail
 
 
+def advertised_midpoint(settings, chunk, tail):
+    """Read Lily's optional pair of restore constraints. Older workers omit both."""
+    physical = "physical_chunk_tokens"
+    suffix = "midpoint_restore_min_suffix_tokens"
+    if physical not in settings and suffix not in settings:
+        return None
+    interval, minimum = settings.get(physical), settings.get(suffix)
+    if (type(interval) is not int or interval <= chunk or interval % chunk
+            or type(minimum) is not int or minimum <= max(2, tail)):
+        raise SystemExit("candidate readiness advertises invalid midpoint restore geometry")
+    return interval, minimum
+
+
 def default_mtp_drafts(ready):
     """Drafts a request naming no MTP setting runs with: the readiness default, else none."""
     drafts = (ready.get("mtp") or {}).get("default_drafts")
@@ -628,10 +648,11 @@ class Expectation:
     that is longer.
     """
 
-    def __init__(self, chunk, boundary_only, tail=1):
+    def __init__(self, chunk, boundary_only, tail=1, midpoint=None):
         self.chunk = chunk
         self.boundary_only = boundary_only
         self.tail = tail
+        self.midpoint = midpoint
         self.entry = None
 
     def boundary(self, length):
@@ -642,9 +663,14 @@ class Expectation:
             return 0
         prefix = self.entry[1]
         if self.boundary_only:
+            minimum = max(2, self.tail)
+            if self.midpoint is not None:
+                interval, midpoint_minimum = self.midpoint
+                if len(prefix) % interval:
+                    minimum = midpoint_minimum
             return (
                 len(prefix)
-                if len(ids) >= len(prefix) + max(2, self.tail) and ids[: len(prefix)] == prefix
+                if len(ids) >= len(prefix) + minimum and ids[: len(prefix)] == prefix
                 else 0
             )
         common = next(
@@ -1122,6 +1148,9 @@ def run_exactness(args, template, codec, parser):
             raise SystemExit("candidate did not enable prefix reuse for this model")
         chunk = settings["chunk_tokens"]
         tail = advertised_tail(settings, chunk)
+        midpoint = advertised_midpoint(settings, chunk, tail)
+        if midpoint is not None and args.reuse != "boundary":
+            raise SystemExit("midpoint readiness requires --reuse boundary")
         default_drafts = default_mtp_drafts(cached.ready)
         mtp_drafts = selected_mtp_drafts(cached.ready, args.mtp_drafts)
         session, turns = build_turns(
@@ -1142,7 +1171,7 @@ def run_exactness(args, template, codec, parser):
         steps = plan(turns, chunk, args.context, mtp_drafts,
                      mtp_selection_key="mtp-selection" in settings.get("key", ""), selectors=selectors,
                      default_schedule=default, tail=tail, default_drafts=default_drafts)
-        expectation = Expectation(chunk, args.reuse == "boundary", tail)
+        expectation = Expectation(chunk, args.reuse == "boundary", tail, midpoint)
         scopes = {"main": secrets.token_hex(16), "other": secrets.token_hex(16)}
         _, observed = run_cases(
             cached,
@@ -1272,9 +1301,130 @@ def run_exactness(args, template, codec, parser):
     # Recorded only when set, so other backends' records are unchanged.
     if tail != 1:
         result["tail_tokens"] = tail
+    if midpoint is not None:
+        result["physical_chunk_tokens"], result["midpoint_restore_min_suffix_tokens"] = midpoint
     if default_drafts:
         result["mtp_default_drafts"] = default_drafts
     return result
+
+
+def run_lily_midpoint(args):
+    """Qualify the pinned retained-image worker's exact restore edges in isolation."""
+    def load(*, cache, midpoint=None):
+        return Worker(args.candidate, args.model, prefix_cache=cache, progress=args.progress,
+                      vision=True, lily_midpoint=midpoint)
+
+    def reuse_matches(reply, expected):
+        return (expected == reply.get("reused_input_tokens")
+                and {row.get("reused_input_tokens") for row in reply["_progress"]} <= {expected})
+
+    def mtp_matches(reply, depth):
+        mtp = reply.get("mtp") or {}
+        proposed = (mtp.get("stats") or {}).get("proposed", 0)
+        return (mtp.get("enabled") is bool(depth) and mtp.get("drafts") == depth
+                and type(proposed) is int and (proposed > 0 if depth else proposed == 0))
+
+    def image_artifact(worker):
+        image = worker.ready.get("image_input") or {}
+        return image.get("artifact_sha256")
+
+    def generate_text(worker, ids, depth, scope=None):
+        return generate(worker, ids, context=args.context, max_new=args.max_new,
+                        mtp_drafts=depth, scope=scope)
+
+    report(args, phase="lily_midpoint_cached")
+    with load(cache=True) as worker:
+        artifact = image_artifact(worker)
+        if not artifact:
+            raise SystemExit("pinned Lily midpoint qualification requires the retained image tower")
+        settings = worker.ready.get("prefix_cache") or {}
+        chunk = settings.get("chunk_tokens")
+        if settings.get("enabled") is not True or chunk != 2048:
+            raise SystemExit("pinned Lily midpoint readiness does not advertise the expected grid")
+        tail = advertised_tail(settings, chunk)
+        midpoint = advertised_midpoint(settings, chunk, tail)
+        if tail != 1 or midpoint != (4096, 17):
+            raise SystemExit("pinned Lily midpoint readiness does not match the expected geometry")
+        drafts = selected_mtp_drafts(worker.ready, args.mtp_drafts)
+        if not drafts:
+            raise SystemExit("pinned Lily midpoint qualification requires retained MTP")
+        tokens = worker.tokenize("The harbor pilot compared the charts before sunrise. "
+                                 "A red buoy marked shallow water near the inlet.\n" * 512)
+        if len(tokens) < 4160:
+            raise SystemExit("Lily midpoint synthetic fixture is too short")
+        rows = []
+        for depth in (0, drafts):
+            for boundary, suffix, expected in ((2048, 16, 0), (2048, 17, 2048), (4096, 2, 4096)):
+                scope = secrets.token_hex(16)
+                key = (scope, args.context, bool(depth))
+                expectation = Expectation(chunk, True, tail, midpoint)
+                seed = tokens[:boundary + 64]
+                seeded = generate_text(worker, seed, depth, scope)
+                expectation.record(seed, key, seeded)
+                ids = tokens[:boundary + suffix]
+                predicted = expectation.predict(ids, key)
+                reply = generate_text(worker, ids, depth, scope)
+                rows.append((ids, reply, {
+                    "boundary_tokens": boundary, "suffix_tokens": suffix, "drafts": depth,
+                    "reused_input_tokens": reply.get("reused_input_tokens"),
+                    "predicted_reuse": predicted,
+                    "passed": ("error" not in seeded and "error" not in reply
+                               and reuse_matches(seeded, 0) and mtp_matches(seeded, depth)
+                               and predicted == expected and reuse_matches(reply, expected)
+                               and mtp_matches(reply, depth)),
+                }))
+                report(args, case="lily_midpoint_restore", **rows[-1][2])
+        scope = secrets.token_hex(16)
+        ids = tokens[:4098]
+        key = (scope, args.context, True)
+        expectation = Expectation(chunk, True, tail, midpoint)
+        seeded = generate_text(worker, ids, drafts, scope)
+        expectation.record(ids, key, seeded)
+        predicted_warm = expectation.predict(ids, key)
+        warm = generate_text(worker, ids, drafts, scope)
+        image = worker.image_transaction(args.context)
+        expectation.entry = None
+        reply = generate_text(worker, ids, drafts, scope)
+        predicted = expectation.predict(ids, key)
+        rows.append((ids, reply, {
+            "case": "image_then_text", "drafts": drafts,
+            "reused_input_tokens": reply.get("reused_input_tokens"),
+            "predicted_reuse": predicted,
+            "passed": ("error" not in seeded and "error" not in warm and "error" not in image
+                       and "error" not in reply and predicted_warm == 4096 and reuse_matches(warm, predicted_warm)
+                       and mtp_matches(image, 0) and reuse_matches(reply, predicted)
+                       and mtp_matches(reply, drafts)),
+        }))
+
+    report(args, phase="lily_midpoint_fresh")
+    with load(cache=False) as fresh:
+        if image_artifact(fresh) != artifact or "prefix_cache" in fresh.ready:
+            raise SystemExit("fresh Lily midpoint worker has different readiness")
+        serial_outputs = {}
+        for ids, reply, row in rows:
+            reference = generate_text(fresh, ids, row["drafts"])
+            row["identical_to_fresh"] = (
+                "error" not in reference and "error" not in reply and mtp_matches(reference, row["drafts"])
+                and all(reply.get(field) == reference.get(field)
+                        for field in ("generated_token_ids", "text", "finish_reason"))
+            )
+            ids_key = tuple(ids)
+            if row["drafts"] == 0:
+                serial_outputs[ids_key] = reference.get("generated_token_ids")
+            row["identical_to_serial"] = reply.get("generated_token_ids") == serial_outputs[ids_key]
+            row["passed"] = row["passed"] and row["identical_to_fresh"] and row["identical_to_serial"]
+
+    report(args, phase="lily_midpoint_disabled")
+    with load(cache=True, midpoint=False) as stock:
+        stock_settings = stock.ready.get("prefix_cache") or {}
+        stock_passed = (image_artifact(stock) == artifact and stock_settings.get("enabled") is True
+                        and stock_settings.get("chunk_tokens") == 4096
+                        and advertised_tail(stock_settings, 4096) == 1
+                        and advertised_midpoint(stock_settings, 4096, 1) is None)
+    checks = [row for _, _, row in rows]
+    return {"image_artifact_sha256": artifact, "active_readiness": settings, "disabled_readiness": stock_settings,
+            "disabled_passed": stock_passed, "checks": checks,
+            "passed": stock_passed and all(row["passed"] for row in checks)}
 
 
 def selector_comparison(row, options, references, schedules, default=None):
@@ -1433,9 +1583,7 @@ def main():
     parser.add_argument("--download-receipt", type=Path,
                         help=("Verified pinned EXL3 flat-pack receipt; "
                               "checks file identities before and after execution"))
-    parser.add_argument(
-        "--baseline", required=True, help="Worker built without prefix reuse"
-    )
+    parser.add_argument("--baseline", help="Worker built without prefix reuse (general modes)")
     parser.add_argument(
         "--candidate", required=True, help="Worker built with prefix reuse"
     )
@@ -1460,7 +1608,7 @@ def main():
     parser.add_argument("--timing-blocks", type=int, default=2)
     parser.add_argument("--rounds-per-block", type=int, default=2)
     parser.add_argument("--seed", type=int, default=11)
-    parser.add_argument("--mode", choices=("all", "exactness", "timing"), default="all")
+    parser.add_argument("--mode", choices=("all", "exactness", "timing", "lily-midpoint"), default="all")
     parser.add_argument("--mtp-drafts", type=int, choices=tuple(range(8)), default=None,
                         help="Select dense MTP depth 0..7; default uses the worker recommendation")
     parser.add_argument("--mtp-policy", choices=("fixed", "adaptive"), default=None,
@@ -1473,6 +1621,14 @@ def main():
         help="Print only phase names and aggregate case counters",
     )
     args = parser.parse_args()
+    lily_midpoint = args.mode == "lily-midpoint"
+    if lily_midpoint:
+        if not args.vision or args.reuse != "boundary" or args.download_receipt is not None:
+            parser.error("lily-midpoint requires --vision --reuse boundary and a local Lily artifact")
+        if args.max_new < 3 or args.context < 4160 + args.max_new:
+            parser.error("lily-midpoint requires at least three output tokens and room for a 4,160-token seed")
+    elif args.baseline is None:
+        parser.error("--baseline is required for general validation modes")
     if (
         min(
             args.context,
@@ -1489,11 +1645,12 @@ def main():
     ):
         parser.error("session sizes and run counts must be positive")
 
-    codec, template, template_provenance = load_validation_template(args.model, args.download_receipt)
+    if not lily_midpoint:
+        codec, template, template_provenance = load_validation_template(args.model, args.download_receipt)
+        preflight_sessions(args, template, codec)
+        tool_parser = tool_parser_for(codec)
     download_identity = (download_receipt_identity(args.model, args.download_receipt)
                          if args.download_receipt is not None else None)
-    preflight_sessions(args, template, codec)
-    tool_parser = tool_parser_for(codec)
     started = time.time()
     report(args, phase="artifact_hashing")
     record = {
@@ -1518,17 +1675,18 @@ def main():
             },
         },
         "workers": {
-            "baseline_sha256": file_sha256(args.baseline),
             "candidate_sha256": file_sha256(args.candidate),
         },
         "context_tokens": args.context,
-        "session": {
-            "seed": args.seed,
-            "first_tokens_target": args.first_tokens,
-            **session_options(args),
-        },
-        "tool_parser": tool_parser,
     }
+    if lily_midpoint:
+        record["lily_midpoint"] = run_lily_midpoint(args)
+        record["passed"] = record["lily_midpoint"]["passed"]
+    else:
+        record["workers"]["baseline_sha256"] = file_sha256(args.baseline)
+        record["session"] = {"seed": args.seed, "first_tokens_target": args.first_tokens,
+                             **session_options(args)}
+        record["tool_parser"] = tool_parser
     if download_identity is not None:
         record["model"]["download_receipt"] = download_identity
         record["model"]["template_adapter"] = template_provenance

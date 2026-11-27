@@ -69,6 +69,10 @@ pub struct QwenMtpOutput<B: Backend> {
 }
 
 impl<B: Backend> QwenMtp<B> {
+    pub(crate) fn max_context_length(&self) -> Option<u32> {
+        self.transformer.max_context_length()
+    }
+
     pub(crate) fn context_cache_buffer_bytes(
         &self,
         context_tokens: u32,
