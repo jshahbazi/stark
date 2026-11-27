@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! AngelSlim Q3_K through Stark's serialized generation worker.
+//! Hy4 Metal backend through Stark's serialized generation worker.
 
 mod source;
 mod vision;
@@ -20,7 +20,7 @@ use stark_engine::{
         Engine,
         hy4::{
             DraftStats, ExpertStorage, ImageInput, MAX_DRAFTS, MAX_NEXTN_DRAFTS, Options, PREFILL_CHUNK,
-            RECOMMENDED_DRAFTS, SHARD, Session, VOCAB,
+            RECOMMENDED_DRAFTS, SHARD, Session, VOCAB, stq_source,
         },
         hybrid::{
             activity::InferenceActivity,
@@ -34,8 +34,9 @@ use self::vision::Hy4PreparedImage;
 use crate::{
     cancel::CancelSignal,
     generation::{
-        FinishReason, GeneratedTokens, GenerationBackend, GenerationOptions, HY4_VISION_PROFILE, ImageArtifactIdentity,
-        MtpCapabilities, PreparedImageMetadata, ProgressCallback, Sampling, TextCallback, collect_tokens_controlled,
+        FinishReason, GeneratedTokens, GenerationBackend, GenerationOptions, HY4_STQ_VISION_PROFILE,
+        HY4_VISION_PROFILE, ImageArtifactIdentity, MtpCapabilities, PreparedImageMetadata, ProgressCallback, Sampling,
+        TextCallback, collect_tokens_controlled,
     },
     hybrid::{ProbabilityMapper, report_prefill_progress, sample_with_mapper},
     prefix_cache::{self, BoundaryEntry, PrefixEntry},
@@ -48,9 +49,17 @@ const CONFIG_SHA: &str = "1f56ac1a3063f926e91ec43842bfdc0fd6d4401ef91bcdecd1fc27
 const PROCESSOR_SHA: &str = "cc5cc63da33e0ebf53b8ac035879982ba18c47965f82a5f341bc82d98759dc1d";
 const TEMPLATE_SHA: &str = "11b12531403da5726b7e1f6003f479043b05999e6746d39af949cbcdfd715c35";
 const ENGRAM_MAP_SHA: &str = "99ed7bbd800d9d9c087aa2cbbf0fcc497839c519045f6f3bf9aca177cc1769b5";
+const STQ_CONFIG_SHA: &str = "c1c5af8449a8e7db0dc5c5e8aa768c80673c94604997cfe13c6ee6aa98e9a3e3";
+const STQ_TEMPLATE_SHA: &str = "63ddd5de294df36f10c8f2c8e5f7b2a9dc2011c8481335422f04554256aee4ad";
+// SHA-256 of the pinned sorted file-name, size and content-digest inventory.
+const STQ_ARTIFACT_SHA: &str = "1ed7e181a27f78ffb1e93f9bef2eb00be3c9c5933cf5d7f50494320b45e9a04f";
+
+fn stq_validation(path: &Path) -> bool {
+    std::env::var("STARK_HY4_STQ_VALIDATION").as_deref() == Ok("1") && path.join("model-dfly.safetensors").is_file()
+}
 
 pub(crate) fn recognizes(path: &Path) -> bool {
-    path.join(SHARD).is_file()
+    path.join(SHARD).is_file() || stq_validation(path)
 }
 
 fn verify(
@@ -110,6 +119,7 @@ pub(crate) struct Hy4Backend {
     tail_prefix_enabled: bool,
     runtime: Value,
     chunk: usize,
+    stq: bool,
 }
 
 #[derive(Default, serde::Serialize)]
@@ -287,6 +297,9 @@ impl Hy4Backend {
         path: &Path,
         cancellation: Option<CancelSignal>,
     ) -> Result<Self, &'static str> {
+        if stq_validation(path) {
+            return Self::load_stq_validation(path, cancellation);
+        }
         let source = source::VerifiedSource::open(path)?;
         for (name, digest) in [
             ("config.json", CONFIG_SHA),
@@ -381,6 +394,78 @@ impl Hy4Backend {
             tail_prefix_enabled,
             runtime,
             chunk: options.chunk,
+            stq: false,
+        })
+    }
+
+    fn load_stq_validation(
+        path: &Path,
+        cancellation: Option<CancelSignal>,
+    ) -> Result<Self, &'static str> {
+        let source = stq_source::StqSource::open(path).map_err(|_| "invalid_hy4_stq_artifact")?;
+        for (name, digest) in [
+            ("tokenizer.json", TOKENIZER_SHA),
+            ("processor_config.json", PROCESSOR_SHA),
+            ("chat_template.jinja", STQ_TEMPLATE_SHA),
+        ] {
+            verify(&path.join(name), digest)?;
+        }
+        let tokenizer = Tokenizer::from_file(path.join("tokenizer.json")).map_err(|_| "invalid_hy4_tokenizer")?;
+        if tokenizer.get_vocab_size(true) != VOCAB {
+            return Err("invalid_hy4_tokenizer");
+        }
+        let engine = Engine::<Metal>::new().map_err(|_| "native_backend_unavailable")?;
+        let identity = engine.metal_device_identity();
+        drop(engine);
+        let chunk = match std::env::var("STARK_HY4_PREFILL_CHUNK").as_deref() {
+            Ok("1024") => 1024,
+            Ok("4096") | Err(std::env::VarError::NotPresent) => 4096,
+            _ => return Err("invalid_hy4_prefill_chunk"),
+        };
+        let context =
+            optional_bound("STARK_HY4_CONTEXT_LIMIT", 2..=u32::MAX, "invalid_hy4_context_limit")?.unwrap_or(u32::MAX);
+        let profile = verify_switch("STARK_HY4_PROFILE_PREFILL", "invalid_hy4_prefill_profile", false)?;
+        let round_bf16 = verify_switch("STARK_HY4_STQ_BF16", "invalid_hy4_stq_precision", false)?;
+        let pair1_decode = verify_switch("STARK_HY4_STQ_PAIR1_DECODE", "invalid_hy4_stq_decode", false)?;
+        let resident = verify_switch("STARK_HY4_STQ_RESIDENT", "invalid_hy4_stq_residency", false)?;
+        let tail_prefix_enabled =
+            verify_switch("STARK_HY4_PREFILL_TAIL_PREFIX", "invalid_hy4_prefill_tail_prefix", false)?;
+        // This opt-in validation run borrows an explicitly pinned, immutable
+        // local artifact. Its caller supplies the verified weight inventory.
+        let native = unsafe {
+            Session::load_stq_diagnostic(&source, chunk as u32, context, profile, round_bf16, pair1_decode, resident)
+        }
+        .map_err(|_| "hy4_stq_native_load_failed")?;
+        source.verify_unchanged().map_err(|_| "invalid_hy4_stq_artifact")?;
+        let runtime = json!({
+            "backend": identity.backend,
+            "device_name": identity.device_name,
+            "apple_gpu_family": identity.apple_gpu_family,
+            "gpu_core_count": identity.gpu_core_count,
+            "supports_mxu": identity.supports_mxu,
+            "prefill_chunk_tokens": chunk,
+            "bf16_projection_boundaries": round_bf16,
+            "pair1_single_token_gemv": pair1_decode,
+            "mapped_weight_residency": resident,
+            "prefill_stage_profile_requested": profile,
+            "draft_head_format": "spec1-k4-dfly2",
+        });
+        Ok(Self {
+            native,
+            tokenizer,
+            cancellation,
+            mapper: ProbabilityMapper::default(),
+            retained: None,
+            pending: None,
+            tail_retained: None,
+            tail_pending: None,
+            stats: DraftStats::default(),
+            lookup_stats: LookupStats::default(),
+            lookup_newline: None,
+            tail_prefix_enabled,
+            runtime,
+            chunk,
+            stq: true,
         })
     }
 
@@ -651,20 +736,43 @@ impl GenerationBackend for Hy4Backend {
         (geometry.patch, geometry.merge)
     }
     fn image_family_profile(&self) -> Option<(&str, u32)> {
-        Some((HY4_VISION_PROFILE, 1))
+        Some((
+            if self.stq {
+                HY4_STQ_VISION_PROFILE
+            } else {
+                HY4_VISION_PROFILE
+            },
+            1,
+        ))
     }
     fn image_artifact_identity(&self) -> Option<ImageArtifactIdentity<'_>> {
         Some(ImageArtifactIdentity {
             schema_version: 7,
-            artifact_sha256: source::ARTIFACT_SHA256,
-            config_sha256: CONFIG_SHA,
+            artifact_sha256: if self.stq {
+                STQ_ARTIFACT_SHA
+            } else {
+                source::ARTIFACT_SHA256
+            },
+            config_sha256: if self.stq {
+                STQ_CONFIG_SHA
+            } else {
+                CONFIG_SHA
+            },
             tokenizer_sha256: TOKENIZER_SHA,
             processor_sha256: PROCESSOR_SHA,
-            template_sha256: TEMPLATE_SHA,
+            template_sha256: if self.stq {
+                STQ_TEMPLATE_SHA
+            } else {
+                TEMPLATE_SHA
+            },
         })
     }
     fn image_source_identity(&self) -> Option<(&str, Option<&str>)> {
-        Some((source::REPOSITORY, Some(source::REVISION)))
+        Some(if self.stq {
+            (stq_source::REPOSITORY, Some(stq_source::REVISION))
+        } else {
+            (source::REPOSITORY, Some(source::REVISION))
+        })
     }
     fn runtime_identity(&self) -> Option<Value> {
         Some(self.runtime.clone())
@@ -708,7 +816,11 @@ impl GenerationBackend for Hy4Backend {
             max_drafts: self.native.max_drafts(),
             recommended_drafts: RECOMMENDED_DRAFTS,
             sampling: "greedy-target-match-v1",
-            verification: "hy4-nextn-greedy-prefix-match-v1",
+            verification: if self.stq {
+                "hy4-dfly2-greedy-prefix-match-v1"
+            } else {
+                "hy4-nextn-greedy-prefix-match-v1"
+            },
         })
     }
     fn effective_mtp_drafts(

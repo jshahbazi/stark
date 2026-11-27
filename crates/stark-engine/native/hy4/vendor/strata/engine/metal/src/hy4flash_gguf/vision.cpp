@@ -112,6 +112,7 @@ std::string check_shapes(const gguf::File& f, const VisionGeometry& g) {
 
 mtl::Arg VisionShard::arg(const std::string& name) const {
     const gguf::Tensor* t = find(name);
+    if (t != nullptr && t->type == 0 && expanded.handle != nullptr) return mtl::Arg::B(expanded, t->offset);
     return mtl::Arg::B(weights, t == nullptr ? 0 : t->offset);
 }
 
@@ -310,6 +311,7 @@ std::string open_vision(VisionShard& out, mtl::Context& cx, const std::string& m
 }
 
 void close_vision(VisionShard& s, mtl::Context& cx) {
+    if (s.expanded.handle != nullptr) cx.free(s.expanded);
     if (s.weights.handle != nullptr) cx.free(s.weights);
     s.weights = mtl::Buffer();
 }

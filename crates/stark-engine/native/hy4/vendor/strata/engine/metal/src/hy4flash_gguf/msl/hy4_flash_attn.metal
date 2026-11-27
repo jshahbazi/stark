@@ -356,6 +356,15 @@ kernel void hy4_flash_copy_f32(device const float* x [[buffer(0)]], device float
     y[(ulong)gid.y * a.y_stride + gid.x] = x[(ulong)gid.y * a.a_stride + gid.x];
 }
 
+kernel void stark_hy4_capture_indexer(
+    device const uint* input [[buffer(0)]], device const uint* counts [[buffer(1)]],
+    device uint* output [[buffer(2)]], device uint* output_counts [[buffer(3)]],
+    constant uint& width [[buffer(4)]], uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x == 0) output_counts[gid.y] = counts[gid.y];
+    if (gid.x < counts[gid.y] && gid.x < width)
+        output[ulong(gid.y) * width + gid.x] = input[ulong(gid.y) * width + gid.x];
+}
+
 // The f16 KV / indexer cache store.  A non-finite value MAY NOT ENTER THE CACHE.
 //
 // So a value that is not finite, or whose magnitude f16 cannot hold (|v| > 65504, which `half()` would turn into

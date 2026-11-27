@@ -20,8 +20,14 @@ pub fn generate(
         }
     }
     paths.extend(
-        ["pair1_k4_grouped.metal", "pair1_k4_io.metal", "spec1_dense.metal", "stq_embedding.metal"]
-            .map(|name| native.join("stq_metal").join(name)),
+        [
+            "pair1_k4_grouped.metal",
+            "pair1_k4_decode.metal",
+            "pair1_k4_io.metal",
+            "spec1_dense.metal",
+            "stq_embedding.metal",
+        ]
+        .map(|name| native.join("stq_metal").join(name)),
     );
     paths.sort();
 

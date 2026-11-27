@@ -12,7 +12,8 @@ bool split_kv_b(const TrellisView& weight, std::size_t heads,
                 std::span<uint16_t> key, std::span<uint16_t> value) noexcept {
     constexpr std::size_t latent = 512, nope = 192, v = 256;
     constexpr std::size_t head_rows = nope + v;
-    if ((heads != 32 && heads != 64) || weight.banks != 1 || weight.format != Format::spec1_k6 ||
+    if ((heads != 32 && heads != 64) || weight.banks != 1 ||
+        (weight.format != Format::spec1_k6 && weight.format != Format::spec1_k4) ||
         weight.inputs != latent || weight.outputs != heads * head_rows || !weight.valid() ||
         suh.size() != weight.inputs || svh.size() != weight.outputs ||
         key.size() != heads * latent * nope || value.size() != heads * latent * v) {

@@ -7,6 +7,7 @@
 #include "forward.h"
 #include "model.h"
 #include "mtp.h"
+#include "stq_dfly.h"
 #include "stq_engram.h"
 #include "stq_geometry.h"
 
@@ -77,6 +78,7 @@ struct StarkHy4 {
     Model model;
     Forward forward;
     Mtp mtp;
+    stark::hy4::stq::Dfly2 dfly;
     StarkHy4Vision vision;
     std::unique_ptr<StarkHy4ImagePrompt> image;
     std::vector<int32_t> tokens;
@@ -89,7 +91,10 @@ struct StarkHy4 {
     mtl::Context::SegTiming decode_start{};
     double decode_engram_start_ms = 0;
     uint64_t request_start_invalid_spans = 0;
-    ~StarkHy4() { metal.stop_keepalive(); }
+    ~StarkHy4() {
+        metal.stop_keepalive();
+        if (model.stq) metal.end_expert_residency();
+    }
 };
 
 extern "C" int stark_hy4_open(const char* model, const char* projector, const char* pack, int chunk,
@@ -224,8 +229,10 @@ extern "C" int stark_hy4_open_stq_diagnostic(
     const stark::hy4::stq::WeightSource* weights, size_t weight_count,
     const stark::hy4::stq::ProjectionSource* experts, size_t expert_count,
     const stark::hy4::stq::TensorSlice* tables, const int32_t* token_map, size_t map_len,
-    int chunk, uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
-    StarkHy4** output, char* detail, size_t detail_len) noexcept {
+    const stark::hy4::stq::TensorSlice* vision_weights, size_t vision_count,
+    int chunk, int profile, int round_bf16, int pair1_decode, int resident,
+    uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
+    StarkHy4** output, StarkHy4VisionGeometry* vision, char* detail, size_t detail_len) noexcept {
     *output = nullptr;
     auto fail = [&](const std::string& error) {
         if (detail_len != 0) {
@@ -242,7 +249,10 @@ extern "C" int stark_hy4_open_stq_diagnostic(
         auto& s = *session;
         if (!s.metal.supports_metal4()) return fail("STQ requires Metal 4");
         s.metal.lock_safe_math();
+        s.metal.stop_keepalive();
         if (auto error = make_geometry(0, s.model.geo); !error.empty()) return fail(error);
+        if (auto error = s.vision.open_stq(s.metal, {vision_weights, vision_count}); !error.empty())
+            return fail(error);
         // Reserve the full packed weight set separately from anonymous scratch
         // and context. Engram tables use positional reads outside this budget.
         double packed_bytes = 0;
@@ -255,9 +265,10 @@ extern "C" int stark_hy4_open_stq_diagnostic(
         const double current = strata::metal_engine::proc_mem().footprint;
         const double matrices = 2.0 * kGiB;
         const double scratch = 2.5 * kGiB * (chunk / 1024.0);
+        const double image = s.metal.allocated() + s.vision.reserved_bytes();
         const double room = std::min({available, phys - current - 16.0 * kGiB - packed_bytes,
                                      s.metal.recommended_working_set() - packed_bytes - 2.0 * kGiB})
-                            - matrices - scratch;
+                            - matrices - scratch - image;
         if (room <= 0) return fail("insufficient live memory for the STQ pack and context");
         auto memory = context_memory(s.model.geo, s.metal, chunk, static_cast<uint64_t>(room));
         memory.draft_slack = 0;
@@ -267,13 +278,26 @@ extern "C" int stark_hy4_open_stq_diagnostic(
         if (context < 2 || context > memory.engine_context || context > memory.checkpoint_context)
             return fail("cannot fit STQ context");
         s.model.geo.max_context = int32_t(context);
-        if (auto error = load_trunk(s.model, s.metal, {weights, weight_count}, {experts, expert_count}); !error.empty())
+        if (auto error = load_trunk(s.model, s.metal, {weights, weight_count}, {experts, expert_count},
+                                    round_bf16 != 0, pair1_decode != 0);
+            !error.empty())
             return fail(error);
         if (auto error = bind_engram(s.model, {tables, 4}, {token_map, map_len}); !error.empty())
             return fail(error);
         Prefill prefill;
         prefill.chunk = chunk;
+        prefill.profile_stages = profile != 0;
         if (auto error = s.forward.open(s.model, s.metal, "", prefill); !error.empty()) return fail(error);
+        if (auto error = s.vision.build(s.metal, s.forward.library()); !error.empty()) return fail(error);
+        if (s.model.stq->has_dfly) {
+            if (auto error = s.dfly.open(s.model, s.metal, s.forward.library()); !error.empty()) return fail(error);
+            s.max_drafts = int(kDflyMaxDrafts);
+        }
+        if (resident && !s.model.stq->begin_residency(s.metal)) return fail("cannot make the STQ mapped banks resident");
+        const auto& vg = s.vision.geometry();
+        *vision = {static_cast<uint32_t>(vg.image_token), static_cast<uint32_t>(vg.patch),
+                   static_cast<uint32_t>(vg.merge), static_cast<uint64_t>(vg.min_pixels),
+                   static_cast<uint64_t>(vg.max_pixels)};
         s.capacity = int(context);
         s.tokens.reserve(context);
         *output = session.release();
@@ -291,7 +315,8 @@ extern "C" void stark_hy4_clear(StarkHy4* session) noexcept {
     auto& s = *session;
     s.image.reset();
     s.forward.reset();
-    if (!s.model.stq) s.mtp.reset();
+    if (s.model.stq) s.mtp.stats() = {};
+    else s.mtp.reset();
     s.tokens.clear();
     s.position = 0;
     s.context = 0;
@@ -316,7 +341,7 @@ extern "C" int stark_hy4_begin(StarkHy4* session, const uint32_t* tokens, int co
     auto& s = *session;
     try {
         if (context > s.capacity || count < 1 || count >= context || reuse < 0 || reuse >= count ||
-            drafts < 0 || drafts > s.max_drafts || (image && (reuse || drafts || s.model.stq))) return 1;
+            drafts < 0 || drafts > s.max_drafts || (image && (reuse || drafts))) return 1;
         const auto valid = [](uint32_t token) { return token < kVocab; };
         if (!std::all_of(tokens, tokens + count, valid)) return 1;
         if (reuse == 0) {
@@ -333,6 +358,7 @@ extern "C" int stark_hy4_begin(StarkHy4* session, const uint32_t* tokens, int co
         s.position = reuse;
         s.context = context;
         s.drafts = drafts;
+        if (s.model.stq) s.forward.capture_dfly(drafts > 0);
         s.decode_start = s.metal.seg_timing();
         s.request_start_invalid_spans = s.decode_start.invalid_gpu_spans;
         s.decode_engram_start_ms = s.forward.timing().engram_wait_ms;
@@ -355,7 +381,7 @@ extern "C" int stark_hy4_prefill(StarkHy4* session, int rows) noexcept {
         if (rows < 1 || rows > s.forward.prefill_chunk() ||
             s.position + rows > static_cast<int>(s.tokens.size())) return 1;
         Forward::PrefillSink sink;
-        if (s.drafts) {
+        if (s.drafts && !s.model.stq) {
             sink.hidden = [&](int pos, int n, const float* h) { s.mtp.set_hidden(pos + 1, n, h); };
         }
         if (!s.forward.prefill(s.tokens.data(), s.position, rows, sink).empty()) return 1;
@@ -412,6 +438,14 @@ extern "C" int stark_hy4_verify(StarkHy4* session, int count, const uint32_t* lo
             s.tokens.insert(s.tokens.end(), proposals.begin(), proposals.begin() + k);
             // The draft cache can lag here. The target history below contains
             // every committed hidden row that NextN needs to catch up later.
+        } else if (s.model.stq) {
+            if (k > 0) {
+                stark::hy4::stq::DflyTargetView target;
+                if (!s.forward.dfly_target(start, target) ||
+                    !s.dfly.propose(target, uint32_t(s.tokens.back()), {proposals.data(), size_t(k)}).empty())
+                    return -1;
+                s.tokens.insert(s.tokens.end(), proposals.begin(), proposals.begin() + k);
+            }
         } else {
             for (int i = 0; i < k; ++i) {
                 const int row = start + i;
@@ -420,7 +454,7 @@ extern "C" int stark_hy4_verify(StarkHy4* session, int count, const uint32_t* lo
                 s.tokens.push_back(proposals[i]);
             }
         }
-        s.mtp.truncate(start + 1);
+        if (!s.model.stq) s.mtp.truncate(start + 1);
         stats.draft_ms += (mtl::now_s() - t) * 1e3;
         t = mtl::now_s();
         if (!s.forward.window(s.tokens.data(), start, count).empty()) return -1;
@@ -428,7 +462,7 @@ extern "C" int stark_hy4_verify(StarkHy4* session, int count, const uint32_t* lo
         const int32_t* actual = s.forward.argmax();
         if (!std::all_of(actual, actual + count, [](int32_t t) { return t >= 0 && t < kVocab; })) return -1;
         const int accepted = accept_prefix(proposals.data(), actual, k);
-        s.mtp.set_hidden(start + 1, accepted + 1, s.forward.result_norm());
+        if (!s.model.stq) s.mtp.set_hidden(start + 1, accepted + 1, s.forward.result_norm());
         s.tokens.resize(static_cast<size_t>(start + 1));
         for (int i = 0; i <= accepted; ++i) {
             output[i] = static_cast<uint32_t>(actual[i]);

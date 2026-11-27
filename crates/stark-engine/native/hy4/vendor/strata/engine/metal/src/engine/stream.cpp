@@ -35,18 +35,18 @@ int env_int(const char* n, int d) {
     const char* e = stark::hy4::vendor_option(n);
     return e && *e ? std::atoi(e) : d;
 }
+}  // namespace
 
-bool prepare_mapped_pages(const uint8_t* mapping,
-                          const std::vector<std::pair<uint64_t, uint64_t>>& ranges) {
+bool prepare_mapped_pages(std::span<const std::span<const uint8_t>> ranges) {
     constexpr uint64_t step = 128ull << 20;
     constexpr uint64_t swap_allowance = 256ull << 20;
     xsw_usage before{};
     size_t before_size = sizeof before;
     if (sysctlbyname("vm.swapusage", &before, &before_size, nullptr, 0) != 0) return false;
-    const volatile uint8_t* pages = mapping;
     uint8_t touched = 0;
-    for (const auto& [lo, hi] : ranges) {
-        for (uint64_t first = lo; first < hi; first += step) {
+    for (const auto& range : ranges) {
+        const volatile uint8_t* pages = range.data();
+        for (uint64_t first = 0; first < range.size(); first += step) {
             int pressure = 0;
             size_t level_size = sizeof pressure;
             xsw_usage current{};
@@ -56,7 +56,7 @@ bool prepare_mapped_pages(const uint8_t* mapping,
                 sysctlbyname("vm.swapusage", &current, &current_size, nullptr, 0) != 0 ||
                 current.xsu_used > before.xsu_used + swap_allowance)
                 return false;
-            const uint64_t last = std::min(first + step, hi);
+            const uint64_t last = std::min<uint64_t>(first + step, range.size());
             for (uint64_t page = first; page < last; page += PAGE)
                 touched ^= pages[page];
         }
@@ -64,7 +64,6 @@ bool prepare_mapped_pages(const uint8_t* mapping,
     (void) touched;
     return true;
 }
-}  // namespace
 
 bool ExpertStream::wanted(const gguf::File& f, const mtl::Context& cx) {
     const char* e = stark::hy4::vendor_option("STRATA_METAL_STREAM");
@@ -257,9 +256,14 @@ bool ExpertStream::map_experts(mtl::Context& cx, uint64_t budget, bool prepare_r
     fcntl(fd_, F_RDAHEAD, 1);
     auto* bytes = static_cast<uint8_t*>(mmap(nullptr, static_cast<size_t>(file.st_size), PROT_READ, MAP_PRIVATE, fd_, 0));
     if (bytes == MAP_FAILED) return false;
-    if (prepare_residency && !prepare_mapped_pages(bytes, ranges)) {
-        munmap(bytes, static_cast<size_t>(file.st_size));
-        return false;
+    if (prepare_residency) {
+        std::vector<std::span<const uint8_t>> pages;
+        pages.reserve(ranges.size());
+        for (const auto& [lo, hi] : ranges) pages.emplace_back(bytes + lo, hi - lo);
+        if (!prepare_mapped_pages(pages)) {
+            munmap(bytes, static_cast<size_t>(file.st_size));
+            return false;
+        }
     }
     // The inherited keepalive references every buffer. Keep cold mapped
     // weights out of idle commands and release references before munmap.

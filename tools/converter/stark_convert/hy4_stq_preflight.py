@@ -334,6 +334,10 @@ def _tensor_summary(config: dict, index: dict, tensors: dict) -> dict:
     }
 
 
+def validation_requested(path: Path) -> bool:
+    return os.environ.get("STARK_HY4_STQ_VALIDATION") == "1" and (path / "model-dfly.safetensors").is_file()
+
+
 def inspect_pack(model_dir: Path) -> dict:
     """Check pinned layout/config/header metadata without reading weight payloads."""
     root = Path(os.path.abspath(model_dir))

@@ -79,6 +79,7 @@ FLINT_TEMPLATE_SHA256 = "7940f4ffa3275c36caa4a582f845aaad79da11018b3961e8fbcad6a
 # Tencent/Hy4-flash chat_template.jinja at eccd3123eec73f2040f4c9ed0de1883593470510,
 # used by the pinned native AngelSlim Q3_K artifact.
 HY4_TEMPLATE_SHA256 = "11b12531403da5726b7e1f6003f479043b05999e6746d39af949cbcdfd715c35"
+HY4_STQ_TEMPLATE_SHA256 = "63ddd5de294df36f10c8f2c8e5f7b2a9dc2011c8481335422f04554256aee4ad"
 # Version-1 Jinja AST fingerprints of the hash-verified sources above.
 # They admit only syntax-equivalent programs, independently of model metadata.
 _SUPPORTED_TEMPLATE_PROGRAMS = {
@@ -403,7 +404,7 @@ def tool_parser_for(codec: dict | None) -> str | None:
         return _QWEN35_XML_PARSER
     if digest in {GLM53_TEMPLATE_SHA256, FLINT_TEMPLATE_SHA256}:
         return _GLM_PARSER
-    if digest == HY4_TEMPLATE_SHA256:
+    if digest in {HY4_TEMPLATE_SHA256, HY4_STQ_TEMPLATE_SHA256}:
         return HY4_TOOL_PARSER
     program = template_program_sha256(source)
     return _SUPPORTED_TEMPLATE_PROGRAMS.get(program) or TEMPLATE_PROGRAMS.get(program)

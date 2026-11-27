@@ -314,6 +314,15 @@ def terminate(process):
 
 
 def model_valid(path):
+    from . import hy4_stq_preflight
+
+    if hy4_stq_preflight.validation_requested(path):
+        try:
+            hy4_stq_preflight.inspect_pack(path)
+            load_template(path)
+            return True
+        except Exception:
+            return False
     if prepared_identity(path) is not None:
         try:
             load_template(path)

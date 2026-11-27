@@ -5,11 +5,22 @@ use std::{env, error::Error, path::Path, time::Instant};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use stark_engine::engine::hy4::{Session, stq_layout::StqFormat, stq_source::StqSource};
+use stark_engine::engine::hy4::{ImageInput, MAX_DRAFTS, Session, stq_layout::StqFormat, stq_source::StqSource};
+
+struct Diagnostic {
+    rows: usize,
+    context: u32,
+    chunk: usize,
+    output: usize,
+    repeats: usize,
+    drafts: usize,
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args().skip(1);
-    let path = args.next().ok_or("usage: hy4_stq_inspect <artifact-directory> [rows context chunk decode]")?;
+    let path = args
+        .next()
+        .ok_or("usage: hy4_stq_inspect <artifact-directory> [rows context chunk output [repeats [drafts]]]")?;
     let source = StqSource::open(Path::new(&path))?;
     let trunk = source.stq_trunk()?;
     let mut pair1 = 0;
@@ -56,66 +67,169 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
     );
     if let Some(rows) = args.next() {
-        let rows: usize = rows.parse()?;
-        let context: u32 = args.next().ok_or("missing context")?.parse()?;
-        let chunk: usize = args.next().ok_or("missing chunk")?.parse()?;
-        let decode: usize = args.next().ok_or("missing decode count")?.parse()?;
-        if rows == 0 || rows.checked_add(decode).is_none_or(|n| n >= context as usize) || !matches!(chunk, 1024 | 4096)
+        let test = Diagnostic {
+            rows: rows.parse()?,
+            context: args.next().ok_or("missing context")?.parse()?,
+            chunk: args.next().ok_or("missing chunk")?.parse()?,
+            output: args.next().ok_or("missing output count")?.parse()?,
+            repeats: args.next().map_or(Ok(1), |n| n.parse())?,
+            drafts: args.next().map_or(Ok(0), |n| n.parse())?,
+        };
+        if test.rows == 0
+            || test.repeats == 0
+            || test.rows.checked_add(test.output).is_none_or(|n| n >= test.context as usize)
+            || !matches!(test.chunk, 1024 | 4096)
         {
             return Err("invalid diagnostic dimensions".into());
         }
-        run_trunk(&source, rows, context, chunk, decode)?;
+        let tokenizer = tokenizers::Tokenizer::from_file(Path::new(&path).join("tokenizer.json"))
+            .map_err(|_| "cannot open pinned-pack tokenizer")?;
+        run_trunk(&source, &tokenizer, test)?;
     }
     Ok(())
 }
 
 fn run_trunk(
     source: &StqSource,
-    rows: usize,
-    context: u32,
-    chunk: usize,
-    decode: usize,
+    tokenizer: &tokenizers::Tokenizer,
+    test: Diagnostic,
 ) -> Result<(), Box<dyn Error>> {
     let started = Instant::now();
     // The diagnostic is restricted to a privately installed, pinned, immutable
     // artifact. Keep it in place for the duration of the command.
-    let mut session = unsafe { Session::load_stq_diagnostic(source, chunk as u32, context) }?;
+    let profile = env::var_os("STARK_HY4_STQ_DIAGNOSTIC_PROFILE").is_some();
+    let round_bf16 = env::var_os("STARK_HY4_STQ_DIAGNOSTIC_BF16").is_some();
+    let pair1_decode = env::var_os("STARK_HY4_STQ_DIAGNOSTIC_PAIR1_DECODE").is_some();
+    let resident = env::var_os("STARK_HY4_STQ_DIAGNOSTIC_RESIDENT").is_some();
+    let mut session = unsafe {
+        Session::load_stq_diagnostic(
+            source,
+            test.chunk as u32,
+            test.context,
+            profile,
+            round_bf16,
+            pair1_decode,
+            resident,
+        )
+    }?;
     let context = session.context_sizing().context_tokens;
-    if rows + decode >= context as usize {
+    if test.rows + test.output >= context as usize || test.drafts > session.max_drafts() {
         return Err("fitted context does not hold this diagnostic".into());
     }
     let load_seconds = started.elapsed().as_secs_f64();
-    let tokens: Vec<u32> = (0..rows).map(|i| 256 + (i * 127 % 8192) as u32).collect();
-    session.begin(&tokens, context, 0, 0, None).map_err(|e| format!("begin: {e}"))?;
-    let started = Instant::now();
-    for window in tokens.chunks(chunk) {
-        session.prefill(window.len()).map_err(|e| format!("prefill: {e}"))?;
+    let tokens: Vec<u32> = (0..test.rows).map(|i| 256 + (i * 127 % 8192) as u32).collect();
+    let mut expected = None;
+    for repeat in 0..test.repeats {
+        session.begin(&tokens, context, 0, test.drafts as u32, None).map_err(|e| format!("begin: {e}"))?;
+        let started = Instant::now();
+        for window in tokens.chunks(test.chunk) {
+            session.prefill(window.len()).map_err(|e| format!("prefill: {e}"))?;
+        }
+        let prefill_seconds = started.elapsed().as_secs_f64();
+        let started = Instant::now();
+        let mut output = Vec::with_capacity(test.output);
+        if test.output != 0 {
+            output.push(session.greedy()?);
+        }
+        if test.drafts > 0 && output.len() < test.output {
+            session.append(output[0]).map_err(|e| format!("draft anchor: {e}"))?;
+        }
+        while output.len() < test.output {
+            if test.drafts == 0 {
+                session
+                    .append(*output.last().ok_or("missing first greedy token")?)
+                    .map_err(|e| format!("decode: {e}"))?;
+                output.push(session.greedy()?);
+            } else {
+                let count = (test.output - output.len()).min(test.drafts + 1);
+                let mut verified = [0; MAX_DRAFTS + 1];
+                let kept = session.verify(count, &[], &mut verified).map_err(|e| format!("DFly2 verify: {e}"))?;
+                output.extend_from_slice(&verified[..kept]);
+            }
+        }
+        let decode_seconds = started.elapsed().as_secs_f64();
+        let mut digest = Sha256::new();
+        for &token in &output {
+            digest.update(token.to_le_bytes());
+        }
+        if !session.logits()?.iter().all(|x| x.is_finite()) {
+            return Err("nonfinite STQ logits".into());
+        }
+        let digest = digest.finalize();
+        if *expected.get_or_insert(digest) != digest {
+            return Err("STQ greedy output changed across fresh requests".into());
+        }
+        let text = tokenizer.decode(&output, false).map_err(|_| "cannot detokenize diagnostic")?;
+        println!(
+            "{}",
+            json!({
+                "repeat": repeat,
+                "context": context,
+                "chunk": test.chunk,
+                "prefill_tokens": test.rows,
+                "output_tokens": test.output,
+                "decode_steps": test.output.saturating_sub(1),
+                "draft_depth": test.drafts,
+                "bf16_projection_boundaries": round_bf16,
+                "pair1_single_token_gemv": pair1_decode,
+                "mapped_weight_residency": resident,
+                "vision_weights_loaded": session.vision_geometry().patch != 0,
+                "load_seconds": load_seconds,
+                "prefill_seconds": prefill_seconds,
+                "decode_seconds": decode_seconds,
+                "output_sha256": format!("{digest:x}"),
+                "text_sha256": format!("{:x}", Sha256::digest(text.as_bytes())),
+                "native_stats": session.stats(),
+            })
+        );
     }
-    let prefill_seconds = started.elapsed().as_secs_f64();
+    if env::var_os("STARK_HY4_STQ_DIAGNOSTIC_LIFECYCLE").is_some() {
+        check_lifecycle(&mut session, &tokens, &test, context)?;
+    }
+    Ok(())
+}
+
+fn check_lifecycle(
+    session: &mut Session,
+    tokens: &[u32],
+    test: &Diagnostic,
+    context: u32,
+) -> Result<(), Box<dyn Error>> {
+    if test.rows < test.chunk || !test.rows.is_multiple_of(test.chunk) || test.rows + 1 >= context as usize {
+        return Err("lifecycle diagnostic requires whole prefill chunks and room for a suffix".into());
+    }
+    let draft = test.drafts as u32;
+    let mut continuation = tokens.to_vec();
+    continuation.push(1616);
+    session.retain_prefix(test.rows)?;
+    session.begin(&continuation, context, test.rows, draft, None)?;
+    session.prefill(1)?;
+    let retained = session.logits()?.to_vec();
+    session.begin(&continuation, context, 0, draft, None)?;
+    for window in continuation.chunks(test.chunk) {
+        session.prefill(window.len())?;
+    }
+    if retained.iter().zip(session.logits()?).any(|(a, b)| a.to_bits() != b.to_bits()) {
+        return Err("STQ prefix replay changed the logits".into());
+    }
+    let geometry = session.vision_geometry();
+    let (width, height) = (96u32, 64u32);
+    let count = (height / geometry.patch / geometry.merge) * (width / geometry.patch / geometry.merge + 1);
+    let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i.wrapping_mul(17) % 251) as u8).collect();
+    let image = ImageInput::new(&pixels, width, height);
+    let mut image_tokens = vec![tokens[0], 120118];
+    image_tokens.extend(std::iter::repeat_n(geometry.image_token, count as usize));
+    image_tokens.push(120119);
+    let pool = session.index_pool_group_tokens() as usize;
+    image_tokens.extend_from_slice(&tokens[..pool]);
+    session.begin(&image_tokens, context, 0, 0, Some(&image))?;
+    session.prefill(image_tokens.len())?;
     if !session.logits()?.iter().all(|x| x.is_finite()) {
-        return Err("nonfinite STQ logits".into());
+        return Err("nonfinite STQ image logits".into());
     }
-    let started = Instant::now();
-    let mut digest = Sha256::new();
-    for _ in 0..decode {
-        let token = session.greedy()?;
-        digest.update(token.to_le_bytes());
-        session.append(token).map_err(|e| format!("decode: {e}"))?;
+    if session.retain_prefix(pool).is_ok() || session.begin(&image_tokens, context, pool, 0, None).is_ok() {
+        return Err("STQ image allowed prefix reuse".into());
     }
-    let decode_seconds = started.elapsed().as_secs_f64();
-    println!(
-        "{}",
-        json!({
-            "context": context,
-            "chunk": chunk,
-            "prefill_tokens": rows,
-            "decode_steps": decode,
-            "load_seconds": load_seconds,
-            "prefill_seconds": prefill_seconds,
-            "decode_seconds": decode_seconds,
-            "output_sha256": format!("{:x}", digest.finalize()),
-            "native_stats": session.stats(),
-        })
-    );
+    println!("{}", json!({"prefix_reuse_tokens": test.rows, "replay_logits_equal": true, "image_rows": count}));
     Ok(())
 }

@@ -59,6 +59,14 @@ std::string StarkHy4Vision::build(mtl::Context& context, int library) {
     return error;
 }
 
+std::string StarkHy4Vision::open_stq(mtl::Context& context,
+                                    std::span<const stark::hy4::stq::TensorSlice> weights) {
+    if (context_ != nullptr) return "invalid vision initialization";
+    const auto error = stark::hy4::stq::open_vision(shard_, context, weights);
+    if (error.empty()) context_ = &context;
+    return error;
+}
+
 uint64_t StarkHy4Vision::reserved_bytes() const {
     const auto& geo = shard_.geo;
     if (!shard_.loaded()) return 0;

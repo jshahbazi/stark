@@ -11,6 +11,7 @@ use std::{
 
 use super::context::ContextSizing;
 
+pub mod stq_dfly;
 pub mod stq_layout;
 mod stq_native;
 pub mod stq_source;

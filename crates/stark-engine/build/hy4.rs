@@ -50,12 +50,14 @@ pub(super) fn build(out_dir: &Path) -> anyhow::Result<()> {
             "stark_hy4.cpp",
             "stark_hy4_vision.cpp",
             "stq_codec.cpp",
+            "stq_dfly.cpp",
             "stq_attention.cpp",
             "stq_engram.cpp",
             "stq_embedding.cpp",
             "stq_expert.cpp",
             "stq_geometry.cpp",
             "stq_model.cpp",
+            "stq_vision.cpp",
         ]
         .map(|path| native.join(path)),
     );

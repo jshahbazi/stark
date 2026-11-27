@@ -47,6 +47,8 @@
 #include <string>
 #include <vector>
 
+namespace stark::hy4::stq { struct DflyTargetView; }
+
 namespace strata::hy4_flash {
 
 /// What one run may inject instead of computing it.  A null pointer means "the engine's own".
@@ -190,6 +192,10 @@ public:
     /// After the arena is built and before the first prompt: puts the prompt's scratch into a region of the arena
     /// (HY4_FLASH_SCRATCH_SPLIT=0: it was allocated beside the arena at open, and this does nothing).
     std::string attach_prefill();
+
+    /// Keep IndexPool selections only for rows in the latest draft-enabled window.
+    void capture_dfly(bool enabled);
+    bool dfly_target(int position, stark::hy4::stq::DflyTargetView& view) const;
 
     /// Runs the whole prompt in chunks: prefill() over [0, n), the last chunk's last position included.  After it
     /// `last_logits()` / `last_token()` are that position's.

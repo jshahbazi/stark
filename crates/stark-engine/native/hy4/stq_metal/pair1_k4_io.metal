@@ -7,6 +7,14 @@
 
 using namespace metal;
 
+constant bool STARK_HY4_STQ_ROUND_BF16 [[function_constant(0)]];
+
+static inline float stark_hy4_stq_projection_boundary(float value) {
+    if (is_function_constant_defined(STARK_HY4_STQ_ROUND_BF16) && STARK_HY4_STQ_ROUND_BF16)
+        return float(bfloat(value));
+    return value;
+}
+
 static inline float stark_hy4_stq_hadamard128(float value, uint position, threadgroup float* workspace) {
     // Preserve the ordered sum and difference of every butterfly. The first
     // five stages stay within a SIMD group, then two stages cross groups.
@@ -36,7 +44,8 @@ kernel void stark_hy4_stq_pair1_prepare(
     threadgroup float workspace[128];
     const uint2 entry = row_map[group.y];
     const uint channel = group.x * 128u + position;
-    const float value = input[ulong(entry.y) * width + channel] * float(scales[ulong(entry.x) * width + channel]);
+    const float value = stark_hy4_stq_projection_boundary(input[ulong(entry.y) * width + channel]) *
+                        float(scales[ulong(entry.x) * width + channel]);
     output[ulong(group.y) * width + channel] = half(stark_hy4_stq_hadamard128(value, position, workspace));
 }
 
@@ -50,7 +59,7 @@ kernel void stark_hy4_stq_pair1_finish(
     const uint channel = group.x * 128u + position;
     const ulong offset = ulong(group.y) * width + channel;
     const float value = stark_hy4_stq_hadamard128(float(input[offset]), position, workspace);
-    output[offset] = value * float(scales[ulong(expert) * width + channel]);
+    output[offset] = stark_hy4_stq_projection_boundary(value * float(scales[ulong(expert) * width + channel]));
 }
 
 // Finish both projections, apply the routed SwiGLU clamp, and prepare the

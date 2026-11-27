@@ -40,6 +40,7 @@ from .template_runtime import (
 from .tool_protocols import runtime_template_source
 from .vision_runtime import (
     CONFIGURED_FAMILY_PROFILE,
+    HY4_STQ_VISION_PROFILE,
     HY4_VISION_PROFILE,
     LILY_FAMILY_PROFILE,
     VISION_MODEL_TYPES,
@@ -272,13 +273,15 @@ def load_template(model, *, expected_hashes=None):
         data = _chat_file(model / "config.json", 2 * 1024 * 1024)
         config = json.loads(data)
         image_family = model_image_family(config, model)
-        hy4 = config.get("model_type") == "hy_v4_flash" and image_family == {
-            "profile": HY4_VISION_PROFILE,
-            "version": 1,
-        }
+        image_profile = (image_family or {}).get("profile")
+        hy4 = config.get("model_type") == "hy_v4_flash" and image_profile in (
+            HY4_VISION_PROFILE,
+            HY4_STQ_VISION_PROFILE,
+        )
         if hy4:
-            from .vision_runtime import _HY4_METADATA_HASHES
+            from .vision_runtime import _HY4_METADATA_HASHES, _HY4_STQ_METADATA_HASHES
 
+            pinned = _HY4_STQ_METADATA_HASHES if image_profile == HY4_STQ_VISION_PROFILE else _HY4_METADATA_HASHES
             metadata = {"config_sha256": hashlib.sha256(data).hexdigest()}
             tokenizer_bytes = _chat_file(model / "tokenizer.json", 64 * 1024 * 1024)
             metadata["tokenizer_sha256"] = hashlib.sha256(tokenizer_bytes).hexdigest()
@@ -287,7 +290,7 @@ def load_template(model, *, expected_hashes=None):
             ).hexdigest()
             template_bytes = _chat_file(model / "chat_template.jinja", 256 * 1024)
             metadata["template_sha256"] = hashlib.sha256(template_bytes).hexdigest()
-            if metadata != _HY4_METADATA_HASHES or (
+            if metadata != pinned or (
                 expected_hashes is not None
                 and any(expected_hashes.get(key) != value for key, value in metadata.items())
             ):
@@ -350,10 +353,8 @@ def load_template(model, *, expected_hashes=None):
                 template_hashes = qwen38_retained.SUPPORTED_TEMPLATE_HASHES
             elif image_family == {"profile": inkling_prepare.VISION_PROFILE, "version": 1}:
                 template_hashes = {inkling_prepare.TEMPLATE_SHA}
-            elif image_family == {"profile": HY4_VISION_PROFILE, "version": 1}:
-                from .vision_runtime import _HY4_METADATA_HASHES
-
-                template_hashes = {_HY4_METADATA_HASHES["template_sha256"]}
+            elif hy4:
+                template_hashes = {pinned["template_sha256"]}
             contract = config.get("artifact_contract")
             family = contract.get("family") if isinstance(contract, dict) else None
             if (
@@ -414,9 +415,12 @@ _HY4_FORMAT_TOKEN = re.compile(r"'([^'\\]*)\{\}([^'\\]*)'\.format\(HYTK\)")
 
 def _hy4_runtime_template(source):
     """Normalize the pinned Hy4 template's bounded Python string formatting for MiniJinja."""
-    from .vision_runtime import _HY4_METADATA_HASHES
+    from .vision_runtime import _HY4_METADATA_HASHES, _HY4_STQ_METADATA_HASHES
 
-    if hashlib.sha256(source.encode("utf-8")).hexdigest() != _HY4_METADATA_HASHES["template_sha256"]:
+    if hashlib.sha256(source.encode("utf-8")).hexdigest() not in {
+        _HY4_METADATA_HASHES["template_sha256"],
+        _HY4_STQ_METADATA_HASHES["template_sha256"],
+    }:
         raise ValueError("unrecognized Hy4 chat template")
     normalized, replacements = _HY4_FORMAT_TOKEN.subn(r"('\1' ~ HYTK ~ '\2')", source)
     if replacements != 22:

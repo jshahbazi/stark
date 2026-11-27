@@ -9,6 +9,7 @@
 #include "attn.h"
 
 #include "ref_quant.h"
+#include "stq_dfly.h"
 
 #include <algorithm>
 #include <array>
@@ -302,6 +303,14 @@ struct Forward::Impl {
     mtl::Buffer dense_device_scratch;
     mtl::Buffer stq_identity, stq_dense_input, stq_dense_output, stq_embedding_ids, stq_embedding_rows;
     mtl::Buffer stq_rows, stq_jobs, stq_inverse, stq_grid, stq_prepared, stq_gate, stq_up, stq_routed;
+    mtl::Pipeline p_dfly_capture;
+    mtl::Buffer dfly_selected, dfly_counts;
+    bool dfly_capture = false;
+    int dfly_first = 0, dfly_rows = 0;
+    bool stq_gemv() const {
+        return m->stq && m->stq->program.pair1_decode_enabled() &&
+               n_tok == 1 && !pr_in_chunk && inj == nullptr && pr_force == nullptr;
+    }
     mtl::Buffer q_resid, qb, Q, qpe, kpe, attn_o, kqv, gproj, gated, attn_y, attn_out, kvp, kvn, sc, pos_b, rope_pos;
     mtl::Buffer ik, iv, ig, iq, iwraw, iw, pool32, score, sel, nsel;
     mtl::Buffer mlogits, ids, rw, pred, pred2, rdown, xp, hbuf, hp, ye, mlat, upo, shg, shu, sha, sho, ffn_sum;
@@ -843,6 +852,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     p_eng_rows = cx->pipeline(lib, "hy4_flash_engram_rows", mtl::Constants().b(63, m->geo.engram_table_type == 30));
     p_eng_gate = cx->pipeline(lib, m->stq ? "stark_hy4_stq_engram_gate" : "hy4_flash_engram_gate");
     p_eng_delta = cx->pipeline(lib, "hy4_flash_engram_delta");
+    if (m->stq && m->stq->has_dfly) p_dfly_capture = cx->pipeline(lib, "stark_hy4_capture_indexer");
 
     if (const std::string e = resolve(); !e.empty()) return e;
     if (const std::string e = alloc(); !e.empty()) return e;
@@ -1183,6 +1193,11 @@ std::string Forward::Impl::alloc() {
             stq_identity.as<uint32_t>()[2 * row] = 0;
             stq_identity.as<uint32_t>()[2 * row + 1] = row;
         }
+        if (p_dfly_capture.handle) {
+            const size_t total = stark::hy4::stq::kDflyTargetBlocks.size() * Forward::kMaxWindow;
+            dfly_selected = cx->alloc(total * Forward::kSelCap * sizeof(uint32_t));
+            dfly_counts = cx->alloc(total * sizeof(uint32_t));
+        }
     }
     return {};
 }
@@ -1461,6 +1476,23 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
             mtl::require_fit(d, "hy4_flash_indexer_topk");
             ds.push_back(d);
         }
+        if (dfly_capture && !images()) {
+            const auto& targets = stark::hy4::stq::kDflyTargetBlocks;
+            const auto at = std::find(targets.begin(), targets.end(), b.id);
+            if (at != targets.end()) {
+                const size_t dst = size_t(at - targets.begin()) * Forward::kMaxWindow;
+                const size_t src = pr_in_chunk ? size_t(T - 1) : 0;
+                constexpr uint32_t width = Forward::kSelCap, group = 256;
+                using mtl::Arg;
+                mtl::Dispatch d{&p_dfly_capture,
+                               {Arg::B(sel, sizeof(uint32_t) * src * width), Arg::B(nsel, sizeof(uint32_t) * src),
+                                Arg::B(dfly_selected, sizeof(uint32_t) * dst * width),
+                                Arg::B(dfly_counts, sizeof(uint32_t) * dst), Arg::V(width)},
+                               {(width + group - 1) / group, pr_in_chunk ? 1u : uT, 1}, {group, 1, 1}};
+                mtl::require_fit(d, "stark_hy4_capture_indexer");
+                ds.push_back(d);
+            }
+        }
     }
 
     // ---- attention itself (three dispatches: the score row, the softmax, PV - attn.h).  In SUB-BATCHES of `asub`
@@ -1668,7 +1700,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
             if (!m->stq->program.append_routed(ds, banks[kGate], banks[kUp], banks[kDown],
                     rdown, stq_rows, stq_jobs, stq_inverse, rw, uT, rows,
                     std::min(rows, rows / 32 + uint32_t(n_experts)), stq_prepared, stq_gate,
-                    stq_up, stq_routed, mlat, &stq_grid))
+                    stq_up, stq_routed, mlat, stq_gemv() ? nullptr : &stq_grid))
                 throw std::runtime_error("invalid STQ routed dispatch");
         } else {
         const ExpertSlices& es = m->experts[(size_t) b.ordinal];
@@ -2009,6 +2041,7 @@ void Forward::Impl::at_cut(int s) {
     if (m->stq) {
         const auto route = stark::hy4::stq::plan_routes({id, size_t(n_tok) * topk});
         if (!route || route->rows.size() != size_t(n_tok) * topk ||
+            (stq_gemv() && route->jobs.size() != size_t(topk)) ||
             route->jobs.size() * sizeof(route->jobs.front()) > stq_jobs.bytes) {
             cut_err = "invalid STQ expert plan";
             return;
@@ -2414,6 +2447,7 @@ void Forward::reset() {
     if (im_ == nullptr) return;
     im_->snap_used = 0;
     im_->last_tok = -1;
+    im_->dfly_rows = 0;
     std::fill(im_->pools_done.begin(), im_->pools_done.end(), 0);
     if (im_->badflag.ptr != nullptr) std::memset(im_->badflag.ptr, 0, 16);
     im_->bad_reported = 0;
@@ -2430,7 +2464,32 @@ std::string Forward::rewind(int position) {
     im_->clamp_pools(position);
     im_->snap_used = position;
     im_->last_tok = -1;
+    im_->dfly_rows = 0;
     return {};
+}
+
+void Forward::capture_dfly(bool enabled) {
+    im_->dfly_capture = enabled && im_->p_dfly_capture.handle != nullptr;
+    im_->dfly_rows = 0;
+}
+
+bool Forward::dfly_target(int position, stark::hy4::stq::DflyTargetView& view) const {
+    const auto& im = *im_;
+    const int row = position - 1 - im.dfly_first;
+    if (!im.dfly_capture || row < 0 || row >= im.dfly_rows || position > im.snap_used || im.images())
+        return false;
+    view = {};
+    view.position = uint32_t(position);
+    view.result_norm = {im.h_rnorm.as<float>() + size_t(row) * im.n_embd, size_t(im.n_embd)};
+    const auto& targets = stark::hy4::stq::kDflyTargetBlocks;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        const size_t at = i * kMaxWindow + row;
+        const size_t count = im.dfly_counts.as<uint32_t>()[at];
+        if (!count || count > kSelCap || count > size_t(position)) return false;
+        view.layers[i] = {&im.kv, sizeof(uint16_t) * im.blk.at(size_t(targets[i])).kv_off,
+                          {im.dfly_selected.as<uint32_t>() + at * kSelCap, count}};
+    }
+    return true;
 }
 
 const float* Forward::logits() const { return im_ == nullptr ? nullptr : im_->logits_b.as<float>(); }
@@ -2689,6 +2748,8 @@ std::string Forward::window(const int32_t* all_tokens, int p0, int T, Dump* dump
                 4 * (size_t) im.vocab);
     im.last_tok = im.argmax_b.as<int32_t>()[T - 1];
     im.snap_used = p0 + T;   // what a snapshot would record: the caches now hold positions 0 .. p0 + T - 1
+    im.dfly_first = p0;
+    im.dfly_rows = im.dfly_capture ? T : 0;
     for (size_t i = 0; i < im.pools_done.size(); ++i) im.pools_done[i] = (p0 + T) / im.idx_kpool;
     if (dump != nullptr && dump->on()) {
         for (const Impl::BW& b : im.blk) {
@@ -2881,6 +2942,8 @@ std::string Forward::prefill(const int32_t* all_tokens, int p0, int T, const Pre
     }
     if (const std::string e = im.nonfinite_check(); !e.empty()) return e;
     im.snap_used = p0 + T;
+    im.dfly_first = p0 + T - 1;
+    im.dfly_rows = im.dfly_capture ? 1 : 0;
     im.tm.pf_wall_ms += (mtl::now_s() - t_chunk) * 1e3;
     im.tm.pf_host_ms += im.m->stream.prompt_host_ms() - host0;
     im.tm.pf_wait_ms += im.m->stream.prompt_wait_ms() - wait0;

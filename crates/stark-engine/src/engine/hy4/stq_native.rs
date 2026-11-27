@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Native diagnostic entry for the pinned trunk. The production loader additionally
-//! requires the vision tower and DFly2.
+//! Native diagnostic entry for qualifying the pinned STQ artifact.
 
 use std::{
     ffi::{CStr, CString, c_char, c_int, c_void},
@@ -178,17 +177,24 @@ unsafe extern "C" {
         tables: *const TensorSlice,
         token_map: *const i32,
         map_len: usize,
+        vision_weights: *const TensorSlice,
+        vision_count: usize,
         chunk: c_int,
+        profile: c_int,
+        round_bf16: c_int,
+        pair1_decode: c_int,
+        resident: c_int,
         select_context: unsafe extern "C" fn(*const ContextMemory, *mut c_void) -> u32,
         sizing: *mut c_void,
         session: *mut *mut c_void,
+        vision: *mut VisionGeometry,
         detail: *mut c_char,
         detail_len: usize,
     ) -> c_int;
 }
 
 impl Session {
-    /// Open the pinned text trunk for native qualification.
+    /// Open the pinned artifact for native qualification.
     ///
     /// # Safety
     /// The validated files must remain immutable for this session's lifetime,
@@ -197,10 +203,18 @@ impl Session {
         source: &StqSource,
         chunk: u32,
         context_limit: u32,
+        profile: bool,
+        round_bf16: bool,
+        pair1_decode: bool,
+        resident: bool,
     ) -> Result<Self, String> {
         let trunk = source.stq_trunk().map_err(|e| e.to_string())?;
-        let bindings: Vec<_> =
-            trunk.weights().map(|(alias, weight)| Binding::new(alias, weight)).collect::<Result<_, _>>()?;
+        let dfly = source.stq_dfly().map_err(|e| e.to_string())?;
+        let bindings: Vec<_> = trunk
+            .weights()
+            .chain(dfly.weights())
+            .map(|(alias, weight)| Binding::new(alias, weight))
+            .collect::<Result<_, _>>()?;
         let weights: Vec<_> = bindings
             .iter()
             .map(|b| {
@@ -229,6 +243,20 @@ impl Session {
             *table = (&source.stq_engram_table(block).ok_or("missing STQ Engram table")?.location).into();
         }
         let token_map = source.stq_engram_token_map().map_err(|e| e.to_string())?;
+        let mut vision_weights = Vec::with_capacity(441);
+        let mut vision_names: Vec<_> = source.tensor_names().filter(|name| name.starts_with("vit.")).collect();
+        vision_names.sort_unstable();
+        for name in vision_names {
+            let tensor = source.tensor(name).ok_or("missing STQ vision tensor")?;
+            if tensor.dtype != StqDtype::BF16 {
+                return Err("unexpected STQ vision dtype".into());
+            }
+            let location = source.tensor_location(name).ok_or("missing STQ vision slice")?;
+            if location.shard_name != "model-globals.safetensors" {
+                return Err("unexpected STQ vision shard".into());
+            }
+            vision_weights.push(TensorSlice::from(&location));
+        }
         source.verify_unchanged().map_err(|e| e.to_string())?;
         let mut selection = ContextSelection {
             limit: Some(context_limit),
@@ -236,6 +264,7 @@ impl Session {
             sizing: None,
         };
         let mut inner = ptr::null_mut();
+        let mut vision = VisionGeometry::default();
         let mut detail = [0; 256];
         // Only the mapped page ranges and duplicated table descriptors survive
         // open. All temporary alias strings and descriptors remain valid here.
@@ -248,10 +277,17 @@ impl Session {
                 tables.as_ptr(),
                 token_map.as_ptr(),
                 token_map.len(),
+                vision_weights.as_ptr(),
+                vision_weights.len(),
                 chunk as c_int,
+                c_int::from(profile),
+                c_int::from(round_bf16),
+                c_int::from(pair1_decode),
+                c_int::from(resident),
                 select_context,
                 ptr::from_mut(&mut selection).cast(),
                 &mut inner,
+                &mut vision,
                 detail.as_mut_ptr(),
                 detail.len(),
             )
@@ -261,13 +297,13 @@ impl Session {
         }
         let session = Self {
             inner: NonNull::new(inner).ok_or("invalid STQ native session")?,
-            vision: VisionGeometry::default(),
+            vision,
             mapped_experts: true,
             draft_head_q5: false,
             arena_bytes: 0,
             sizing: selection.sizing.expect("successful STQ open selected a context"),
             pool_size: selection.pool_size.expect("successful STQ open selected a pool size"),
-            max_drafts: 0,
+            max_drafts: dfly.drafts as usize,
         };
         source.verify_unchanged().map_err(|e| e.to_string())?;
         Ok(session)

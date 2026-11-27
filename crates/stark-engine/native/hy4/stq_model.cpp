@@ -52,28 +52,54 @@ bool load_raw(const WeightSource& weight, const gguf::Tensor& tensor, void* dst)
 bool load_absorbed(const WeightSource& weight, const gguf::Tensor& key, const gguf::Tensor& value,
                    void* dense) {
     const auto& p = weight.projection;
-    if (p.rate != 6 || p.inputs != 512 || key.shape.size() != 3 || value.shape.size() != 3) return false;
+    if ((p.rate != 4 && p.rate != 6) || p.inputs != 512 || key.shape.size() != 3 || value.shape.size() != 3)
+        return false;
+    const auto format = p.rate == 4 ? Format::spec1_k4 : Format::spec1_k6;
     const size_t heads = key.shape[2];
     if ((heads != 32 && heads != 64) || p.outputs != heads * (192 + 256) ||
         key.shape != std::vector<uint64_t>{192, 512, heads} ||
         value.shape != std::vector<uint64_t>{512, 256, heads} ||
-        p.trellis.size != size_t(p.inputs / 16) * (p.outputs / 16) * 96 * sizeof(uint16_t)) return false;
+        p.trellis.size != size_t(p.inputs / 16) * (p.outputs / 16) * tile_word_count(format) * sizeof(uint16_t))
+        return false;
     std::vector<uint16_t> words(p.trellis.size / 2), suh(p.inputs), svh(p.outputs);
     if (!read(p.trellis, words.data(), words.size() * 2) ||
         !read(p.suh, suh.data(), suh.size() * 2) || !read(p.svh, svh.data(), svh.size() * 2)) return false;
     auto plane = [&](const gguf::Tensor& tensor) {
         return std::span(static_cast<uint16_t*>(dense) + tensor.offset / 2, tensor.bytes / 2);
     };
-    return split_kv_b({words, Format::spec1_k6, p.inputs, p.outputs, 1}, heads, suh, svh, plane(key), plane(value));
+    return split_kv_b({words, format, p.inputs, p.outputs, 1}, heads, suh, svh, plane(key), plane(value));
 }
 
 } // namespace
 
+bool Trunk::begin_residency(mtl::Context& metal) const {
+    std::vector<mtl::Buffer> buffers;
+    buffers.reserve(3 * (experts.size() * 3 + dense.size()));
+    const auto add = [&](const auto& bank) {
+        buffers.push_back(bank.trellis.buffer());
+        buffers.push_back(bank.suh.buffer());
+        buffers.push_back(bank.svh.buffer());
+    };
+    for (const auto& block : experts)
+        for (const auto& bank : block) add(bank);
+    for (const auto& entry : dense) add(*entry.second);
+    std::vector<std::span<const uint8_t>> pages;
+    pages.reserve(buffers.size());
+    for (const auto& buffer : buffers) {
+        if (!buffer.ptr || !buffer.bytes) return false;
+        pages.emplace_back(buffer.as<uint8_t>(), buffer.bytes);
+    }
+    return strata::metal_engine::prepare_mapped_pages(pages) && metal.begin_expert_residency(buffers);
+}
+
 std::string load_trunk(strata::hy4_flash::Model& model, mtl::Context& metal,
                        std::span<const WeightSource> weights,
-                       std::span<const ProjectionSource> experts) {
-    if (weights.size() != 1256 || experts.size() != 123 || model.stq) return "invalid STQ trunk inventory";
+                       std::span<const ProjectionSource> experts, bool round_bf16, bool pair1_decode) {
+    constexpr size_t trunk_weights = 1256, draft_weights = 92;
+    if ((weights.size() != trunk_weights && weights.size() != trunk_weights + draft_weights) ||
+        experts.size() != 123 || model.stq) return "invalid STQ weight inventory";
     auto trunk = std::make_unique<Trunk>();
+    trunk->has_dfly = weights.size() == trunk_weights + draft_weights;
     uint64_t bytes = 0;
     for (const auto& weight : weights) {
         if (!weight.alias || !weight.rank || weight.rank > 3) return "invalid STQ weight descriptor";
@@ -136,7 +162,8 @@ std::string load_trunk(strata::hy4_flash::Model& model, mtl::Context& metal,
             !trunk->experts[i / 3][i % 3].open(metal, p.trellis, p.suh, p.svh))
             return "cannot map STQ expert bank " + std::to_string(i);
     }
-    if (!trunk->program.open(metal) || !trunk->embedding.open(metal)) return "cannot compile STQ Metal projections";
+    if (!trunk->program.open(metal, round_bf16, pair1_decode) || !trunk->embedding.open(metal))
+        return "cannot compile STQ Metal projections";
     model.stq = std::move(trunk);
     return {};
 }

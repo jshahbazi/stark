@@ -28,14 +28,17 @@ struct WeightSource {
 };
 
 struct Trunk {
+    bool has_dfly = false;
     ExpertProgram program;
     EmbeddingProgram embedding;
     std::map<std::string, std::unique_ptr<DenseBank>> dense;
     std::array<std::array<ExpertBank, 3>, 41> experts;
+    bool begin_residency(mtl::Context& metal) const;
 };
 
 std::string load_trunk(strata::hy4_flash::Model& model, mtl::Context& metal,
                        std::span<const WeightSource> weights,
-                       std::span<const ProjectionSource> experts);
+                       std::span<const ProjectionSource> experts, bool round_bf16 = false,
+                       bool pair1_decode = false);
 
 } // namespace stark::hy4::stq

@@ -211,6 +211,7 @@ pub(crate) struct PreparedImageMetadata {
 }
 
 pub(crate) const HY4_VISION_PROFILE: &str = "hy4-flash-gguf-bf16-vision-v1";
+pub(crate) const HY4_STQ_VISION_PROFILE: &str = "hy4-flash-stq-bf16-vision-v1";
 
 pub(crate) struct ImageArtifactIdentity<'a> {
     pub schema_version: u32,
@@ -264,7 +265,7 @@ fn image_family_limits(
         ) => ((16, 3), 2520, 280),
         ("gemma3-siglip-bf16-v1", 1, 5) => ((14, 4), 4096, 256),
         ("inkling2-mini-native-v1", 1, 7) => ((20, 2), 4096, 1024),
-        (HY4_VISION_PROFILE, 1, 7) => ((16, 2), 16_384, 8_192),
+        (HY4_VISION_PROFILE | HY4_STQ_VISION_PROFILE, 1, 7) => ((16, 2), 16_384, 8_192),
         _ => return None,
     };
     (geometry == expected_geometry).then_some((patches, tokens, patches * geometry.0 * geometry.0))
@@ -330,8 +331,8 @@ fn valid_image_metadata(
 ) -> bool {
     let (patch_size, merge_size) = geometry;
     let (max_patches, max_image_tokens) = match (profile, geometry) {
-        (HY4_VISION_PROFILE, (16, 2)) => (16_384, 8192),
-        (HY4_VISION_PROFILE, _) => return false,
+        (HY4_VISION_PROFILE | HY4_STQ_VISION_PROFILE, (16, 2)) => (16_384, 8192),
+        (HY4_VISION_PROFILE | HY4_STQ_VISION_PROFILE, _) => return false,
         (_, (16, 2)) => (65_536, 16_384),
         (_, (16, 3)) => (2520, 280),
         (_, (20, 2)) => (4096, 1024),
@@ -339,7 +340,7 @@ fn valid_image_metadata(
         _ => return false,
     };
     let [temporal, height, width] = metadata.grid;
-    let count_newline = u32::from(profile == HY4_VISION_PROFILE);
+    let count_newline = u32::from(matches!(profile, HY4_VISION_PROFILE | HY4_STQ_VISION_PROFILE));
     temporal == 1
         && height > 0
         && width > 0
@@ -1729,11 +1730,12 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             worker.backend.image_geometry(),
         )
         .ok_or("invalid_model_config")?;
-        let max_source_pixels = if identity.schema_version == 7 && family_profile != HY4_VISION_PROFILE {
-            max_processed_pixels
-        } else {
-            32_000_000
-        };
+        let max_source_pixels =
+            if identity.schema_version == 7 && !matches!(family_profile, HY4_VISION_PROFILE | HY4_STQ_VISION_PROFILE) {
+                max_processed_pixels
+            } else {
+                32_000_000
+            };
         readiness["image_input"] = json!({
             "version":"mediaref-v1","transport":"owner-private-file-v1","qualified":false,"qualification":"unverified",
             "operations":["prepare_image","generate_image","discard_image"],

@@ -68,9 +68,106 @@ banks and do not measure file-backed page faults. Output SHA-256
 The fused MoE's indirect command matched the direct command bit for bit
 on the independent real-layer component fixture.
 
+## Image and draft integration
+
+The released pack stores all 441 vision tensors as BF16. The adapter maps
+the matrices in place, widens vectors and position weights as required by
+the existing tower, skips the unused CLS position and uses the pack's tanh
+GELU projector. The 96 × 64 vision fixture passed all 32 stage comparisons
+against a CPU BLAS oracle reading the release weights. Its 24,576 output
+values differed by `2.85e-6` relative RMS. Median tower encode time was
+14.47 ms across five warm runs. Static vision memory was 1.01 GB, with
+1.20 GB reserved for the largest admitted image.
+
+The new DFly2 path binds 92 aliases for the five dense K4 layers and
+captures the committed target row and selections from blocks 25, 29, 33,
+37 and 41. Its draft cache is bounded to the selected target rows plus the
+causal draft window. The real-weight component generated five proposals
+with synthetic target state and matched the first proposal at widths one
+and five. It exercised both contiguous and selected target rows.
+
+The image-loaded 4K graph at depth two then completed two full prefill
+and decode requests. The first prefill took 26.271 s and the warm repeat
+took 6.594 s, or 156 and 621 tok/s. The seven decode transitions took
+1.128 and 1.262 s, or 6.21 and 5.55 tok/s. Each offered nine drafts and
+accepted one. Both had the same generated-ID hash as the earlier native
+autoregressive run. The decoded-text hash
+`fcc0c5023bd5a8bd7152f233b78a4da9fde7c80ef88f0cfd0a37992b147f9c84`
+also matched the reference on this fixture. The reference used the same
+4,096 input IDs and 8,192 capacity, with vision loaded, drafting disabled
+and its unquantized BF16 cache. Sushi prefill was 892 and 923 tok/s across
+its two runs. Sushi reported 37.55 and 44.96 decode tok/s using its
+eight-output-token numerator. Stark stores the cache in F16.
+
+The lifecycle continued from a retained 4,096-token prefix and reproduced
+every vocabulary logit bit for the suffix when replayed fresh. The same
+loaded model processed eight projected rows in an actual image request.
+Drafting was disabled on that request, and attempts to retain its prefix
+or continue it as text were rejected.
+
+The first integrated vision smoke failed at load because the Rust tensor
+map's iteration order did not match the adapter's source-name order.
+Sorting the pinned source names corrected it. The first drafting
+diagnostic submitted a second anchor after the verifier had committed the
+next one. Submitting the anchor only once corrected the diagnostic.
+
+An optional BF16 boundary mode matches the documented Sushi input and
+output casts on packed linear projections. Component tests matched the
+CPU cast and stage references. At 4K, the mode took 6.243 s warm and
+changed the decoded-text hash. The default diagnostic keeps the
+matched-output F32 boundary policy.
+
+## OpenCode through Stark
+
+The pinned STQ validation worker `fd5ef340395a6382cd2fe40fdc6042750855115560b5f0ba601e0b215ba35028`
+served the three synthetic OpenCode turns through the installed connector
+and Stark's local HTTP API. Stark loaded the image tower, passed the
+normal image startup checks and advertised the Hy4 XML tool parser.
+The 49,152-position fitted ceiling was used with 4,096-row prefill,
+greedy generation and DFly2 at depth two. There was one generation per
+turn and all three emitted 96 output tokens. Startup including image
+checks took 63.76 s.
+
+| Turn | Input | Reused | Prefill tok/s | Decode tok/s | Wall time | DFly2 accepted / offered |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Fresh 16K | 16,229 | 0 | 540.68 | 23.55 | 34.85 s | 57 / 76 |
+| Continued 27K | 27,179 | 12,288 | 508.11 | 21.74 | 34.35 s | 56 / 77 |
+| Fresh 27K | 27,229 | 0 | 492.40 | 23.73 | 60.09 s | 58 / 74 |
+
+Prefill rates use computed rows and decode uses 95 post-prefill tokens.
+The 16K run spent 26.90 of 30.02 prefill seconds inside measured GPU
+spans. Decode spent 3.69 of 4.03 seconds in target verification and
+0.35 seconds in the drafter, despite accepting 75% of the proposed
+tokens. Longer continuation input hashes can differ across model
+artifacts because the first turn's output is part of the history.
+
+Earlier runs stopped during saved-model admission, template admission
+or image accounting. The final run used the pinned STQ header verifier
+at desktop admission, the release template hash with the existing
+Hy4 XML parser, and the same 72-row image accounting as the Hy4 tower.
+
+## Packed kernel screens
+
+The SPEC1 unpack-once screen borrowed the existing direct F16 Metal
+device views and kept each 16-wide reduction step. On two real sliding
+projections at 1,024 and 4,096 rows, it matched all 99,614,720 intermediate
+and result values exactly. It used 96 MiB more scratch and increased
+warm GPU time by 37–81%. For the 4,096-row gate and output projections,
+GPU times moved from 9.813 to 13.991 ms and 10.444 to 18.915 ms respectively.
+The direct packed kernel stays in the graph.
+
+A PAIR1 GEMV screen on real layer-one weights and router picks reduced
+one projection from about 0.177 to 0.103 ms at one token. Fully
+overlapping six-token routes were roughly twice as slow. Swapping all
+three routed projections missed the provisional combined RMS gate
+with `1.316e-4` against a `1.2e-4` limit. The down-only screen passed
+with `1.26e-5` relative RMS and a median routed-chain change from
+0.2625 to 0.2285 ms. The validation worker exposes the down-only
+single-token path as an opt-in.
+
 ## Qualification boundary
 
-The native entry is a development diagnostic. The catalog remains a Sushi
-entry while the exact pack's vision tower, DFly2 execution, same-pack
-output checks and 16K/27K OpenCode matrix are pending. Trunk diagnostics
-use deterministic synthetic inputs and emit aggregate timings and hashes.
+The native worker is enabled for local STQ validation. The catalog
+continues to identify Sushi as the runtime. Native quality beyond the
+recorded fixtures, default policy, and packaged installation remain
+separate gates. Diagnostics emit aggregate results and hashes.

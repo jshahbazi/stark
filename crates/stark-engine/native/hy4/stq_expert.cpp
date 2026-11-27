@@ -109,22 +109,28 @@ bool DenseBank::open(mtl::Context& metal, Format rate, uint32_t input_width, uin
     return false;
 }
 
-bool ExpertProgram::open(mtl::Context& metal) {
+bool ExpertProgram::open(mtl::Context& metal, bool round_bf16, bool pair1_decode) {
     if (!metal.supports_metal4()) return false;
     try {
-        const int library = metal.compile_try({"pair1_k4_grouped.metal", "pair1_k4_io.metal", "spec1_dense.metal"},
-                                             "#define NO_GGML_COMMON", false, nullptr);
+        std::vector<std::string> sources{"pair1_k4_grouped.metal", "pair1_k4_io.metal", "spec1_dense.metal"};
+        if (pair1_decode) sources.emplace_back("pair1_k4_decode.metal");
+        const int library = metal.compile_try(sources, "#define NO_GGML_COMMON", false, nullptr);
         if (library < 0) return false;
-        prepare_ = metal.pipeline(library, "stark_hy4_stq_pair1_prepare");
+        mtl::Constants boundary;
+        if (round_bf16) boundary.b(0, true);
+        prepare_ = metal.pipeline(library, "stark_hy4_stq_pair1_prepare", boundary);
         project_ = metal.pipeline(library, "stark_hy4_stq_pair1_k4_grouped");
         finish_ = metal.pipeline(library, "stark_hy4_stq_pair1_finish");
+        dense_finish_ = round_bf16 ? metal.pipeline(library, "stark_hy4_stq_pair1_finish", boundary) : finish_;
         prepare_down_ = metal.pipeline(library, "stark_hy4_stq_pair1_prepare_down");
         combine_ = metal.pipeline(library, "stark_hy4_stq_pair1_combine");
         dense_k4_ = metal.pipeline(library, "stark_hy4_stq_spec1_k4_dense");
         dense_k6_ = metal.pipeline(library, "stark_hy4_stq_spec1_k6_dense");
+        decode_ = pair1_decode ? metal.pipeline(library, "stark_hy4_stq_pair1_k4_decode") : mtl::Pipeline{};
         return prepare_.max_threads >= 128 && project_.max_threads >= 128 && finish_.max_threads >= 128 &&
                prepare_down_.max_threads >= 128 && combine_.max_threads >= 128 &&
-               dense_k4_.max_threads >= 128 && dense_k6_.max_threads >= 128;
+               dense_k4_.max_threads >= 128 && dense_k6_.max_threads >= 128 && dense_finish_.max_threads >= 128 &&
+               (!pair1_decode || (decode_.max_threads >= 128 && decode_.simd_width == 32));
     } catch (...) {
         return false;
     }
@@ -179,9 +185,13 @@ bool ExpertProgram::append_routed(std::vector<mtl::Dispatch>& commands, const Ex
             !fits(jobs, size_t(job_count) * 16) || !fits(prepared, elements * sizeof(uint16_t)) ||
             !fits(gate_raw, elements * sizeof(uint16_t)) || !fits(up_raw, elements * sizeof(uint16_t))) return false;
         const uint32_t shape[2] = {width, width};
-        auto project = [&](const ExpertBank& bank, const mtl::Buffer& raw) {
-            commands.push_back({&project_, {bank.trellis.argument(), Arg::B(prepared), Arg::B(raw), Arg::B(jobs),
-                                           Arg::V(shape)}, {blocks, job_count, 1}, {128, 1, 1}});
+        const bool use_decode = pair1_decode_enabled() && tokens == 1 && rows == topk && job_count == topk &&
+                                projection_grid == nullptr;
+        auto project = [&](const ExpertBank& bank, const mtl::Buffer& raw, bool use_gemv = false) {
+            const auto& projection = use_gemv ? decode_ : project_;
+            const uint32_t projection_width = use_gemv ? width / 32 : blocks;
+            commands.push_back({&projection, {bank.trellis.argument(), Arg::B(prepared), Arg::B(raw), Arg::B(jobs),
+                                               Arg::V(shape)}, {projection_width, job_count, 1}, {128, 1, 1}});
             commands.back().indirect = projection_grid;
         };
         auto prepare = [&](const ExpertBank& bank) {
@@ -196,7 +206,7 @@ bool ExpertProgram::append_routed(std::vector<mtl::Dispatch>& commands, const Ex
                                             up.svh.argument(), down.suh.argument(), Arg::B(row_map),
                                             Arg::B(prepared), Arg::V(width), Arg::V(clamp)},
                             {blocks, rows, 1}, {128, 1, 1}});
-        project(down, gate_raw);
+        project(down, gate_raw, use_decode);
         commands.push_back({&finish_, {Arg::B(gate_raw), down.svh.argument(), Arg::B(row_map), Arg::B(routed),
                                        Arg::V(width)}, {blocks, rows, 1}, {128, 1, 1}});
     }
@@ -212,7 +222,7 @@ bool ExpertProgram::append_dense(std::vector<mtl::Dispatch>& commands, const Den
     const size_t in_elements = size_t(rows) * bank.inputs, out_elements = size_t(rows) * bank.outputs;
     auto fits = [](const mtl::Buffer& buffer, size_t bytes) { return buffer.handle && buffer.bytes >= bytes; };
     if (!bank.ready() || rows == 0 || rows > 4096 || prepare_.max_threads < 128 || project.max_threads < 128 ||
-        finish_.max_threads < 128 || !fits(input, in_elements * sizeof(float)) ||
+        dense_finish_.max_threads < 128 || !fits(input, in_elements * sizeof(float)) ||
         !fits(row_map, size_t(rows) * 8) || !fits(prepared, in_elements * sizeof(uint16_t)) ||
         !fits(raw, out_elements * sizeof(uint16_t)) || !fits(output, out_elements * sizeof(float))) return false;
 
@@ -222,8 +232,8 @@ bool ExpertProgram::append_dense(std::vector<mtl::Dispatch>& commands, const Den
                                    Arg::V(bank.inputs)}, {bank.inputs / 128, rows, 1}, {128, 1, 1}});
     commands.push_back({&project, {bank.trellis.argument(), Arg::B(prepared), Arg::B(raw), Arg::V(shape)},
                         {bank.outputs / 128, (rows + 31) / 32, 1}, {128, 1, 1}});
-    commands.push_back({&finish_, {Arg::B(raw), bank.svh.argument(), Arg::B(row_map), Arg::B(output),
-                                  Arg::V(bank.outputs)}, {bank.outputs / 128, rows, 1}, {128, 1, 1}});
+    commands.push_back({&dense_finish_, {Arg::B(raw), bank.svh.argument(), Arg::B(row_map), Arg::B(output),
+                                        Arg::V(bank.outputs)}, {bank.outputs / 128, rows, 1}, {128, 1, 1}});
     return true;
 }
 

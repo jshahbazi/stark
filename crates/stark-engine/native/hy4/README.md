@@ -8,6 +8,12 @@ The build embeds the quant definitions and Metal shader sources in the library. 
 
 The original expert stream reads packed banks into its Metal arena. Stark also wraps read-only GGUF expert ranges directly when the mapped banks fit the live host and Metal budgets. The layer records retain the original gate, up and down offsets and strides. The vision integration reuses Strata’s GGUF projector, vision tower and M-RoPE encoder. Stark provides the resized RGB input and token spans through the native request interface.
 
+The pinned Sushi STQ validation worker reuses the Hy4 graph with direct
+PAIR1 K4 expert and SPEC1 K6 and K4 matrix bindings, segmented BF16 Engram,
+the release BF16 vision tower and the five-layer DFly2 drafter. Its packed
+kernels preserve the Sushi and MLX notices beside the source.
+[Native STQ evidence](../../../../docs/model-experiments/2026-11-27-hy4-stq-native.md)
+
 The generation worker tries `resident-decode` before `streamed-prefill` on
 Metal 4. It uses the existing context fitter before allocating each graph
 and accepts different request windows within the selected capacity. A draft

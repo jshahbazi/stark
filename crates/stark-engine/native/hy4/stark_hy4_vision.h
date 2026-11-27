@@ -2,6 +2,7 @@
 #pragma once
 
 #include "forward.h"
+#include "stq_vision.h"
 #include "vis_tower.h"
 
 #include <cstddef>
@@ -21,6 +22,7 @@ public:
 
     std::string open(mtl::Context& context, const char* trunk_path, const char* projector_path,
                      int32_t trunk_hidden, int32_t rope_dim);
+    std::string open_stq(mtl::Context& context, std::span<const stark::hy4::stq::TensorSlice> weights);
     std::string build(mtl::Context& context, int library);
     const strata::hy4_flash::VisionGeometry& geometry() const { return shard_.geo; }
     uint64_t reserved_bytes() const;

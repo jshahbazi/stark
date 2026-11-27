@@ -27,6 +27,7 @@ public:
     bool open(mtl::Context& metal, TensorSlice slice, uint64_t expected_bytes);
     void close();
     mtl::Arg argument() const { return mtl::Arg::B(buffer_, bias_); }
+    const mtl::Buffer& buffer() const { return buffer_; }
     bool ready() const { return metal_ != nullptr; }
 
 private:
@@ -65,7 +66,9 @@ std::optional<ExpertRoutes> plan_routes(std::span<const int32_t> expert_ids);
 
 class ExpertProgram {
 public:
-    bool open(mtl::Context& metal);
+    // Round incoming activations for both formats and final dense outputs to BF16.
+    bool open(mtl::Context& metal, bool round_bf16 = false, bool pair1_decode = false);
+    bool pair1_decode_enabled() const { return decode_.handle != nullptr; }
 
     // Appends one PAIR1 projection to the caller's encoder. Each sorted row has
     // `(expert, source_row)` and each job has `(expert, first_row, count, 0)`.
@@ -74,6 +77,9 @@ public:
                 const mtl::Buffer& row_map, const mtl::Buffer& jobs, uint32_t rows, uint32_t job_count,
                 const mtl::Buffer& prepared, const mtl::Buffer& raw, const mtl::Buffer& output) const;
 
+    // A direct single-token launch with exactly 16 rows and jobs proves one
+    // row per expert and is eligible for the opt-in GEMV. Indirect callers
+    // can supply a job upper bound and always use the grouped MMA grid.
     bool append_routed(std::vector<mtl::Dispatch>& commands, const ExpertBank& gate, const ExpertBank& up,
                        const ExpertBank& down, const mtl::Buffer& input, const mtl::Buffer& row_map,
                        const mtl::Buffer& jobs, const mtl::Buffer& inverse, const mtl::Buffer& route_weights,
@@ -88,7 +94,7 @@ public:
                       const mtl::Buffer& raw, const mtl::Buffer& output) const;
 
 private:
-    mtl::Pipeline prepare_, project_, finish_, prepare_down_, combine_, dense_k4_, dense_k6_;
+    mtl::Pipeline prepare_, project_, decode_, finish_, prepare_down_, combine_, dense_k4_, dense_k6_, dense_finish_;
 };
 
 }  // namespace stark::hy4::stq
