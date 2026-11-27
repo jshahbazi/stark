@@ -197,8 +197,19 @@ class ConversionPlan:
     mtp_config: dict | None = None
 
 
-def read_safetensors_header(path: Path) -> tuple[dict[str, str], dict[str, TensorInfo]]:
-    """Validate the complete on-disk layout without loading tensor payloads."""
+def read_safetensors_header(
+    path: Path,
+    *,
+    max_zero_padding_bytes: int = 0,
+) -> tuple[dict[str, str], dict[str, TensorInfo]]:
+    """Validate the on-disk layout without loading tensor payloads.
+
+    The default remains strict and requires adjacent tensor spans. Some native
+    STQ exports insert a few zero alignment bytes between spans; callers may
+    explicitly admit a small maximum padding size for those artifacts.
+    """
+    if type(max_zero_padding_bytes) is not int or not 0 <= max_zero_padding_bytes <= 16:
+        raise ValueError("Invalid safetensors padding allowance")
     try:
         with open_regular(path.resolve(strict=True)) as stream:
             signature = _signature(os.fstat(stream.fileno()))
@@ -211,26 +222,47 @@ def read_safetensors_header(path: Path) -> tuple[dict[str, str], dict[str, Tenso
             header_bytes = stream.read(header_size)
             if len(header_bytes) != header_size or not header_bytes.startswith(b"{"):
                 raise ConversionError("Invalid safetensors JSON header")
+            metadata, records = parse_safetensors_header(
+                header_bytes,
+                signature[2],
+                max_zero_padding_bytes=max_zero_padding_bytes,
+            )
+            if max_zero_padding_bytes:
+                cursor = 8 + header_size
+                ordered = sorted(records.values(), key=lambda item: item[2])
+                for _dtype, _shape, offset, nbytes in ordered:
+                    padding = offset - cursor
+                    if padding > 0:
+                        stream.seek(cursor)
+                        if stream.read(padding) != bytes(padding):
+                            raise ConversionError("Safetensors alignment padding is not zero")
+                    cursor = offset + nbytes
     except OSError as exc:
         raise ConversionError("Cannot read safetensors header") from exc
-    metadata, headers = parse_safetensors_header(header_bytes, signature[2])
     return metadata, {
         name: TensorInfo(path, dtype, shape, offset, nbytes, signature)
-        for name, (dtype, shape, offset, nbytes) in headers.items()
+        for name, (dtype, shape, offset, nbytes) in records.items()
     }
 
 
-def parse_safetensors_header(header_bytes: bytes, file_size: int):
+def parse_safetensors_header(header_bytes: bytes, file_size: int, *, max_zero_padding_bytes: int = 0):
     """Validate header records and byte ranges without reading any tensors."""
     try:
         header = json.loads(header_bytes, object_pairs_hook=_unique_object)
     except (ValueError, UnicodeError, RecursionError) as exc:
         raise ConversionError("Cannot parse safetensors header") from exc
-    return safetensors_header_records(header, 8 + len(header_bytes), file_size)
+    return safetensors_header_records(
+        header,
+        8 + len(header_bytes),
+        file_size,
+        max_zero_padding_bytes=max_zero_padding_bytes,
+    )
 
 
-def safetensors_header_records(header, data_start: int, file_size: int):
+def safetensors_header_records(header, data_start: int, file_size: int, *, max_zero_padding_bytes: int = 0):
     """Validate a decoded header whose tensor data begins at ``data_start``."""
+    if type(max_zero_padding_bytes) is not int or not 0 <= max_zero_padding_bytes <= 16:
+        raise ValueError("Invalid safetensors padding allowance")
     if not isinstance(header, dict):
         raise ConversionError("Safetensors header must be an object")
     header = dict(header)
@@ -263,7 +295,7 @@ def safetensors_header_records(header, data_start: int, file_size: int):
         spans.append((start, end))
     cursor = 0
     for start, end in sorted(spans):
-        if start != cursor:
+        if start < cursor or start - cursor > max_zero_padding_bytes:
             raise ConversionError("Safetensors data has gaps or overlapping tensors")
         cursor = end
     if data_start + cursor != file_size:
