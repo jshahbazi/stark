@@ -500,7 +500,7 @@ class Desktop:
         self.job = None
         self.api_primary_job = None
         self.api_primary_text = False
-        self.api_secondary_job = None
+        self.api_auxiliary_jobs = {}
         self.worker = None
         self.converter = None
         self.catalog_process = None
@@ -1103,7 +1103,7 @@ class Desktop:
 
     def install_catalog(self, payload):
         with self.lock:
-            if self.api_secondary_job is not None or (self.job is not None and self.job.is_alive()):
+            if self.api_auxiliary_jobs or (self.job is not None and self.job.is_alive()):
                 raise DesktopError("Wait for the current operation or choose Stop.")
             if payload.get("catalog_request_id") != self.catalog_request_id:
                 raise DesktopError("Refresh this family before downloading a model.")
@@ -1450,7 +1450,7 @@ class Desktop:
         if not self.request_id(request_id):
             raise DesktopError("Check the starting model again before downloading.")
         with self.lock:
-            if self.api_secondary_job is not None or (self.job is not None and self.job.is_alive()):
+            if self.api_auxiliary_jobs or (self.job is not None and self.job.is_alive()):
                 raise DesktopError("Wait for the current operation before downloading another model.")
             recipe = self.guided_recipe(payload)
             previous = next(
@@ -1513,7 +1513,7 @@ class Desktop:
             resources = self.guided_resources(self.guided_hardware.get(payload["recommendation_request_id"]))
             if not installation_allowed(recipe, resources, installed=True):
                 raise DesktopError("This starting model is not available for the current Mac resources.")
-            if self.job is not None or self.api_secondary_job or self.api_queue:
+            if self.job is not None or self.api_auxiliary_jobs or self.api_queue:
                 raise DesktopError("Wait for the current request before switching models.")
             # Claim the operation slot before releasing the old worker, so an
             # API request cannot enter between the idle check and model switch.
@@ -1740,15 +1740,17 @@ class Desktop:
             self.epoch += 1
             self.api_condition.notify_all()
             self.install_epoch = None
-            converter, job, secondary_job = self.converter, self.job, self.api_secondary_job
+            converter, job = self.converter, self.job
+            active_jobs = (job, *self.api_auxiliary_jobs)
             for phase, previous in cancelled.items():
                 if previous["state"] in {"waiting", "running"}:
                     self.emit("progress", phase=phase, **{**previous, "state": "cancelled"})
         self.terminate_converter(converter)
         self.close_worker()
-        for active in (job, secondary_job):
+        join_deadline = time.monotonic() + 5
+        for active in active_jobs:
             if active is not None and active is not threading.current_thread():
-                active.join(timeout=5)
+                active.join(timeout=max(0, join_deadline - time.monotonic()))
         with self.lock:
             # A cancelled job cannot publish events or acquire a new child.
             if self.job is job and (job is None or not job.is_alive()):
@@ -1789,7 +1791,7 @@ class Desktop:
 
     def start(self, function, state, message, *args, request_id=None, guided_install=False):
         with self.lock:
-            if self.api_secondary_job is not None or (self.job is not None and self.job.is_alive()):
+            if self.api_auxiliary_jobs or (self.job is not None and self.job.is_alive()):
                 self.emit(
                     "error",
                     message="Wait for the current operation or choose Stop.",
@@ -2869,8 +2871,12 @@ class Desktop:
             self.output_limit = min(ready["max_new_tokens"], self.context_limit - 1)
             self.context = min(guided_context or self.context_override or self.context_limit, self.context_limit)
             self.maximum = min(self.maximum, self.output_limit, self.context - 1)
-            self.api_context = min(guided_context or self.context_limit, self.context_limit)
-            self.api_maximum = min(self.output_limit, self.api_context - 1)
+            # Every admitted API lane must be able to serve the advertised budget.
+            lanes = getattr(worker, "hy4_lanes", ())
+            self.api_context = min(
+                self.context_limit, guided_context or self.context_limit, *(lane.context_limit for lane in lanes)
+            )
+            self.api_maximum = min(self.output_limit, self.api_context - 1, *(lane.max_new_tokens for lane in lanes))
             self.api_vocab = ready.get("vocab_size", 0)
             self.active_model = identifier
             self.active_mode = mode
@@ -2922,7 +2928,7 @@ class Desktop:
                 )
             if self.active_mode == mode:
                 return
-            if (self.job is not None and self.job is not current) or self.api_secondary_job or self.api_queue:
+            if (self.job is not None and self.job is not current) or self.api_auxiliary_jobs or self.api_queue:
                 raise APIError(
                     429, "Stark is using the model. Wait for the current operation, then retry.", "model_busy"
                 )
@@ -3077,7 +3083,7 @@ class Desktop:
                 raise DesktopError("MTP options are available in Chat mode.")
             if payload["model_id"] != self.active_model:
                 raise DesktopError("Model changed. Refresh its MTP options.")
-            if self.job is not None or self.api_secondary_job or self.api_queue:
+            if self.job is not None or self.api_auxiliary_jobs or self.api_queue:
                 raise DesktopError("Wait for the current operation or choose Stop.")
             capability, _ = self.mtp_settings()
             enabled = payload["enabled"]
@@ -3114,7 +3120,7 @@ class Desktop:
 
     def configure(self, payload):
         with self.lock:
-            if self.job is not None or self.api_secondary_job or self.api_queue:
+            if self.job is not None or self.api_auxiliary_jobs or self.api_queue:
                 raise DesktopError("Wait for the current operation or choose Stop.")
             if self.worker is None:
                 raise DesktopError("Run a model before changing advanced options.")
@@ -3334,12 +3340,16 @@ class Desktop:
             if epoch is not None and epoch != self.epoch:
                 raise APIError(503, "Model changed or stopped before this request started.", "model_changed")
             primary, template, codec = self.worker, self.template, self.codec
-            if lane is not None and lane is not primary and lane is not getattr(primary, "secondary", None):
+            if (
+                lane is not None
+                and lane is not primary
+                and all(lane is not auxiliary for auxiliary in getattr(primary, "hy4_lanes", ()))
+            ):
                 raise APIError(503, "Model changed or stopped before this request started.", "model_changed")
             worker = lane if lane is not None else primary
             prefix_cache = getattr(worker, "prefix_cache", False) is True
             reset_prefix = worker is primary and getattr(self, "prefix_reset_pending", False) and prefix_cache
-            if self.api_secondary_job is not None:
+            if self.api_auxiliary_jobs:
                 cache_scope = None
             dispatch_epoch, identifier = self.epoch, self.active_model
             if worker is None or template is None:
@@ -3613,7 +3623,7 @@ class Desktop:
             worker = self.worker
             if worker is None or getattr(worker, "prefix_cache", False) is not True:
                 return
-            if self.job is not None or self.api_secondary_job is not None:
+            if self.job is not None or self.api_auxiliary_jobs:
                 self.prefix_reset_pending = True
                 return
             try:
@@ -3828,9 +3838,9 @@ class Desktop:
                 "status": "ok",
                 "resource_budget": self.resource_budget_summary(),
                 "model_loaded": loaded,
-                "busy": self.job is not None or self.api_secondary_job is not None,
-                "worker_slots": (1 + int(self.api_secondary_worker() is not None)) if loaded else 0,
-                "running_requests": int(self.api_primary_job is not None) + int(self.api_secondary_job is not None),
+                "busy": self.job is not None or bool(self.api_auxiliary_jobs),
+                "worker_slots": 1 + len(self.api_auxiliary_workers()) if loaded else 0,
+                "running_requests": int(self.api_primary_job is not None) + len(self.api_auxiliary_jobs),
                 "queued_requests": len(self.api_queue),
                 "queue_limit": self.api_queue_limit,
                 "queue_timeout_seconds": self.api_queue_timeout,
@@ -3872,17 +3882,23 @@ class Desktop:
     def api_decide(self, payload, cancelled=None):
         return run_decision(self, payload, cancelled)
 
-    def api_secondary_worker(self):
-        secondary = getattr(self.worker, "secondary", None)
-        return secondary if secondary is not None and self.api_context <= secondary.context_limit else None
+    def api_auxiliary_workers(self):
+        return tuple(lane for lane in getattr(self.worker, "hy4_lanes", ()) if self.api_context <= lane.context_limit)
 
     def available_api_worker(self, *, text, maximum):
-        if self.job is None and (text or self.api_secondary_job is None):
+        if self.job is None and (text or not self.api_auxiliary_jobs):
             return self.worker
-        if not text or not self.api_primary_text or self.job is not self.api_primary_job or self.api_secondary_job:
+        if not text or not self.api_primary_text or self.job is not self.api_primary_job:
             return None
-        secondary = self.api_secondary_worker()
-        return secondary if secondary is not None and maximum <= secondary.max_new_tokens else None
+        busy = self.api_auxiliary_jobs.values()
+        return next(
+            (
+                lane
+                for lane in self.api_auxiliary_workers()
+                if maximum <= lane.max_new_tokens and all(lane is not active for active in busy)
+            ),
+            None,
+        )
 
     def reserve_api_request(self, epoch, identifier, cancelled, *, text=False, maximum=0):
         """Claim a compatible lane in FIFO order while holding self.lock."""
@@ -3917,7 +3933,7 @@ class Desktop:
             self.job = self.api_primary_job = current
             self.api_primary_text = text
         else:
-            self.api_secondary_job = current
+            self.api_auxiliary_jobs[current] = worker
             self.prefix_reset_pending = True
         return worker
 
@@ -3929,8 +3945,7 @@ class Desktop:
                 self.job = None
             self.api_primary_job = None
             self.api_primary_text = False
-        if self.api_secondary_job is current:
-            self.api_secondary_job = None
+        if self.api_auxiliary_jobs.pop(current, None) is not None:
             self.prefix_reset_pending = True
         self.api_condition.notify_all()
 
@@ -3943,7 +3958,7 @@ class Desktop:
         asked for streaming. ``cancelled`` is the handler's event: it is set when
         the client disconnects or the request deadline passes, and its optional
         ``reason`` attribute (``"deadline"``) selects the 504 response. While the
-        completion runs, ``stop`` fences both serving threads. Failures map to
+        completion runs, ``stop`` fences every serving thread. Failures map to
         ``APIError``: a cancelled request, a context
         overflow or oversized worker request (400), or a worker fault (503, after which the worker is closed
         and the app shows the model as stopped).
@@ -4166,7 +4181,7 @@ class Desktop:
         finally:
             with self.lock:
                 self.release_api_request()
-                if epoch == self.epoch and self.job is None and self.api_secondary_job is None:
+                if epoch == self.epoch and self.job is None and not self.api_auxiliary_jobs:
                     self.status(
                         "ready" if self.worker else "error", "Ready" if self.worker else "Model stopped", epoch
                     )
@@ -4238,7 +4253,7 @@ class Desktop:
             if (
                 self.worker is None
                 or self.job is not None
-                or self.api_secondary_job
+                or self.api_auxiliary_jobs
                 or self.worker.process.poll() is None
             ):
                 return
@@ -4443,7 +4458,7 @@ class Desktop:
                 raise
             with self.lock:
                 if reference is not None and (
-                    self.api_secondary_job is not None or (self.job is not None and self.job.is_alive())
+                    self.api_auxiliary_jobs or (self.job is not None and self.job.is_alive())
                 ):
                     self.discard_decision_attachment(reference)
                     self.emit(
@@ -4465,7 +4480,7 @@ class Desktop:
             )
         elif command == "reset":
             with self.lock:
-                if self.job is not None or self.api_secondary_job is not None:
+                if self.job is not None or self.api_auxiliary_jobs:
                     raise DesktopError("Wait for the current operation or choose Stop.")
                 self.reset()
         elif command == "configure":

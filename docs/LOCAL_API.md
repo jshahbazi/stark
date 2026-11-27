@@ -322,8 +322,8 @@ tool calls private until that validation completes.
 ## Limits, queueing and cancellation
 
 - The server accepts at most 16 concurrent connections. Excess connections receive a bare 429 with `Retry-After: 1` and no `X-Request-Id` header.
-- One worker request runs at a time by default. Up to eight more chat or Decision requests wait in FIFO order. A ninth receives 429 `queue_full`. A request still queued after 600 seconds receives 429 `queue_timeout`.
-- The Hy4 Sushi STQ preview accepts `STARK_HY4_CONCURRENT_SLOTS=2` in the app backend's environment. When both slots fit and the configured API context and output budget fit the second slot, two text requests can make progress in the same loaded worker. Larger windows use the primary slot. Image requests run exclusively on the image-enabled primary slot. Health reports `worker_slots` for the configured context and `running_requests` for admitted API requests.
+- Up to eight additional chat or Decision requests can wait in FIFO order. A ninth waiting request receives 429 `queue_full`. A request still queued after 600 seconds receives 429 `queue_timeout`.
+- The catalog Hy4 Sushi STQ model automatically admits up to four active text requests on one worker as memory permits. The slots share model weights, and the API advertises a window that fits all admitted slots. Image requests run exclusively on the image-enabled primary slot. Other models ordinarily run one request at a time. Health reports `worker_slots` for the configured context and `running_requests` for admitted API requests.
 - The 300-second inactivity timer starts after body parsing, pauses during the FIFO wait and starts fresh when the request gets the worker. Validated native chat progress renews it, including progress during prefill. An active chat request can run longer than five minutes. A stalled request returns 504 `request_timeout`.
 - The handler polls the client connection every 50 ms while a request runs. A disconnected or timed-out queued request is removed and leaves the loaded model available. Cancelling or timing out a running chat request follows the chat worker's cancellation behavior. Cancelling or timing out a running Decision request terminates and reaps the native Decider worker; the model must be run again before another decision. When a response can still be written, cancellation returns 499 `request_cancelled`.
 - Stopping or changing the model in Stark fences waiting and running requests with 503 `model_changed`.
@@ -333,11 +333,11 @@ tool calls private until that validation completes.
 - The image service starts the worker with an empty, owner-private 0700 staging directory and stages each accepted image as a 0600 regular file with an opaque identifier. The worker validates the reference, owner, type, private permissions, size, link count, stable metadata and image signature, then immediately unlinks the name. It retains the opened-file lease through completion. Host cleanup removes remaining staged names when the transaction exits; worker teardown removes only opaque, owner-private, single-link regular files in its pinned directory. Media references and image bytes are not logged.
 - Image preparation, generation, streaming reads, frame writes and discard share one worker inactivity deadline, with a 300-second default. Validated generation progress or deltas renew it; operation boundaries and activity after cancellation do not. Local image verification retains its absolute time limit. Recoverable cancellation drains native work and clears prepared state before reuse; a protocol or cleanup failure closes and reaps the worker before another request can run.
 
-The secondary slot reserves at most 49,152 positions. Set
-`STARK_HY4_CONTEXT_LIMIT=49152` alongside the preview flag to use the benchmarked
-shared window on a host that fits both slots. The loaded context remains a
-ceiling for flexible requests. A single-slot load with no user cap uses its
-ordinary automatic memory fit.
+Each auxiliary Hy4 text slot reserves at most 49,152 positions. Smaller
+request windows still work. The primary retains its separately fitted
+Playground capacity. `STARK_HY4_CONCURRENT_SLOTS` accepts `1` through `4`
+as an operator override for the maximum slot count. Selecting `1` gives the
+API the primary's ordinary automatic memory fit.
 
 ### Prefix reuse
 

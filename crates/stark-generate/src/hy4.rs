@@ -297,10 +297,10 @@ impl Hy4Backend {
     pub(crate) fn load(
         path: &Path,
         cancellation: Option<CancelSignal>,
-        secondary: bool,
+        concurrent_slots: usize,
     ) -> Result<Self, &'static str> {
         if is_stq_pack(path) {
-            return Self::load_stq(path, cancellation, secondary);
+            return Self::load_stq(path, cancellation, concurrent_slots);
         }
         let source = source::VerifiedSource::open(path)?;
         for (name, digest) in [
@@ -404,7 +404,7 @@ impl Hy4Backend {
     fn load_stq(
         path: &Path,
         cancellation: Option<CancelSignal>,
-        secondary: bool,
+        concurrent_slots: usize,
     ) -> Result<Self, &'static str> {
         let source = stq_source::StqSource::open(path).map_err(|_| "invalid_hy4_stq_artifact")?;
         for (name, digest) in [
@@ -478,7 +478,8 @@ impl Hy4Backend {
                     fused_attn_hc,
                     batch_draft,
                     register_dense_io,
-                    secondary_context_limit: secondary.then(|| context.unwrap_or(49_152).min(49_152)),
+                    concurrent_slots,
+                    secondary_context_limit: (concurrent_slots > 1).then(|| context.unwrap_or(49_152).min(49_152)),
                 },
             )
         }
@@ -535,33 +536,42 @@ impl Hy4Backend {
         })
     }
 
-    pub(crate) fn take_secondary(
+    pub(crate) fn take_additional_slots(&mut self) -> Vec<(Self, u32)> {
+        self.native
+            .take_additional_slots()
+            .into_iter()
+            .map(|native| {
+                let capacity = native.context_sizing().context_tokens;
+                (
+                    Self {
+                        native,
+                        tokenizer: self.tokenizer.clone(),
+                        cancellation: None,
+                        mapper: ProbabilityMapper::default(),
+                        retained: None,
+                        pending: None,
+                        tail_retained: None,
+                        tail_pending: None,
+                        stats: DraftStats::default(),
+                        lookup_stats: LookupStats::default(),
+                        lookup_newline: None,
+                        tail_prefix_enabled: false,
+                        runtime: self.runtime.clone(),
+                        chunk: self.chunk,
+                        stq: true,
+                        recommended_drafts: self.recommended_drafts,
+                    },
+                    capacity,
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn set_cancellation(
         &mut self,
         cancellation: CancelSignal,
-    ) -> Option<(Self, u32)> {
-        let native = self.native.take_secondary()?;
-        let capacity = native.context_sizing().context_tokens;
-        Some((
-            Self {
-                native,
-                tokenizer: self.tokenizer.clone(),
-                cancellation: Some(cancellation),
-                mapper: ProbabilityMapper::default(),
-                retained: None,
-                pending: None,
-                tail_retained: None,
-                tail_pending: None,
-                stats: DraftStats::default(),
-                lookup_stats: LookupStats::default(),
-                lookup_newline: None,
-                tail_prefix_enabled: false,
-                runtime: self.runtime.clone(),
-                chunk: self.chunk,
-                stq: true,
-                recommended_drafts: self.recommended_drafts,
-            },
-            capacity,
-        ))
+    ) {
+        self.cancellation = Some(cancellation);
     }
 
     fn generate_inner(

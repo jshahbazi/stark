@@ -16,7 +16,7 @@ struct StarkHy4ContextMemory {
     uint64_t draft_cache_bytes_per_token;
     uint64_t pool_bytes_per_row;
     uint64_t draft_pool_bytes_per_row;
-    uint64_t secondary_scratch_bytes;
+    uint64_t additional_slot_bytes;
 };
 
 struct StarkHy4VisionGeometry {

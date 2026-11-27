@@ -646,8 +646,17 @@ struct Forward::Impl {
     }
 
     std::string open(Model& mm, mtl::Context& c, const std::string& pack_dir, const Prefill& p,
-                     int context_capacity, int shared_library);
-    std::string alloc();
+                     int context_capacity, const Impl* shared_stq_graph);
+    std::string alloc(const Impl* shared_stq_graph);
+    mtl::Buffer alloc_local(size_t bytes);
+    // The Metal context owns shared scratch handles for the loaded model's lifetime.
+    std::vector<mtl::Buffer> stq_scratch;
+    // Roll back private buffers if this extra slot fails to open.
+    std::vector<mtl::Buffer> stq_slot_buffers;
+    bool extra_stq_slot = false;
+    ~Impl() {
+        for (auto& buffer : stq_slot_buffers) cx->free(buffer);
+    }
     void alloc_scratch(int Tm, int as, int ms, const std::function<mtl::Buffer(size_t)>& get);
     std::string attach_prefill();
     void swap_scratch();                    ///< the decode set <-> the prompt's (the GPU must be idle)
@@ -680,11 +689,15 @@ struct Forward::Impl {
 
 // ---- opening -------------------------------------------------------------------------------------------------------
 std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& pack_dir, const Prefill& p,
-                                int context_capacity, int shared_library) {
+                                int context_capacity, const Impl* shared_stq_graph) {
     m = &mm;
     cx = &c;
     pack = pack_dir;
     pf = p;
+    extra_stq_slot = shared_stq_graph != nullptr;
+    if (extra_stq_slot && (!mm.stq || shared_stq_graph->m != &mm || shared_stq_graph->cx != &c ||
+                           shared_stq_graph->pf.chunk != p.chunk || shared_stq_graph->ctx < context_capacity))
+        return "incompatible Hy4 STQ scratch geometry";
     if (pf.routed_fragments && (!pf.routed_half || !pf.grouped_k_quant || !c.supports_metal4()))
         return "packed expert fragments need the grouped F16 Metal 4 prefill path";
     if (pf.dense_packed && !c.supports_metal4()) return "packed attention prefill needs Metal 4";
@@ -764,8 +777,8 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     const bool can_fuse_attn_hc = m->stq && pf.stq_fused_attn_hc && n_embd == 3072 && hc == 4;
     if (can_fuse_attn_hc) kernel_files.emplace_back("stq_attn_hc.metal");
     if (pf.routed_fragments) kernel_files.emplace_back("stark_hy4_flash_moe_fragments.metal");
-    lib = shared_library >= 0
-        ? shared_library
+    lib = shared_stq_graph
+        ? shared_stq_graph->lib
         : cx->compile(kernel_files, strata_hy4_flash_metal::hy4_flash_prelude(), false);
     p_rms_w = cx->pipeline(lib, "hy4_flash_rmsnorm", mtl::Constants().b(40, true));
     p_rms_nw = cx->pipeline(lib, "hy4_flash_rmsnorm", mtl::Constants().b(40, false));
@@ -877,7 +890,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     if (m->stq && m->stq->has_dfly) p_dfly_capture = cx->pipeline(lib, "stark_hy4_capture_indexer");
 
     if (const std::string e = resolve(); !e.empty()) return e;
-    if (const std::string e = alloc(); !e.empty()) return e;
+    if (const std::string e = alloc(shared_stq_graph); !e.empty()) return e;
     if (!pack.empty() || m->stq) {
         if (const std::string e = eng.open(mm, pack, pf.stq_cache_engram_pages); !e.empty()) return "Engram: " + e;
         eng_ready = true;
@@ -885,9 +898,9 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
             const size_t cells = size_t(Forward::kMaxWindow) * eng.rows_per_token();
             decode_engram_inputs.resize((size_t) eng.n_tables());
             for (auto& input : decode_engram_inputs) {
-                input.rows = cx->alloc(cells * eng.row_bytes());
-                input.valid = cx->alloc(cells * sizeof(float));
-                input.any = cx->alloc(size_t(Forward::kMaxWindow) * sizeof(float));
+                input.rows = alloc_local(cells * eng.row_bytes());
+                input.valid = alloc_local(cells * sizeof(float));
+                input.any = alloc_local(size_t(Forward::kMaxWindow) * sizeof(float));
             }
         }
     }
@@ -1124,41 +1137,69 @@ void Forward::Impl::swap_scratch() {
     big_in = !big_in;
 }
 
-std::string Forward::Impl::alloc() {
+mtl::Buffer Forward::Impl::alloc_local(size_t bytes) {
+    auto buffer = cx->alloc(bytes);
+    if (extra_stq_slot) {
+        try {
+            stq_slot_buffers.push_back(buffer);
+        } catch (...) {
+            cx->free(buffer);
+            throw;
+        }
+    }
+    return buffer;
+}
+
+std::string Forward::Impl::alloc(const Impl* shared_stq_graph) {
     // Tm is the widest run the scratch must hold: a decode window (8) with prefill off, the chunk size with it on.
     // Three stages are allocated for their SUB-BATCH instead, because at Tm = 1024 they are what does not fit:
     // the score rows (537 GB), the MoE's entry-indexed buffers (635 MB) and the logits (495 MB) - see forward.h.
     // HY4_FLASH_SCRATCH_SPLIT (default on): with a prefill chunk, only the DECODE scratch is allocated here; the prompt's
     // (1.47 GB at 1024 positions) goes into a region of the expert arena while a prompt runs (attach_prefill).
     split = !m->stq && tcap > Forward::kMaxWindow && scratch_split_on();
-    if (split) alloc_scratch(Forward::kMaxWindow, Forward::kMaxWindow, Forward::kMaxWindow, [&](size_t n) { return cx->alloc(n); });
-    else alloc_scratch(tcap, asub, msub, [&](size_t n) { return cx->alloc(n); });
-    auto f32 = [&](size_t n) { return cx->alloc(4 * n); };
+    // These allocations have the same order and purpose for all slots. Each
+    // prefill or verify phase overwrites the scratch before using it and
+    // completes all GPU work before another slot can run.
+    size_t shared_index = 0;
+    auto scratch = [&](size_t bytes) {
+        if (!shared_stq_graph) {
+            auto buffer = cx->alloc(bytes);
+            if (m->stq) stq_scratch.push_back(buffer);
+            return buffer;
+        }
+        auto buffer = shared_stq_graph->stq_scratch.at(shared_index++);
+        if (buffer.bytes < bytes) throw std::runtime_error("Hy4 STQ shared scratch is too small");
+        buffer.bytes = bytes;
+        return buffer;
+    };
+    if (split) alloc_scratch(Forward::kMaxWindow, Forward::kMaxWindow, Forward::kMaxWindow, scratch);
+    else alloc_scratch(tcap, asub, msub, scratch);
+    auto f32 = [&](size_t n) { return alloc_local(4 * n); };
     const size_t kv_total = (size_t) blk.size() * (size_t) ctx * (size_t) kv_w;
     size_t idx_blocks = 0;
     for (const BW& b : blk)
         if (b.has_indexer) ++idx_blocks;
-    kv = cx->alloc(2 * kv_total);
-    idxc = cx->alloc(2 * idx_blocks * (size_t) ctx * 3ull * (size_t) idx_dim);
+    kv = alloc_local(2 * kv_total);
+    idxc = alloc_local(2 * idx_blocks * (size_t) ctx * 3ull * (size_t) idx_dim);
     const size_t n_pool_max = (size_t) ctx / (size_t) idx_kpool + 1;
     pool32 = f32(n_pool_max * (size_t) idx_dim);
     slots.layout((uint32_t) Forward::kMaxWindow, (uint32_t) topk, 4, (uint32_t) n_experts);
-    plan = cx->alloc(4 * slots.buf.size());
-    plan_b = cx->alloc(4 * slots.buf.size());
-    rms_part = cx->alloc(4 * 8 * Forward::kMaxWindow);
-    moe_ind = cx->alloc(4 * 3 * 2 * 4 * 2);
+    plan = alloc_local(4 * slots.buf.size());
+    plan_b = alloc_local(4 * slots.buf.size());
+    rms_part = alloc_local(4 * 8 * Forward::kMaxWindow);
+    moe_ind = alloc_local(4 * 3 * 2 * 4 * 2);
     moe_gx.assign((size_t) m->stream.n_layers(), {0u, 0u});
 
     if (tcap > Forward::kMaxWindow) {
         pslots.layout((uint32_t) tcap, (uint32_t) topk, 4, (uint32_t) n_experts, (uint32_t) msub);
-        pplan = cx->alloc(4 * pslots.buf.size());
+        pplan = alloc_local(4 * pslots.buf.size());
         if (mm_supported) {
             // the tile lists and their grids: (sub-batch, chunk), worst case tiles each, (x, y, z) per kind
             const int tm = mm_tile().tm;
             mm_cap = MoeMmF32::tile_cap(pslots.g_max, pslots.n_entry, tm);
             mm_slots = pslots.subs_for((uint32_t) tcap) * pslots.n_chunk;
-            mm_tiles = cx->alloc(4ull * 2 * mm_cap * mm_slots);
-            mm_ind = cx->alloc(4ull * 3 * 2 * mm_slots);
+            mm_tiles = alloc_local(4ull * 2 * mm_cap * mm_slots);
+            mm_ind = alloc_local(4ull * 3 * 2 * mm_slots);
             mm_gx.assign((size_t) m->stream.n_layers(), {0u, 0u});
             const size_t ent = (size_t) msub * topk;
             // What this costs, both ways round.  Against the GEMVs AT THE SAME SUB-BATCH the GEMM saves the
@@ -1188,9 +1229,9 @@ std::string Forward::Impl::alloc() {
         }
     }
     logits_b = f32((size_t) hsub * vocab);
-    argmax_b = cx->alloc(4 * (size_t) hsub);
+    argmax_b = alloc_local(4 * (size_t) hsub);
     last_log.assign((size_t) vocab, 0.0f);
-    badflag = cx->alloc(16);
+    badflag = alloc_local(16);
     mut_sinks = f32((size_t) max_heads);
     mut_zero = f32((size_t) idx_kpool * (size_t) idx_dim);
     for (int i = 0; i < max_heads; ++i) mut_sinks.as<float>()[i] = -INFINITY;
@@ -1201,27 +1242,31 @@ std::string Forward::Impl::alloc() {
         const size_t routes = size_t(tcap) * topk;
         const size_t elements = routes * latent;
         const size_t width = std::max({max_heads * qk, max_heads * v_mla, m->geo.dense_ff});
-        stq_identity = cx->alloc(size_t(tcap) * 2 * sizeof(uint32_t));
-        stq_embedding_ids = cx->alloc(size_t(tcap) * sizeof(int32_t));
-        stq_embedding_rows = f32(size_t(tcap) * n_embd);
-        stq_dense_input = cx->alloc(2 * size_t(tcap) * width);
-        stq_dense_output = cx->alloc(2 * std::max(size_t(tcap) * width, size_t(hsub) * vocab));
-        stq_grid = cx->alloc(3 * sizeof(uint32_t));
-        stq_rows = cx->alloc(routes * 2 * sizeof(uint32_t));
-        stq_jobs = cx->alloc((routes / 32 + n_experts) * 4 * sizeof(uint32_t));
-        stq_inverse = cx->alloc(routes * sizeof(uint32_t));
-        stq_prepared = cx->alloc(elements * sizeof(uint16_t));
-        stq_gate = cx->alloc(elements * sizeof(uint16_t));
-        stq_up = cx->alloc(elements * sizeof(uint16_t));
-        stq_routed = f32(elements);
-        for (int row = 0; row < tcap; ++row) {
-            stq_identity.as<uint32_t>()[2 * row] = 0;
-            stq_identity.as<uint32_t>()[2 * row + 1] = row;
+        stq_identity = scratch(size_t(tcap) * 2 * sizeof(uint32_t));
+        stq_embedding_ids = scratch(size_t(tcap) * sizeof(int32_t));
+        stq_embedding_rows = scratch(sizeof(float) * size_t(tcap) * n_embd);
+        stq_dense_input = scratch(2 * size_t(tcap) * width);
+        stq_dense_output = scratch(2 * std::max(size_t(tcap) * width, size_t(hsub) * vocab));
+        stq_grid = scratch(3 * sizeof(uint32_t));
+        stq_rows = scratch(routes * 2 * sizeof(uint32_t));
+        stq_jobs = scratch((routes / 32 + n_experts) * 4 * sizeof(uint32_t));
+        stq_inverse = scratch(routes * sizeof(uint32_t));
+        stq_prepared = scratch(elements * sizeof(uint16_t));
+        stq_gate = scratch(elements * sizeof(uint16_t));
+        stq_up = scratch(elements * sizeof(uint16_t));
+        stq_routed = scratch(sizeof(float) * elements);
+        if (shared_stq_graph) {
+            if (shared_index != shared_stq_graph->stq_scratch.size()) return "incomplete Hy4 STQ scratch layout";
+        } else {
+            for (int row = 0; row < tcap; ++row) {
+                stq_identity.as<uint32_t>()[2 * row] = 0;
+                stq_identity.as<uint32_t>()[2 * row + 1] = row;
+            }
         }
         if (p_dfly_capture.handle) {
             const size_t total = stark::hy4::stq::kDflyTargetBlocks.size() * Forward::kMaxWindow;
-            dfly_selected = cx->alloc(total * Forward::kSelCap * sizeof(uint32_t));
-            dfly_counts = cx->alloc(total * sizeof(uint32_t));
+            dfly_selected = alloc_local(total * Forward::kSelCap * sizeof(uint32_t));
+            dfly_counts = alloc_local(total * sizeof(uint32_t));
         }
     }
     return {};
@@ -2424,16 +2469,16 @@ void Forward::Impl::dump_block(const BW& b, int T, Dump* dump, const Inject& inj
 Forward::~Forward() { delete im_; }
 
 std::string Forward::open(Model& m, mtl::Context& cx, const std::string& pack_dir, const Prefill& pf,
-                          int context_capacity, int shared_library) {
+                          int context_capacity, const Forward* shared_stq_graph) {
     if (im_ != nullptr) return "already open";
-    im_ = new Impl();
-    const std::string e = im_->open(m, cx, pack_dir, pf, context_capacity, shared_library);
-    if (!e.empty()) {
-        delete im_;
-        im_ = nullptr;
-    }
+    auto opened = std::make_unique<Impl>();
+    const std::string e = opened->open(m, cx, pack_dir, pf, context_capacity,
+                                       shared_stq_graph ? shared_stq_graph->im_ : nullptr);
+    if (e.empty()) im_ = opened.release();
     return e;
 }
+
+void Forward::commit_stq_slot() { im_->stq_slot_buffers.clear(); }
 
 // Called after the LAST flush of a window, i.e. after the command buffer that wrote the cache has completed -
 // before that the flag is not readable.  Returns the `nonfinite` sentinel when this window added any: the request

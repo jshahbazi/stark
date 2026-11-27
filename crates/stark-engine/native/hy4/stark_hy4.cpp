@@ -27,6 +27,7 @@ namespace {
 constexpr int kVocab = 120832;
 constexpr int kRecommendedDrafts = 2;
 constexpr int kMaxDrafts = 7;
+constexpr size_t kMaxAdditionalStqSlots = 3;
 static_assert(kMaxDrafts + 1 <= Forward::kMaxWindow && kMaxDrafts < Mtp::kCacheSlack);
 constexpr uint64_t kGiB = 1ull << 30;
 
@@ -85,7 +86,7 @@ struct LoadedHy4 {
     std::condition_variable phase_ready;
     uint64_t issued_phase = 0;
     uint64_t serving_phase = 0;
-    bool dual_slot = false;
+    bool shared_slots = false;
 
     ~LoadedHy4() {
         metal.stop_keepalive();
@@ -112,6 +113,7 @@ struct StarkHy4 {
     int position = 0;
     int drafts = 0;
     int max_drafts = 0;
+    bool additional = false;
     StarkHy4Stats start_stats{};
     mtl::Context::SegTiming decode_start{};
     mtl::Context::SegTiming slot_timing{};
@@ -119,7 +121,7 @@ struct StarkHy4 {
     uint64_t request_start_invalid_spans = 0;
 
     const mtl::Context::SegTiming& timing() const {
-        return loaded->dual_slot ? slot_timing : metal.seg_timing();
+        return loaded->shared_slots ? slot_timing : metal.seg_timing();
     }
 };
 
@@ -129,7 +131,7 @@ namespace {
 class SlotPhase {
 public:
     explicit SlotPhase(StarkHy4& slot) : slot_(slot) {
-        if (!slot.loaded->dual_slot) return;
+        if (!slot.loaded->shared_slots) return;
         auto& loaded = *slot.loaded;
         std::unique_lock lock(loaded.gpu);
         const uint64_t ticket = loaded.issued_phase++;
@@ -139,7 +141,7 @@ public:
 
     ~SlotPhase() {
         auto& loaded = *slot_.loaded;
-        if (!loaded.dual_slot) return;
+        if (!loaded.shared_slots) return;
         slot_.slot_timing = slot_.metal.seg_timing();
         {
             std::lock_guard lock(loaded.gpu);
@@ -290,11 +292,10 @@ extern "C" int stark_hy4_open_stq(
     const stark::hy4::stq::TensorSlice* vision_weights, size_t vision_count,
     int chunk, int profile, int round_bf16, int pair1_decode, int resident, uint32_t tuning,
     uint32_t (*select_context)(const StarkHy4ContextMemory*, void*, uint32_t*), void* sizing,
-    StarkHy4** output, StarkHy4** secondary_output, StarkHy4VisionGeometry* vision,
+    StarkHy4** output, StarkHy4** additional_outputs, StarkHy4VisionGeometry* vision,
     char* detail, size_t detail_len) noexcept {
     *output = nullptr;
-    *secondary_output = nullptr;
-    bool opening_secondary = false;
+    std::fill_n(additional_outputs, kMaxAdditionalStqSlots, nullptr);
     auto fail = [&](const std::string& error) {
         if (detail_len != 0) {
             const size_t n = std::min(error.size(), detail_len - 1);
@@ -335,15 +336,15 @@ extern "C" int stark_hy4_open_stq(
         memory.draft_slack = 0;
         memory.draft_cache_bytes_per_token = 0;
         memory.draft_pool_bytes_per_row = 0;
-        memory.secondary_scratch_bytes = static_cast<uint64_t>(scratch);
-        uint32_t secondary_context = 0;
-        const uint32_t context = select_context(&memory, sizing, &secondary_context);
+        // The phase queue shares the large forward scratch. Each extra slot
+        // still owns four Engram readers and host window buffers, private
+        // Metal readout and draft state, and the context priced by the callback.
+        memory.additional_slot_bytes = kGiB + (kGiB * chunk / 1024) / 8;
+        std::array<uint32_t, kMaxAdditionalStqSlots> additional_contexts{};
+        const uint32_t context = select_context(&memory, sizing, additional_contexts.data());
         if (context < 2 || context > memory.engine_context || context > memory.checkpoint_context)
             return fail("cannot fit STQ context");
-        if (secondary_context && (secondary_context < 2 || secondary_context > memory.engine_context ||
-                                  secondary_context > memory.checkpoint_context))
-            return 2;
-        s.model.geo.max_context = int32_t(std::max(context, secondary_context));
+        s.model.geo.max_context = int32_t(context);
         if (auto error = load_trunk(s.model, s.metal, {weights, weight_count}, {experts, expert_count},
                                     round_bf16 != 0, pair1_decode != 0, (tuning & 8u) != 0, (tuning & 16u) != 0,
                                     (tuning & 128u) != 0, (tuning & 256u) != 0, (tuning & 1024u) != 0,
@@ -371,33 +372,44 @@ extern "C" int stark_hy4_open_stq(
                 !error.empty()) return fail(error);
             s.max_drafts = int(kDflyMaxDrafts);
         }
-        std::unique_ptr<StarkHy4> secondary;
-        if (secondary_context) {
-            opening_secondary = true;
-            secondary = std::make_unique<StarkHy4>(s.loaded);
-            if (auto error = secondary->forward.open(s.model, s.metal, "", prefill, int(secondary_context),
-                                                      s.forward.library()); !error.empty())
-                return 2;
-            secondary->capacity = int(secondary_context);
-            secondary->max_drafts = s.max_drafts;
-            secondary->tokens.reserve(secondary_context);
-            s.loaded->dual_slot = true;
+        s.capacity = int(context);
+        s.tokens.reserve(context);
+        std::array<std::unique_ptr<StarkHy4>, kMaxAdditionalStqSlots> additional;
+        size_t admitted = 0;
+        for (const uint32_t capacity : additional_contexts) {
+            if (capacity < 2 || capacity > context) break;
+            try {
+                auto slot = std::make_unique<StarkHy4>(s.loaded);
+                if (auto error = slot->forward.open(s.model, s.metal, "", prefill, int(capacity), &s.forward);
+                    !error.empty()) break;
+                slot->capacity = int(capacity);
+                slot->max_drafts = s.max_drafts;
+                slot->additional = true;
+                slot->tokens.reserve(capacity);
+                additional[admitted++] = std::move(slot);
+            } catch (...) {
+                break;
+            }
         }
-        if (resident && !s.model.stq->begin_residency(s.metal)) {
-            if (opening_secondary) return 2;
+        while (resident && !s.model.stq->begin_residency(s.metal)) {
+            if (admitted) {
+                additional[--admitted].reset();
+                continue;
+            }
             return fail("cannot make the STQ mapped banks resident");
         }
+        s.loaded->shared_slots = admitted > 0;
         const auto& vg = s.vision.geometry();
         *vision = {static_cast<uint32_t>(vg.image_token), static_cast<uint32_t>(vg.patch),
                    static_cast<uint32_t>(vg.merge), static_cast<uint64_t>(vg.min_pixels),
                    static_cast<uint64_t>(vg.max_pixels)};
-        s.capacity = int(context);
-        s.tokens.reserve(context);
-        *secondary_output = secondary.release();
+        for (size_t i = 0; i < admitted; ++i) {
+            additional[i]->forward.commit_stq_slot();
+            additional_outputs[i] = additional[i].release();
+        }
         *output = session.release();
         return 0;
     } catch (...) {
-        if (opening_secondary) return 2;
         return fail("STQ native model initialization failed");
     }
 }
@@ -437,7 +449,7 @@ extern "C" int stark_hy4_begin(StarkHy4* session, const uint32_t* tokens, int co
     try {
         SlotPhase phase(s);
         if (context > s.capacity || count < 1 || count >= context || reuse < 0 || reuse >= count ||
-            drafts < 0 || drafts > s.max_drafts || (image && (reuse || drafts))) return 1;
+            drafts < 0 || drafts > s.max_drafts || (image && (s.additional || reuse || drafts))) return 1;
         const auto valid = [](uint32_t token) { return token < kVocab; };
         if (!std::all_of(tokens, tokens + count, valid)) return 1;
         if (reuse == 0) {

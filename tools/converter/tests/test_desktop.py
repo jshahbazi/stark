@@ -724,7 +724,7 @@ def test_hy4_api_second_lane_runs_while_first_is_active(desktop, model, monkeypa
         stop_sequences=True,
         close=close_secondary,
     )
-    monkeypatch.setattr(primary, "secondary", lane)
+    monkeypatch.setattr(primary, "hy4_lanes", (lane,))
     monkeypatch.setattr(primary, "request", hold_primary)
     payload = {"messages": [{"role": "user", "content": "synthetic text"}], "max_tokens": 16}
     cancelled = threading.Event()
@@ -774,7 +774,91 @@ def test_hy4_api_second_lane_runs_while_first_is_active(desktop, model, monkeypa
                 first.result(timeout=3)
             assert desktop.api_status()["worker_slots"] == 0
     assert desktop.api_status()["running_requests"] == 0
-    assert desktop.job is None and desktop.api_secondary_job is None
+    assert desktop.job is None and not desktop.api_auxiliary_jobs
+
+
+def test_hy4_admitted_api_lanes_keep_image_exclusive_and_fifo(desktop, model, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    from stark_convert.chat import Worker
+
+    read = Worker.read
+    lanes = tuple(
+        SimpleNamespace(context_limit=context, max_new_tokens=maximum, close=lambda: None)
+        for context, maximum in [(4096, 4095), (3072, 3071), (2048, 1024)]
+    )
+
+    def read_ready(worker):
+        reply = read(worker)
+        if reply.get("ready") is True:
+            worker.hy4_lanes = lanes
+        return reply
+
+    monkeypatch.setattr(Worker, "read", read_ready)
+    identifier = running(desktop, model)
+    primary = desktop.worker
+    assert desktop.context_limit == desktop.context == 8192
+    assert desktop.api_models()[0]["context_length"] == 2048
+    assert desktop.api_models()[0]["max_output_tokens"] == 1024
+    assert desktop.api_status()["worker_slots"] == 4
+
+    started = [threading.Event() for _ in range(6)]
+    release = [threading.Event() for _ in started]
+
+    def reserve(index, text=True):
+        with desktop.lock:
+            lane = desktop.reserve_api_request(desktop.epoch, identifier, threading.Event(), text=text, maximum=64)
+        try:
+            started[index].set()
+            assert release[index].wait(5)
+            return lane
+        finally:
+            with desktop.lock:
+                desktop.release_api_request()
+
+    def wait_for_queue(size):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with desktop.lock:
+                if len(desktop.api_queue) == size:
+                    return
+            time.sleep(0.005)
+        pytest.fail(f"expected {size} waiting requests")
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        try:
+            active = []
+            for index in range(4):
+                active.append(pool.submit(reserve, index))
+                assert started[index].wait(2)
+            assert desktop.api_status()["running_requests"] == 4
+
+            image = pool.submit(reserve, 4, False)
+            wait_for_queue(1)
+            text = pool.submit(reserve, 5)
+            wait_for_queue(2)
+
+            release[2].set()
+            assert active[2].result(timeout=2) is lanes[1]
+            assert not started[4].is_set()
+            assert not started[5].is_set()
+            for index in (0, 1, 3):
+                release[index].set()
+            for index, lane in [(0, primary), (1, lanes[0]), (3, lanes[2])]:
+                assert active[index].result(timeout=2) is lane
+            assert started[4].wait(2)
+            assert not started[5].is_set()
+            release[4].set()
+            assert image.result(timeout=2) is primary
+            assert started[5].wait(2)
+            release[5].set()
+            assert text.result(timeout=2) is primary
+        finally:
+            for event in release:
+                event.set()
+    assert desktop.api_status()["running_requests"] == 0
 
 
 def test_api_progress_and_metrics_report_worker_prefix_reuse(desktop, model, monkeypatch):

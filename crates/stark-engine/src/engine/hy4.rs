@@ -23,6 +23,9 @@ pub const PREFILL_CHUNK: usize = 1024;
 pub const RECOMMENDED_DRAFTS: usize = 2;
 pub const MAX_NEXTN_DRAFTS: usize = 4;
 pub const MAX_DRAFTS: usize = 7;
+pub const MAX_STQ_SLOTS: usize = 4;
+const MAX_ADDITIONAL_STQ_SLOTS: usize = MAX_STQ_SLOTS - 1;
+const STQ_SHARED_CONTEXT_FLOOR: u32 = 32_768;
 pub const SHARD: &str = "Hy4-flash-Q3_K-00001-of-00002.gguf";
 pub const ENGRAM_SHARD: &str = "Hy4-flash-Q3_K-00002-of-00002.gguf";
 pub const PROJECTOR: &str = "mmproj-Hy4-flash-bf16.gguf";
@@ -156,7 +159,7 @@ struct ContextMemory {
     draft_cache_bytes_per_token: u64,
     pool_bytes_per_row: u64,
     draft_pool_bytes_per_row: u64,
-    secondary_scratch_bytes: u64,
+    additional_slot_bytes: u64,
 }
 
 impl ContextMemory {
@@ -179,26 +182,34 @@ struct ContextSelection {
     limit: Option<u32>,
     pool_size: Option<u32>,
     sizing: Option<Result<ContextSizing, &'static str>>,
-    secondary_limit: Option<u32>,
-    secondary_sizing: Option<ContextSizing>,
+    additional_limit: Option<u32>,
+    requested_slots: usize,
+    additional_sizing: Option<ContextSizing>,
 }
 
 unsafe extern "C" fn select_context(
     memory: *const ContextMemory,
     selection: *mut c_void,
-    secondary_context: *mut u32,
+    additional_contexts: *mut u32,
 ) -> u32 {
     // The native open call owns the borrowed inventory and calls this synchronously.
     let memory = unsafe { &*memory };
     let selection = unsafe { &mut *selection.cast::<ContextSelection>() };
     selection.pool_size = Some(memory.pool_size);
+    selection.additional_sizing = None;
     let budget = stark_resource_budget::inference_memory_budget(memory.budget as usize);
-    if let Some(cap) = selection.secondary_limit.filter(|_| !secondary_context.is_null()) {
-        if let Some((primary, secondary)) = fit_slot_pair(memory, budget, selection.limit, cap) {
-            // The STQ caller supplies a writable output for the independently sized slot.
-            unsafe { secondary_context.write(secondary.context_tokens) };
+    if let Some(cap) = selection.additional_limit.filter(|_| !additional_contexts.is_null()) {
+        let cap = cap.min(selection.limit.unwrap_or(cap));
+        let requested_slots = selection.requested_slots.min(MAX_STQ_SLOTS);
+        for slots in (2..=requested_slots).rev() {
+            let Some((primary, additional)) = fit_stq_slots(memory, budget, selection.limit, cap, slots) else {
+                continue;
+            };
+            // Native STQ open supplies one writable entry per possible additional slot.
+            let contexts = unsafe { slice::from_raw_parts_mut(additional_contexts, MAX_ADDITIONAL_STQ_SLOTS) };
+            contexts[..slots - 1].fill(additional.context_tokens);
             selection.sizing = Some(Ok(primary));
-            selection.secondary_sizing = Some(secondary);
+            selection.additional_sizing = Some(additional);
             return primary.context_tokens;
         }
     }
@@ -208,18 +219,24 @@ unsafe extern "C" fn select_context(
     context_tokens
 }
 
-fn fit_slot_pair(
+fn fit_stq_slots(
     memory: &ContextMemory,
     budget: usize,
     primary_cap: Option<u32>,
-    secondary_cap: u32,
+    additional_cap: u32,
+    slots: usize,
 ) -> Option<(ContextSizing, ContextSizing)> {
-    let budget = budget.checked_sub(memory.secondary_scratch_bytes as usize)?;
-    let primary_budget = budget.checked_sub(memory.estimate(secondary_cap)?)?;
+    let extras = slots.checked_sub(1)?;
+    let fixed = usize::try_from(memory.additional_slot_bytes).ok()?.checked_mul(extras)?;
+    let context_budget = budget.checked_sub(fixed)?;
+    let additional = hy4_context_sizing(memory, context_budget.checked_div(slots)?, Some(additional_cap)).ok()?;
+    if additional.context_tokens < additional_cap.min(STQ_SHARED_CONTEXT_FLOOR) {
+        return None;
+    }
+    let additional_bytes = memory.estimate(additional.context_tokens)?.checked_mul(extras)?;
+    let primary_budget = context_budget.checked_sub(additional_bytes)?;
     let primary = hy4_context_sizing(memory, primary_budget, primary_cap).ok()?;
-    let secondary_budget = budget.checked_sub(memory.estimate(primary.context_tokens)?)?;
-    let secondary = hy4_context_sizing(memory, secondary_budget, Some(secondary_cap)).ok()?;
-    (secondary.context_tokens == secondary_cap).then_some((primary, secondary))
+    (primary.context_tokens >= additional.context_tokens).then_some((primary, additional))
 }
 
 fn hy4_context_sizing(
@@ -316,7 +333,7 @@ pub struct Session {
     sizing: ContextSizing,
     pool_size: u32,
     max_drafts: usize,
-    secondary: Option<Box<Session>>,
+    additional: Vec<Session>,
 }
 
 // The handle owns its request and readout state. STQ slots share a model
@@ -366,8 +383,9 @@ impl Session {
             limit: options.context_limit,
             pool_size: None,
             sizing: None,
-            secondary_limit: None,
-            secondary_sizing: None,
+            additional_limit: None,
+            requested_slots: 1,
+            additional_sizing: None,
         };
         // The path arguments remain alive throughout initialization. The returned
         // handle owns all model data and the device queue.
@@ -427,13 +445,13 @@ impl Session {
             sizing: selection.sizing.ok_or("invalid_finite_context_limit")??,
             pool_size: selection.pool_size.ok_or("invalid_hy4_pool_size")?,
             max_drafts: options.max_drafts,
-            secondary: None,
+            additional: Vec::new(),
         })
     }
 
-    /// Take the independently sized STQ slot when the shared load admitted it.
-    pub fn take_secondary(&mut self) -> Option<Self> {
-        self.secondary.take().map(|session| *session)
+    /// Take the independently sized text slots admitted by the shared STQ load.
+    pub fn take_additional_slots(&mut self) -> Vec<Self> {
+        std::mem::take(&mut self.additional)
     }
 
     pub fn vision_geometry(&self) -> VisionGeometry {
@@ -617,14 +635,15 @@ mod context_tests {
             draft_cache_bytes_per_token: 16,
             pool_bytes_per_row: 16,
             draft_pool_bytes_per_row: 16,
-            secondary_scratch_bytes: 0,
+            additional_slot_bytes: 0,
         };
         let mut selection = ContextSelection {
             limit: Some(32_768),
             pool_size: None,
             sizing: None,
-            secondary_limit: None,
-            secondary_sizing: None,
+            additional_limit: None,
+            requested_slots: 1,
+            additional_sizing: None,
         };
         let context = unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast(), ptr::null_mut()) };
         assert_eq!(context, 32_768);
@@ -642,8 +661,9 @@ mod context_tests {
     }
 
     #[stark_test]
-    fn shared_fit_accounts_for_both_contexts_and_second_scratch() {
-        let memory = ContextMemory {
+    fn shared_fit_preserves_usable_context_across_the_slot_ladder() {
+        const MIB: u64 = 1024 * 1024;
+        let mut memory = ContextMemory {
             checkpoint_context: 262_144,
             engine_context: 131_072,
             pool_size: 128,
@@ -653,16 +673,38 @@ mod context_tests {
             draft_cache_bytes_per_token: 0,
             pool_bytes_per_row: 16,
             draft_pool_bytes_per_row: 0,
-            secondary_scratch_bytes: 16 * 1024 * 1024,
+            additional_slot_bytes: 16 * MIB,
         };
-        let budget = 96 * 1024 * 1024;
-        let (primary, secondary) = fit_slot_pair(&memory, budget, Some(43_000), 32_768).unwrap();
-        assert_eq!(primary.context_tokens, 40_960);
-        assert_eq!(secondary.context_tokens, 32_768);
-        let combined = memory.estimate(primary.context_tokens).unwrap()
-            + memory.estimate(secondary.context_tokens).unwrap()
-            + memory.secondary_scratch_bytes as usize;
-        assert!(combined <= budget);
-        assert!(fit_slot_pair(&memory, 32 * 1024 * 1024, None, 32_768).is_none());
+        let mut selection = ContextSelection {
+            limit: None,
+            pool_size: None,
+            sizing: None,
+            additional_limit: Some(49_152),
+            requested_slots: 4,
+            additional_sizing: None,
+        };
+        for (budget, slots, cap) in
+            [(75, 1, 49_152), (110, 2, 49_152), (165, 3, 49_152), (220, 4, 49_152), (300, 4, 49_152), (130, 4, 16_384)]
+        {
+            memory.budget = (budget + 256) * MIB;
+            selection.limit = Some(cap);
+            let mut additional = [0; MAX_ADDITIONAL_STQ_SLOTS];
+            let primary =
+                unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast(), additional.as_mut_ptr()) };
+            assert!(primary >= cap.min(STQ_SHARED_CONTEXT_FLOOR) && primary <= cap);
+            let mut total = memory.estimate(primary).unwrap();
+            for (i, context) in additional.into_iter().enumerate() {
+                if i >= slots - 1 {
+                    assert_eq!(context, 0);
+                    continue;
+                }
+                assert!(context >= cap.min(STQ_SHARED_CONTEXT_FLOOR) && context <= primary);
+                if budget == 300 || cap < STQ_SHARED_CONTEXT_FLOOR {
+                    assert_eq!(context, cap);
+                }
+                total += memory.estimate(context).unwrap() + memory.additional_slot_bytes as usize;
+            }
+            assert!(total <= (budget * MIB) as usize);
+        }
     }
 }

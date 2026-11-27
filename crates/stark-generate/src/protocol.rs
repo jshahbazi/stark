@@ -71,29 +71,40 @@ struct Hy4Lane {
 
 #[cfg(all(feature = "hy4", target_os = "macos", target_arch = "aarch64"))]
 impl Hy4Lane {
-    /// The private app host gives the second lane independent request, reply and cancellation pipes.
+    /// The private app host gives each additional lane independent request, reply and cancellation pipes.
     /// Call before any native code can start threads or acquire inherited descriptors.
-    fn from_environment() -> Result<Option<Self>, &'static str> {
+    fn from_environment() -> Result<Vec<Self>, &'static str> {
         const ERROR: &str = "invalid_hy4_lane_descriptors";
         let Some(value) = std::env::var_os("STARK_HY4_LANE_FDS") else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         unsafe { std::env::remove_var("STARK_HY4_LANE_FDS") };
-        let (input, rest) = value.to_str().and_then(|value| value.split_once(',')).ok_or(ERROR)?;
-        let (output, cancellation) = rest.split_once(',').ok_or(ERROR)?;
-        let parse = |part: &str| part.parse::<i32>().ok().filter(|fd| *fd >= 3).ok_or(ERROR);
-        let (input, output, cancellation) = (parse(input)?, parse(output)?, parse(cancellation)?);
-        if input == output || input == cancellation || output == cancellation {
+        let descriptors = value
+            .to_str()
+            .ok_or(ERROR)?
+            .split(',')
+            .take(10)
+            .map(|part| part.parse::<i32>().ok().filter(|fd| *fd >= 3).ok_or(ERROR))
+            .collect::<Result<Vec<_>, _>>()?;
+        if descriptors.len() > 9 || !descriptors.len().is_multiple_of(3) {
             return Err(ERROR);
         }
         for name in ["STARK_CANCEL_FD", "STARK_GPU_MEMORY_FD"] {
             if let Some(fd) = std::env::var(name).ok().and_then(|fd| fd.parse::<i32>().ok())
-                && [input, output, cancellation].contains(&fd)
+                && descriptors.contains(&fd)
             {
                 return Err(ERROR);
             }
         }
-        for (fd, access) in [(input, libc::O_RDONLY), (output, libc::O_WRONLY), (cancellation, libc::O_RDONLY)] {
+        for (index, &fd) in descriptors.iter().enumerate() {
+            if descriptors[index + 1..].contains(&fd) {
+                return Err(ERROR);
+            }
+            let access = if index % 3 == 1 {
+                libc::O_WRONLY
+            } else {
+                libc::O_RDONLY
+            };
             let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
             if flags < 0
@@ -105,14 +116,20 @@ impl Hy4Lane {
                 return Err(ERROR);
             }
         }
-        // All three validated descriptors are distinct and were transferred by the launching host.
-        let (input, output, cancellation) =
-            unsafe { (File::from_raw_fd(input), File::from_raw_fd(output), File::from_raw_fd(cancellation)) };
-        Ok(Some(Self {
-            input,
-            output,
-            cancellation: crate::cancel::CancelSignal::new(cancellation)?,
-        }))
+        // All validated descriptors are distinct and were transferred by the launching host.
+        let mut files =
+            descriptors.into_iter().map(|fd| unsafe { File::from_raw_fd(fd) }).collect::<Vec<_>>().into_iter();
+        let mut lanes = Vec::new();
+        while let Some(input) = files.next() {
+            let output = files.next().ok_or(ERROR)?;
+            let cancellation = crate::cancel::CancelSignal::new(files.next().ok_or(ERROR)?)?;
+            lanes.push(Self {
+                input,
+                output,
+                cancellation,
+            });
+        }
+        Ok(lanes)
     }
 }
 
@@ -145,7 +162,7 @@ pub fn main() {
         #[cfg(feature = "metal")]
         {
             #[cfg(all(feature = "hy4", target_os = "macos", target_arch = "aarch64"))]
-            let hy4_lane = Hy4Lane::from_environment()?;
+            let hy4_lanes = Hy4Lane::from_environment()?;
             let cancellation = crate::cancel::CancelSignal::from_environment()?;
             // SAFETY: startup is single-threaded here, and the inherited pipe
             // write FD is transferred exclusively to the sampler.
@@ -156,36 +173,33 @@ pub fn main() {
                 if validation_gemma_text_only {
                     return Err("validation_family_not_supported");
                 }
-                let mut backend = crate::hy4::Hy4Backend::load(&path, cancellation, hy4_lane.is_some())?;
-                let secondary = if let Some(Hy4Lane {
-                    input,
-                    output,
-                    cancellation,
-                }) = hy4_lane
+                let mut backend = crate::hy4::Hy4Backend::load(&path, cancellation, hy4_lanes.len() + 1)?;
+                let mut capacities = Vec::new();
+                for (
+                    (mut backend, capacity),
+                    Hy4Lane {
+                        input,
+                        output,
+                        cancellation,
+                    },
+                ) in backend.take_additional_slots().into_iter().zip(hy4_lanes)
                 {
-                    if let Some((backend, capacity)) = backend.take_secondary(cancellation) {
-                        let mut worker = crate::generation::GenerationWorker::new_with_options(backend, None, false)?;
-                        std::thread::Builder::new()
-                            .name("hy4-secondary".into())
-                            .spawn(move || {
-                                let _ = crate::generation::run_lines(
-                                    &mut worker,
-                                    &mut io::BufReader::new(input),
-                                    &mut io::BufWriter::new(output),
-                                );
-                            })
-                            .map_err(|_| "hy4_secondary_start_failed")?;
-                        Some(capacity)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
-                if let Some(capacity) = secondary {
-                    worker.advertise_hy4_secondary(capacity);
+                    backend.set_cancellation(cancellation);
+                    let mut worker = crate::generation::GenerationWorker::new_with_options(backend, None, false)?;
+                    std::thread::Builder::new()
+                        .name(format!("hy4-lane-{}", capacities.len() + 1))
+                        .spawn(move || {
+                            let _ = crate::generation::run_lines(
+                                &mut worker,
+                                &mut io::BufReader::new(input),
+                                &mut io::BufWriter::new(output),
+                            );
+                        })
+                        .map_err(|_| "hy4_lane_start_failed")?;
+                    capacities.push(capacity);
                 }
+                let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
+                worker.advertise_hy4_lanes(capacities);
                 return crate::generation::run_lines(
                     &mut worker,
                     &mut crate::prefix_cache::StandardInput::reader(),
