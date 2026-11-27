@@ -236,6 +236,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ## Inkling 2 Mini
 
+- [Generation context policy follow-up](2026-11-26-context-sizing-follow-up.md) · Experiment, 2026-11-26, attempt 20261126-CTX-02
 - [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
 
 ### References, native milestones and follow-up
