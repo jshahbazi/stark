@@ -165,7 +165,9 @@ Full-model parity and speed are still to be measured. [Compensated sparse MLA re
 point in the final prefill chunk. The worker retains the last complete
 IndexPool group before the final prompt token and checks for an identical
 prefix with the same scope, context and draft settings. The reported chunk
-width still describes the ordinary fallback grid.
+width still describes the ordinary fallback grid. The optional
+`prefix_cache.subchunk_tokens` readiness field reports the IndexPool group
+width so hosts can validate the finer reuse counts.
 
 `STARK_HY4_PARALLEL_ROUTER=1` requests the parallel top-16 selector for
 512-expert Hy4 trunk batches of up to 16 rows on devices that admit its

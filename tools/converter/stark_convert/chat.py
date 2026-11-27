@@ -452,6 +452,7 @@ class Worker:
         self.media = None
         self.prefix_cache = False
         self.prefix_chunk_tokens = None
+        self.prefix_subchunk_tokens = None
         self.generation_budget_inputs = False
         command = [str(executable), "--model-path", str(model)]
         try:
@@ -648,7 +649,9 @@ class Worker:
                 self.generation_budget_inputs = reply.get("generation_budget_inputs") == "token-ids-v1"
                 self.mtp = mtp_capabilities(reply)
                 self.prefix_cache = prefix_cache_enabled(reply)
-                self.prefix_chunk_tokens = reply["prefix_cache"]["chunk_tokens"] if self.prefix_cache else None
+                prefix_settings = reply["prefix_cache"] if self.prefix_cache else {}
+                self.prefix_chunk_tokens = prefix_settings.get("chunk_tokens")
+                self.prefix_subchunk_tokens = prefix_settings.get("subchunk_tokens")
                 self.cancellation = reply.get("cancellation") == "pipe-v1"
                 self.image_input = image_input_contract(reply.get("image_input"))
                 launch_hash = getattr(self, "_launch_worker_sha256", None)
@@ -1050,20 +1053,19 @@ def _read_image_file(path: Path) -> ImageData:
 
 
 def prefix_cache_enabled(ready):
-    """Accept consecutive prefix reuse only from a complete readiness contract.
-
-    Reused counts are multiples of the backend's prefill chunk, itself a
-    multiple of 1,024 tokens.
-    """
+    """Accept consecutive prefix reuse only from a complete readiness contract."""
     settings = ready.get("prefix_cache")
-    chunk = settings.get("chunk_tokens") if isinstance(settings, dict) else None
+    if not isinstance(settings, dict):
+        return False
+    chunk = settings.get("chunk_tokens")
+    subchunk = settings.get("subchunk_tokens")
     return (
         ready.get("state_policy") == "consecutive-prefix-v1"
-        and isinstance(settings, dict)
         and settings.get("enabled") is True
         and type(chunk) is int
         and 1024 <= chunk <= 65536
         and chunk % 1024 == 0
+        and (subchunk is None or (type(subchunk) is int and 1 <= subchunk < chunk and chunk % subchunk == 0))
         and "reset_cache" in (ready.get("operations") or [])
     )
 

@@ -84,5 +84,25 @@ passed the IndexPool boundary cases. The recovered OpenCode harness
 completed all three mock client turns. The exact Q3_K download and
 checksum preparation gate the real-model screen.
 
-The staged release worker is bound by SHA-256
-`10c9cdada2435d54eb6a6dbe4bd1a3fa0e324d2a985a14f17d346ff7718594a8`.
+### OpenCode host gate
+
+Review of the live OpenCode path found that the Python host required all
+worker reuse counts to land on the compute-chunk grid. An IndexPool tail
+count such as 15,996 would fail the continued request. Hy4 now advertises
+the optional `subchunk_tokens` alignment when tail reuse is enabled. The
+host accepts in-range counts on either advertised grid. A synthetic API
+request passed with a finer reuse count, and validation still rejects
+misaligned counts and counts that consume the whole prompt.
+
+The rebuilt Rust 1.98.1 release worker used for the queued screen is
+bound by SHA-256
+`c4c92f5af7d2378ddb205a7a2ec84904ae6565c68a4f1a746bdf9b99780ebaae`.
+
+### Artifact recovery
+
+The first Hub transfer reached 137.5 GB of 156.4 GB before an Xet CDN
+request returned HTTP 403. The installer exited while the benchmark runner
+was waiting for a verified model. Recovery reused 64.4 GB of completed
+files and switched the missing trunk shard to HTTPS byte ranges with
+per-range checkpoints. The pinned SHA-256 and native installer remain the
+publication gates for the exact model.

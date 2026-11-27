@@ -397,6 +397,10 @@ impl Session {
         self.sizing
     }
 
+    pub fn index_pool_group_tokens(&self) -> u32 {
+        self.pool_size
+    }
+
     /// Largest completed IndexPool boundary before the prompt's final token.
     /// Keeps one token available to produce fresh logits on the next request.
     pub fn prefill_tail_boundary(

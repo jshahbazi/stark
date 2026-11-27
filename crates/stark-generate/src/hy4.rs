@@ -736,6 +736,10 @@ impl GenerationBackend for Hy4Backend {
     fn prefix_cache_chunk_tokens(&self) -> usize {
         self.chunk
     }
+    fn prefix_cache_subchunk_tokens(&self) -> Option<usize> {
+        let alignment = self.native.index_pool_group_tokens() as usize;
+        (self.tail_prefix_enabled && (1..self.chunk).contains(&alignment)).then_some(alignment)
+    }
     fn prefix_cache_key(&self) -> &'static str {
         if self.lookup_newline.is_some() {
             "model-instance+context-tokens+cache-scope+mtp-drafts+mtp-lookup"

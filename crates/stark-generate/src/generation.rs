@@ -716,10 +716,13 @@ pub(crate) trait GenerationBackend {
     fn prefix_cache_supported(&self) -> bool {
         false
     }
-    /// Reused prompt tokens are a multiple of this prefill chunk length, itself
-    /// a multiple of `PREFILL_CHUNK_TOKENS`.
+    /// The ordinary reuse grid, a multiple of `PREFILL_CHUNK_TOKENS`.
     fn prefix_cache_chunk_tokens(&self) -> usize {
         prefix_cache::PREFILL_CHUNK_TOKENS
+    }
+    /// Optional alignment for a backend that retains a boundary inside a chunk.
+    fn prefix_cache_subchunk_tokens(&self) -> Option<usize> {
+        None
     }
     /// Prompt tokens a request always prefills after a reuse boundary: its own
     /// boundary is the largest chunk multiple at or below its input length
@@ -1664,6 +1667,9 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             "tail_tokens":worker.backend.prefix_cache_tail_tokens(),"idle_seconds":prefix_cache::IDLE_SECONDS,
             "key":worker.backend.prefix_cache_key()});
         if enabled {
+            if let Some(alignment) = worker.backend.prefix_cache_subchunk_tokens() {
+                readiness["prefix_cache"]["subchunk_tokens"] = json!(alignment);
+            }
             readiness["state_policy"] = json!(prefix_cache::POLICY);
             readiness["operations"] = json!(["tokenize", "decode", "generate", "reset_cache"]);
         }

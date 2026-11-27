@@ -354,9 +354,13 @@ def metric(reply, key):
     return value if valid else None
 
 
-def valid_reuse(reply, input_tokens, chunk_tokens=1024):
+def valid_reuse(reply, input_tokens, chunk_tokens=1024, subchunk_tokens=None):
     reused = reply.get("reused_input_tokens")
-    return type(reused) is int and 0 <= reused < input_tokens and reused % chunk_tokens == 0
+    return (
+        type(reused) is int
+        and 0 <= reused < input_tokens
+        and (reused % chunk_tokens == 0 or (subchunk_tokens is not None and reused % subchunk_tokens == 0))
+    )
 
 
 def metrics(reply):
@@ -3538,7 +3542,12 @@ class Desktop:
             reply = worker.request(request, cancelled=cancelled)
         if not isinstance(reply.get("text"), str) or "error" in reply:
             raise ValueError
-        if prefix_cache and not valid_reuse(reply, count, getattr(worker, "prefix_chunk_tokens", None) or 1024):
+        if prefix_cache and not valid_reuse(
+            reply,
+            count,
+            getattr(worker, "prefix_chunk_tokens", None) or 1024,
+            getattr(worker, "prefix_subchunk_tokens", None),
+        ):
             raise ValueError
         if capability["supported"]:
             self.validate_mtp_reply(reply, capability, drafts)
