@@ -79,6 +79,7 @@ struct Dfly2::Impl {
     const gguf::Tensor *enorm, *hnorm, *fusion_gate, *final_norm, *embed_norm, *hidden_norm, *conf_weight, *conf_bias;
     const DenseBank *fusion, *correction_gate, *correction_up, *correction_down, *embed, *head;
     Pipeline p_norm, p_rope, p_kv, p_copy, p_add, p_gate, p_glu, p_argmax;
+    Pipeline p_check_proposal;
     Pipeline p_register_mla, p_mla_finish, p_stitch;
     DenseGemvF32 raw_kv, key_absorb, value_absorb;
     strata::hy4_flash::AttnPipes attention;
@@ -158,7 +159,7 @@ struct Dfly2::Impl {
         if (!buffer.ptr) throw std::runtime_error("STQ DFly2 scratch allocation failed");
     }
 
-    void initialize(int library, bool register_mla) {
+    void initialize(int library, bool register_mla, bool batch_correction) {
         bind();
         auto build = [&](const char* name) { return metal.pipeline(library, name); };
         p_norm = metal.pipeline(library, "hy4_flash_rmsnorm", mtl::Constants().b(40, true));
@@ -169,6 +170,25 @@ struct Dfly2::Impl {
         p_gate = build("hy4_flash_gate_mul");
         p_glu = build("hy4_flash_swiglu_clamp");
         p_argmax = build("hy4_flash_argmax");
+        if (batch_correction) {
+            const int correction_library = metal.compile({}, R"METAL(
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void stark_dfly_check_proposal(device const float* logits [[buffer(0)]],
+                                      device const int& proposal [[buffer(1)]],
+                                      device uint& failed [[buffer(2)]],
+                                      device int& next_id [[buffer(3)]],
+                                      constant uint& vocab [[buffer(4)]],
+                                      constant uint& mask [[buffer(5)]]) {
+    const int id = proposal;
+    const bool valid = failed == 0 && id >= 0 && uint(id) < vocab && isfinite(logits[id]);
+    next_id = valid ? id : int(mask);
+    if (!valid) failed = 1;
+}
+)METAL", false);
+            p_check_proposal = metal.pipeline(correction_library, "stark_dfly_check_proposal");
+        }
         attention = strata::hy4_flash::attn_pipes(&metal, library, false);
         if (register_mla) {
             p_register_mla = metal.pipeline(library, "stark_hy4_stq_register_mla", mtl::Constants().b(43, false));
@@ -190,7 +210,7 @@ struct Dfly2::Impl {
         allocate(compact_positions, layers.size() * kRows * sizeof(int32_t));
         allocate(unused, sizeof(int32_t));
         allocate(bad, sizeof(uint32_t));
-        allocate(best, sizeof(int32_t));
+        allocate(best, kDflyMaxDrafts * sizeof(int32_t));
         for (uint32_t i = 0; i < kRows; ++i) {
             row_map.as<uint32_t>()[2 * i] = 0;
             row_map.as<uint32_t>()[2 * i + 1] = i;
@@ -386,9 +406,10 @@ struct Dfly2::Impl {
 
         std::array<int32_t, kDflyMaxDrafts> draft{};
         std::array<float, kDflyMaxDrafts> conf{};
+        const bool batch = p_check_proposal.handle && confidence_out.empty() && proposals.size() > 1;
         for (size_t j = 0; j < proposals.size(); ++j) {
             if (j != 0) {
-                *ids.as<int32_t>() = draft[j - 1];
+                if (!batch) *ids.as<int32_t>() = draft[j - 1];
                 embed_rows(previous, 1);
             }
             const size_t offset = j * kWidth * sizeof(float);
@@ -397,15 +418,28 @@ struct Dfly2::Impl {
             swiglu(concat, correction_gate, correction_up, correction_down, linear_out, 1);
             elementwise(p_add, hidden, offset, linear_out, 0, fused, kWidth, 1);
             project(head, fused, logits, 1);
-            push(commands, p_argmax, {Arg::B(logits), Arg::B(best), Arg::V(ArgmaxArgs{kVocab, kVocab})}, 1, 1, kTg);
+            const auto result = Arg::B(best, j * sizeof(int32_t));
+            push(commands, p_argmax, {Arg::B(logits), result, Arg::V(ArgmaxArgs{kVocab, kVocab})}, 1, 1, kTg);
+            if (batch) {
+                // Validate before embedding this ID in the next correction. The
+                // mask keeps the rest of a failed graph within the vocabulary.
+                push(commands, p_check_proposal, {Arg::B(logits), result, Arg::B(bad), Arg::B(ids),
+                     Arg::V(kVocab), Arg::V(kMask)}, 1, 1, 1);
+                continue;
+            }
             execute();
-            draft[j] = *best.as<int32_t>();
+            draft[j] = best.as<int32_t>()[j];
             if (draft[j] < 0 || uint32_t(draft[j]) >= kVocab || !std::isfinite(logits.as<float>()[draft[j]]))
                 throw std::runtime_error("nonfinite STQ DFly2 proposal");
             if (!confidence_out.empty()) {
                 conf[j] = confidence();
                 if (!std::isfinite(conf[j])) throw std::runtime_error("nonfinite STQ DFly2 confidence");
             }
+        }
+        if (batch) {
+            execute();
+            if (*bad.as<uint32_t>() != 0) throw std::runtime_error("nonfinite STQ DFly2 proposal");
+            std::copy_n(best.as<int32_t>(), proposals.size(), draft.begin());
         }
         std::copy_n(draft.begin(), proposals.size(), proposals.begin());
         std::copy_n(conf.begin(), confidence_out.size(), confidence_out.begin());
@@ -415,7 +449,8 @@ struct Dfly2::Impl {
 Dfly2::Dfly2() = default;
 Dfly2::~Dfly2() = default;
 
-std::string Dfly2::open(strata::hy4_flash::Model& model, mtl::Context& metal, int shared_library, bool register_mla) {
+std::string Dfly2::open(strata::hy4_flash::Model& model, mtl::Context& metal, int shared_library,
+                       bool register_mla, bool batch_correction) {
     if (impl_ || !model.stq || shared_library < 0 || model.geo.trunk_blocks != 42 || model.geo.layers.size() != 42 ||
         model.geo.hidden_dim != kWidth || model.geo.vocab_size != kVocab || model.geo.kv_a_width != kKv ||
         !std::all_of(kDflyTargetBlocks.begin(), kDflyTargetBlocks.end(), [&](int32_t block) {
@@ -423,7 +458,7 @@ std::string Dfly2::open(strata::hy4_flash::Model& model, mtl::Context& metal, in
         })) return "invalid STQ DFly2 model";
     try {
         auto impl = std::make_unique<Impl>(model, metal);
-        impl->initialize(shared_library, register_mla);
+        impl->initialize(shared_library, register_mla, batch_correction);
         impl_ = std::move(impl);
         return {};
     } catch (const std::exception& e) {

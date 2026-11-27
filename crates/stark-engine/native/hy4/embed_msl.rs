@@ -25,6 +25,7 @@ pub fn generate(
             "pair1_k4_decode.metal",
             "pair1_k4_io.metal",
             "spec1_dense.metal",
+            "stq_attn_hc.metal",
             "stq_mla_register.metal",
             "stq_embedding.metal",
         ]

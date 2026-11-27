@@ -125,6 +125,8 @@ fn run_trunk(
                 draft_register_mla: env::var_os("STARK_HY4_STQ_DRAFT_REGISTER_MLA").is_some(),
                 wide_ffn: env::var_os("STARK_HY4_STQ_WIDE_FFN").is_some(),
                 fast_verify: env::var_os("STARK_HY4_STQ_FAST_VERIFY").is_some(),
+                fused_attn_hc: env::var_os("STARK_HY4_STQ_FUSED_ATTN_HC").is_some(),
+                batch_draft: env::var_os("STARK_HY4_STQ_BATCH_DRAFT").is_some(),
             },
         )
     }?;

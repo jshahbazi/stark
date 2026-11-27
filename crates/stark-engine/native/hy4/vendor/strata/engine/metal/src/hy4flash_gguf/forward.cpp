@@ -290,6 +290,7 @@ struct Forward::Impl {
     mtl::Pipeline attn_pf_range, attn_pf_sel;   // the prefill MMA attention (hy4_flash_attn_pf.metal), prompt chunks only
     mtl::Pipeline attn_pf_tensor;
     mtl::Pipeline attn_stq_range, attn_stq_sel, attn_stq_finish;
+    mtl::Pipeline stq_attn_hc;
     mtl::Pipeline p_dense_pack, p_dense_device;
     bool dense_ffn_device_views = false;
     bool pf_mma_ok = false, pf_mma_idx_ok = false;
@@ -602,9 +603,10 @@ struct Forward::Impl {
     // `norm_w` / `norm_y`: the block's RMSNorm of `cur` (attn_norm or ffn_norm) fused into the mix - one dispatch,
     // bitwise the hy4_flash_hc_mix + hy4_flash_rmsnorm pair it replaces (hy4_flash_hc.metal, hy4_flash_hc_mix_norm)
     void hc_pre(std::vector<mtl::Dispatch>& ds, const BW& b, const mtl::Buffer& x, int which, int T,
-                const gguf::Tensor* norm_w = nullptr, const mtl::Buffer* norm_y = nullptr, float norm_eps = 0) {
+                const gguf::Tensor* norm_w = nullptr, const mtl::Buffer* norm_y = nullptr, float norm_eps = 0,
+                bool flat_ready = false) {
         // flat_norm over the WHOLE hc * n_embd row, no weight
-        rms(ds, x, 0, (uint32_t) hcw, nullptr, flat, 0, (uint32_t) hcw, (uint32_t) hcw, T, eps);
+        if (!flat_ready) rms(ds, x, 0, (uint32_t) hcw, nullptr, flat, 0, (uint32_t) hcw, (uint32_t) hcw, T, eps);
         const gguf::Tensor* fn = b.t[which == 0 ? W_HCA_FN : W_HCF_FN];
         const mtl::Buffer& mx = which == 0 ? mixes_a : mixes_f;
         gv(fn).append(ds, m->dense, fn->offset, flat, (uint32_t) hcw, mx, 2 * (uint32_t) hc, 0, (uint32_t) T);
@@ -757,6 +759,8 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     if (pf.tensor_mla) kernel_files.emplace_back("stark_hy4_flash_mla_prefill.metal");
     if (pf.stq_register_mla || pf.stq_verify_register_mla || pf.stq_draft_register_mla)
         kernel_files.emplace_back("stq_mla_register.metal");
+    const bool can_fuse_attn_hc = m->stq && pf.stq_fused_attn_hc && n_embd == 3072 && hc == 4;
+    if (can_fuse_attn_hc) kernel_files.emplace_back("stq_attn_hc.metal");
     if (pf.routed_fragments) kernel_files.emplace_back("stark_hy4_flash_moe_fragments.metal");
     lib = cx->compile(kernel_files, strata_hy4_flash_metal::hy4_flash_prelude(), false);
     p_rms_w = cx->pipeline(lib, "hy4_flash_rmsnorm", mtl::Constants().b(40, true));
@@ -775,6 +779,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     p_kv_finish = cx->pipeline(lib, "hy4_flash_kv_finish");
     p_hc_head = cx->pipeline(lib, "hy4_flash_hc_mix", mtl::Constants().b(41, false));
     p_hc_post = cx->pipeline(lib, "hy4_flash_hc_post");
+    if (can_fuse_attn_hc) stq_attn_hc = cx->pipeline(lib, "stark_hy4_stq_attn_hc");
     p_router = cx->pipeline(lib, "hy4_flash_router");
     if (pf.parallel_router && n_experts == 512 && topk == 16) {
         try {
@@ -1671,13 +1676,24 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     append_dense_projection(ds, ao, gated, H * (uint32_t) v_mla, attn_y, (uint32_t) n_embd, uT, true,
                             fuse_gate ? DenseBoundaries::prepared_input : DenseBoundaries::full);
     stage(tm.pf_attention_misc_ms);
-    rms(ds, attn_y, 0, (uint32_t) n_embd, b.t[W_POST_ATTN], attn_out, 0, (uint32_t) n_embd, (uint32_t) n_embd, T,
-        eps);
-    hc_post(ds, attn_out, *resid, post_a, hc_mid, T);
+    const bool fused_attn_hc = stq_attn_hc.max_threads >= 256 && !want_dump;
+    if (fused_attn_hc) {
+        using mtl::Arg;
+        mtl::Dispatch d{&stq_attn_hc,
+                        {Arg::B(attn_y), Arg::B(m->dense, b.t[W_POST_ATTN]->offset), Arg::B(*resid),
+                         Arg::B(post_a), Arg::B(hc_mid), Arg::B(flat), Arg::V(eps)},
+                        {uT, 1, 1}, {256, 1, 1}};
+        mtl::require_fit(d, "stark_hy4_stq_attn_hc");
+        ds.push_back(d);
+    } else {
+        rms(ds, attn_y, 0, (uint32_t) n_embd, b.t[W_POST_ATTN], attn_out, 0, (uint32_t) n_embd,
+            (uint32_t) n_embd, T, eps);
+        hc_post(ds, attn_out, *resid, post_a, hc_mid, T);
+    }
 
     // ---- the FFN half
     stage(tm.pf_other_ms);
-    hc_pre(ds, b, hc_mid, 1, T, b.t[W_FFN_NORM], &fnorm, eps);   // + ffn_norm(cur) -> fnorm
+    hc_pre(ds, b, hc_mid, 1, T, b.t[W_FFN_NORM], &fnorm, eps, fused_attn_hc);
     const auto fused_ffn = [&](const gguf::Tensor* gate, const gguf::Tensor* up, const gguf::Tensor* down,
                                const mtl::Buffer& output) {
         if (!m->stq || !pr_in_chunk || want_dump || !m->stq->program.fuses_ffn(uT)) return false;

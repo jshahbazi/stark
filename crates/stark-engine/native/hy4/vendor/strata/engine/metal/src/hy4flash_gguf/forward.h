@@ -81,6 +81,7 @@ struct Prefill {
     bool stq_verify_register_mla = false;  ///< Key-partitioned register attention for STQ verification
     bool stq_cache_engram_pages = false;   ///< Use the filesystem cache and overlap STQ Engram reads with prefill
     bool stq_draft_register_mla = false;  ///< Include partitioned MLA for the STQ DFly2 graph
+    bool stq_fused_attn_hc = false; ///< Fuse attention output normalization, HC residual update and FFN flat normalization
     bool routed_half = false;       ///< Stage grouped expert GEMM operands as F16, keeping F32 accumulation
     bool routed_fragments = false;  ///< Use gathered F16 tensor fragments for packed grouped experts
     bool dense_packed = false;      ///< Read packed Q8_0 attention projections into prefill tensor fragments

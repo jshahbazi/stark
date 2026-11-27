@@ -295,10 +295,12 @@ extern "C" int stark_hy4_open_stq_diagnostic(
         prefill.stq_verify_register_mla = (tuning & 32u) != 0;
         prefill.stq_cache_engram_pages = (tuning & 64u) != 0;
         prefill.stq_draft_register_mla = (tuning & 512u) != 0;
+        prefill.stq_fused_attn_hc = (tuning & 4096u) != 0;
         if (auto error = s.forward.open(s.model, s.metal, "", prefill); !error.empty()) return fail(error);
         if (auto error = s.vision.build(s.metal, s.forward.library()); !error.empty()) return fail(error);
         if (s.model.stq->has_dfly) {
-            if (auto error = s.dfly.open(s.model, s.metal, s.forward.library(), prefill.stq_draft_register_mla);
+            if (auto error = s.dfly.open(s.model, s.metal, s.forward.library(), prefill.stq_draft_register_mla,
+                                         (tuning & 8192u) != 0);
                 !error.empty()) return fail(error);
             s.max_drafts = int(kDflyMaxDrafts);
         }

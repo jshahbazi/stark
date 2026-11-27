@@ -41,7 +41,7 @@ public:
     // Uses the existing packed trunk weights/program for embeddings and head.
     // The model and Metal context outlive the drafter.
     std::string open(strata::hy4_flash::Model& model, mtl::Context& metal, int shared_library,
-                     bool register_mla = false);
+                     bool register_mla = false, bool batch_correction = false);
     bool ready() const { return bool(impl_); }
 
     // Propose for the causal block [anchor, mask ...]. Uses scratch only. The

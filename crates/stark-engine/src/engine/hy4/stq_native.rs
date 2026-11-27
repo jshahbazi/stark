@@ -188,6 +188,8 @@ pub struct StqOptions {
     pub draft_register_mla: bool,
     pub wide_ffn: bool,
     pub fast_verify: bool,
+    pub fused_attn_hc: bool,
+    pub batch_draft: bool,
 }
 
 unsafe extern "C" {
@@ -313,7 +315,9 @@ impl Session {
                     | (u32::from(options.wide_routed) << 8)
                     | (u32::from(options.draft_register_mla) << 9)
                     | (u32::from(options.wide_ffn) << 10)
-                    | (u32::from(options.fast_verify) << 11),
+                    | (u32::from(options.fast_verify) << 11)
+                    | (u32::from(options.fused_attn_hc) << 12)
+                    | (u32::from(options.batch_draft) << 13),
                 select_context,
                 ptr::from_mut(&mut selection).cast(),
                 &mut inner,
