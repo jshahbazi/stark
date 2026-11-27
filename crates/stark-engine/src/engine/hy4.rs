@@ -224,6 +224,7 @@ unsafe extern "C" {
         actual_draft_head_q5: *mut c_int,
     ) -> c_int;
     fn stark_hy4_close(session: *mut c_void);
+    fn stark_hy4_parallel_router_active(session: *const c_void) -> c_int;
     fn stark_hy4_clear(session: *mut c_void);
     fn stark_hy4_retain_prefix(
         session: *mut c_void,
@@ -379,6 +380,10 @@ impl Session {
 
     pub fn mapped_experts(&self) -> bool {
         self.mapped_experts
+    }
+
+    pub fn parallel_router_active(&self) -> bool {
+        unsafe { stark_hy4_parallel_router_active(self.inner.as_ptr()) != 0 }
     }
 
     pub fn draft_head_format(&self) -> &'static str {

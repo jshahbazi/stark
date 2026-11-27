@@ -270,6 +270,7 @@ public:
                           int32_t delta, int32_t mrope_len1, int32_t mrope_len2);
     /// Whether a picture is attached: the text path must be able to assert it is not.
     bool has_image_prompt() const;
+    bool parallel_router_active() const;
 
     struct Impl;   // public so the run_graph_seg trampoline in forward.cpp can name it
 

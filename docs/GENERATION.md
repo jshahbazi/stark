@@ -171,7 +171,8 @@ width so hosts can validate the finer reuse counts.
 
 `STARK_HY4_PARALLEL_ROUTER=1` requests the parallel top-16 selector for
 512-expert Hy4 trunk batches of up to 16 rows on devices that admit its
-Metal pipeline. Larger batches use the original selector.
+Metal pipeline. Larger batches use the original selector. The Hy4 runtime
+identity reports `parallel_router_active` for the pipeline that loaded.
 [Experiment controls and qualification](model-experiments/2026-11-26-hy4-post-sushi-controls.md)
 
 `STARK_HY4_PREFILL_ROUTED_HALF=1` selects F16 operands with F32 accumulation

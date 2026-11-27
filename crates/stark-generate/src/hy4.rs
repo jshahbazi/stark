@@ -358,6 +358,7 @@ impl Hy4Backend {
             "prefill_dense_ffn_device_views_requested": options.dense_ffn_device_views,
             "prefill_tensor_mla_requested": options.tensor_mla,
             "prefill_compensated_sparse_mla_requested": options.compensated_sparse_mla,
+            "parallel_router_active": native.parallel_router_active(),
             "token_embeddings_resident": options.resident_token_embeddings,
             "draft_experts_resident": options.resident_draft_experts,
             "draft_head_format": native.draft_head_format(),

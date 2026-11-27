@@ -2405,6 +2405,7 @@ void Forward::set_image_prompt(const std::vector<ImageSpanRows>* spans, const in
 }
 
 bool Forward::has_image_prompt() const { return im_->images(); }
+bool Forward::parallel_router_active() const { return im_ && im_->p_router_parallel.handle; }
 const std::vector<int32_t>& Forward::predicted_ids() const { return im_->predicted; }
 
 namespace {

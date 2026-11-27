@@ -178,3 +178,56 @@ experts, the 4,096-token prefill chunk, and memory-fitted context.
 | Original A | `57ca3606e0d381814dc2fb9291d92675798efa2b09aa3f9e3855af66c3e37913` |
 | Original B | `145893bf4555723f90e644622dfeccc59ed19601aa5965347fb54ceecbeb73bb` |
 | Compensated B | `2066c2575e323ac970b9671ab4732f6841b8e79e58e6ee631d44406e32c38267` |
+
+## Final prefill chunk reuse
+
+A 49,152-position continuation attempt produced duplicate OpenCode requests
+and a `queue_timeout`. The resumed valid screen disabled automatic/background
+compaction and session warming in its isolated OpenCode configuration. The
+runner required the complete system/user/assistant/user history for the
+continuation, exactly one request per turn, and 96 greedy tokens with NextN
+depth two. A second release build with the original MLA default served
+these cases with the override unset. Its worker SHA-256 is
+`d942a3f884309c227e8dfddbca4dfd82040fb5a40d4ec034888f2e8a6b8a3808`.
+
+| 26,966-position continuation | Reused, control → tail | Prefill s, control → tail | Decode tok/s, control → tail | OpenCode s, control → tail |
+| --- | ---: | ---: | ---: | ---: |
+| A | 12,288 → 16,012 | 27.622 → 20.577 | 37.51 → 38.92 | 30.821 → 23.683 |
+| B | 12,288 → 16,012 | 27.441 → 20.681 | 38.66 → 38.39 | 30.603 → 23.842 |
+
+Both timed pairs preserved rendered input hashes, generated output hashes,
+and draft counters at all three turns. The finer boundary saved 3,724
+positions and reduced continuation wall time by 22.6% at the paired median.
+Suffix prefill throughput stayed within 1%. Fresh 16K GPU spans ranged from
+26.1 to 26.4 seconds, while first-request prefill wall time ranged from
+42.9 to 94.5 seconds across the four runs. This makes the first 16K wall
+times unsuitable for attributing a change to tail reuse. The fresh 27K
+control moved in both directions across the two pairs.
+
+The first lifecycle check failed in the harness after all three timed
+requests had completed. The replay toggled the captured streaming payload
+to nonstreaming. Preserve the original payload for the isolated fresh
+replay. Keep the candidate opt-in while lifecycle and broader coverage
+are assessed.
+
+| Private timing aggregate | SHA-256 |
+| --- | --- |
+| Control A | `ab8a89c28fd30e4ffbdda058059e555124ffe6537704ff0436d0fba57bec2704` |
+| Tail A, timed responses complete, lifecycle harness failed | `bfba53054aea7b0992c282037fdef3aacd12254911716790c87c52e24ae44990` |
+| Tail B | `774f8d2dd6c65e59cdcf1534d4c622bcea69faaccc8ae99071285655e5700b1c` |
+| Control B | `f45f6e946b5c23c0ddb0e616a4ea4cb6b6cb7123766d76b314139df0ceed7e7d` |
+
+## Runtime readiness and image availability
+
+The first router probes waited for a native stderr message. The worker
+protocol suppresses native stdout and stderr, so both candidates timed out
+before OpenCode generated. The new readiness field reports activation from
+the actual native Metal pipeline handle. The router comparison requires
+that it report the expected state in every arm.
+
+The earlier runs loaded the BF16 projector in the native worker. The host
+silently removed the image capability because its Hy4 schema rejected the
+compensated MLA readiness field. The host now accepts the two named Hy4
+selection fields as optional booleans and keeps older readiness compatible.
+The rerun requires local image qualification and holds the image capability
+active for the text requests.

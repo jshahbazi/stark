@@ -218,6 +218,10 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
 
 extern "C" void stark_hy4_close(StarkHy4* session) noexcept { delete session; }
 
+extern "C" int stark_hy4_parallel_router_active(const StarkHy4* session) noexcept {
+    return session->forward.parallel_router_active();
+}
+
 extern "C" void stark_hy4_clear(StarkHy4* session) noexcept {
     auto& s = *session;
     s.image.reset();

@@ -81,6 +81,7 @@ int stark_hy4_open(const char* model, const char* projector, const char* pack, i
                    StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
                    uint64_t* arena_bytes, int* actual_draft_head_q5) noexcept;
 void stark_hy4_close(StarkHy4* session) noexcept;
+int stark_hy4_parallel_router_active(const StarkHy4* session) noexcept;
 void stark_hy4_clear(StarkHy4* session) noexcept;
 int stark_hy4_retain_prefix(StarkHy4* session, int position) noexcept;
 int stark_hy4_begin(StarkHy4* session, const uint32_t* tokens, int count, int context, int reuse, int drafts,

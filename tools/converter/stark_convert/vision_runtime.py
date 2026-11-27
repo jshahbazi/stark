@@ -99,6 +99,7 @@ _HY4_RUNTIME_KEYS = {
     "streamed_expert_arena_bytes",
     "streamed_expert_arena_requested_bytes",
 }
+_HY4_OPTIONAL_RUNTIME_KEYS = {"prefill_compensated_sparse_mla_requested", "parallel_router_active"}
 _RECORD_KEYS = _ARTIFACT_HASHES | {
     "repo",
     "revision",
@@ -113,9 +114,12 @@ _RECORD_KEYS = _ARTIFACT_HASHES | {
 
 def _valid_runtime_identity(value: object, family_profile: str | None = None) -> bool:
     hy4 = family_profile == HY4_VISION_PROFILE
+    required = _RUNTIME_KEYS | _HY4_RUNTIME_KEYS if hy4 else _RUNTIME_KEYS
+    optional = _HY4_OPTIONAL_RUNTIME_KEYS if hy4 else set()
     return (
         isinstance(value, dict)
-        and set(value) == (_RUNTIME_KEYS | _HY4_RUNTIME_KEYS if hy4 else _RUNTIME_KEYS)
+        and required <= value.keys() <= required | optional
+        and all(type(value[key]) is bool for key in optional & value.keys())
         and value.get("backend") == "metal"
         and isinstance(value.get("device_name"), str)
         and 0 < len(value["device_name"]) <= 128
