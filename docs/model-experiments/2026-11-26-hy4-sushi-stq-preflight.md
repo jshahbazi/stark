@@ -67,4 +67,6 @@ metadata before returning a report.
 Checks run on 2026-11-26:
 
 - The preflight passed against all 89 local weight-shard headers.
-- Both focused tests passed. Ruff formatting and lint passed.
+- The focused streaming and preflight suite passed 176 tests. The full
+  converter suite passed 8,072 tests with 96 skips.
+- Ruff formatting and lint passed.
