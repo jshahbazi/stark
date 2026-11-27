@@ -161,6 +161,17 @@ kernel if the compensated pipeline is unavailable. Set
 explicitly. The compensated kernel has passed synthetic GPU accuracy checks.
 Full-model parity and speed are still to be measured. [Compensated sparse MLA record](model-experiments/2026-11-26-hy4-compensated-sparse-mla.md)
 
+`STARK_HY4_PREFILL_TAIL_PREFIX=1` enables the experimental in-memory reuse
+point in the final prefill chunk. The worker retains the last complete
+IndexPool group before the final prompt token and checks for an identical
+prefix with the same scope, context and draft settings. The reported chunk
+width still describes the ordinary fallback grid.
+
+`STARK_HY4_PARALLEL_ROUTER=1` requests the parallel top-16 selector for
+512-expert Hy4 trunk batches of up to 16 rows on devices that admit its
+Metal pipeline. Larger batches use the original selector.
+[Experiment controls and qualification](model-experiments/2026-11-26-hy4-post-sushi-controls.md)
+
 `STARK_HY4_PREFILL_ROUTED_HALF=1` selects F16 operands with F32 accumulation
 for eligible grouped routed experts. Dense projections and the small
 decode and verification windows keep their existing paths.

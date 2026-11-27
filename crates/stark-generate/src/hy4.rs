@@ -38,7 +38,7 @@ use crate::{
         MtpCapabilities, PreparedImageMetadata, ProgressCallback, Sampling, TextCallback, collect_tokens_controlled,
     },
     hybrid::{ProbabilityMapper, report_prefill_progress, sample_with_mapper},
-    prefix_cache::{self, PrefixEntry},
+    prefix_cache::{self, BoundaryEntry, PrefixEntry},
     text_stop::StopFilter,
 };
 
@@ -102,9 +102,12 @@ pub(crate) struct Hy4Backend {
     mapper: ProbabilityMapper,
     retained: Option<PrefixEntry<(u32, bool)>>,
     pending: Option<PrefixEntry<(u32, bool)>>,
+    tail_retained: Option<BoundaryEntry<(u32, bool)>>,
+    tail_pending: Option<BoundaryEntry<(u32, bool)>>,
     stats: DraftStats,
     lookup_stats: LookupStats,
     lookup_newline: Option<Arc<NewlineTokens>>,
+    tail_prefix_enabled: bool,
     runtime: Value,
     chunk: usize,
 }
@@ -228,6 +231,7 @@ impl Hy4Backend {
             "invalid_hy4_prefill_compensated_sparse_mla",
             tuned,
         )?;
+        let parallel_router = verify_switch("STARK_HY4_PARALLEL_ROUTER", "invalid_hy4_parallel_router", false)?;
         let resident_token_embeddings =
             verify_switch("STARK_HY4_EMBEDDINGS_RESIDENT", "invalid_hy4_embeddings_resident", tuned)?;
         let resident_draft_experts =
@@ -271,6 +275,7 @@ impl Hy4Backend {
                 draft_head_q5,
                 tensor_mla,
                 compensated_sparse_mla,
+                parallel_router,
                 max_drafts,
                 context_limit,
             },
@@ -315,6 +320,8 @@ impl Hy4Backend {
                 .peekable();
         drop(engine);
         let lookup_enabled = verify_switch("STARK_HY4_MTP_LOOKUP", "invalid_hy4_mtp_lookup", false)?;
+        let tail_prefix_enabled =
+            verify_switch("STARK_HY4_PREFILL_TAIL_PREFIX", "invalid_hy4_prefill_tail_prefix", false)?;
         let (load_profile, options, native) = loop {
             let load_profile = profiles.next().ok_or("invalid_hy4_load_profile")?;
             let (mut options, profile_arena) = Self::load_options(load_profile, lookup_enabled)?;
@@ -365,9 +372,12 @@ impl Hy4Backend {
             mapper: ProbabilityMapper::default(),
             retained: None,
             pending: None,
+            tail_retained: None,
+            tail_pending: None,
             stats: DraftStats::default(),
             lookup_stats: LookupStats::default(),
             lookup_newline,
+            tail_prefix_enabled,
             runtime,
             chunk: options.chunk,
         })
@@ -397,6 +407,8 @@ impl Hy4Backend {
         };
         self.retained = None;
         self.pending = None;
+        self.tail_retained = None;
+        self.tail_pending = None;
         self.stats = DraftStats::default();
         self.lookup_stats = LookupStats::default();
         if self.cancelled(options.request_id)? {
@@ -512,19 +524,59 @@ impl Hy4Backend {
         self.lookup_stats = lookup_stats;
         result.reused_input_tokens = reused;
         let boundary = prefix_cache::chunk_boundary(input.len(), self.chunk);
-        if let Some(scope) = options.cache_scope.filter(|_| image.is_none() && boundary > 0) {
-            self.native.retain_prefix(boundary)?;
-            self.pending = Some(PrefixEntry::with_chunk(
-                (options.mtp_drafts, options.mtp_scheduling.lookup),
-                scope,
-                options.context_tokens,
-                input,
-                self.chunk,
-            ));
+        if let Some(scope) = options.cache_scope.filter(|_| image.is_none()) {
+            let mut tail_saved = false;
+            if self.tail_prefix_enabled
+                && let Some(tail_boundary) = self.native.prefill_tail_boundary(input.len(), boundary)
+            {
+                // Keep the last complete IndexPool group before the prompt's
+                // final token. The remaining prompt suffix will be prefetched
+                // on every hit, reproducing the fresh prompt endpoint exactly.
+                if self.native.retain_prefix(tail_boundary).is_ok() {
+                    self.tail_pending = Some(BoundaryEntry::new(
+                        (options.mtp_drafts, options.mtp_scheduling.lookup),
+                        scope,
+                        options.context_tokens,
+                        &input[..tail_boundary],
+                    ));
+                    tail_saved = true;
+                }
+            }
+            if boundary > 0 {
+                if !tail_saved {
+                    self.native.retain_prefix(boundary)?;
+                }
+                self.pending = Some(PrefixEntry::with_chunk(
+                    (options.mtp_drafts, options.mtp_scheduling.lookup),
+                    scope,
+                    options.context_tokens,
+                    input,
+                    self.chunk,
+                ));
+            }
+            if boundary == 0 && !tail_saved {
+                self.native.clear();
+            }
         } else {
             self.native.clear();
         }
         Ok(result)
+    }
+
+    fn tail_prefix_cache_plan(
+        &self,
+        input: &[u32],
+        options: &GenerationOptions,
+    ) -> usize {
+        if !self.tail_prefix_enabled {
+            return 0;
+        }
+        self.tail_retained
+            .as_ref()
+            .filter(|entry| entry.state == (options.mtp_drafts, options.mtp_scheduling.lookup))
+            .map_or(0, |entry| {
+                entry.reusable_with_min_suffix(input, options.context_tokens, options.cache_scope.as_ref(), 1)
+            })
     }
 }
 
@@ -696,21 +748,39 @@ impl GenerationBackend for Hy4Backend {
         input: &[u32],
         options: &GenerationOptions,
     ) -> usize {
-        self.retained
+        let coarse = self
+            .retained
             .as_ref()
             .filter(|entry| entry.state == (options.mtp_drafts, options.mtp_scheduling.lookup))
-            .map_or(0, |entry| entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()))
+            .map_or(0, |entry| entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()));
+        coarse.max(self.tail_prefix_cache_plan(input, options))
+    }
+    fn prefix_cache_reuse_valid(
+        &self,
+        reused: usize,
+        input_tokens: usize,
+    ) -> bool {
+        if reused >= input_tokens {
+            return false;
+        }
+        if reused.is_multiple_of(self.chunk) {
+            return true;
+        }
+        self.tail_prefix_enabled && self.tail_retained.as_ref().is_some_and(|entry| entry.boundary() == reused)
     }
     fn publish_prefix_cache(&mut self) {
         self.retained = self.pending.take();
+        self.tail_retained = self.tail_pending.take();
     }
     fn clear_prefix_cache(&mut self) {
         self.pending = None;
         self.retained = None;
+        self.tail_pending = None;
+        self.tail_retained = None;
         self.native.clear();
     }
     fn prefix_cache_retained(&self) -> bool {
-        self.retained.is_some() || self.pending.is_some()
+        self.retained.is_some() || self.pending.is_some() || self.tail_retained.is_some() || self.tail_pending.is_some()
     }
 }
 

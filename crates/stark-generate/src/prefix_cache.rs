@@ -109,8 +109,10 @@ impl<S> PrefixEntry<S> {
 
 /// A state valid only at the end of its prefix, such as a recurrent-state
 /// snapshot taken at a prefill chunk boundary. A request reuses the whole
-/// prefix or nothing, and must leave at least two prompt tokens to prefill so
-/// its final token takes the same route as on a fresh state.
+/// prefix or nothing, and normally leaves two prompt tokens to prefill so its
+/// final token takes the same route as on a fresh state. A backend may request
+/// a one-token minimum when its native checkpoint is a completed boundary in
+/// the prompt's final prefill tail.
 pub(crate) struct BoundaryEntry<S> {
     pub state: S,
     scope: CacheScope,
@@ -119,6 +121,10 @@ pub(crate) struct BoundaryEntry<S> {
 }
 
 impl<S> BoundaryEntry<S> {
+    pub(crate) fn boundary(&self) -> usize {
+        self.prefix.len()
+    }
+
     pub(crate) fn context_tokens(&self) -> u32 {
         self.context_tokens
     }
@@ -143,7 +149,17 @@ impl<S> BoundaryEntry<S> {
         context_tokens: u32,
         scope: Option<&CacheScope>,
     ) -> usize {
-        let fits = input.len().checked_sub(2).is_some_and(|limit| self.prefix.len() <= limit);
+        self.reusable_with_min_suffix(input, context_tokens, scope, 2)
+    }
+
+    pub(crate) fn reusable_with_min_suffix(
+        &self,
+        input: &[u32],
+        context_tokens: u32,
+        scope: Option<&CacheScope>,
+        min_suffix: usize,
+    ) -> usize {
+        let fits = input.len().checked_sub(min_suffix).is_some_and(|limit| self.prefix.len() <= limit);
         if scope != Some(&self.scope)
             || context_tokens != self.context_tokens
             || !fits
@@ -313,6 +329,28 @@ mod tests {
         assert_eq!(entry.reusable(&prompt(20_000), 40_960, None), 0);
         assert_eq!(entry.reusable(&prompt(20_000), 40_960, Some(&[8; 16])), 0);
         assert_eq!(entry.reusable(&prompt(20_000), 32_768, Some(&SCOPE)), 0);
+    }
+
+    #[test]
+    fn final_prefill_tail_reuse_preserves_coarse_grid_fallback() {
+        let cached_prompt = prompt(15_997);
+        let boundary = chunk_boundary(cached_prompt.len(), 4096);
+        let tail_boundary = 15_996;
+        let tail = BoundaryEntry::new((), SCOPE, 40_960, &cached_prompt[..tail_boundary]);
+        let extended = prompt(26_950);
+        assert_eq!(tail.boundary(), tail_boundary);
+        assert_eq!(tail.reusable_with_min_suffix(&cached_prompt, 40_960, Some(&SCOPE), 1), tail_boundary);
+        assert_eq!(tail.reusable_with_min_suffix(&extended, 40_960, Some(&SCOPE), 1), 15_996);
+        assert_eq!(tail.reusable_with_min_suffix(&cached_prompt[..tail_boundary], 40_960, Some(&SCOPE), 1), 0);
+        assert_eq!(tail.reusable_with_min_suffix(&extended, 40_960, None, 1), 0);
+        assert_eq!(tail.reusable_with_min_suffix(&extended, 32_768, Some(&SCOPE), 1), 0);
+
+        let coarse = PrefixEntry::with_chunk((), SCOPE, 40_960, &cached_prompt, 4096);
+        assert_eq!(coarse.reusable(&cached_prompt, 40_960, Some(&SCOPE)), boundary);
+        let mut tail_diverged = extended;
+        tail_diverged[tail_boundary - 1] = u32::MAX;
+        assert_eq!(tail.reusable_with_min_suffix(&tail_diverged, 40_960, Some(&SCOPE), 1), 0);
+        assert_eq!(coarse.reusable(&tail_diverged, 40_960, Some(&SCOPE)), boundary);
     }
 
     #[test]

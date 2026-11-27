@@ -124,6 +124,7 @@ pub struct Options {
     pub draft_head_q5: bool,
     pub tensor_mla: bool,
     pub compensated_sparse_mla: bool,
+    pub parallel_router: bool,
     pub max_drafts: usize,
     pub context_limit: Option<u32>,
 }
@@ -161,6 +162,7 @@ impl ContextMemory {
 
 struct ContextSelection {
     limit: Option<u32>,
+    pool_size: Option<u32>,
     sizing: Option<ContextSizing>,
 }
 
@@ -171,6 +173,7 @@ unsafe extern "C" fn select_context(
     // The native open call owns the borrowed inventory and calls this synchronously.
     let memory = unsafe { &*memory };
     let selection = unsafe { &mut *selection.cast::<ContextSelection>() };
+    selection.pool_size = Some(memory.pool_size);
     let budget = stark_resource_budget::inference_memory_budget(memory.budget as usize);
     let Some(mut sizing) = ContextSizing::fit(
         memory.checkpoint_context,
@@ -205,6 +208,7 @@ unsafe extern "C" {
         resident_token_embeddings: c_int,
         tensor_mla: c_int,
         compensated_sparse_mla: c_int,
+        parallel_router: c_int,
         max_drafts: c_int,
         routed_fragments: c_int,
         dense_device_views: c_int,
@@ -260,6 +264,7 @@ pub struct Session {
     draft_head_q5: bool,
     arena_bytes: u64,
     sizing: ContextSizing,
+    pool_size: u32,
     max_drafts: usize,
 }
 
@@ -269,6 +274,20 @@ fn path_arg(path: &Path) -> Result<CString, &'static str> {
 
 fn generation_status(status: c_int) -> Result<(), &'static str> {
     (status == 0).then_some(()).ok_or("native_generation_failed")
+}
+
+fn completed_pool_boundary(
+    prompt_tokens: usize,
+    minimum: usize,
+    pool_size: u32,
+) -> Option<usize> {
+    let before_final_token = prompt_tokens.checked_sub(1)?;
+    let pool_size = usize::try_from(pool_size).ok()?;
+    if pool_size == 0 {
+        return None;
+    }
+    let boundary = before_final_token / pool_size * pool_size;
+    (boundary > minimum).then_some(boundary)
 }
 
 impl Session {
@@ -290,6 +309,7 @@ impl Session {
         let mut actual_draft_head_q5 = 0;
         let mut selection = ContextSelection {
             limit: options.context_limit,
+            pool_size: None,
             sizing: None,
         };
         // The path arguments remain alive throughout initialization. The returned
@@ -311,6 +331,7 @@ impl Session {
                 c_int::from(options.resident_token_embeddings),
                 c_int::from(options.tensor_mla),
                 c_int::from(options.compensated_sparse_mla),
+                c_int::from(options.parallel_router),
                 options.max_drafts as c_int,
                 c_int::from(options.routed_fragments),
                 c_int::from(options.dense_device_views),
@@ -347,6 +368,7 @@ impl Session {
             draft_head_q5: actual_draft_head_q5 != 0,
             arena_bytes,
             sizing: selection.sizing.expect("successful Hy4 open selected a context"),
+            pool_size: selection.pool_size.expect("successful Hy4 open selected a pool size"),
             max_drafts: options.max_drafts,
         })
     }
@@ -373,6 +395,16 @@ impl Session {
 
     pub fn context_sizing(&self) -> ContextSizing {
         self.sizing
+    }
+
+    /// Largest completed IndexPool boundary before the prompt's final token.
+    /// Keeps one token available to produce fresh logits on the next request.
+    pub fn prefill_tail_boundary(
+        &self,
+        prompt_tokens: usize,
+        minimum: usize,
+    ) -> Option<usize> {
+        completed_pool_boundary(prompt_tokens, minimum, self.pool_size)
     }
 
     pub fn max_drafts(&self) -> usize {
@@ -470,6 +502,22 @@ impl Session {
 
     pub fn clear(&mut self) {
         unsafe { stark_hy4_clear(self.inner.as_ptr()) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use stark_engine_macros::stark_test;
+
+    use super::completed_pool_boundary;
+
+    #[stark_test]
+    fn completed_pool_boundary_rounds_down_and_leaves_a_prompt_token() {
+        assert_eq!(completed_pool_boundary(16_701, 16_384, 128), Some(16_640));
+        assert_eq!(completed_pool_boundary(16_384, 16_000, 128), Some(16_256));
+        assert_eq!(completed_pool_boundary(4_097, 4_096, 128), None);
+        assert_eq!(completed_pool_boundary(1, 0, 128), None);
+        assert_eq!(completed_pool_boundary(16_701, 16_384, 0), None);
     }
 }
 

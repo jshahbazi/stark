@@ -740,6 +740,15 @@ pub(crate) trait GenerationBackend {
     ) -> usize {
         0
     }
+    /// Whether the reported reuse amount follows this backend's reuse policy.
+    /// Backends with opt-in sub-chunk checkpoints may extend the default grid.
+    fn prefix_cache_reuse_valid(
+        &self,
+        reused: usize,
+        input_tokens: usize,
+    ) -> bool {
+        reused < input_tokens && reused.is_multiple_of(self.prefix_cache_chunk_tokens())
+    }
     /// Make the state retained by the last successful generation reusable.
     /// Called only after its terminal reply has been written and flushed.
     fn publish_prefix_cache(&mut self) {}
@@ -1026,7 +1035,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             None => self.backend.prefix_cache_plan(input, options),
             Some(_) => 0,
         };
-        if reused >= input_tokens || !reused.is_multiple_of(self.backend.prefix_cache_chunk_tokens()) {
+        if !self.backend.prefix_cache_reuse_valid(reused, input_tokens) {
             return Err("invalid_generation_output");
         }
         let report_reuse = self.prefix_cache_enabled();

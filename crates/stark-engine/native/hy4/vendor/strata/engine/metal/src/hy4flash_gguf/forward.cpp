@@ -281,7 +281,7 @@ struct Forward::Impl {
     // pipelines
     mtl::Pipeline p_rope_mrope, p_kv_finish_mrope;
     mtl::Pipeline p_mapped_gpu_plan;
-    mtl::Pipeline p_rms_w, p_rms_nw, p_rope, p_glu, p_hc_mix, p_hc_mix_norm, p_kv_finish, p_hc_head, p_hc_post, p_router, p_idx_w, p_idx_kpool,
+    mtl::Pipeline p_rms_w, p_rms_nw, p_rope, p_glu, p_hc_mix, p_hc_mix_norm, p_kv_finish, p_hc_head, p_hc_post, p_router, p_router_parallel, p_idx_w, p_idx_kpool,
         p_idx_score, p_idx_score_pf, p_idx_topk, p_argmax, p_copy, p_store_half, p_add_row, p_add,
         p_gate_mul, p_eng_rows, p_eng_gate, p_eng_delta;
     AttnPipes attn_range, attn_sel;   // attn.h: the score row, the softmax, PV
@@ -748,6 +748,19 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     p_hc_head = cx->pipeline(lib, "hy4_flash_hc_mix", mtl::Constants().b(41, false));
     p_hc_post = cx->pipeline(lib, "hy4_flash_hc_post");
     p_router = cx->pipeline(lib, "hy4_flash_router");
+    if (pf.parallel_router && n_experts == 512 && topk == 16) {
+        try {
+            auto candidate = cx->pipeline(lib, "hy4_flash_router_parallel_512x16");
+            if (candidate.max_threads >= 512) p_router_parallel = std::move(candidate);
+        } catch (const std::runtime_error&) {
+            // The optional path must not prevent loading on a device/compiler
+            // that cannot build or launch a 512-thread group.
+        }
+    }
+    if (pf.parallel_router) {
+        std::fprintf(stderr, "  MoE router top-16: %s\n",
+                     p_router_parallel.handle ? "parallel SIMD path enabled" : "incumbent fallback (shape or launch limit)");
+    }
     if (pf.mapped_gpu_plan) p_mapped_gpu_plan = cx->pipeline(lib, "hy4_flash_mapped_moe_plan");
     p_idx_w = cx->pipeline(lib, "hy4_flash_indexer_weights");
     p_idx_kpool = cx->pipeline(lib, "hy4_flash_indexer_kpool",
@@ -1537,13 +1550,15 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         gv(gi).append(ds, m->dense, gi->offset, fnorm, (uint32_t) n_embd, mlogits, (uint32_t) n_experts, 0, uT);
         {
             mtl::Dispatch d;
-            d.p = &p_router;
+            // Small row batches benefited in the isolated router screen.
+            const bool parallel_router = p_router_parallel.handle && uT <= 16;
+            d.p = parallel_router ? &p_router_parallel : &p_router;
             RouterArgs a{(uint32_t) n_experts, (uint32_t) topk,   (uint32_t) n_experts, (uint32_t) topk,
                          (uint32_t) topk,      uT,                m->geo.routed_scale,  6.103515625e-5f};
             d.args = {mtl::Arg::B(mlogits), mtl::Arg::B(m->dense, b.t[W_PROBS_B]->offset), mtl::Arg::B(ids),
                       mtl::Arg::B(rw), mtl::Arg::V(a)};
             d.grid[0] = uT;
-            d.tg[0] = 256;
+            d.tg[0] = parallel_router ? 512 : 256;
             mtl::require_fit(d, "hy4_flash_router");
             ds.push_back(d);
         }

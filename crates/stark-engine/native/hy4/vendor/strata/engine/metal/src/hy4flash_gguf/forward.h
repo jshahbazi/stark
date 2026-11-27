@@ -81,6 +81,7 @@ struct Prefill {
     bool dense_ffn_device_views = false; ///< Also use direct F16 tensor views for eligible trunk FFN projections
     bool tensor_mla = false;        ///< Use multi-query tensor attention for contiguous prefill ranges
     bool compensated_sparse_mla = false; ///< Split query and probability operands on selected-cell prefill
+    bool parallel_router = false; ///< Parallel SIMD top-16 for the 512-expert Hy4 trunk router
     bool grouped_k_quant = false;   ///< Q3_K/Q4_K gate/up with Q4_K down, on Metal 4
     /// A WRONG DECISION, ON PURPOSE, IN THE PREFILL PATH ONLY (HY4_FLASH_PREFILL_PROBE), so that
     /// `--prefill-consistency` has a case it must FAIL on.  A bitwise check that has never been seen to fail is
