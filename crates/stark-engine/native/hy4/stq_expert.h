@@ -54,6 +54,8 @@ struct DenseBank {
     bool ready() const { return trellis.ready() && suh.ready() && svh.ready(); }
 };
 
+enum class DenseBoundaries { full, raw_output, prepared_input };
+
 struct ExpertRoutes {
     std::vector<std::array<uint32_t, 2>> rows;
     std::vector<std::array<uint32_t, 4>> jobs;
@@ -68,11 +70,14 @@ class ExpertProgram {
 public:
     // Round incoming activations for both formats and final dense outputs to BF16.
     bool open(mtl::Context& metal, bool round_bf16 = false, bool pair1_decode = false,
-              bool fused_finish_reduce = false, bool split_spec1 = false);
+              bool fused_finish_reduce = false, bool split_spec1 = false, bool wide_attention = false);
     bool pair1_decode_enabled() const { return decode_.handle != nullptr; }
     static constexpr uint32_t kFusedFinishMinTokens = 1024;
     bool fuses_finish_reduce(uint32_t tokens) const {
         return finish_reduce_.handle && tokens >= kFusedFinishMinTokens;
+    }
+    bool fuses_attention_gate(uint32_t rows) const {
+        return attention_gate_prepare_.handle && rows >= 1024 && rows <= 4096;
     }
 
     // Appends one PAIR1 projection to the caller's encoder. Each sorted row has
@@ -94,14 +99,25 @@ public:
 
     // The row map contains (0, row) for each source row. The head may submit a
     // short window without materializing logits for the rest of the prompt.
-    // Narrow split-K uses raw as F32 partial planes when it has room.
+    // Raw output leaves the F16 product in raw. Prepared input reads the
+    // F16 input directly from prepared. Full narrow split-K may use raw as
+    // F32 partial planes when it has room.
     bool append_dense(std::vector<mtl::Dispatch>& commands, const DenseBank& bank, const mtl::Buffer& input,
                       const mtl::Buffer& row_map, uint32_t rows, const mtl::Buffer& prepared,
-                      const mtl::Buffer& raw, const mtl::Buffer& output) const;
+                      const mtl::Buffer& raw, const mtl::Buffer& output,
+                      DenseBoundaries boundaries = DenseBoundaries::full, bool prefill_attention = false) const;
+
+    // Finishes the gate, multiplies by the matching attention values and
+    // prepares the output projection's F16 input. Rows are in source order.
+    bool append_attention_gate_prepare(std::vector<mtl::Dispatch>& commands,
+                                       const DenseBank& gate_bank, const DenseBank& output_bank, uint32_t rows,
+                                       const mtl::Buffer& raw, const mtl::Buffer& value,
+                                       const mtl::Buffer& prepared) const;
 
 private:
     mtl::Pipeline prepare_, project_, decode_, finish_, prepare_down_, combine_, finish_reduce_;
-    mtl::Pipeline dense_k4_, dense_k6_, dense_finish_, dense_split_, dense_split_finish_;
+    mtl::Pipeline dense_k4_, dense_k6_, dense_finish_, dense_split_, dense_split_finish_, dense_prefill_;
+    mtl::Pipeline attention_gate_prepare_;
 };
 
 }  // namespace stark::hy4::stq

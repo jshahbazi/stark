@@ -51,14 +51,14 @@ static inline vec<half, 8> stark_hy4_spec1_fragment(device const uint* words, ui
     return vec<half, 8>(a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y);
 }
 
-template <typename Fragment>
+template <uint Offset = 0, typename Fragment>
 static inline void stark_hy4_spec1_load(thread Fragment& target, device const half* a, device const half* b, uint k) {
     const half4 first = *(device const half4*)(a + k);
     const half4 second = *(device const half4*)(b + k);
     #pragma clang loop unroll(full)
     for (uint i = 0; i < 4; ++i) {
-        target[i] = first[i];
-        target[i + 4] = second[i];
+        target[Offset + i] = first[i];
+        target[Offset + i + 4] = second[i];
     }
 }
 
@@ -152,6 +152,99 @@ template [[host_name("stark_hy4_stq_spec1_k4_dense")]] kernel decltype(stark_hy4
     stark_hy4_stq_spec1_dense<4>;
 template [[host_name("stark_hy4_stq_spec1_k6_dense")]] kernel decltype(stark_hy4_stq_spec1_dense<6>)
     stark_hy4_stq_spec1_dense<6>;
+
+// For a complete M16×N32 tile the four consecutive lanes of each destination
+// fragment vector address adjacent columns in one row.
+template <typename Fragment>
+static inline void stark_hy4_spec1_store_full_tile(const thread Fragment& source,
+    device half* output, uint width) {
+    const auto first = source.get_multidimensional_index(ushort(0));
+    device half* row = output + ulong(first[1]) * width + first[0];
+    #pragma clang loop unroll(full)
+    for (uint run = 0; run < 4; ++run) {
+        const uint i = run * 4u;
+        device half* destination = row + ulong(run & 1u) * 8u * width + (run & 2u) * 8u;
+        *(device half4*)destination = half4(half(source[i]), half(source[i + 1u]),
+                                           half(source[i + 2u]), half(source[i + 3u]));
+    }
+}
+
+// Complete 32-row prefill tiles use two 16-row accumulators over the same
+// packed fragment. K32 consumes two consecutive K16 slabs in the F32
+// accumulator. K must be a multiple of 32. A partial final row tile uses
+// the regular K16 path. Both paths store F16 before H128/SVH and share the
+// buffers and grid of the regular dense path.
+kernel void stark_hy4_stq_spec1_k6_prefill(
+    device const uint* weights [[buffer(0)]], device const half* input [[buffer(1)]],
+    device half* output [[buffer(2)]], constant uint4& shape [[buffer(3)]],
+    uint3 group [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint TileWords = 48;
+    constexpr auto descriptor = matmul2d_descriptor(16, 32, 32, false, true, true,
+        matmul2d_descriptor::mode::multiply_accumulate);
+    const uint channel = group.x * 128u + sg * 32u;
+    const uint first_row = group.y * 32u;
+    if (first_row >= shape.z || channel >= shape.y) return;
+    const uint live_rows = min(32u, shape.z - first_row);
+    if (live_rows < 32u) {
+        if (live_rows > 16u) {
+            stark_hy4_spec1_project<6, true>(weights, input, output, shape.xy,
+                first_row, live_rows, channel, lane, 0u, shape.x);
+        } else {
+            stark_hy4_spec1_project<6, false>(weights, input, output, shape.xy,
+                first_row, live_rows, channel, lane, 0u, shape.x);
+        }
+        return;
+    }
+
+    matmul2d<descriptor, execution_simdgroup> product;
+    auto left = product.get_left_input_cooperative_tensor<half, half, float>();
+    auto right = product.get_right_input_cooperative_tensor<half, half, float>();
+    using Left = remove_addrspace_t<decltype(left)>;
+    using Right = remove_addrspace_t<decltype(right)>;
+    auto top = product.get_destination_cooperative_tensor<Left, Right, float>();
+    auto bottom = product.get_destination_cooperative_tensor<Left, Right, float>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < top.get_capacity(); ++i) {
+        top[i] = 0.0f;
+        bottom[i] = 0.0f;
+    }
+
+    const uint row = ((lane >> 2u) & 4u) | ((lane >> 1u) & 3u);
+    const uint col = (((lane >> 2u) & 2u) | (lane & 1u)) * 4u;
+    device const half* top0 = input + ulong(first_row + row) * shape.x + col;
+    const ulong stripe = ulong(shape.x) * 8u;
+    device const half* top1 = top0 + stripe;
+    device const half* bottom0 = top0 + 2u * stripe;
+    device const half* bottom1 = top0 + 3u * stripe;
+    const ulong stride = ulong(shape.y / 16u) * TileWords;
+    device const uint* tiles = weights + (channel / 16u) * TileWords;
+
+    #pragma clang loop unroll(disable)
+    for (uint k = 0; k < shape.x; k += 32u, tiles += 2u * stride) {
+        const auto low0 = stark_hy4_spec1_fragment<6>(tiles, lane);
+        const auto low1 = stark_hy4_spec1_fragment<6>(tiles + TileWords, lane);
+        const auto high0 = stark_hy4_spec1_fragment<6>(tiles + stride, lane);
+        const auto high1 = stark_hy4_spec1_fragment<6>(tiles + stride + TileWords, lane);
+        #pragma clang loop unroll(full)
+        for (uint i = 0; i < 8; ++i) {
+            right[i] = low0[i];
+            right[i + 8u] = low1[i];
+            right[i + 16u] = high0[i];
+            right[i + 24u] = high1[i];
+        }
+        stark_hy4_spec1_load(left, top0, top1, k);
+        stark_hy4_spec1_load<8>(left, top0, top1, k + 16u);
+        product.run(left, right, top);
+        stark_hy4_spec1_load(left, bottom0, bottom1, k);
+        stark_hy4_spec1_load<8>(left, bottom0, bottom1, k + 16u);
+        product.run(left, right, bottom);
+    }
+
+    device half* out = output + ulong(first_row) * shape.y + channel;
+    stark_hy4_spec1_store_full_tile(top, out, shape.y);
+    stark_hy4_spec1_store_full_tile(bottom, out + ulong(16u) * shape.y, shape.y);
+}
 
 // The narrow NAX projection partitions its contiguous K tiles across threadgroups,
 // as in Sushi v1.8.1 src/exl3/project_rows.zig. Each split writes an F32 plane

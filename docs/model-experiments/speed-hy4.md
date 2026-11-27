@@ -4,6 +4,8 @@ Stark's best measured prefill and decode use different load profiles. A streamed
 
 The Sushi STQ 4bpw pack has separate 16K and 27K OpenCode measurements, a five-draft verifier and different packed projections. [Measured STQ attempts and Sushi comparison](2026-11-27-hy4-stq-open-code-performance.md)
 
+The STQ dense attention follow-up saved 2.49 s of fresh 27K OpenCode prefill in a same-binary pair using the direct packed K32 product and fused gate preparation. The absorbed-head trials stayed out of the worker. [Dense attention measurements](2026-11-27-hy4-stq-dense-attention-prefill.md)
+
 ## Artifact and reference
 
 - **Artifact.** `AngelSlim/Hy4-flash-GGUF` at `c50d4dd30be42f2b91138e5731de0e2f32ad56b2`. The two Q3_K shards and original BF16 projector total 156,415,403,072 bytes. Keep the original packed expert tensors, FP8 Engram table and NextN block. The target vocabulary projection remains BF16 across draft-head experiments. [Artifact inventory and digests](2026-11-25-hy4-native-q3-k.md#artifact-and-runtime-identities)

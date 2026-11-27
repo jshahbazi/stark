@@ -62,6 +62,25 @@ kernel void stark_hy4_stq_pair1_finish(
     output[offset] = stark_hy4_stq_projection_boundary(value * float(scales[ulong(expert) * width + channel]));
 }
 
+// The attention gate's finish, sigmoid product and output projection prepare
+// share the same 128-channel block. Keep the two Hadamard workspaces and all
+// precision boundaries while avoiding the intermediate F32 planes.
+kernel void stark_hy4_stq_attention_gate_prepare(
+    device const half* raw_gate [[buffer(0)]], device const half* gate_scale [[buffer(1)]],
+    device const float* value [[buffer(2)]], device const half* input_scale [[buffer(3)]],
+    device half* prepared [[buffer(4)]], constant uint& width [[buffer(5)]],
+    uint2 group [[threadgroup_position_in_grid]], uint channel_in_group [[thread_index_in_threadgroup]]) {
+    threadgroup float gate_work[128];
+    threadgroup float output_work[128];
+    const uint channel = group.x * 128u + channel_in_group;
+    const ulong index = ulong(group.y) * width + channel;
+    const float gate = stark_hy4_stq_projection_boundary(
+        stark_hy4_stq_hadamard128(float(raw_gate[index]), channel_in_group, gate_work) * float(gate_scale[channel]));
+    const float gated = value[index] * (1.0f / (1.0f + precise::exp(-gate)));
+    const float source = stark_hy4_stq_projection_boundary(gated) * float(input_scale[channel]);
+    prepared[index] = half(stark_hy4_stq_hadamard128(source, channel_in_group, output_work));
+}
+
 static inline half stark_hy4_stq_spec1_split_round(device const float* partials, ulong offset,
                                                     ulong plane_size, uint splits) {
     float sum = partials[offset];

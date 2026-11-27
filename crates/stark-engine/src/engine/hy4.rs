@@ -117,6 +117,8 @@ pub struct DraftStats {
     pub verify_expert_seconds: f64,
     pub verify_other_seconds: f64,
     pub verify_profiled_graphs: u64,
+    /// Q_A, Q_B, K_B, KV_A, IndexPool projections, V_B, attention gate, output.
+    pub prefill_stq_projection_seconds: [f64; 8],
 }
 
 #[derive(Clone, Copy)]

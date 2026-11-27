@@ -120,6 +120,7 @@ fn run_trunk(
                 split_spec1: env::var_os("STARK_HY4_STQ_SPLIT_SPEC1").is_some(),
                 verify_register_mla: env::var_os("STARK_HY4_STQ_VERIFY_MLA").is_some(),
                 cache_engram_pages: env::var_os("STARK_HY4_STQ_ENGRAM_PAGE_CACHE").is_some(),
+                wide_attention: env::var_os("STARK_HY4_STQ_WIDE_ATTENTION").is_some(),
             },
         )
     }?;

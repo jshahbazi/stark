@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <numeric>
 #include <stdexcept>
 
 namespace strata::hy4_flash {
@@ -478,14 +479,16 @@ struct Forward::Impl {
     }
     void append_dense_projection(std::vector<mtl::Dispatch>& ds, const gguf::Tensor* w,
                                  const mtl::Buffer& input, uint32_t n_in, const mtl::Buffer& output,
-                                 uint32_t n_out, uint32_t n_tok, bool attention) {
+                                 uint32_t n_out, uint32_t n_tok, bool attention,
+                                 stark::hy4::stq::DenseBoundaries boundaries = stark::hy4::stq::DenseBoundaries::full) {
         if (m->stq) {
             auto it = m->stq->dense.find(w->name);
             if (it != m->stq->dense.end()) {
                 const auto& bank = *it->second;
                 if (bank.inputs != n_in || bank.outputs != n_out ||
                     !m->stq->program.append_dense(ds, bank, input, stq_identity, n_tok,
-                                                  stq_dense_input, stq_dense_output, output))
+                                                  stq_dense_input, stq_dense_output, output, boundaries,
+                                                  attention && pr_in_chunk))
                     throw std::runtime_error("invalid STQ dense dispatch for " + w->name);
                 return;
             }
@@ -1234,6 +1237,10 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         }
         profile->stages.push_back({ds.size(), total});
     };
+    enum Projection { QueryA, QueryB, KeyB, KeyValueA, IndexPool, ValueB, Gate, Output };
+    const auto projection = [&](Projection kind) {
+        stage(pr_in_chunk && m->stq ? tm.pf_stq_projection_ms[kind] : tm.pf_attention_dense_ms);
+    };
 
     // ---- Engram, BEFORE the attention pre-mix
     if (b.engram_table >= 0) {
@@ -1298,7 +1305,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     hc_pre(ds, b, *resid, 0, T, b.t[W_ATTN_NORM], &anorm, eps);   // + attn_norm(cur) -> anorm
 
     // ---- MLA
-    stage(tm.pf_attention_dense_ms);
+    projection(QueryA);
     const gguf::Tensor* qa = b.t[W_Q_A];
     if (m->stq)
         append_dense_projection(ds, qa, anorm, uint32_t(n_embd), q_resid, uint32_t(m->geo.q_lora_rank), uT, true);
@@ -1308,7 +1315,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     stage(tm.pf_attention_misc_ms);
     rms(ds, q_resid, 0, (uint32_t) m->geo.q_lora_rank, b.t[W_Q_A_NORM], q_resid, 0,
         (uint32_t) m->geo.q_lora_rank, (uint32_t) m->geo.q_lora_rank, T, eps);
-    stage(tm.pf_attention_dense_ms);
+    projection(QueryB);
     const gguf::Tensor* qbw = b.t[W_Q_B];
     if (m->stq)
         append_dense_projection(ds, qbw, q_resid, uint32_t(m->geo.q_lora_rank), qb, H * uint32_t(qk), uT, true);
@@ -1318,7 +1325,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     rope(ds, qb, H, (uint32_t) qk, (uint32_t) (qk - rope_dim), H * (uint32_t) qk, b.tscale, T);
     // q_abs = wk_b[h] . q_nope[h], every head in one dispatch (grid.y = head, bitwise the per-head dispatches it
     // replaces - gemv.metal's note on function constants 10-12); then the rotated tail is copied in beside it
-    stage(tm.pf_attention_dense_ms);
+    projection(KeyB);
     const gguf::Tensor* kb = b.t[W_K_B];
     const uint32_t nope = (uint32_t) (qk - rope_dim);
     const size_t kb_head = (size_t) kv_lora * ref::row_bytes(kb->type, (int) nope);
@@ -1339,7 +1346,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         }
     }
     // the shared key: rope on its tail, the latent normed, both into the f16 cache
-    stage(tm.pf_attention_dense_ms);
+    projection(KeyValueA);
     const gguf::Tensor* kva = b.t[W_KV_A];
     gv(kva, true).append(ds, m->dense, kva->offset, anorm, (uint32_t) n_embd, kvp, (uint32_t) kv_w, 0, uT);
     // rope on the tail, rms on the latent, both stores: one dispatch (hy4_flash_attn.metal hy4_flash_kv_finish, bitwise the
@@ -1378,12 +1385,12 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     // ---- the indexer, on the sparse blocks
     uint32_t n_pool = 0;
     if (b.has_indexer) {
-        stage(tm.pf_attention_dense_ms);
+        projection(IndexPool);
         const gguf::Tensor* ikw = b.t[W_IK];
         gv(ikw, true).append(ds, m->dense, ikw->offset, anorm, (uint32_t) n_embd, ik, (uint32_t) idx_dim, 0, uT);
         stage(tm.pf_attention_index_ms);
         rms(ds, ik, 0, (uint32_t) idx_dim, b.t[W_IK_NORM], ik, 0, (uint32_t) idx_dim, (uint32_t) idx_dim, T, eps);
-        stage(tm.pf_attention_dense_ms);
+        projection(IndexPool);
         const gguf::Tensor* cv = b.t[W_ICV];
         const gguf::Tensor* cg = b.t[W_ICG];
         gv(cv, true).append(ds, m->dense, cv->offset, ik, (uint32_t) idx_dim, iv, (uint32_t) idx_dim, 0, uT);
@@ -1432,14 +1439,14 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         }
     }
     if (use_selection) {
-        stage(tm.pf_attention_dense_ms);
+        projection(IndexPool);
         const gguf::Tensor* iqb = b.t[W_IQ_B];
         gv(iqb, true).append(ds, m->dense, iqb->offset, q_resid, (uint32_t) m->geo.q_lora_rank, iq,
                              (uint32_t) (idx_heads * idx_dim), 0, uT);
         stage(tm.pf_attention_index_ms);
         rope(ds, iq, (uint32_t) idx_heads, (uint32_t) idx_dim, (uint32_t) (idx_dim - rope_dim),
              (uint32_t) (idx_heads * idx_dim), b.tscale, T);
-        stage(tm.pf_attention_dense_ms);
+        projection(IndexPool);
         const gguf::Tensor* ip = b.t[W_IPROJ];
         gv(ip).append(ds, m->dense, ip->offset, anorm, (uint32_t) n_embd, iwraw, (uint32_t) idx_heads, 0, uT);
         stage(tm.pf_attention_index_ms);
@@ -1630,23 +1637,32 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     }
 
     // kqv = wv_b[h] . o[h]
-    stage(tm.pf_attention_dense_ms);
+    projection(ValueB);
     const gguf::Tensor* vb = b.t[W_V_B];
     const size_t vb_head = (size_t) v_mla * ref::row_bytes(vb->type, kv_lora);
     gvh(vb->type, (uint32_t) kv_lora, (uint32_t) v_mla,
         GemvHeads{(uint32_t) vb_head, (uint32_t) kv_lora, (uint32_t) v_mla})
         .append_heads(ds, m->dense, vb->offset, attn_o, H * (uint32_t) kv_lora, kqv, H * (uint32_t) v_mla, 0, uT, H);
+    projection(Gate);
     const gguf::Tensor* ag = b.t[W_AGATE];
-    append_dense_projection(ds, ag, anorm, (uint32_t) n_embd, gproj, H * (uint32_t) v_mla, uT, true);
+    const gguf::Tensor* ao = b.t[W_AOUT];
+    const bool fuse_gate = m->stq && pr_in_chunk && !want_dump && m->stq->program.fuses_attention_gate(uT);
+    using stark::hy4::stq::DenseBoundaries;
+    append_dense_projection(ds, ag, anorm, (uint32_t) n_embd, gproj, H * (uint32_t) v_mla, uT, true,
+                            fuse_gate ? DenseBoundaries::raw_output : DenseBoundaries::full);
     stage(tm.pf_attention_misc_ms);
-    {
+    if (fuse_gate) {
+        if (!m->stq->program.append_attention_gate_prepare(ds, *m->stq->dense.at(ag->name),
+                *m->stq->dense.at(ao->name), uT, stq_dense_output, kqv, stq_dense_input))
+            throw std::runtime_error("invalid STQ attention gate preparation");
+    } else {
         ElemArgs a{H * (uint32_t) v_mla, H * (uint32_t) v_mla, H * (uint32_t) v_mla, H * (uint32_t) v_mla};
         elem(ds, p_gate_mul, {mtl::Arg::B(kqv), mtl::Arg::B(gproj), mtl::Arg::B(gated), mtl::Arg::V(a)}, a.n, T,
              "hy4_flash_gate_mul");
     }
-    stage(tm.pf_attention_dense_ms);
-    const gguf::Tensor* ao = b.t[W_AOUT];
-    append_dense_projection(ds, ao, gated, H * (uint32_t) v_mla, attn_y, (uint32_t) n_embd, uT, true);
+    projection(Output);
+    append_dense_projection(ds, ao, gated, H * (uint32_t) v_mla, attn_y, (uint32_t) n_embd, uT, true,
+                            fuse_gate ? DenseBoundaries::prepared_input : DenseBoundaries::full);
     stage(tm.pf_attention_misc_ms);
     rms(ds, attn_y, 0, (uint32_t) n_embd, b.t[W_POST_ATTN], attn_out, 0, (uint32_t) n_embd, (uint32_t) n_embd, T,
         eps);
@@ -2944,6 +2960,10 @@ std::string Forward::prefill(const int32_t* all_tokens, int p0, int T, const Pre
         const double g = im.cx->run_graph_seg(ds, cuts, im.cut_wait, cut_tramp, &im, stage_profile) * 1e3;
         if (profile.sampled) {
             ++im.tm.pf_profiled_blocks;
+            if (im.m->stq) {
+                const auto& parts = im.tm.pf_stq_projection_ms;
+                im.tm.pf_attention_dense_ms = std::accumulate(parts.begin(), parts.end(), 0.0);
+            }
             im.tm.pf_attention_ms = im.tm.pf_attention_dense_ms + im.tm.pf_attention_index_ms +
                                     im.tm.pf_attention_mla_ms + im.tm.pf_attention_misc_ms;
         }

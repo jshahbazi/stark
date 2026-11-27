@@ -1,6 +1,6 @@
 # Performance playbook
 
-Use this guide when adding a model or improving its performance. The family speed histories answer “what happened on this artifact?” This page answers “what should I measure or try next?” Each comparison belongs to the build, workload and host in its dated report. Updated 2026-11-26.
+Use this guide when adding a model or improving its performance. The family speed histories answer “what happened on this artifact?” This page answers “what should I measure or try next?” Each comparison belongs to the build, workload and host in its dated report. Updated 2026-11-27.
 
 ## Choose a performance experiment
 
@@ -845,6 +845,8 @@ Reuse the GGUF mapped-residency admission for the pinned STQ pack and measure st
 
 Compare register scheduling and key loads before porting an attention precision policy. On the pinned STQ pack, multi-query contiguous MLA and a register-resident sparse path lowered sampled 16K and 27K MLA time from 9.50 and 18.16 s to 2.80 and 5.77 s. F16 cache layout and the prefix grid carry through both paths. Dense projections became the largest prefill stage. The key-partitioned verifier spent only 70–81 ms in MLA across a 96-token reply, so further decode work belongs in dense and routed products. Verify the full output at every draft width when a component uses split-K or a different selector kernel. [STQ OpenCode timing and attribution](model-experiments/2026-11-27-hy4-stq-open-code-performance.md)
 
+Split dense attention attribution before redesigning its projections. At 27K on the pinned STQ pack the gate and output account for 8.17 s of the 13.88 s sampled dense stage. A direct packed K32 product reduced component time 27–33% across the six gate, output and Q_B shapes, with exact F16 product bits. The partial tile uses the incumbent K16 product. Fusion preserves both Hadamard boundaries and skips two F32 intermediate planes. Together they reduced fresh 27K OpenCode prefill from 36.67 to 34.18 s in a same-binary pair with matching outputs and draft counts. Keep the existing F32 head products. Compensation changed real OpenCode output and reduced useful decode. The fastest bit-exact head retile projected about 0.35 s of prompt savings and stayed out of the worker. [Dense attention prefill record](model-experiments/2026-11-27-hy4-stq-dense-attention-prefill.md)
+
 For AngelSlim Hy4-flash Q3_K, inspect the dispatch path on the actual mixed expert banks before interpreting shared-format timings. The pinned Strata grouped prefill requires IQ2_XXS gate/up and leaves the Q3_K gate/up route on per-entry products. The patched llama.cpp Metal reference groups the packed Q3_K/Q4_K products from 32 tokens and uses a 256-row microbatch in the matched diagnostic. Its projection precision and reduction order need their own parity gate. Measure the Q3_K path directly and split decode GPU work from expert and Engram I/O at the host cuts. [Hy4 native diagnostic and prior reference runs](model-experiments/2026-11-25-hy4-native-q3-k.md)
 
 On the native Hy4 Q3_K release worker, grouped F32 and a single 4,096-row chunk reduced observed streamed K2 prefill from 19.497 to 15.665 s and expert reads from 232 to 87 GB. These are worker diagnostics with ambient compiler activity. Keep 1,024 rows for the default prefix grid. Read-only mapped banks and GPU routing improved observed decode with a cold page-fault cost. Consolidating the Engram submissions and switching the grouped operands to F16 produced inconsistent speed and stayed out of the worker. [Measured Hy4 attempts](model-experiments/2026-11-25-hy4-native-q3-k.md)
@@ -1055,6 +1057,7 @@ The [experiment selection table](#choose-a-performance-experiment) links the GLM
 | 2026-11-25 | [Hy4-flash NextN cache construction and verify attention](model-experiments/2026-11-25-hy4-decode-cache-construction.md) | Resident packed token embeddings, rejected cache MMA, history batching and fused verifier attention |
 | 2026-11-25 | [Hy4-flash multi-query MLA prefill](model-experiments/2026-11-25-hy4-multi-query-prefill.md) | Opt-in tensor kernel for contiguous sliding and causal keys, stage attribution and 4K exact-output bracket |
 | 2026-11-25 | [Hy4-flash grouped expert fragments](model-experiments/2026-11-25-hy4-grouped-fragments.md) | Gathered F16 tensor inputs, fused packed gate and up, and a controlled exact-output 4K comparison |
+| 2026-11-27 | [Hy4 STQ dense attention prefill](model-experiments/2026-11-27-hy4-stq-dense-attention-prefill.md) | Per-projection attribution, 2.49 s same-binary 27K prefill saving, absorbed-head screens and OpenCode lifecycle |
 
 The 2026-11-17 branch records are not in this tree. They are on `codex/flashnext-speed-review-20261117` at commit `2e3058d1`, and the links above point there.
 

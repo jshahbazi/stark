@@ -76,6 +76,7 @@ struct StarkHy4Stats {
     double verify_expert_seconds;
     double verify_other_seconds;
     uint64_t verify_profiled_graphs;
+    double prefill_stq_projection_seconds[8];
 };
 
 extern "C" {

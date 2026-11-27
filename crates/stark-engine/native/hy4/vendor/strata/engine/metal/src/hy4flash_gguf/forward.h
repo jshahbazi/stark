@@ -40,6 +40,7 @@
 #include "mtl_rt.h"
 #include "prefill_snap.h"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -131,6 +132,8 @@ struct Timing {
     // Trunk encoder spans sampled only with profile_stages. Event waits and inter-encoder gaps are excluded.
     double pf_attention_ms = 0, pf_dense_ms = 0, pf_moe_route_ms = 0, pf_moe_expert_ms = 0, pf_other_ms = 0;
     double pf_attention_dense_ms = 0, pf_attention_index_ms = 0;
+    // Q_A, Q_B, K_B, KV_A, IndexPool projections, V_B, attention gate, output.
+    std::array<double, 8> pf_stq_projection_ms{};
     double pf_attention_mla_ms = 0, pf_attention_misc_ms = 0;
     uint64_t pf_profiled_blocks = 0;
     uint64_t pf_grouped_tiles = 0, pf_grouped_tail_tiles = 0;  ///< eligible Q3_K/Q4_K M64 tiles, tail has <=32 rows

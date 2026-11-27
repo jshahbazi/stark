@@ -110,7 +110,7 @@ bool DenseBank::open(mtl::Context& metal, Format rate, uint32_t input_width, uin
 }
 
 bool ExpertProgram::open(mtl::Context& metal, bool round_bf16, bool pair1_decode, bool fused_finish_reduce,
-                         bool split_spec1) {
+                         bool split_spec1, bool wide_attention) {
     if (!metal.supports_metal4()) return false;
     try {
         std::vector<std::string> sources{"pair1_k4_grouped.metal", "pair1_k4_io.metal", "spec1_dense.metal"};
@@ -130,6 +130,10 @@ bool ExpertProgram::open(mtl::Context& metal, bool round_bf16, bool pair1_decode
         dense_k6_ = metal.pipeline(library, "stark_hy4_stq_spec1_k6_dense");
         dense_split_ = split_spec1 ? metal.pipeline(library, "stark_hy4_stq_spec1_k6_split") : mtl::Pipeline{};
         dense_split_finish_ = split_spec1 ? metal.pipeline(library, "stark_hy4_stq_spec1_split_finish", boundary) : mtl::Pipeline{};
+        dense_prefill_ = wide_attention ?
+            metal.pipeline(library, "stark_hy4_stq_spec1_k6_prefill") : mtl::Pipeline{};
+        attention_gate_prepare_ = wide_attention ?
+            metal.pipeline(library, "stark_hy4_stq_attention_gate_prepare", boundary) : mtl::Pipeline{};
         decode_ = pair1_decode ? metal.pipeline(library, "stark_hy4_stq_pair1_k4_decode") : mtl::Pipeline{};
         return prepare_.max_threads >= 128 && project_.max_threads >= 128 && finish_.max_threads >= 128 &&
                prepare_down_.max_threads >= 128 && combine_.max_threads >= 128 &&
@@ -137,7 +141,10 @@ bool ExpertProgram::open(mtl::Context& metal, bool round_bf16, bool pair1_decode
                (!pair1_decode || (decode_.max_threads >= 128 && decode_.simd_width == 32)) &&
                (!fused_finish_reduce || (finish_reduce_.max_threads >= 512 && finish_reduce_.simd_width == 32)) &&
                (!split_spec1 || (dense_split_.max_threads >= 128 && dense_split_.simd_width == 32 &&
-                               dense_split_finish_.max_threads >= 128 && dense_split_finish_.simd_width == 32));
+                               dense_split_finish_.max_threads >= 128 && dense_split_finish_.simd_width == 32)) &&
+               (!wide_attention || (dense_prefill_.max_threads >= 128 && dense_prefill_.simd_width == 32 &&
+                                    attention_gate_prepare_.max_threads >= 128 &&
+                                    attention_gate_prepare_.simd_width == 32));
     } catch (...) {
         return false;
     }
@@ -232,17 +239,28 @@ bool ExpertProgram::append_routed(std::vector<mtl::Dispatch>& commands, const Ex
 
 bool ExpertProgram::append_dense(std::vector<mtl::Dispatch>& commands, const DenseBank& bank,
                                  const mtl::Buffer& input, const mtl::Buffer& row_map, uint32_t rows,
-                                 const mtl::Buffer& prepared, const mtl::Buffer& raw, const mtl::Buffer& output) const {
-    const auto& project = bank.format == Format::spec1_k4 ? dense_k4_ : dense_k6_;
+                                 const mtl::Buffer& prepared, const mtl::Buffer& raw, const mtl::Buffer& output,
+                                 DenseBoundaries boundaries, bool prefill_attention) const {
+    // The wider K32 product is qualified on these attention banks and uses
+    // the incumbent K16 product for the partial final tile.
+    const bool wide_shape = ((bank.inputs == 1024 || bank.inputs == 3072) &&
+                             (bank.outputs == 8192 || bank.outputs == 16384)) ||
+                            ((bank.inputs == 8192 || bank.inputs == 16384) && bank.outputs == 3072);
+    const bool wide_prefill = prefill_attention && dense_prefill_.handle && bank.format == Format::spec1_k6 &&
+                              rows >= 1024 && wide_shape;
+    const auto& project = bank.format == Format::spec1_k4 ? dense_k4_ : wide_prefill ? dense_prefill_ : dense_k6_;
+    const bool needs_prepare = boundaries != DenseBoundaries::prepared_input;
+    const bool needs_finish = boundaries != DenseBoundaries::raw_output;
     const size_t in_elements = size_t(rows) * bank.inputs, out_elements = size_t(rows) * bank.outputs;
     auto fits = [](const mtl::Buffer& buffer, size_t bytes) { return buffer.handle && buffer.bytes >= bytes; };
-    if (!bank.ready() || rows == 0 || rows > 4096 || prepare_.max_threads < 128 || project.max_threads < 128 ||
-        dense_finish_.max_threads < 128 || !fits(input, in_elements * sizeof(float)) ||
+    if (!bank.ready() || rows == 0 || rows > 4096 || project.max_threads < 128 ||
+        (needs_prepare && (prepare_.max_threads < 128 || !fits(input, in_elements * sizeof(float)))) ||
+        (needs_finish && (dense_finish_.max_threads < 128 || !fits(output, out_elements * sizeof(float)))) ||
         !fits(row_map, size_t(rows) * 8) || !fits(prepared, in_elements * sizeof(uint16_t)) ||
-        !fits(raw, out_elements * sizeof(uint16_t)) || !fits(output, out_elements * sizeof(float))) return false;
+        !fits(raw, out_elements * sizeof(uint16_t))) return false;
 
     uint32_t splits = 0;
-    if (dense_split_.handle && bank.format == Format::spec1_k6 && rows <= 6) {
+    if (boundaries == DenseBoundaries::full && dense_split_.handle && bank.format == Format::spec1_k6 && rows <= 6) {
         // Fixed geometry from the real packed projection sweep at these row counts.
         constexpr uint32_t tested_shapes[][3] = {
             {1024, 8192, 4}, {1024, 16384, 4},
@@ -262,8 +280,10 @@ bool ExpertProgram::append_dense(std::vector<mtl::Dispatch>& commands, const Den
 
     using mtl::Arg;
     const uint32_t shape[4] = {bank.inputs, bank.outputs, rows, splits};
-    commands.push_back({&prepare_, {Arg::B(input), bank.suh.argument(), Arg::B(row_map), Arg::B(prepared),
-                                   Arg::V(bank.inputs)}, {bank.inputs / 128, rows, 1}, {128, 1, 1}});
+    if (needs_prepare) {
+        commands.push_back({&prepare_, {Arg::B(input), bank.suh.argument(), Arg::B(row_map), Arg::B(prepared),
+                                       Arg::V(bank.inputs)}, {bank.inputs / 128, rows, 1}, {128, 1, 1}});
+    }
     if (splits != 0) {
         commands.push_back({&dense_split_, {bank.trellis.argument(), Arg::B(prepared), Arg::B(raw), Arg::V(shape)},
                             {bank.outputs / 128, splits, 1}, {128, 1, 1}});
@@ -273,8 +293,30 @@ bool ExpertProgram::append_dense(std::vector<mtl::Dispatch>& commands, const Den
     }
     commands.push_back({&project, {bank.trellis.argument(), Arg::B(prepared), Arg::B(raw), Arg::V(shape)},
                         {bank.outputs / 128, (rows + 31) / 32, 1}, {128, 1, 1}});
-    commands.push_back({&dense_finish_, {Arg::B(raw), bank.svh.argument(), Arg::B(row_map), Arg::B(output),
-                                        Arg::V(bank.outputs)}, {bank.outputs / 128, rows, 1}, {128, 1, 1}});
+    if (needs_finish) {
+        commands.push_back({&dense_finish_, {Arg::B(raw), bank.svh.argument(), Arg::B(row_map), Arg::B(output),
+                                           Arg::V(bank.outputs)}, {bank.outputs / 128, rows, 1}, {128, 1, 1}});
+    }
+    return true;
+}
+
+bool ExpertProgram::append_attention_gate_prepare(std::vector<mtl::Dispatch>& commands,
+                                                  const DenseBank& gate_bank, const DenseBank& output_bank,
+                                                  uint32_t rows, const mtl::Buffer& raw, const mtl::Buffer& value,
+                                                  const mtl::Buffer& prepared) const {
+    const uint32_t width = gate_bank.outputs;
+    const size_t elements = size_t(rows) * width;
+    if (!fuses_attention_gate(rows) || !gate_bank.ready() || !output_bank.ready() ||
+        gate_bank.format != Format::spec1_k6 || output_bank.format != Format::spec1_k6 ||
+        width != output_bank.inputs || width == 0 || width % 128 != 0 ||
+        !raw.handle || raw.bytes < elements * sizeof(uint16_t) ||
+        !value.handle || value.bytes < elements * sizeof(float) ||
+        !prepared.handle || prepared.bytes < elements * sizeof(uint16_t)) return false;
+
+    using mtl::Arg;
+    commands.push_back({&attention_gate_prepare_, {Arg::B(raw), gate_bank.svh.argument(), Arg::B(value),
+                                                   output_bank.suh.argument(), Arg::B(prepared), Arg::V(width)},
+                        {width / 128, rows, 1}, {128, 1, 1}});
     return true;
 }
 

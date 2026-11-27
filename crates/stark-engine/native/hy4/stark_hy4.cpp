@@ -279,7 +279,8 @@ extern "C" int stark_hy4_open_stq_diagnostic(
             return fail("cannot fit STQ context");
         s.model.geo.max_context = int32_t(context);
         if (auto error = load_trunk(s.model, s.metal, {weights, weight_count}, {experts, expert_count},
-                                    round_bf16 != 0, pair1_decode != 0, (tuning & 8u) != 0, (tuning & 16u) != 0);
+                                    round_bf16 != 0, pair1_decode != 0, (tuning & 8u) != 0, (tuning & 16u) != 0,
+                                    (tuning & 128u) != 0);
             !error.empty())
             return fail(error);
         if (auto error = bind_engram(s.model, {tables, 4}, {token_map, map_len}); !error.empty())
@@ -489,7 +490,7 @@ extern "C" StarkHy4Stats stark_hy4_stats(StarkHy4* session) noexcept {
     const auto& base = session->start_stats;
     const auto& schedule = session->metal.seg_timing();
     const auto& schedule_base = session->decode_start;
-    return {
+    StarkHy4Stats stats{
         draft.offered, draft.accepted, draft.rounds,
         draft.draft_ms / 1e3, draft.verify_ms / 1e3, draft.catchup_ms / 1e3,
         graph.pf_gpu_ms / 1e3 - base.prefill_gpu_span_seconds,
@@ -528,5 +529,9 @@ extern "C" StarkHy4Stats stark_hy4_stats(StarkHy4* session) noexcept {
         graph.verify_expert_ms / 1e3 - base.verify_expert_seconds,
         graph.verify_other_ms / 1e3 - base.verify_other_seconds,
         graph.verify_profiled_graphs - base.verify_profiled_graphs,
+        {},
     };
+    for (size_t i = 0; i < graph.pf_stq_projection_ms.size(); ++i)
+        stats.prefill_stq_projection_seconds[i] = graph.pf_stq_projection_ms[i] / 1e3 - base.prefill_stq_projection_seconds[i];
+    return stats;
 }
