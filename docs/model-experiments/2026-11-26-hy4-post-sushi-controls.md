@@ -12,7 +12,7 @@ rendered lengths. It used a separate pack and draft head.
 
 | Attempt | Change and criterion | Status |
 | --- | --- | --- |
-| HY4OC-04A | Compare compensated indexed sparse MLA with the original kernel on one build. Compare synthetic OpenCode digests and measure the selected-cell stage and whole prompts separately. Use natural-text quality and image/prefix checks for production qualification. | Exact-artifact evaluation awaiting the Q3_K download. |
+| HY4OC-04A | Compare compensated indexed sparse MLA with the original kernel on one build. Compare synthetic OpenCode digests and measure the selected-cell stage and whole prompts separately. | The compensated stage regressed and changed output hashes. Restored the original default. |
 | HY4OC-04B | Retain the last completed IndexPool group of the previous prompt's final prefill chunk, with the existing grid as fallback. The restored continuation must reproduce its fresh replay while reusing more than 12,288 prompt positions when the final tokens match. | Opt-in candidate. |
 | HY4OC-04C | Select the router's top 16 out of 512 in parallel. Preserve expert IDs, tie order, selected weights and invalid-row behavior. | Opt-in candidate. Synthetic GPU exactness passed. Full-model timing and parity remain open. |
 
@@ -106,3 +106,75 @@ was waiting for a verified model. Recovery reused 64.4 GB of completed
 files and switched the missing trunk shard to HTTPS byte ranges with
 per-range checkpoints. The pinned SHA-256 and native installer remain the
 publication gates for the exact model.
+
+All 156,415,403,072 weight bytes passed the native installer on November 27.
+The range utility's first handoff used stdout as the installer's progress
+descriptor and failed before preparation. Relaying progress through an
+inherited private descriptor completed installation using the staged files.
+
+## Selected-cell MLA diagnostics
+
+Two instrumented cases completed on the M5 Max with the 65,536 upper bound
+and greedy NextN depth two. The tool-enabled OpenCode requests rendered to
+16,015 and 27,015 positions and each returned 96 tokens. The rendered input
+and sampling settings matched within each pair. Generated output hashes
+differed at both lengths.
+
+| Fresh prompt | Original MLA, s | Compensated MLA, s | Original prefill GPU span, s | Compensated prefill GPU span, s |
+| --- | ---: | ---: | ---: | ---: |
+| 16,015 | 4.923 | 7.731 | 26.851 | 29.096 |
+| 27,015 | 9.440 | 15.148 | 48.919 | 55.373 |
+
+The compensated selected-cell stage took 57% and 60% longer. Treat these
+as diagnostic GPU timings. The 16K original arm also spent 11.23 seconds in
+Engram versus 2.26 seconds in the compensated arm. Compare uninstrumented
+whole-request timing and fixed-position output hashes separately.
+
+| Private diagnostic aggregate | SHA-256 |
+| --- | --- |
+| Original | `0fd4a49955bd3e6650cd500625cf87757160d587372a55b33ad39b34e490c687` |
+| Compensated | `73ff0b4889d90f7524eeaba794f1b6b2c9309facbdd25ff2a38caa90d7dbd594` |
+
+A macOS watchdog restart interrupted the first uninstrumented case during
+startup. Restarting changed the filesystem device identifier in the weight
+fingerprints. Stark refused the stale receipt, so the original three GGUFs
+and pinned sidecars were verified again before the retry. The retry used
+a 32,768-position upper bound to reduce resident cache allocation while
+keeping both prompt lengths and the 96-token budget in range.
+
+At 32,768 positions, OpenCode performed extra generations and changed the
+rendered history on the long turns as it reserved context for compaction.
+Discard those timings. The resumed uninstrumented screen uses a 49,152
+upper bound and checks the rendered prompt lengths, generation count, draft
+depth and sampling mode on every case.
+
+## Uninstrumented MLA comparison
+
+With the 49,152 upper bound, the pairs used identical rendered fresh prompts,
+greedy depth two and 96 generated tokens. The original and compensated
+kernels returned different output hashes at both lengths in both pairs.
+Within each kernel, the fresh output hashes were repeatable and matched
+the corresponding instrumented arm. Fresh 16K first-request overhead
+varied within each kernel. Compare fresh 27K in pair B, where the preceding
+request was fresh 16K in both arms. Pair A's compensated arm had a resumed
+request in between and illustrates run order sensitivity.
+
+| Fresh prompt | Prefill tok/s, original | Prefill tok/s, compensated | Decode tok/s, original | Decode tok/s, compensated | OpenCode s, original | OpenCode s, compensated |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16K, A | 224.31 | 248.53 | 39.97 | 41.85 | 74.565 | 67.440 |
+| 16K, B | 386.85 | 292.37 | 37.47 | 41.70 | 44.723 | 57.837 |
+| 27K, B | 541.61 | 495.15 | 36.34 | 37.39 | 53.198 | 58.070 |
+
+The host reported memory pressure level 1 and no other inference workers.
+Swap ranged from 62 to 283 MiB. Worker startup took 80–91 seconds. The
+original 27K arm improved prefill by 9.4% and cut client wall time by 8.4%.
+The small decode difference comes from sequences with different token
+digests. Keep compensated MLA opt-in. The default change retains resident
+experts, the 4,096-token prefill chunk, and memory-fitted context.
+
+| Private timing aggregate | SHA-256 |
+| --- | --- |
+| Compensated A | `de5c0ff65eb61c8346a05a19b40af5a4e5e07e1f3974fca3bfcd6e9c76e69c24` |
+| Original A | `57ca3606e0d381814dc2fb9291d92675798efa2b09aa3f9e3855af66c3e37913` |
+| Original B | `145893bf4555723f90e644622dfeccc59ed19601aa5965347fb54ceecbeb73bb` |
+| Compensated B | `2066c2575e323ac970b9671ab4732f6841b8e79e58e6ee631d44406e32c38267` |

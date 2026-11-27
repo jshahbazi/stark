@@ -153,13 +153,13 @@ record](model-experiments/2026-11-25-hy4-prefill-decode-profile.md) covers the
 observed benefit and remaining qualification. The verification and worker
 gates remain artifact-specific.
 
-The tuned profiles request compensated indexed sparse prefill on Metal 4.
-The kernel splits queries and probabilities into F16 operands and keeps F32
+The load profiles default to the original indexed sparse prefill kernel.
+`STARK_HY4_PREFILL_COMPENSATED_SPARSE_MLA=1` requests the experimental Metal 4
+kernel. It splits queries and probabilities into F16 operands and keeps F32
 accumulation and the original F16 K/V cache. The worker uses the original
-kernel if the compensated pipeline is unavailable. Set
-`STARK_HY4_PREFILL_COMPENSATED_SPARSE_MLA=0` to select the original kernel
-explicitly. The compensated kernel has passed synthetic GPU accuracy checks.
-Full-model parity and speed are still to be measured. [Compensated sparse MLA record](model-experiments/2026-11-26-hy4-compensated-sparse-mla.md)
+kernel if the compensated pipeline is unavailable. The compensated kernel
+passed synthetic accuracy checks, took longer at 27K in OpenCode, and
+changed greedy output hashes. [Full-model comparison](model-experiments/2026-11-26-hy4-post-sushi-controls.md#selected-cell-mla-diagnostics)
 
 `STARK_HY4_PREFILL_TAIL_PREFIX=1` enables the experimental in-memory reuse
 point in the final prefill chunk. The worker retains the last complete

@@ -65,9 +65,9 @@ ignored.
 | Validation harness | `dfe26b8e48d6b65a2eb0a416ea30616fc99ada7066016497c212fa69047933dc` |
 | Aggregate validation receipt | `f04309d78fa2b333bc085ae31594451f240d8b2ff6b8840c21a08d20c7b497c7` |
 
-## Proposed default
+## Default policy follow-up
 
-The tuned Metal 4 profiles request this specialization by default. The worker
+The initial tuned Metal 4 profiles requested this specialization by default. The worker
 uses the original selected-cell kernel if Metal rejects the pipeline or
 reports a limit below the required 1,024 threads. Set
 `STARK_HY4_PREFILL_COMPENSATED_SPARSE_MLA=0` for an explicit control.
@@ -77,6 +77,8 @@ assembled shader SHA-256 and aggregate receipt as above. The locked Rust
 `e5fccfce3394dcb10a56d0b0c72198064a2cd6cf7406fc000f0f4acd325c8e94`.
 
 The local Q3_K weights were removed after the resident OpenCode bracket.
-On the exact artifact, compare natural-text teacher-forced top-1 and
-generated outputs, verify reuse and image transitions, and measure sparse
-stage and whole-request throughput at 16K and 27K before merging.
+After restoring the exact artifact, the selected-cell stage was 57–60%
+slower at 16K and 27K and generated hashes changed at both lengths. A
+matched uninstrumented 27K OpenCode pair confirmed slower whole-request
+time. The original kernel is again the default. Natural-text quality was
+outside this synthetic comparison. [Full-model follow-up](2026-11-26-hy4-post-sushi-controls.md#selected-cell-mla-diagnostics)

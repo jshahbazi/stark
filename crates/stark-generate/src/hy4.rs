@@ -229,7 +229,7 @@ impl Hy4Backend {
         let compensated_sparse_mla = verify_switch(
             "STARK_HY4_PREFILL_COMPENSATED_SPARSE_MLA",
             "invalid_hy4_prefill_compensated_sparse_mla",
-            tuned,
+            false,
         )?;
         let parallel_router = verify_switch("STARK_HY4_PARALLEL_ROUTER", "invalid_hy4_parallel_router", false)?;
         let resident_token_embeddings =
