@@ -370,7 +370,82 @@ pub struct Model {
     mtp_schedule_default: MtpScheduleDefault,
 }
 
+enum SharedRequestForward {
+    Flint(flint::FlintModel),
+    Ripple(ripple::RippleModel),
+}
+
+/// Owns a fresh request cache and shares the loaded weight inventory and
+/// tokenizer. Build the full hybrid model on the receiving worker thread.
+pub struct SharedRequestSlot {
+    forward: SharedRequestForward,
+    tokenizer: Arc<Tokenizer>,
+    vocab_size: usize,
+    max_context: u32,
+    checkpoint_context: u32,
+    eos: Vec<u32>,
+    mtp_schedule_default: MtpScheduleDefault,
+}
+
+impl SharedRequestSlot {
+    pub fn mapped_weight_bytes(&self) -> Option<usize> {
+        match &self.forward {
+            SharedRequestForward::Flint(model) => model.mapped_weight_bytes(),
+            SharedRequestForward::Ripple(model) => model.mapped_weight_bytes(),
+        }
+    }
+
+    pub fn new_request_slot(&self) -> Self {
+        let forward = match &self.forward {
+            SharedRequestForward::Flint(model) => SharedRequestForward::Flint(model.new_request_slot()),
+            SharedRequestForward::Ripple(model) => SharedRequestForward::Ripple(model.new_request_slot()),
+        };
+        Self {
+            forward,
+            tokenizer: Arc::clone(&self.tokenizer),
+            vocab_size: self.vocab_size,
+            max_context: self.max_context,
+            checkpoint_context: self.checkpoint_context,
+            eos: self.eos.clone(),
+            mtp_schedule_default: self.mtp_schedule_default,
+        }
+    }
+
+    pub fn into_model(self) -> Model {
+        Model {
+            forward: match self.forward {
+                SharedRequestForward::Flint(model) => Forward::Flint(model),
+                SharedRequestForward::Ripple(model) => Forward::Ripple(model),
+            },
+            tokenizer: self.tokenizer,
+            vocab_size: self.vocab_size,
+            max_context: self.max_context,
+            checkpoint_context: self.checkpoint_context,
+            eos: self.eos,
+            image_artifact: None,
+            mtp_schedule_default: self.mtp_schedule_default,
+        }
+    }
+}
+
 impl Model {
+    pub fn new_shared_request_slot(&self) -> Option<SharedRequestSlot> {
+        let forward = match &self.forward {
+            Forward::Flint(model) => SharedRequestForward::Flint(model.new_request_slot()),
+            Forward::Ripple(model) => SharedRequestForward::Ripple(model.new_request_slot()),
+            _ => return None,
+        };
+        Some(SharedRequestSlot {
+            forward,
+            tokenizer: Arc::clone(&self.tokenizer),
+            vocab_size: self.vocab_size,
+            max_context: self.max_context,
+            checkpoint_context: self.checkpoint_context,
+            eos: self.eos.clone(),
+            mtp_schedule_default: self.mtp_schedule_default,
+        })
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         Self::load_with_mtp(path, false)
     }

@@ -305,8 +305,8 @@ fn expand_image_placeholder(
 
 pub struct VisionLanguageModel<B: Backend> {
     engine: Arc<Engine<B>>,
-    language_model: LanguageModel<B>,
-    text_language_model: Option<LanguageModel<B>>,
+    language_model: Arc<LanguageModel<B>>,
+    text_language_model: Option<Arc<LanguageModel<B>>>,
     parameter_storage: crate::parameters::ParameterStorageStatistics,
     tower: Option<VisionTower<B>>,
     limits: PreprocessLimits,
@@ -446,7 +446,8 @@ impl<B: Backend> Engine<B> {
         self: &Arc<Self>,
         model_path: &Path,
     ) -> Result<LanguageModel<B>, NativeVisionError<B>> {
-        Ok(self.load_vision_language_model_inner(model_path, false, None)?.language_model)
+        Arc::into_inner(self.load_vision_language_model_inner(model_path, false, None)?.language_model)
+            .ok_or_else(|| InvalidInput("new validation decoder has an unexpected shared owner").into())
     }
 
     fn load_vision_language_model_inner(
@@ -690,8 +691,8 @@ impl<B: Backend> Engine<B> {
         let hash = |name| hashes.get(name).cloned().ok_or(InvalidInput("missing native vision identity"));
         Ok(VisionLanguageModel {
             engine: self.clone(),
-            language_model,
-            text_language_model,
+            language_model: Arc::new(language_model),
+            text_language_model: text_language_model.map(Arc::new),
             parameter_storage,
             tower,
             limits: PreprocessLimits::default(),
@@ -716,6 +717,27 @@ impl<B: Backend> Engine<B> {
 }
 
 impl<B: Backend> VisionLanguageModel<B> {
+    /// Create a text-only worker owner around the already loaded decoder.
+    pub fn shared_text_lane(&self) -> Self {
+        Self {
+            engine: self.engine.clone(),
+            language_model: self.language_model.clone(),
+            tower: None,
+            failed: self.failed,
+            identity: self.identity.clone(),
+            codec_eos_token: self.codec_eos_token.clone(),
+            text_language_model: self.text_language_model.clone(),
+            parameter_storage: self.parameter_storage,
+            limits: self.limits,
+            source: self.source.clone(),
+            revision: self.revision.clone(),
+            image_tokens: self.image_tokens,
+            model_dim: self.model_dim,
+            vocab_size: self.vocab_size,
+            family_profile: self.family_profile,
+        }
+    }
+
     fn text_model(&self) -> &LanguageModel<B> {
         self.text_language_model.as_ref().unwrap_or(&self.language_model)
     }
@@ -769,7 +791,7 @@ impl<B: Backend> VisionLanguageModel<B> {
     }
 
     pub fn generation_cache_context_bound(&self) -> Option<super::context::BackendContextBound> {
-        [&self.language_model, self.text_model()]
+        [self.language_model.as_ref(), self.text_model()]
             .into_iter()
             .filter_map(LanguageModel::generation_cache_context_bound)
             .min_by_key(|bound| bound.context_tokens)

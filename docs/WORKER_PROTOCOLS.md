@@ -199,15 +199,18 @@ The first line a worker writes is its readiness reply. On success it starts with
 
 Each tag names the exact request and reply shape documented on the per-worker page at the time of writing. A tag changes when the shape it covers changes incompatibly; new readiness keys can appear without a tag change. Treat an unrecognised tag as incompatible rather than guessing.
 
-For Hy4 Sushi STQ, the private desktop launcher can pass up to three groups of
-inherited FIFO descriptors in `STARK_HY4_LANE_FDS`. The comma-separated list
-gives worker request read, worker reply write and worker cancellation read for
-each auxiliary slot in order. Primary readiness includes
-`hy4_lane_context_tokens` when it admits auxiliaries, with a capacity for each
-of its accepted groups. Each additional slot publishes its own readiness and
-uses the same JSON request and response shapes with text and
+The private desktop launcher can pass up to three groups of inherited FIFO
+descriptors in `STARK_GENERATION_LANE_FDS`. The comma-separated list gives
+worker request read, worker reply write and worker cancellation read for each
+auxiliary slot in order. Primary readiness includes `generation_lane_context_tokens`
+when it admits auxiliaries, with a capacity for each accepted group.
+`4294967295` indicates an undeclared capacity and requires the worker's
+request context planner. Hy4 Sushi STQ also accepts the legacy
+`STARK_HY4_LANE_FDS` flag and reports `hy4_lane_context_tokens` in that mode.
+A worker closes unused groups at startup. Each additional slot publishes its
+own readiness and uses the same JSON request and response shapes with text and
 request-local cancellation. The desktop continues to use the primary slot for
-image transactions. Each slot has its own cache and mutable inference state.
+image transactions. Each slot has its own mutable inference state.
 Only the primary slot supports retained prefixes across requests. All slots
 stop when the owning desktop closes the worker process.
 

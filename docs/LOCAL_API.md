@@ -323,7 +323,7 @@ tool calls private until that validation completes.
 
 - The server accepts at most 16 concurrent connections. Excess connections receive a bare 429 with `Retry-After: 1` and no `X-Request-Id` header.
 - Up to eight additional chat or Decision requests can wait in FIFO order. A ninth waiting request receives 429 `queue_full`. A request still queued after 600 seconds receives 429 `queue_timeout`.
-- The catalog Hy4 Sushi STQ model automatically admits up to four active text requests on one worker as memory permits. The slots share model weights, and the API advertises a window that fits all admitted slots. Image requests run exclusively on the image-enabled primary slot. Other models ordinarily run one request at a time. Health reports `worker_slots` for the configured context and `running_requests` for admitted API requests.
+- Desktop generation can serve up to four active text requests on one worker when the loaded backend admits independent request state. The slots share model weights. Hy4 Sushi STQ, native language and vision-language decoders, Flint, and Ripple can advertise additional slots. Unsupported backends and Decision requests run one at a time. Image requests run exclusively on the image-enabled primary slot. Health reports `worker_slots` for the configured context and `running_requests` for admitted API requests.
 - The 300-second inactivity timer starts after body parsing, pauses during the FIFO wait and starts fresh when the request gets the worker. Validated native chat progress renews it, including progress during prefill. An active chat request can run longer than five minutes. A stalled request returns 504 `request_timeout`.
 - The handler polls the client connection every 50 ms while a request runs. A disconnected or timed-out queued request is removed and leaves the loaded model available. Cancelling or timing out a running chat request follows the chat worker's cancellation behavior. Cancelling or timing out a running Decision request terminates and reaps the native Decider worker; the model must be run again before another decision. When a response can still be written, cancellation returns 499 `request_cancelled`.
 - Stopping or changing the model in Stark fences waiting and running requests with 503 `model_changed`.
@@ -333,11 +333,15 @@ tool calls private until that validation completes.
 - The image service starts the worker with an empty, owner-private 0700 staging directory and stages each accepted image as a 0600 regular file with an opaque identifier. The worker validates the reference, owner, type, private permissions, size, link count, stable metadata and image signature, then immediately unlinks the name. It retains the opened-file lease through completion. Host cleanup removes remaining staged names when the transaction exits; worker teardown removes only opaque, owner-private, single-link regular files in its pinned directory. Media references and image bytes are not logged.
 - Image preparation, generation, streaming reads, frame writes and discard share one worker inactivity deadline, with a 300-second default. Validated generation progress or deltas renew it; operation boundaries and activity after cancellation do not. Local image verification retains its absolute time limit. Recoverable cancellation drains native work and clears prepared state before reuse; a protocol or cleanup failure closes and reaps the worker before another request can run.
 
-Each auxiliary Hy4 text slot reserves at most 49,152 positions. Smaller
-request windows still work. The primary retains its separately fitted
-Playground capacity. `STARK_HY4_CONCURRENT_SLOTS` accepts `1` through `4`
-as an operator override for the maximum slot count. Selecting `1` gives the
-API the primary's ordinary automatic memory fit.
+`STARK_GENERATION_SLOTS` accepts `1` through `4` as an operator override. The
+Hy4-specific `STARK_HY4_CONCURRENT_SLOTS` setting remains available when the
+generic override is unset. For fixed per-slot capacities the API advertises
+the common window, while Playground retains the primary's own capacity.
+Hy4 auxiliary slots reserve at most 49,152 positions. Native language and
+vision-language decoders retain their normal context capacity and reserve
+memory when admitting each request. A request whose state does not fit can
+receive a resource-limit error. Playground, the CLI and install checks use
+the primary lane.
 
 ### Prefix reuse
 

@@ -2787,6 +2787,7 @@ class Desktop:
                         Path(model["path"]),
                         self.timeout,
                         gpu_memory_callback=on_gpu_memory,
+                        enable_generation_lanes=True,
                     )
                 )
                 self.worker = worker
@@ -2872,7 +2873,7 @@ class Desktop:
             self.context = min(guided_context or self.context_override or self.context_limit, self.context_limit)
             self.maximum = min(self.maximum, self.output_limit, self.context - 1)
             # Every admitted API lane must be able to serve the advertised budget.
-            lanes = getattr(worker, "hy4_lanes", ())
+            lanes = getattr(worker, "generation_lanes", ())
             self.api_context = min(
                 self.context_limit, guided_context or self.context_limit, *(lane.context_limit for lane in lanes)
             )
@@ -3343,7 +3344,7 @@ class Desktop:
             if (
                 lane is not None
                 and lane is not primary
-                and all(lane is not auxiliary for auxiliary in getattr(primary, "hy4_lanes", ()))
+                and all(lane is not auxiliary for auxiliary in getattr(primary, "generation_lanes", ()))
             ):
                 raise APIError(503, "Model changed or stopped before this request started.", "model_changed")
             worker = lane if lane is not None else primary
@@ -3883,7 +3884,9 @@ class Desktop:
         return run_decision(self, payload, cancelled)
 
     def api_auxiliary_workers(self):
-        return tuple(lane for lane in getattr(self.worker, "hy4_lanes", ()) if self.api_context <= lane.context_limit)
+        return tuple(
+            lane for lane in getattr(self.worker, "generation_lanes", ()) if self.api_context <= lane.context_limit
+        )
 
     def available_api_worker(self, *, text, maximum):
         if self.job is None and (text or not self.api_auxiliary_jobs):

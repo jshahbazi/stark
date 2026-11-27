@@ -62,23 +62,41 @@ fn protocol_output() -> Result<File, &'static str> {
     Ok(output)
 }
 
-#[cfg(all(feature = "hy4", target_os = "macos", target_arch = "aarch64"))]
-struct Hy4Lane {
+#[cfg(feature = "metal")]
+struct GenerationLane {
     input: File,
     output: File,
     cancellation: crate::cancel::CancelSignal,
 }
 
-#[cfg(all(feature = "hy4", target_os = "macos", target_arch = "aarch64"))]
-impl Hy4Lane {
+#[cfg(feature = "metal")]
+struct GenerationLanes {
+    channels: Vec<GenerationLane>,
+    legacy_hy4: bool,
+}
+
+#[cfg(feature = "metal")]
+impl GenerationLanes {
     /// The private app host gives each additional lane independent request, reply and cancellation pipes.
     /// Call before any native code can start threads or acquire inherited descriptors.
-    fn from_environment() -> Result<Vec<Self>, &'static str> {
-        const ERROR: &str = "invalid_hy4_lane_descriptors";
-        let Some(value) = std::env::var_os("STARK_HY4_LANE_FDS") else {
-            return Ok(Vec::new());
+    fn from_environment() -> Result<Self, &'static str> {
+        const ERROR: &str = "invalid_generation_lane_descriptors";
+        let generic = std::env::var_os("STARK_GENERATION_LANE_FDS");
+        let legacy = std::env::var_os("STARK_HY4_LANE_FDS");
+        if generic.is_some() && legacy.is_some() && generic != legacy {
+            return Err(ERROR);
+        }
+        let legacy_hy4 = legacy.is_some();
+        let Some(value) = generic.or(legacy) else {
+            return Ok(Self {
+                channels: Vec::new(),
+                legacy_hy4: false,
+            });
         };
-        unsafe { std::env::remove_var("STARK_HY4_LANE_FDS") };
+        unsafe {
+            std::env::remove_var("STARK_GENERATION_LANE_FDS");
+            std::env::remove_var("STARK_HY4_LANE_FDS");
+        }
         let descriptors = value
             .to_str()
             .ok_or(ERROR)?
@@ -119,17 +137,57 @@ impl Hy4Lane {
         // All validated descriptors are distinct and were transferred by the launching host.
         let mut files =
             descriptors.into_iter().map(|fd| unsafe { File::from_raw_fd(fd) }).collect::<Vec<_>>().into_iter();
-        let mut lanes = Vec::new();
+        let mut channels = Vec::new();
         while let Some(input) = files.next() {
             let output = files.next().ok_or(ERROR)?;
             let cancellation = crate::cancel::CancelSignal::new(files.next().ok_or(ERROR)?)?;
-            lanes.push(Self {
+            channels.push(GenerationLane {
                 input,
                 output,
                 cancellation,
             });
         }
-        Ok(lanes)
+        Ok(Self {
+            channels,
+            legacy_hy4,
+        })
+    }
+
+    fn start<B, F>(
+        &mut self,
+        slots: impl IntoIterator<Item = (u32, F)>,
+    ) -> Result<Vec<u32>, &'static str>
+    where
+        B: crate::generation::GenerationBackend,
+        F: FnOnce(crate::cancel::CancelSignal) -> B + Send + 'static,
+    {
+        let mut capacities = Vec::new();
+        for (
+            (capacity, make_backend),
+            GenerationLane {
+                input,
+                output,
+                cancellation,
+            },
+        ) in slots.into_iter().zip(std::mem::take(&mut self.channels))
+        {
+            std::thread::Builder::new()
+                .name(format!("stark-generation-lane-{}", capacities.len() + 1))
+                .spawn(move || {
+                    let backend = make_backend(cancellation);
+                    if let Ok(mut worker) = crate::generation::GenerationWorker::new_with_options(backend, None, false)
+                    {
+                        let _ = crate::generation::run_lines(
+                            &mut worker,
+                            &mut io::BufReader::new(input),
+                            &mut io::BufWriter::new(output),
+                        );
+                    }
+                })
+                .map_err(|_| "generation_lane_start_failed")?;
+            capacities.push(capacity);
+        }
+        Ok(capacities)
     }
 }
 
@@ -161,8 +219,8 @@ pub fn main() {
         let _request_budget = stark_resource_budget::Budget::from_environment()?;
         #[cfg(feature = "metal")]
         {
-            #[cfg(all(feature = "hy4", target_os = "macos", target_arch = "aarch64"))]
-            let hy4_lanes = Hy4Lane::from_environment()?;
+            use crate::generation::GenerationBackend;
+            let mut lanes = GenerationLanes::from_environment()?;
             let cancellation = crate::cancel::CancelSignal::from_environment()?;
             // SAFETY: startup is single-threaded here, and the inherited pipe
             // write FD is transferred exclusively to the sampler.
@@ -173,33 +231,16 @@ pub fn main() {
                 if validation_gemma_text_only {
                     return Err("validation_family_not_supported");
                 }
-                let mut backend = crate::hy4::Hy4Backend::load(&path, cancellation, hy4_lanes.len() + 1)?;
-                let mut capacities = Vec::new();
-                for (
-                    (mut backend, capacity),
-                    Hy4Lane {
-                        input,
-                        output,
-                        cancellation,
-                    },
-                ) in backend.take_additional_slots().into_iter().zip(hy4_lanes)
-                {
-                    backend.set_cancellation(cancellation);
-                    let mut worker = crate::generation::GenerationWorker::new_with_options(backend, None, false)?;
-                    std::thread::Builder::new()
-                        .name(format!("hy4-lane-{}", capacities.len() + 1))
-                        .spawn(move || {
-                            let _ = crate::generation::run_lines(
-                                &mut worker,
-                                &mut io::BufReader::new(input),
-                                &mut io::BufWriter::new(output),
-                            );
+                let mut backend = crate::hy4::Hy4Backend::load(&path, cancellation, lanes.channels.len() + 1)?;
+                let capacities =
+                    lanes.start(backend.take_additional_slots().into_iter().map(|(mut backend, capacity)| {
+                        (capacity, move |cancellation| {
+                            backend.set_cancellation(cancellation);
+                            backend
                         })
-                        .map_err(|_| "hy4_lane_start_failed")?;
-                    capacities.push(capacity);
-                }
+                    }))?;
                 let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
-                worker.advertise_hy4_lanes(capacities);
+                worker.advertise_lanes(capacities, lanes.legacy_hy4);
                 return crate::generation::run_lines(
                     &mut worker,
                     &mut crate::prefix_cache::StandardInput::reader(),
@@ -232,26 +273,40 @@ pub fn main() {
                 if validation_gemma_text_only {
                     return Err("validation_family_not_supported");
                 }
-                let backend = if media.is_some() {
+                let mut backend = if media.is_some() {
                     crate::hybrid::HybridBackend::load_vision(&path, cancellation)?
                 } else {
                     crate::hybrid::HybridBackend::load(&path, cancellation)?
                 };
+                let capacities =
+                    lanes.start(backend.take_additional_slots(lanes.channels.len()).into_iter().map(
+                        |(lane, capacity)| (capacity, move |cancellation| lane.into_backend(Some(cancellation))),
+                    ))?;
                 let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
+                worker.advertise_lanes(capacities, lanes.legacy_hy4);
                 return crate::generation::run_lines(
                     &mut worker,
                     &mut crate::prefix_cache::StandardInput::reader(),
                     &mut output,
                 );
             }
-            let backend = if validation_gemma_text_only {
+            let mut backend = if validation_gemma_text_only {
                 crate::native::NativeBackend::load_gemma4_text_validation(&path, cancellation)?
             } else if media.is_some() {
                 crate::native::NativeBackend::load_vision(&path, cancellation)?
             } else {
                 crate::native::NativeBackend::load(&path, cancellation)?
             };
+            let capacities =
+                lanes.start(backend.take_additional_slots(lanes.channels.len()).into_iter().map(|mut backend| {
+                    let capacity = backend.context_capacity().limit().unwrap_or(u32::MAX);
+                    (capacity, move |cancellation| {
+                        backend.set_cancellation(cancellation);
+                        backend
+                    })
+                }))?;
             let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
+            worker.advertise_lanes(capacities, lanes.legacy_hy4);
             crate::generation::run_lines(&mut worker, &mut crate::prefix_cache::StandardInput::reader(), &mut output)
         }
         #[cfg(not(feature = "metal"))]

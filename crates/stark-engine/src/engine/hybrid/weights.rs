@@ -952,6 +952,10 @@ impl Weights {
     pub fn metadata(&self) -> &BTreeMap<String, Value> {
         &self.metadata
     }
+
+    pub(super) fn mapped_bytes(&self) -> Option<usize> {
+        self.files.iter().try_fold(0usize, |sum, file| sum.checked_add(file.length))
+    }
     pub fn has(
         &self,
         name: &str,

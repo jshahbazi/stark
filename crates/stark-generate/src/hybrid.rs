@@ -1,4 +1,4 @@
-//! Serialized text generation through Stark's native hybrid-family forward.
+//! Text generation through Stark's native hybrid-family forward.
 
 use std::{
     collections::BTreeMap,
@@ -13,7 +13,7 @@ use stark_engine::engine::{
     context,
     hybrid::{
         GenerationContextSizing, Model, MtpRoundOptions, NativeSampling, PrefixSnapshot, PreparedHybridImage,
-        finite_guard, mtp_lookup, mtp_policy, profile,
+        SharedRequestSlot, finite_guard, mtp_lookup, mtp_policy, profile,
     },
 };
 
@@ -61,6 +61,28 @@ fn greedy_host_workspace(
     mtp_drafts == 0 && matches!(sampling, Sampling::Greedy {})
 }
 
+fn fit_hybrid_lanes(
+    primary: context::ContextSizing,
+    budget_bytes: usize,
+    additional_slots: usize,
+    estimate: impl Fn(u32) -> Option<usize>,
+) -> Option<(usize, context::ContextSizing)> {
+    (1..=additional_slots).rev().find_map(|additional| {
+        let share = budget_bytes.checked_div(additional.checked_add(1)?)?;
+        let sizing = context::ContextSizing::fit_loaded(
+            primary.checkpoint_context_tokens,
+            primary.backend_bound,
+            primary.checkpoint_context_tokens.min(primary.engine_context_tokens),
+            share,
+            &estimate,
+        )
+        .ok()?
+        .with_user_cap(primary.user_context_cap)
+        .ok()?;
+        Some((additional, sizing))
+    })
+}
+
 fn native_sampling(options: &GenerationOptions) -> Option<NativeSampling> {
     let sampling = match options.sampling {
         Sampling::Greedy {} => Some(NativeSampling::Greedy {
@@ -84,6 +106,7 @@ fn native_sampling(options: &GenerationOptions) -> Option<NativeSampling> {
 pub(crate) struct HybridBackend {
     model: Model,
     context_capacity: ContextCapacity,
+    slot_memory_budget: Option<usize>,
     cancellation: Option<CancelSignal>,
     profile_output: Option<ProfileOutput>,
     profile_mode: Option<AggregateProfileMode>,
@@ -100,6 +123,23 @@ pub(crate) struct HybridBackend {
     /// Line-break ids of the loaded tokenizer for the prompt-lookup gate,
     /// built on the first lookup request. Tokenizer metadata only.
     mtp_newline: Option<std::sync::Arc<mtp_lookup::NewlineTokens>>,
+}
+
+pub(crate) struct HybridLane {
+    model: SharedRequestSlot,
+    context: context::ContextSizing,
+}
+
+impl HybridLane {
+    pub(crate) fn into_backend(
+        self,
+        cancellation: Option<CancelSignal>,
+    ) -> HybridBackend {
+        let mut backend =
+            HybridBackend::new(self.model.into_model(), ContextCapacity::Shared(self.context), cancellation);
+        backend.slot_memory_budget = Some(self.context.memory_budget_bytes);
+        backend
+    }
 }
 
 pub(crate) struct HybridPreparedRequest {
@@ -330,6 +370,70 @@ impl Drop for HybridBackend {
 }
 
 impl HybridBackend {
+    fn new(
+        model: Model,
+        context_capacity: ContextCapacity,
+        cancellation: Option<CancelSignal>,
+    ) -> Self {
+        Self {
+            model,
+            context_capacity,
+            slot_memory_budget: None,
+            cancellation,
+            profile_output: None,
+            profile_mode: None,
+            native_prefill_snapshot: None,
+            probability_mapper: ProbabilityMapper::default(),
+            nucleus_sampler: nucleus::NucleusSampler::default(),
+            last_mtp: None,
+            prefix_cache: None,
+            pending_prefix: None,
+            image_runtime_identity: None,
+            mtp_newline: None,
+        }
+    }
+
+    pub(crate) fn take_additional_slots(
+        &mut self,
+        additional_slots: usize,
+    ) -> Vec<(HybridLane, u32)> {
+        if additional_slots == 0 || self.slot_memory_budget.is_some() || self.profile_output.is_some() {
+            return Vec::new();
+        }
+        let Some(first_slot) = self.model.new_shared_request_slot() else {
+            return Vec::new();
+        };
+        let ContextCapacity::Shared(primary) = self.context_capacity else {
+            return Vec::new();
+        };
+        let Some(weight_bytes) = first_slot.mapped_weight_bytes() else {
+            return Vec::new();
+        };
+        let budget = primary.memory_budget_bytes.min(context::current_memory_budget(context::metal_memory_headroom()));
+        // Keep one reserve for lazy mapped weight residency. Charge each lane
+        // for cold KV growth and a prompt filling its window.
+        let budget = budget.saturating_sub(weight_bytes);
+        let Some((slots, context)) = fit_hybrid_lanes(primary, budget, additional_slots, |tokens| {
+            self.model.generation_memory_bytes(tokens, tokens - 1, false)
+        }) else {
+            return Vec::new();
+        };
+        let lane = |model| {
+            (
+                HybridLane {
+                    model,
+                    context,
+                },
+                context.context_tokens,
+            )
+        };
+        let mut models = (1..slots).map(|_| lane(first_slot.new_request_slot())).collect::<Vec<_>>();
+        models.push(lane(first_slot));
+        self.context_capacity = ContextCapacity::Shared(context);
+        self.slot_memory_budget = Some(context.memory_budget_bytes);
+        models
+    }
+
     fn record_mtp_metadata(
         &mut self,
         drafts: u32,
@@ -427,21 +531,11 @@ impl HybridBackend {
         if profile_output.is_some() {
             profile::enable(true);
         }
-        Ok(Self {
-            model,
-            context_capacity,
-            cancellation,
-            profile_output,
-            profile_mode,
-            native_prefill_snapshot: None,
-            probability_mapper: ProbabilityMapper::default(),
-            nucleus_sampler: nucleus::NucleusSampler::default(),
-            last_mtp: None,
-            prefix_cache: None,
-            pending_prefix: None,
-            image_runtime_identity,
-            mtp_newline: None,
-        })
+        let mut backend = Self::new(model, context_capacity, cancellation);
+        backend.profile_output = profile_output;
+        backend.profile_mode = profile_mode;
+        backend.image_runtime_identity = image_runtime_identity;
+        Ok(backend)
     }
 
     /// Where a scoped request captures its snapshot: the start of its final
@@ -848,6 +942,8 @@ impl GenerationBackend for HybridBackend {
         maximum: u32,
         memory_budget_bytes: usize,
     ) -> Option<u32> {
+        let memory_budget_bytes =
+            self.slot_memory_budget.map_or(memory_budget_bytes, |share| share.min(memory_budget_bytes));
         self.model.automatic_context_length(input_tokens, maximum, memory_budget_bytes)
     }
     fn supports_automatic_context_planning(&self) -> bool {
@@ -867,6 +963,8 @@ impl GenerationBackend for HybridBackend {
         } else {
             memory_budget_bytes
         };
+        let memory_budget_bytes =
+            self.slot_memory_budget.map_or(memory_budget_bytes, |share| share.min(memory_budget_bytes));
         let Some(input) = request.input_token_ids else {
             return Ok(self.model.automatic_context_length(request.input_tokens, request.maximum, memory_budget_bytes));
         };
@@ -938,15 +1036,16 @@ impl GenerationBackend for HybridBackend {
         let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
         let reused = self.prefix_cache_plan(input, options);
         let capture = self.prefix_boundary(input, options).is_some_and(|boundary| boundary > reused);
-        admit_request_memory(
-            self.model.generation_memory_bytes_for_request(
-                end,
-                input_tokens,
-                capture,
-                greedy_host_workspace(&options.sampling, options.mtp_drafts),
-            ),
-            available,
-        )?;
+        let estimate = self.model.generation_memory_bytes_for_request(
+            end,
+            input_tokens,
+            capture,
+            greedy_host_workspace(&options.sampling, options.mtp_drafts),
+        );
+        if self.slot_memory_budget.is_some_and(|share| estimate.is_none_or(|bytes| bytes > share)) {
+            return Err("resource_budget_exceeded");
+        }
+        admit_request_memory(estimate, available)?;
         self.nucleus_sampler.clear();
         // A miss drops the snapshot; the next prefill overwrites the rows.
         let retained = self.prefix_cache.take().map(|entry| entry.state);
@@ -1480,6 +1579,25 @@ mod tests {
     use stark_engine::engine::hybrid::math;
 
     use super::*;
+
+    #[test]
+    fn hybrid_slots_fit_aggregate_memory_and_reduce_to_serial_if_needed() {
+        fn require_send<T: Send>() {}
+        require_send::<HybridLane>();
+
+        let estimate = |tokens| Some(3_000 + 2 * tokens as usize);
+        let primary = context::ContextSizing::fit_loaded(4_096, None, 4_096, 24_000, estimate).unwrap();
+        let (slots, capacity) = fit_hybrid_lanes(primary, 24_000, 3, estimate).unwrap();
+        assert_eq!(slots, 3);
+        assert_eq!(capacity.memory_budget_bytes, 6_000);
+        assert!(capacity.context_tokens < primary.context_tokens);
+        assert!(estimate(capacity.context_tokens).unwrap() * (slots + 1) <= 24_000);
+
+        let (slots, capacity) = fit_hybrid_lanes(primary, 8_000, 3, estimate).unwrap();
+        assert_eq!(slots, 1);
+        assert_eq!(capacity.memory_budget_bytes, 4_000);
+        assert!(fit_hybrid_lanes(primary, 6_000, 3, estimate).is_none());
+    }
 
     #[test]
     fn prefill_progress_reports_content_free_activity_at_bounded_intervals() {

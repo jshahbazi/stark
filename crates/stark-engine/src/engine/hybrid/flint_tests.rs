@@ -293,6 +293,27 @@ fn flint_request_inventory_bounds_lazy_cache_growth_and_window_retention() {
 }
 
 #[stark_test]
+fn flint_slots_share_weights_and_replay_independently_after_failure() {
+    let c = config();
+    let fixture = Fixture::new(&tensors(), &c);
+    let mut first = fixture.load(&c).unwrap();
+    let mut second = first.new_request_slot();
+    assert!(Arc::ptr_eq(&first.weights, &second.weights));
+
+    let mut baseline = fixture.load(&c).unwrap();
+    let expected: Vec<_> = [4, 2, 4, 1].into_iter().map(|token| baseline.step(token).unwrap()).collect();
+    first.step(0).unwrap();
+    assert_eq!(second.step(4).unwrap(), expected[0]);
+    first.step(1).unwrap();
+    assert_eq!(second.step(2).unwrap(), expected[1]);
+    assert!(first.step(u32::MAX).is_err());
+    assert_eq!(first.position, 0);
+    assert_eq!(second.step(4).unwrap(), expected[2]);
+    assert_eq!(first.step(4).unwrap(), expected[0]);
+    assert_eq!(second.step(1).unwrap(), expected[3]);
+}
+
+#[stark_test]
 fn flint_large_declared_cache_does_not_reserve_or_cap_a_small_request() {
     let mut c = config();
     c["num_attention_heads"] = json!(256);
