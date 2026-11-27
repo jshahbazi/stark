@@ -146,6 +146,35 @@ or image accounting. The final run used the pinned STQ header verifier
 at desktop admission, the release template hash with the existing
 Hy4 XML parser, and the same 72-row image accounting as the Hy4 tower.
 
+### Prepared mapped residency
+
+The follow-up worker `20ca0fde0c24f1f8d069e04dd377594021644f6c6b4981b8a95a75caec57adf4`
+reused the GGUF page-preparation and Metal residency code. It faults
+the original mapped weight pages under the same pressure and swap
+budget and stops the legacy keep-alive before wrapping packed weights.
+It holds the admitted weight buffers in a Metal residency set. Image
+and DFly2 settings, prefill width and fitted context matched the
+earlier run.
+
+| Turn | Prefill tok/s | Decode tok/s | OpenCode wall |
+| --- | ---: | ---: | ---: |
+| Fresh 16K | 563.81 | 27.92 | 33.03 s |
+| Continued 27K | 578.57 | 27.07 | 29.90 s |
+| Fresh 27K | 577.81 | 28.59 | 51.14 s |
+
+All three rendered inputs, outputs, reuse counts and DFly2 counts
+matched the demand-mapped runs. The observed prefill gains were
+4–17% and decode gains were 18–25%. Startup including image checks
+increased from 63.76 to 100.49 s. At the two host sampling points,
+memory pressure was normal and swap held at 599.56 MiB. This is one
+paired matrix across two builds. The residency policy stays opt-in.
+The comparison bundles residency and disabling the old keep-alive.
+
+| Private evidence | SHA-256 |
+| --- | --- |
+| Demand-mapped OpenCode aggregate | `6f1c20ed8280150dea85da726bad95c62169349695aedab6de51e45d8f9b3370` |
+| Prepared-resident OpenCode aggregate | `bb19ab585866d169317ef369b59ffe7322c3f368d6b437418a7f05dbc36282d6` |
+
 ## Packed kernel screens
 
 The SPEC1 unpack-once screen borrowed the existing direct F16 Metal
@@ -165,9 +194,22 @@ with `1.26e-5` relative RMS and a median routed-chain change from
 0.2625 to 0.2285 ms. The validation worker exposes the down-only
 single-token path as an opt-in.
 
+The native worker's down-only arm retained the exact eight generated IDs
+from the prior 4K control on both runs. It decoded seven transitions in
+7.987 s on first use and 1.258 s warm. This pair repeated the opt-in
+arm and has no same-build timing control. The component gain does not
+establish a worker throughput gain, so the option stays off by default.
+
 ## Qualification boundary
 
 The native worker is enabled for local STQ validation. The catalog
 continues to identify Sushi as the runtime. Native quality beyond the
 recorded fixtures, default policy, and packaged installation remain
 separate gates. Diagnostics emit aggregate results and hashes.
+
+## Local checks
+
+Rust 1.98.1 release builds and Clippy with warnings denied passed for the
+Hy4 worker. The focused converter tests passed 515 cases across chat,
+images, tool parsing, MTP and STQ preflight. The catalog suite passed
+155 cases. The pinned Rust formatter and Ruff checks passed.
