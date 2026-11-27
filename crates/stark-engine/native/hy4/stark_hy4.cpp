@@ -152,7 +152,6 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         }
         if (context_room <= 0) return arena_bytes_requested != 0 ? 9 : require_mapped ? 8 : 10;
         const auto memory = context_memory(geo, s.metal, chunk, static_cast<uint64_t>(context_room));
-        if (memory.engine_context < 2) return 10;
         const uint32_t selected = select_context(&memory, sizing);
         if (selected < 2 || selected > memory.engine_context || selected > memory.checkpoint_context) return 10;
         const int context = static_cast<int>(selected);
@@ -225,7 +224,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
 
 extern "C" void stark_hy4_close(StarkHy4* session) noexcept { delete session; }
 
-extern "C" int stark_hy4_open_stq_diagnostic(
+extern "C" int stark_hy4_open_stq(
     const stark::hy4::stq::WeightSource* weights, size_t weight_count,
     const stark::hy4::stq::ProjectionSource* experts, size_t expert_count,
     const stark::hy4::stq::TensorSlice* tables, const int32_t* token_map, size_t map_len,

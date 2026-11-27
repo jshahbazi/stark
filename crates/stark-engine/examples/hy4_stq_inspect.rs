@@ -104,11 +104,11 @@ fn run_trunk(
     let pair1_decode = env::var_os("STARK_HY4_STQ_DIAGNOSTIC_PAIR1_DECODE").is_some();
     let resident = env::var_os("STARK_HY4_STQ_DIAGNOSTIC_RESIDENT").is_some();
     let mut session = unsafe {
-        Session::load_stq_diagnostic(
+        Session::load_stq(
             source,
             StqOptions {
                 chunk: test.chunk as u32,
-                context_limit: test.context,
+                context_limit: Some(test.context),
                 profile,
                 round_bf16,
                 pair1_decode,

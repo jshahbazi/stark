@@ -1,11 +1,14 @@
+import hashlib
 import io
 import json
 import sys
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
+
 from stark_convert import desktop as desktop_module
-from stark_convert import hybrid_prepare, model_catalog, native_catalog
+from stark_convert import hy4_stq_preflight, hybrid_prepare, inkling_prepare, model_catalog, native_catalog
 from stark_convert.desktop import Desktop
 
 
@@ -17,41 +20,53 @@ def test_legacy_glm_catalog_api_remains_compatible():
     assert native_catalog.allowed_choice(native_catalog.CHOICE)
 
 
-def test_inkling_catalog_binds_original_target_and_draft_to_default_vision_mode():
+def test_inkling_catalog_binds_original_target_and_draft_to_default_vision_mode(tmp_path, monkeypatch):
     family = native_catalog.INKLING_FAMILY_ID
     choice = native_catalog.INKLING_CHOICE
     [item] = native_catalog.catalog_items(family)
     assert item["artifact_modes"] == ["vision-language"]
     assert item["default_artifact_mode"] == "vision-language"
     assert item["repo"] == "thinkingmachines/Inkling-2-Mini"
+    assert item["revision"] == inkling_prepare.REVISION
+    assert item["download_revision"] == inkling_prepare.DOWNLOAD_REVISION
     assert hybrid_prepare.SOURCES[choice]["required_weight_files"] == [
         "model-00001-of-00001.safetensors",
         "mtp.safetensors",
     ]
     assert native_catalog.source_choice(family, item) == choice
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    report = model_catalog.family_catalog(family, hub=object())
+    host = Desktop(tmp_path / "unused-worker", tmp_path / "library", io.StringIO())
+    try:
+        [published] = host.catalog_report(report, family)["items"]
+        assert published["download_revision"] == inkling_prepare.DOWNLOAD_REVISION
+        report["items"][0]["download_revision"] = "main"
+        with pytest.raises(ValueError):
+            host.catalog_report(report, family)
+    finally:
+        host.stop(quiet=True)
 
 
-def test_hy4_catalog_binds_exact_split_source_and_image_projector():
+def test_hy4_catalog_binds_the_pinned_stq_pack_and_image_tower():
     family = native_catalog.HY4_FAMILY_ID
     choice = native_catalog.HY4_CHOICE
     [item] = native_catalog.catalog_items(family)
     source = hybrid_prepare.SOURCES[choice]
-    assert item["name"] == "Hy4-flash AngelSlim Q3_K"
-    assert item["repo"] == "AngelSlim/Hy4-flash-GGUF"
-    assert item["revision"] == "c50d4dd30be42f2b91138e5731de0e2f32ad56b2"
-    assert item["quantization"] == "Q3_K"
-    assert item["weight_bytes"] == source["weight_bytes"] == 156_415_403_072
+    assert item["name"] == "Hy4-flash Sushi STQ 4bpw"
+    assert item["repo"] == "beamster/Hy4-Flash-Sushi-STQ-4bpw"
+    assert item["revision"] == "61528ba635a623f127c5a7b1e1f4ac2c2b0d4885"
+    assert item["quantization"] == "STQ 4bpw"
+    assert item["weight_bytes"] == source["weight_bytes"] == 208_388_142_680
     assert item["artifact_modes"] == ["vision-language"]
     assert item["default_artifact_mode"] == "vision-language"
-    assert source["required_weight_files"] == [
-        "Hy4-flash-Q3_K-00001-of-00002.gguf",
-        "Hy4-flash-Q3_K-00002-of-00002.gguf",
-        "mmproj-Hy4-flash-bf16.gguf",
-    ]
-    assert source["metadata_repo"] == "tencent/Hy4-flash"
-    assert source["metadata_revision"] == "eccd3123eec73f2040f4c9ed0de1883593470510"
+    assert len(source["weights_patterns"]) == 99
+    assert source["weight_shards"] == 89
+    assert {"model-globals.safetensors", "model-dfly.safetensors"} <= set(source["weights_patterns"])
+    assert source["metadata_repo"] == item["repo"]
+    assert source["metadata_revision"] == item["revision"]
     assert native_catalog.source_choice(family, item) == choice
     assert native_catalog.allowed_choice(choice)
+    assert not native_catalog.allowed_choice("hy4-q3-k")
 
 
 def test_hy4_family_is_visible_as_a_conditional_native_image_family():
@@ -70,6 +85,50 @@ def test_hy4_family_catalog_returns_the_pinned_downloadable_choice_without_hub_s
     assert report["status"] == "ready"
     assert report["family_id"] == native_catalog.HY4_FAMILY_ID
     assert report["items"] == native_catalog.catalog_items(native_catalog.HY4_FAMILY_ID)
+
+
+@pytest.mark.parametrize("matches", [True, False])
+def test_hy4_stq_install_checks_payload_before_publishing(tmp_path, monkeypatch, matches):
+    choice = native_catalog.HY4_CHOICE
+    weights = {"model-globals.safetensors": b"target", "model-dfly.safetensors": b"draft"}
+    source = {
+        **hybrid_prepare.SOURCES[choice],
+        "weights_patterns": sorted(weights),
+        "weight_shards": len(weights),
+        "weight_bytes": sum(map(len, weights.values())),
+    }
+    monkeypatch.setitem(hybrid_prepare.SOURCES, choice, source)
+    inventory = "".join(
+        f"{name}\0{len(weights[name])}\0{hashlib.sha256(weights[name]).hexdigest()}\n"
+        for name in source["weights_patterns"]
+    )
+    monkeypatch.setattr(hy4_stq_preflight, "CONTENTS_SHA256", hashlib.sha256(inventory.encode()).hexdigest())
+
+    def download(repo, *, revision, allow_patterns, local_dir, **_kwargs):
+        assert (repo, revision) == (source["weights_repo"], source["weights_revision"])
+        assert allow_patterns == source["weights_patterns"]
+        for name in allow_patterns:
+            payload = weights[name]
+            (local_dir / name).write_bytes(payload if matches else payload.upper())
+
+    def inspect(directory):
+        assert (directory / ".cache" / "stark-download.json").is_file()
+        assert {file.name for file in directory.iterdir() if file.is_file()} == set(weights)
+
+    monkeypatch.setattr(hybrid_prepare, "snapshot_download", download)
+    monkeypatch.setattr(hy4_stq_preflight, "inspect_pack", inspect)
+    output = tmp_path / "model"
+    if matches:
+        result = hybrid_prepare.prepare(choice, output, offline=True, artifact_mode="vision-language")
+        assert result["status"] == "prepared"
+        assert result["artifact_mode"] == "vision-language"
+        assert {file.name: file.read_bytes() for file in output.iterdir() if file.is_file()} == weights
+        assert not (output / ".cache" / "stark-download.json").exists()
+    else:
+        with pytest.raises(hybrid_prepare.ConversionError, match="file contents do not match"):
+            hybrid_prepare.prepare(choice, output, offline=True, artifact_mode="vision-language")
+        assert not output.exists()
+        assert (tmp_path / "model.native-download" / ".cache" / "stark-download.json").is_file()
 
 
 def test_qwen_native_catalog_preserves_text_source_and_adds_retained_image_choices():

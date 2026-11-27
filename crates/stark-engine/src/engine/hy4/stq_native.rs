@@ -171,7 +171,7 @@ impl Binding {
 #[derive(Clone, Copy, Default)]
 pub struct StqOptions {
     pub chunk: u32,
-    pub context_limit: u32,
+    pub context_limit: Option<u32>,
     pub profile: bool,
     pub round_bf16: bool,
     pub pair1_decode: bool,
@@ -194,7 +194,7 @@ pub struct StqOptions {
 }
 
 unsafe extern "C" {
-    fn stark_hy4_open_stq_diagnostic(
+    fn stark_hy4_open_stq(
         weights: *const WeightSource,
         weight_count: usize,
         experts: *const ProjectionSource,
@@ -220,12 +220,12 @@ unsafe extern "C" {
 }
 
 impl Session {
-    /// Open the pinned artifact for native qualification.
+    /// Open the pinned original-format Hy4 STQ artifact.
     ///
     /// # Safety
     /// The validated files must remain immutable for this session's lifetime,
     /// including all GPU work. The native runtime maps the original packed pages.
-    pub unsafe fn load_stq_diagnostic(
+    pub unsafe fn load_stq(
         source: &StqSource,
         options: StqOptions,
     ) -> Result<Self, String> {
@@ -280,7 +280,7 @@ impl Session {
         }
         source.verify_unchanged().map_err(|e| e.to_string())?;
         let mut selection = ContextSelection {
-            limit: Some(options.context_limit),
+            limit: options.context_limit,
             pool_size: None,
             sizing: None,
         };
@@ -290,7 +290,7 @@ impl Session {
         // Only the mapped page ranges and duplicated table descriptors survive
         // open. All temporary alias strings and descriptors remain valid here.
         let status = unsafe {
-            stark_hy4_open_stq_diagnostic(
+            stark_hy4_open_stq(
                 weights.as_ptr(),
                 weights.len(),
                 experts.as_ptr(),
@@ -337,7 +337,7 @@ impl Session {
             mapped_experts: true,
             draft_head_q5: false,
             arena_bytes: 0,
-            sizing: selection.sizing.expect("successful STQ open selected a context"),
+            sizing: selection.sizing.ok_or("invalid finite context limit")??,
             pool_size: selection.pool_size.expect("successful STQ open selected a pool size"),
             max_drafts: dfly.drafts as usize,
         };

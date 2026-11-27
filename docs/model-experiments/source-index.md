@@ -32,6 +32,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ## Qwen3.8-Flash-Next and Lily
 
+- [Generation context policy follow-up](2026-11-26-context-sizing-follow-up.md) · Experiment, 2026-11-26, attempt 20261126-CTX-02
 - [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
 
 ### Native decode, kernels and engine comparisons
@@ -116,6 +117,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ## Dense Qwen, Qwen MoE and GGUF
 
+- [Generation context policy follow-up](2026-11-26-context-sizing-follow-up.md) · Experiment, 2026-11-26, attempt 20261126-CTX-02
 - [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
 
 ### Qwen3.8 27B, catalog admission and image parity
@@ -183,6 +185,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Hy4-Flash Sushi STQ wide-routing decode and FFN follow-up](2026-11-27-hy4-stq-decode-prefill-followup.md) · Model experiment, 2026-11-27
 - [Hy4-Flash Sushi STQ attention-to-FFN boundary](2026-11-27-hy4-stq-attention-ffn-boundary.md) · Model experiment, 2026-11-27
 - [Hy4-Flash STQ KV width and wide dense preparation](2026-11-27-hy4-stq-kv-width-dense-io.md) · Model experiment, 2026-11-27
+- [Hy4-Flash STQ catalog and runtime defaults](2026-11-27-hy4-stq-catalog-defaults.md) · Model experiment, 2026-11-27
 - [Hy4-flash AngelSlim Q3_K tool calling](2026-11-26-hy4-tool-calling.md) · Model experiment, 2026-11-26
 - [Hy4-flash defaults through OpenCode](2026-11-26-hy4-opencode-defaults.md) · Model experiment, 2026-11-26
 - [Resident Hy4-flash through OpenCode](2026-11-26-hy4-resident-opencode.md) · Model experiment, 2026-11-26
@@ -242,6 +245,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ## Inkling 2 Mini
 
+- [Generation context policy follow-up](2026-11-26-context-sizing-follow-up.md) · Experiment, 2026-11-26, attempt 20261126-CTX-02
 - [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
 
 ### References, native milestones and follow-up
@@ -366,6 +370,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ## Shared runtime, catalog and image qualification
 
+- [Generation context policy follow-up](2026-11-26-context-sizing-follow-up.md) · Experiment, 2026-11-26, attempt 20261126-CTX-02
 - [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
 - [Image-support work: findings, failed attempts and remaining qualification](2026-11-08-image-support-retrospective.md) · Experiment, 2026-11-08
 - [Resource ceilings and installed-app recovery](2026-11-09-resource-admission.md) · Experiment, 2026-11-09

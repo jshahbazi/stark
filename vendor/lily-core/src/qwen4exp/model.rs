@@ -1976,15 +1976,18 @@ impl Qwen4ExpModel {
         self.prefill_chunk
     }
 
-    /// A short resumed midpoint can switch the projection arithmetic below 17
-    /// rows from the path selected for the full containing chunk.
+    /// Minimum suffix that preserves the containing chunk's projection arithmetic.
+    pub fn midpoint_restore_min_suffix_tokens(&self) -> usize {
+        crate::kernels::skinny::DENSE_SMALLM_THRESHOLD + 1
+    }
+
     pub fn midpoint_suffix_compatible(
         &self,
         position: usize,
         suffix_rows: usize,
     ) -> bool {
         position.is_multiple_of(self.prefill_chunk)
-            || suffix_rows > crate::kernels::skinny::DENSE_SMALLM_THRESHOLD
+            || suffix_rows >= self.midpoint_restore_min_suffix_tokens()
     }
 
     /// Sets the prompt tokens per batched prefill pass (a power of two up

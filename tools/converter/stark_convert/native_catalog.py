@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 
 from .inkling_prepare import CHOICE as INKLING_CHOICE
+from .inkling_prepare import DOWNLOAD_REVISION as INKLING_DOWNLOAD_REVISION
 from .inkling_prepare import FAMILY as INKLING_FAMILY_ID
 
 FAMILY_ID = "glm5_next"
@@ -15,9 +16,7 @@ FLINT_FAMILY_ID = "flint"
 FLINT_CHOICE = "flint-int4"
 RIPPLE_FAMILY_ID = "ricursive"
 HY4_FAMILY_ID = "hy4_flash"
-HY4_CHOICE = "hy4-q3-k"
-HY4_SUSHI_REPO = "beamster/Hy4-Flash-Sushi-STQ-4bpw"
-HY4_SUSHI_REVISION = "61528ba635a623f127c5a7b1e1f4ac2c2b0d4885"
+HY4_CHOICE = "hy4-sushi-stq"
 
 _NATIVE_CHOICES = {
     FAMILY_ID: (CHOICE,),
@@ -65,7 +64,9 @@ def family_definition(family: str = FAMILY_ID) -> dict:
         "model_kind": "language",
         "conversion": {
             "status": "implemented",
-            "containers": [".safetensors"] if family in {FLINT_FAMILY_ID, INKLING_FAMILY_ID} else [".gguf"],
+            "containers": [".safetensors"]
+            if family in {FLINT_FAMILY_ID, INKLING_FAMILY_ID, HY4_FAMILY_ID}
+            else [".gguf"],
             "source_formats": [source_for(choice)["quantization"] for choice in _NATIVE_CHOICES[family]]
             if family in {RIPPLE_FAMILY_ID, INKLING_FAMILY_ID, HY4_FAMILY_ID}
             else ["MLX affine INT4"]
@@ -108,7 +109,7 @@ def catalog_item(choice: str = CHOICE) -> dict:
     elif choice in {"ripple-q8", "ripple-q4-k-m"}:
         name = "Ripple-65B-Preview-GGUF"
     elif choice == HY4_CHOICE:
-        name = "Hy4-flash AngelSlim Q3_K"
+        name = "Hy4-flash Sushi STQ 4bpw"
     elif choice == FLINT_CHOICE:
         name = "Flint INT4"
     elif choice == QWEN_CHOICE:
@@ -125,6 +126,7 @@ def catalog_item(choice: str = CHOICE) -> dict:
         "id": hashlib.sha256((repo + "@" + revision).encode()).hexdigest()[:32],
         "repo": repo,
         "revision": revision,
+        **({"download_revision": INKLING_DOWNLOAD_REVISION} if choice == INKLING_CHOICE else {}),
         "name": name,
         "size_label": "65B" if source["architecture"] == RIPPLE_FAMILY_ID else None,
         "parameter_count": 64_782_689_360 if source["architecture"] == RIPPLE_FAMILY_ID else None,
@@ -141,28 +143,9 @@ def catalog_item(choice: str = CHOICE) -> dict:
     }
 
 
-def catalog_items(family: str, *, include_unavailable: bool = False) -> list[dict]:
-    """Return fixed native choices and, for browsing, known unavailable exports."""
-    items = [catalog_item(choice) for choice in _NATIVE_CHOICES.get(family, ())]
-    if family == HY4_FAMILY_ID and include_unavailable:
-        items.append(
-            {
-                "id": hashlib.sha256(f"{HY4_SUSHI_REPO}@{HY4_SUSHI_REVISION}".encode()).hexdigest()[:32],
-                "repo": HY4_SUSHI_REPO,
-                "revision": HY4_SUSHI_REVISION,
-                "name": "Hy4-flash Sushi STQ 4bpw",
-                "size_label": None,
-                "parameter_count": None,
-                "weight_bytes": 208_397_806_219,
-                "quantization": "STQ 4bpw",
-                "artifact_modes": ["vision-language"],
-                "default_artifact_mode": "vision-language",
-                "downloadable": False,
-                "model_group": None,
-                "unavailable_reason": "Requires Sushi. To run Hy4-flash in Stark, choose AngelSlim Q3_K.",
-            }
-        )
-    return items
+def catalog_items(family: str) -> list[dict]:
+    """Return fixed native catalog choices."""
+    return [catalog_item(choice) for choice in _NATIVE_CHOICES.get(family, ())]
 
 
 def source_choice(family: str, item: object) -> str | None:

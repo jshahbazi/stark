@@ -1,4 +1,4 @@
-# Native GLM-5.3-Flash, Qwen3.8-Flash-Next, Flint and Ripple
+# Native hybrid generation models
 
 Stark has a separate native Rust/Metal forward path for `glm5_next`,
 `qwen4_exp` and `flint`. It reads their prepared quantized GGUF or MLX
@@ -27,8 +27,18 @@ without drafting; a worker without the source verifier decodes serially and
 advertises no MTP. See the [native worker checks](model-experiments/2026-11-21-inkling-mini-worker.md)
 and [performance plan](INKLING_2_MINI_PLAN.md).
 
-The worker currently caps context at 32,768 tokens on the tested M5 Max path
-and 4,352 on the other Metal path. Context still depends on available memory.
+The worker selects a fixed logical window at load from the memory fit,
+the 1,048,576-token source limit and the active Metal geometry. It allocates
+request state within that window as needed. The alternate path without
+source-grid prefill has a 4,352-token geometry limit. An affine8 worker
+advertised 540,672 tokens on an M5 Max under the recorded load budget.
+[Load-time and request allocation evidence](model-experiments/2026-11-24-inkling-mini-request-context.md)
+
+Hy4-flash uses a separate feature-enabled native worker path. Its streamed
+Q3_K artifact retains the BF16 projector and native NextN for text. The worker
+uses load-time sizing with an optional explicit context cap.
+[Packaged catalog run](model-experiments/2026-11-26-hy4-desktop-catalog.md) ·
+[Automatic and explicit-cap runs](model-experiments/2026-11-25-hy4-context-ladder.md)
 
 ```sh
 uv run --project tools/converter --locked python -m stark_convert.hybrid_prepare inkling2-mini \
@@ -55,11 +65,15 @@ The preparation command uses these qualified checkpoint identities:
 | `glm53-q2` | `unsloth/GLM-5.3-Flash-GGUF`, `UD-Q2_K_XL`, revision `a38483c8cd5df544f53d70fb281afe97369d5ab6` | 108,720,071,552 bytes, 101.25 GiB |
 | `qwen38-mixed` | `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit`, revision `b2c422f3c643e36f04227a64d61796b44a4b1029` | 106,195,031,237 bytes, 98.90 GiB |
 | `qwen38-lily-q4-xl` | `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`, revision `0f94842e3682b49acace4daeb4cf2e65a6f94f83` | 106,905,155,192 bytes, 99.56 GiB |
+| `qwen38-mlx-serve-mixed` (text) | `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`, revision `788c07a8725642bccf13a0a3b8a21954ab84b4f2`, external affine with text MTP | 107,303,406,192 bytes including the external table. [262,144-token installed receipt](CONTEXT_SIZING_INVENTORY.md#installed-generation-receipts-from-the-audit) |
+| `qwen38-mlx-serve-mixed --artifact-mode vision-language` | Same source revision, schema-6 retained BF16 tower and text MTP, separate prepared manifest | Same payload bytes in the prepared clone. [Bounded image and text lifecycle evidence](archive/runs/2026-11-09-model-launch-double-check.md) |
 | `flint-int4` | `RecursiveSI/flint-int4`, revision `3b93f9053b530488405ae9fca51d4900d6ce21f0` | 22,568,912,600 bytes, 21.02 GiB |
 | `ripple-q8` | `AtomicChat/Ripple-65B-Preview-GGUF`, Q8_0, revision `57066fdb2348a53f2261f096e0a793b9554b4106` | 68,840,113,568 bytes, 64.11 GiB |
 | `ripple-q4-k-m` | `AtomicChat/Ripple-65B-Preview-GGUF`, standard Q4_K_M, revision `df550a7178a87bbfb6ee2bdbd37603c553d536ee` | 38,798,820,576 bytes, 36.13 GiB |
 | `inkling2-mini` (default) | Stark 8-bit dense artifact derived from `thinkingmachines/Inkling-2-Mini` at `6e7c8248f75265bdd4fbab5273304243b5d8c2cb`; target SHA-256 `c9e14848ad017467dc0deb91c6aa67022e181dbcdfe02a1b04024434bf9acddd` | 18,687,815,064 bytes, 17.40 GiB, including the DSpark head; preparation downloads the 20,161,820,584-byte original and needs about 43.1 GB free while both exist |
 | `inkling2-mini-original` | `thinkingmachines/Inkling-2-Mini`, source NVFP4/MXFP8, revision `6e7c8248f75265bdd4fbab5273304243b5d8c2cb` | 20,161,820,584 bytes, 18.78 GiB, including the separate DSpark head |
+| `hy4-sushi-stq` | `beamster/Hy4-Flash-Sushi-STQ-4bpw` revision `61528ba635a623f127c5a7b1e1f4ac2c2b0d4885` | 208,388,142,680 weight-file bytes including vision and DFly2. Sole Hy4-flash catalog choice. [Native catalog evidence](model-experiments/2026-11-27-hy4-stq-catalog-defaults.md) |
+| `hy4-q3-k` (local preparation) | `AngelSlim/Hy4-flash-GGUF` revision `c50d4dd30be42f2b91138e5731de0e2f32ad56b2`, with `tencent/Hy4-flash` metadata at `eccd3123eec73f2040f4c9ed0de1883593470510` | 156,415,403,072 weight-file bytes including the BF16 projector. [Packaged evidence](model-experiments/2026-11-26-hy4-desktop-catalog.md) |
 
 Both Inkling choices download from the publisher's [original public upload](https://huggingface.co/thinkingmachines/Inkling-2-Mini/tree/1fb4134b9a74f9681054f4ef82e4bf1f458a2337). The qualified revision in the table returns HTTP 404 from the Hub. The public upload lists the same byte counts and SHA-256 hashes for the target and draft weights. Its config, processor config, chat template, tokenizer, quantization config and weight index also match Stark's pinned SHA-256 hashes. Preparation checks the pinned bytes before publishing and retains the qualified revision in the catalog and prepared artifact identity.
 
@@ -231,9 +245,12 @@ use zero drafts. Text snapshots match MTP enabled/disabled, reported as
 `mtp-enabled` in the cache key. The exact Lily startup memory recipe includes
 the resident head and its state/scratch even while image execution has MTP off.
 The pinned Lily Q4-XL artifact has source-bound vision-tower and
-worker lifecycle evidence. Preparation support for the separate MLX-Serve
-mixed-4/8-bit artifact does not establish its image execution qualification.
-Full retained-decoder numerical parity and image performance remain unverified.
+worker lifecycle evidence. A separately prepared schema-6 MLX-Serve
+mixed-4/8-bit clone passed bounded text MTP, 4,096-token prefix reuse and a
+one-token image followed by cold text recovery. The run paged. Candidate
+load sizing and request admission with its tower and predictor resident,
+full retained-decoder numerical parity, and image performance remain unverified.
+[Prepared-clone run](archive/runs/2026-11-09-model-launch-double-check.md)
 Installed releases can have earlier capabilities. See the
 [retained image preparation and validation record](archive/runs/2026-11-07-qwen-image-families.md#original-format-flash-next)
 for exact checkpoints, builds, memory admission and remaining limits.

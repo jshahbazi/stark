@@ -42,6 +42,10 @@ use tokenizers::Tokenizer;
 pub enum Error {
     #[error("native hybrid image request cancelled")]
     Cancelled,
+    #[error("invalid finite context limit")]
+    InvalidContextLimit,
+    #[error("GLM EXL3 requires the optional macOS arm64 backend")]
+    GlmExl3Unavailable,
     #[error("invalid native hybrid model: {0}")]
     Invalid(&'static str),
     #[error("unsupported native hybrid model: {0}")]
@@ -297,6 +301,19 @@ pub fn recognizes(path: &Path) -> Result<bool> {
         ))
 }
 
+pub enum GenerationContextSizing {
+    Shared(super::context::ContextSizing),
+    #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+    BackendFixed {
+        checkpoint_context_tokens: u32,
+        backend_context_tokens: u32,
+        source: &'static str,
+    },
+}
+
+#[cfg(any(test, all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64")))]
+const GLM_EXL3_CONTEXT_CAP: u32 = 32_768;
+
 enum Forward {
     Flint(flint::FlintModel),
     Ripple(ripple::RippleModel),
@@ -306,6 +323,15 @@ enum Forward {
     Qwen(qwen::QwenModel),
     #[cfg(all(feature = "metal", target_os = "macos"))]
     Lily(Box<lily::LilyModel>),
+}
+
+#[cfg(any(test, all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64")))]
+fn glm_exl3_context_capacity(checkpoint: u32) -> std::result::Result<u32, &'static str> {
+    let capacity = checkpoint.min(GLM_EXL3_CONTEXT_CAP);
+    if capacity < 2 {
+        return Err("invalid_finite_context_limit");
+    }
+    Ok(capacity)
 }
 
 fn glm_exl3_checkpoint(config: &Value) -> bool {
@@ -416,6 +442,14 @@ impl Model {
         if outer.get("type").and_then(Value::as_str) == Some(uzu::CONFIG_TYPE) {
             return Self::load_uzu(path);
         }
+        let exl3 = outer.get("expert_streaming").is_some();
+        if exl3 && !glm_exl3_checkpoint(&outer) {
+            return Err(Error::Unsupported("GLM streaming pack format"));
+        }
+        #[cfg(not(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64")))]
+        if exl3 {
+            return Err(Error::GlmExl3Unavailable);
+        }
         let text = outer.get("text_config").unwrap_or(&outer);
         let vocab_size = text
             .get("vocab_size")
@@ -425,8 +459,8 @@ impl Model {
         let checkpoint_context = text
             .get("max_position_embeddings")
             .and_then(Value::as_u64)
-            .filter(|n| *n > 0 && *n <= u32::MAX as u64)
-            .ok_or(Error::Invalid("context size"))? as u32;
+            .filter(|n| (2..=u64::from(u32::MAX)).contains(n))
+            .ok_or(Error::InvalidContextLimit)? as u32;
         let tokenizer =
             Arc::new(Tokenizer::from_file(path.join("tokenizer.json")).map_err(|_| Error::Invalid("tokenizer"))?);
         let vocab = tokenizer.get_vocab(true);
@@ -463,13 +497,10 @@ impl Model {
         if eos.is_empty() {
             return Err(Error::Invalid("EOS IDs"));
         }
-        let (forward, max_context) = if outer.get("expert_streaming").is_some() {
-            if !glm_exl3_checkpoint(&outer) {
-                return Err(Error::Unsupported("GLM streaming pack format"));
-            }
+        let (forward, max_context) = if exl3 {
             #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
             {
-                let context = checkpoint_context.min(32_768);
+                let context = glm_exl3_context_capacity(checkpoint_context).map_err(|_| Error::InvalidContextLimit)?;
                 let canonical = path.canonicalize()?;
                 let mut options = glm_exl3::LoadOptions::new(context as usize);
                 options.prefix_reuse = cfg!(stark_glm_exl3_prefix_available);
@@ -486,7 +517,7 @@ impl Model {
             }
             #[cfg(not(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64")))]
             {
-                return Err(Error::Unsupported("GLM EXL3 requires the optional macOS arm64 backend"));
+                unreachable!("optional bridge availability checked before model load");
             }
         } else if mixed_precision_checkpoint(&outer) {
             #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -724,25 +755,40 @@ impl Model {
         self.max_context
     }
 
-    /// Estimate a cold text request under the loaded family's memory policy.
+    /// Select the generation window under the loaded family's policy.
     pub fn context_sizing(
         &self,
         memory_budget_bytes: usize,
-    ) -> std::result::Result<Option<super::context::ContextSizing>, &'static str> {
-        #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
-        if matches!(self.forward, Forward::GlmExl3(_)) {
-            // The bridge's context is admitted as part of its native load.
-            return Ok(None);
-        }
-        super::context::ContextSizing::fit_loaded(
+    ) -> std::result::Result<GenerationContextSizing, &'static str> {
+        use super::context::{BackendContextBound, ContextSizing, LOAD_PREFILL_PROBE_TOKENS};
+
+        let backend_bound = match &self.forward {
+            Forward::Flint(_) | Forward::Ripple(_) | Forward::Glm(_) | Forward::Qwen(_) => None,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(_) => Some(BackendContextBound {
+                context_tokens: lily::LilyModel::kernel_context_limit(),
+                source: "lily_attention_max_seq",
+            }),
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            Forward::GlmExl3(_) => {
+                return Ok(GenerationContextSizing::BackendFixed {
+                    checkpoint_context_tokens: self.checkpoint_context,
+                    backend_context_tokens: GLM_EXL3_CONTEXT_CAP,
+                    source: "glm_exl3_bridge",
+                });
+            },
+        };
+        ContextSizing::fit_loaded(
             self.checkpoint_context,
+            backend_bound,
             self.max_context,
             memory_budget_bytes,
             |context| {
-                let input = (context - 1).min(super::context::LOAD_PREFILL_PROBE_TOKENS);
+                let input = (context - 1).min(LOAD_PREFILL_PROBE_TOKENS);
                 self.generation_memory_bytes(context, input, true)
             },
         )
+        .map(GenerationContextSizing::Shared)
     }
 
     /// Allocation admission uses the loaded execution family and cache policy.
@@ -1370,6 +1416,15 @@ impl Model {
         None
     }
 
+    /// Physical chunk spacing and minimum suffix at an interior Lily snapshot.
+    pub fn prefix_midpoint_restore_geometry(&self) -> Option<(usize, usize)> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return model.prefix_midpoint_restore_geometry();
+        }
+        None
+    }
+
     /// Whether a compatible retained prefix leaves a supported suffix shape.
     pub fn prefix_suffix_compatible(
         &self,
@@ -1512,6 +1567,13 @@ mod tests {
         assert!(!pinned_lily_q4_xl(LILY_Q4_XL_SOURCE, LILY_Q4_XL_REVISION, &"0".repeat(64)));
         assert!(!pinned_lily_q4_xl("", "", ""));
         assert!(!Model::pinned_lily_q4_xl_artifact(None));
+    }
+
+    #[stark_test]
+    fn glm_exl3_capacity_is_admitted_at_the_bridge_cap() {
+        assert_eq!(glm_exl3_context_capacity(4096), Ok(4096));
+        assert_eq!(glm_exl3_context_capacity(262_144), Ok(32_768));
+        assert_eq!(glm_exl3_context_capacity(1), Err("invalid_finite_context_limit"));
     }
 
     #[stark_test]

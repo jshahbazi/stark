@@ -667,6 +667,23 @@ class PrefixQualificationTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(SystemExit):
                 harness.advertised_tail({"tail_tokens": invalid}, 2048)
 
+    def test_midpoint_restore_geometry_changes_restore_only_off_the_physical_grid(self):
+        settings = {"physical_chunk_tokens": 4096, "midpoint_restore_min_suffix_tokens": 17}
+        midpoint = harness.advertised_midpoint(settings, 2048, 1)
+        self.assertIsNone(harness.advertised_midpoint({}, 4096, 1))
+        expected = harness.Expectation(2048, boundary_only=True, midpoint=midpoint)
+        ids = list(range(4200))
+        key = ("synthetic-scope", 8192, False)
+        self.assertEqual(expected.boundary(2049), 2048)
+        for boundary, suffix, reuse in ((2048, 16, 0), (2048, 17, 2048), (4096, 2, 4096)):
+            with self.subTest(boundary=boundary, suffix=suffix):
+                expected.record(ids[:boundary + 64], key, {})
+                self.assertEqual(expected.predict(ids[:boundary + suffix], key), reuse)
+        for invalid in ({"physical_chunk_tokens": 4096}, {**settings, "physical_chunk_tokens": 3000},
+                        {**settings, "midpoint_restore_min_suffix_tokens": True}):
+            with self.subTest(settings=invalid), self.assertRaises(SystemExit):
+                harness.advertised_midpoint(invalid, 2048, 1)
+
     def test_tail_and_default_draft_cases_are_added_only_when_advertised(self):
         def cases(steps):
             return {label: (ids, options) for kind, label, ids, options in steps if kind == "case"}

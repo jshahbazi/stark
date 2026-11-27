@@ -583,6 +583,9 @@ the original BF16 working copies and serial-tail policy. Model integration
 uses the existing convolution rollback rule, fused into the GDN and PLE
 convolution dispatches for the capture-bearing pass, plus the draft-hidden
 row layout. The normal prefill entry point and non-Lily layouts remain separate.
+Stark's generation readiness reads the midpoint restore minimum through
+`src/qwen4exp/model.rs`, which uses the same dense small-row projection
+threshold as the existing restore compatibility check.
 Lily's Apache-2.0 attribution applies. Operator and full-model qualification
 are tracked independently in the midpoint experiment record.
 

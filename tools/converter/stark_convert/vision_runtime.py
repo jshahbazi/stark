@@ -412,9 +412,9 @@ def model_image_family(config: object, model: Path) -> dict | None:
             return {"profile": inkling_prepare.VISION_PROFILE, "version": 1}
         return None
     if isinstance(config, dict) and config.get("model_type") == "hy_v4_flash":
-        from .hy4_stq_preflight import validation_requested
+        from .hy4_stq_preflight import matches_layout
 
-        if validation_requested(model):
+        if matches_layout(model):
             return {"profile": HY4_STQ_VISION_PROFILE, "version": 1}
         from .hybrid_prepare import prepared_identity
 

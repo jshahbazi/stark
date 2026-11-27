@@ -9,7 +9,7 @@ use std::{
     slice,
 };
 
-use super::context::ContextSizing;
+use super::context::{BackendContextBound, ContextSizing};
 
 pub mod stq_dfly;
 pub mod stq_layout;
@@ -166,20 +166,18 @@ impl ContextMemory {
         let context = u64::from(context);
         let draft = context + u64::from(self.draft_slack);
         let pool = u64::from(self.pool_size);
-        usize::try_from(
-            context * self.cache_bytes_per_token
-                + draft * self.draft_cache_bytes_per_token
-                + (context / pool + 1) * self.pool_bytes_per_row
-                + (draft / pool + 1) * self.draft_pool_bytes_per_row,
-        )
-        .ok()
+        let cache = context.checked_mul(self.cache_bytes_per_token)?;
+        let draft_cache = draft.checked_mul(self.draft_cache_bytes_per_token)?;
+        let pooled = (context.checked_div(pool)? + 1).checked_mul(self.pool_bytes_per_row)?;
+        let draft_pooled = (draft.checked_div(pool)? + 1).checked_mul(self.draft_pool_bytes_per_row)?;
+        usize::try_from(cache.checked_add(draft_cache)?.checked_add(pooled)?.checked_add(draft_pooled)?).ok()
     }
 }
 
 struct ContextSelection {
     limit: Option<u32>,
     pool_size: Option<u32>,
-    sizing: Option<ContextSizing>,
+    sizing: Option<Result<ContextSizing, &'static str>>,
 }
 
 unsafe extern "C" fn select_context(
@@ -191,20 +189,28 @@ unsafe extern "C" fn select_context(
     let selection = unsafe { &mut *selection.cast::<ContextSelection>() };
     selection.pool_size = Some(memory.pool_size);
     let budget = stark_resource_budget::inference_memory_budget(memory.budget as usize);
-    let Some(mut sizing) = ContextSizing::fit(
+    let sizing = hy4_context_sizing(memory, budget, selection.limit);
+    let context_tokens = sizing.as_ref().map_or(0, |sizing| sizing.context_tokens);
+    selection.sizing = Some(sizing);
+    context_tokens
+}
+
+fn hy4_context_sizing(
+    memory: &ContextMemory,
+    budget: usize,
+    cap: Option<u32>,
+) -> Result<ContextSizing, &'static str> {
+    ContextSizing::fit_loaded(
         memory.checkpoint_context,
-        memory.engine_context,
+        Some(BackendContextBound {
+            context_tokens: memory.engine_context,
+            source: "hy4_metal_buffer_or_i32_index",
+        }),
         memory.checkpoint_context.min(memory.engine_context),
         budget,
         |context| memory.estimate(context),
-    ) else {
-        return 0;
-    };
-    if let Some(limit) = selection.limit {
-        sizing.context_tokens = sizing.context_tokens.min(limit);
-    }
-    selection.sizing = Some(sizing);
-    sizing.context_tokens
+    )?
+    .with_user_cap(cap)
 }
 
 unsafe extern "C" {
@@ -374,7 +380,7 @@ impl Session {
                 6 => "hy4_expert_arena_load_failed",
                 8 => "hy4_mapped_experts_exceed_budget",
                 9 => "hy4_larger_arena_exceeds_budget",
-                10 => "resource_budget_exceeded",
+                10 => selection.sizing.and_then(Result::err).unwrap_or("resource_budget_exceeded"),
                 _ => "hy4_native_load_failed",
             });
         }
@@ -384,8 +390,8 @@ impl Session {
             mapped_experts: mapped != 0,
             draft_head_q5: actual_draft_head_q5 != 0,
             arena_bytes,
-            sizing: selection.sizing.expect("successful Hy4 open selected a context"),
-            pool_size: selection.pool_size.expect("successful Hy4 open selected a pool size"),
+            sizing: selection.sizing.ok_or("invalid_finite_context_limit")??,
+            pool_size: selection.pool_size.ok_or("invalid_hy4_pool_size")?,
             max_drafts: options.max_drafts,
         })
     }
@@ -549,5 +555,46 @@ mod tests {
 impl Drop for Session {
     fn drop(&mut self) {
         unsafe { stark_hy4_close(self.inner.as_ptr()) }
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::*;
+    use crate::engine::context::ContextConstraint;
+
+    #[stark_test]
+    fn hy4_callback_selects_and_records_its_admitted_user_cap() {
+        let mut memory = ContextMemory {
+            checkpoint_context: 262_144,
+            engine_context: 65_536,
+            pool_size: 128,
+            draft_slack: 16,
+            budget: 512 * 1024 * 1024,
+            cache_bytes_per_token: 16,
+            draft_cache_bytes_per_token: 16,
+            pool_bytes_per_row: 16,
+            draft_pool_bytes_per_row: 16,
+        };
+        let mut selection = ContextSelection {
+            limit: Some(32_768),
+            pool_size: None,
+            sizing: None,
+        };
+        let context = unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast()) };
+        assert_eq!(context, 32_768);
+        assert_eq!(selection.pool_size, Some(memory.pool_size));
+        let sizing = selection.sizing.unwrap().unwrap();
+        assert_eq!(sizing.limiting_factor, ContextConstraint::UserCap);
+        assert_eq!(sizing.user_context_cap, Some(32_768));
+        assert_eq!(sizing.backend_bound.unwrap().source, "hy4_metal_buffer_or_i32_index");
+        memory.pool_size = 0;
+        assert_eq!(unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast()) }, 0);
+        assert_eq!(selection.sizing.unwrap().unwrap_err(), "context_memory_estimate_unavailable");
+        memory.engine_context = 1;
+        assert_eq!(unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast()) }, 0);
+        assert_eq!(selection.sizing.unwrap().unwrap_err(), "invalid_finite_context_limit");
     }
 }

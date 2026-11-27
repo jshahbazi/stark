@@ -58,6 +58,10 @@ def mtp_capabilities(readiness: Any) -> dict[str, Any]:
                 (sampling, verification, maximum) == (_INKLING_SAMPLING, _INKLING_SHORT_VERIFICATION, 3)
                 and default == maximum
             )
+            or (
+                (sampling, verification, maximum) == (_HY4_SAMPLING, _HY4_STQ_VERIFICATION, 5)
+                and default == recommended
+            )
         )
         or operations != ["generate"]
         or not isinstance(operations, list)

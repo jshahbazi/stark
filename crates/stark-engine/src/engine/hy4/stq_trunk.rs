@@ -514,8 +514,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    #[ignore = "requires STARK_HY4_STQ_TEST_PACK pointing to the pinned artifact"]
+    #[stark_engine_macros::stark_test]
+    #[ignore] // Requires STARK_HY4_STQ_TEST_PACK pointing to the pinned artifact.
     fn binds_pinned_trunk_headers() {
         let model = std::env::var_os("STARK_HY4_STQ_TEST_PACK").expect("set the pinned STQ pack path");
         let source = StqSource::open(Path::new(&model)).unwrap();

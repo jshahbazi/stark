@@ -768,6 +768,13 @@ impl<B: Backend> VisionLanguageModel<B> {
         !self.failed && self.text_model().has_dense_mtp()
     }
 
+    pub fn generation_cache_context_bound(&self) -> Option<super::context::BackendContextBound> {
+        [&self.language_model, self.text_model()]
+            .into_iter()
+            .filter_map(LanguageModel::generation_cache_context_bound)
+            .min_by_key(|bound| bound.context_tokens)
+    }
+
     pub fn max_context_length(&self) -> Option<u32> {
         self.language_model.max_context_length()
     }

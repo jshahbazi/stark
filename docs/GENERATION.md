@@ -34,10 +34,10 @@ When a backend has no declared finite context maximum, the CLI tokenizes the con
 | `--context-tokens N` | model maximum, or automatic memory planning when undeclared | Upper context budget for prompt plus reply |
 | `--max-new-tokens N` | remaining context or memory-planned execution allowance | Explicit reply budget when supplied |
 | `--thinking` | off | Enable reasoning where supported; GLM uses Max effort when on and Low when off |
-| `--mtp`, `--no-mtp` | off | Enable or disable exact MTP for this terminal session; enabling uses the loaded model's recommended draft count |
+| `--mtp`, `--no-mtp` | model default | Enable or disable exact MTP for this terminal session. Enabling uses the loaded model's recommended draft count. |
 | `--timeout SECONDS` | 300 | Startup or reply inactivity limit; validated generation activity renews image transactions |
 
-Generation is greedy. By default, the client tokenizes each rendered prompt and uses the remaining finite context for output, stopping on EOS or another termination condition. An explicit reply budget that does not fit beside the rendered prompt is refused without changing the history; use `/reset` or a larger `--context-tokens`. The menu bar app exposes generation limits, thinking and a supported-model MTP toggle through **Advanced Options** ([menu bar guide](../apps/menu-bar/README.md#models-and-requests)). The app uses model-specific MTP defaults and remembers an explicit choice per model; the terminal session defaults off.
+Generation is greedy. By default, the client tokenizes each rendered prompt and uses the remaining finite context for output, stopping on EOS or another termination condition. An explicit reply budget that does not fit beside the rendered prompt is refused without changing the history. Use `/reset` or a larger `--context-tokens`. The menu bar app exposes generation limits, thinking and a supported-model MTP toggle through **Advanced Options**. The app uses model-specific MTP defaults and remembers an explicit choice per model. [Menu bar guide](../apps/menu-bar/README.md#models-and-requests)
 
 Terminal chat consumes worker streaming frames internally, including prefill
 progress, while displaying the completed reply. `--timeout` limits inactivity
@@ -48,7 +48,27 @@ finishes before cancellation resets the request and clears its prefix state.
 
 With `--image`, the CLI reads one regular local file with a 4 MiB limit and accepts PNG or JPEG signatures. The first user turn contains an image placeholder followed by its text. Later turns keep that placeholder in the conversation and resubmit the same owned image bytes for each fresh request; `/reset` clears the conversation and attaches the image to the next first turn. The image stays in process memory between turns. Each request uses the [private staging and transaction lifecycle](#prepared-image-operations). A worker without passing image evidence and an invalid image produce fixed, path-free errors. See the [CLI implementation](../tools/converter/stark_convert/chat.py) and [private image staging](../tools/converter/stark_convert/media.py).
 
-## AngelSlim Hy4 Flash Q3_K
+## Hy4-flash Sushi STQ 4bpw
+
+In a Hy4-enabled desktop build, choose **Manage Models → Model Catalog →
+Hy4-flash → Hy4-flash Sushi STQ 4bpw**. Stark downloads the pinned source,
+verifies the original files and runs it on its own Metal worker. The source
+includes the BF16 vision tower and DFly2 draft model. It requires Metal 4
+and enough live unified memory for the loaded graph. Allow at least 199 GiB
+of free disk space for a fresh install.
+
+The default uses prepared mapped residency, F16 KV, 4,096-row prefill,
+the tuned dense and routed projections, fused attention-to-FFN work and
+five DFly2 drafts for greedy text. The model's MTP toggle remains available.
+Image turns run with zero drafts and invalidate the preceding text prefix.
+
+The worker fits a maximum context at load and reports it in `context_sizing`.
+Each request can choose a smaller window. The planner clamps the request to
+the fitted limit and prefix reuse is scoped to the selected window.
+`STARK_HY4_CONTEXT_LIMIT` is an optional load-time ceiling.
+[Catalog, defaults and flexible context evidence](model-experiments/2026-11-27-hy4-stq-catalog-defaults.md)
+
+## AngelSlim Hy4 Flash Q3_K local preparation
 
 On Apple Silicon, the `hy4` feature runs the original Q3_K split GGUF and BF16
 projector in the generation worker. It uses the Strata Metal graph and Stark's
@@ -62,13 +82,6 @@ the worker request budget. `STARK_HY4_CONTEXT_LIMIT` is an optional upper bound
 applied before allocation. The worker always loads the projector. Image requests
 use target-only generation and invalidate the preceding text prefix. [Flexible
 window verification](model-experiments/2026-11-25-hy4-context-ladder.md#20261126-hy4ladder-05--verify-flexible-windows-on-the-measured-profiles)
-
-In a Hy4-enabled desktop build, choose **Manage Models → Model Catalog → Hy4-flash → Hy4-flash AngelSlim Q3_K**.
-Stark downloads the pinned split GGUF and BF16 projector, verifies their hashes,
-and prepares the Tencent metadata before adding the model to the library. Allow
-about 150 GiB of free disk space for the weights and the first-run draft sidecar.
-Select the installed model in Playground to load it for chat.
-[Packaged install and generation check](model-experiments/2026-11-26-hy4-desktop-catalog.md)
 
 ### Prepare a local copy from source
 
@@ -93,7 +106,7 @@ transaction is available when launched with `--vision-staging-root`. The native 
 has its own worker and artifact evidence in the
 [Hy4 Q3_K record](model-experiments/2026-11-25-hy4-native-q3-k.md).
 
-### Tested Hy4 load profiles
+### Tested AngelSlim Q3_K load profiles
 
 With `STARK_HY4_LOAD_PROFILE` unset, Stark tries `resident-decode` first on
 Metal 4. If the resident banks or context exceed the memory budget, it tries
@@ -313,10 +326,11 @@ context limit, EOS IDs and MTP support vary by loaded model:
 | `generation_budget` | `memory-context-v1` when the loaded text backend supports native memory planning |
 | `thinking_budget_supported` | `true` when the loaded Inkling backend accepts `thinking_budget_tokens` on `generate` and `generate_image` |
 | `state_policy` | `fresh-per-request`: no state survives between requests. `consecutive-prefix-v1` when [prefix reuse](#prefix-reuse) is enabled |
-| `prefix_cache` | Present only when the worker was started with `--prefix-cache`: `supported`, `enabled`, `chunk_tokens` (the reuse grid, a multiple of 1,024: 1,024 for converted models and native GLM-5.3, 4,096 for native mixed-precision Qwen3.8, 2,048 for Inkling 2 Mini with its packed source prefill loaded), `tail_tokens` (the prompt tokens a request always prefills after a boundary, so its own boundary is the largest `chunk_tokens` multiple at or below its input length less the tail: 1, except 4 for Inkling 2 Mini with its packed source prefill and 2 without it), `idle_seconds` (600) and the reuse `key`. When enabled, `operations` also lists `reset_cache` |
+| `prefix_cache` | Present only when the worker was started with `--prefix-cache`: `supported`, `enabled`, `chunk_tokens` (the reuse grid, a multiple of 1,024: 1,024 for converted models and native GLM-5.3, 4,096 for native mixed-precision Qwen3.8, 2,048 for Lily with active midpoint snapshots and for Inkling 2 Mini with its packed source prefill loaded), `tail_tokens` (the prompt tokens a request always prefills after a boundary, so its own boundary is the largest `chunk_tokens` multiple at or below its input length less the tail: 1, except 4 for Inkling 2 Mini with its packed source prefill and 2 without it), `idle_seconds` (600) and the reuse `key`. When enabled, `operations` also lists `reset_cache`. An active Lily midpoint path also includes `physical_chunk_tokens` and `midpoint_restore_min_suffix_tokens` |
 | `vocab_size` | Upper bound for every token ID |
 | `max_context_tokens` | Loaded model's configured maximum context; no global 16,384-token cap. A backend with no finite maximum reports the protocol's unsigned 32-bit maximum. |
-| `context_sizing` | When the backend has a load-time memory estimate, its selected context, checkpoint and engine limits, estimated memory limit in tokens, and available budget in bytes. |
+| `context_sizing_policy` | `shared_memory` for a window selected by Stark, `undeclared` for per-request planning without a finite advertised window, or `backend_fixed` for a window admitted by a native bridge. |
+| `context_sizing` | Shared sizing reports the selected context, checkpoint and legacy engine limits, memory-fit tokens, budget in bytes, `limiting_factor` and optional `user_context_cap`. `backend_bound` reports an independently determined bound and its source or is null. Backend-fixed sizing reports the checkpoint, bridge bound and admitted context. Undeclared sizing omits this object. |
 | `max_new_tokens` | Model context capacity minus one, or the unsigned 32-bit protocol ceiling minus one when no finite context is declared; actual input still consumes context |
 | `request_budget_bytes`, `max_request_bytes` | Configured logical content budget and encoded request-line budget, including the newline; see [resource budget](WORKER_PROTOCOLS.md#resource-budget) |
 | `eos_token_ids` | Stop IDs from the model's generation metadata, always honoured |
@@ -329,7 +343,13 @@ The configured context is a token admission boundary. Available memory and the c
 
 The engine sizes a finite advertised context after the backend loads its weights and enabled components. It uses the smaller of available unified memory and remaining Metal working-set headroom after a 256 MiB reserve. Each backend estimates a cold request from its own cache, workspace, and prefix-copy costs. The engine takes 85% of the memory-fit token count, rounds down to a 1,024-token boundary when the result is at least 1,024, and applies the checkpoint and execution limits. When an estimate ends at the model or engine limit, the full window is selected if it fits within 85% of the memory budget. The selected window stays fixed for the worker's lifetime. A reload measures headroom again. If available memory cannot admit a window, worker startup reports `resource_budget_exceeded`.
 
-Native text, native vision decoders and hybrid backends with finite context and a memory inventory use this policy. The load estimate budgets full cache capacity with up to 2,048 text prefill tokens and all selected components resident. Each request checks workspace costs for its actual prompt and output. Image requests include expanded image tokens and encoder workspace in that check. Models without a declared context continue to plan text requests individually. The optional GLM EXL3 bridge continues to admit its configured window at native load.
+Finite native text, native vision decoders, ordinary hybrid backends, Inkling and Hy4 use shared sizing. A finite limit below two tokens fails startup with `invalid_finite_context_limit`. An unavailable minimum-window estimate fails with `context_memory_estimate_unavailable`. A valid estimate that exceeds the load budget results in `resource_budget_exceeded`.
+
+The load estimate budgets full cache capacity with up to 2,048 text prefill tokens and all selected components resident. Each request checks workspace costs for its actual prompt and output. Image requests include expanded image tokens and encoder workspace in that check.
+
+Converted native decoders take their checkpoint limit from the loaded attention RoPE configuration. The separate KV address bound comes from the Metal single-buffer length and checked index geometry of the target and loaded draft head. Shared sizing retains the legacy `engine_context_tokens` field, which repeats the checkpoint limit when no separate bound is available. `limiting_factor` records the checkpoint, backend, memory fit or Hy4 user cap that selected the final length. The memory fit includes estimator feasibility and rounding.
+
+LLaMBA and other native text graphs made entirely from Mamba2, ShortConv or DeltaNet mixers without a position limit continue to plan individual text requests. The optional GLM EXL3 bridge admits the smaller of the checkpoint limit and 32,768 tokens while it loads its native state.
 
 Inkling 2 Mini estimates live cache, prefill workspace growth and a prefix snapshot. Its M5 Max path is bounded by authenticated checkpoint metadata and Metal buffer limits. Other configurations retain their 4,352-token geometry.
 
@@ -747,7 +767,9 @@ Exactness, native hybrid snapshots:
 - Dense Qwen3.5-family MTP prefill captures after the last complete non-final 1,024-token chunk. Restore copies the recurrence, convolution history and normalized target hidden state, rewinds both attention cursors, then prefills the remaining suffix with the fresh route's chunk boundaries. The snapshot belongs to one loaded model instance and one retained session.
 - Qwen vision text requests capture after the last complete non-final 1,024-token prefill chunk, in the same ordered command after decoder writes. Restoration checks loaded identity, execution graph, capacity, text-only state and saved position, restores all owned mixer snapshots and reseeds the sampler. Repeated prompts keep an unchanged restored snapshot; longer prompts replace it at their new eligible boundary. An image-prefilled or failed state is rejected. BF16 dense, affine dense and affine MoE ordinary text select the shared-weight Legacy graph; image requests select the reference graph and clear retained prefixes. Admitted complete dense heads use their separate MTP-aware snapshot path and key the selected draft count. BF16-head and other artifact qualification remains separate; see the [remaining Qwen attempt](archive/runs/2026-11-09-qwen-remaining-image-text-parity.md).
 - Inkling 2 Mini text requests capture a GPU copy of the live keys, values and convolution histories at their boundary on the worker's reuse grid. With the packed source prefill loaded the grid is 2,048 rows with a four-token tail, the source schedule's bulk alignment and serial suffix; every request of that worker uses it, whichever prefill path it takes, so reuse counts stay multiples of the advertised `chunk_tokens`. A request without a cache scope splits its bulk at the same boundary, so output does not depend on whether prefix reuse is enabled. The key adds MTP on or off and, with the source verifier, the source precision; a request that names no MTP setting drafts by default and is keyed as drafted. Image requests clear the entry and never populate it. Qualification is per artifact, in the [8-bit default record](model-experiments/2026-11-23-inkling-mini-affine8-default.md).
-- A snapshot cannot be rewound. The next request must begin with the whole snapshotted prefix and leave at least two tokens to prefill, or the advertised `tail_tokens` when that is longer. Optional Lily interior snapshots require the longer suffix described above. Requests outside the supported continuation use fresh prefill. The backend retains its normal final-token route and draw.
+- A snapshot cannot be rewound. The next request must begin with the whole snapshotted prefix and leave at least two tokens to prefill, or the advertised `tail_tokens` when that is longer. When both Lily midpoint fields are present, a snapshot whose token count is off the `physical_chunk_tokens` grid needs at least `midpoint_restore_min_suffix_tokens` in the new suffix. A snapshot on the physical grid uses the ordinary restore minimum. The midpoint fields are optional and earlier workers omit them. Requests outside the supported continuation use fresh prefill. The backend retains its normal final-token route and draw.
+
+The prefix validator's `--mode lily-midpoint --vision --reuse boundary` exercises the pinned Lily artifact with the tower loaded. It checks suffix lengths 16 and 17 after a 2,048-token snapshot and length two after a 4,096-token snapshot. The validator compares cached and fresh greedy generation with MTP off and on, checks reuse after image generation, and reloads once with midpoint snapshots disabled to verify the stock readiness fields.
 
 Inkling compares the logical context size in its prefix key. A matching snapshot can restore into a different physical capacity that covers the prefix, with the same source prefill geometry and DSpark mode.
 

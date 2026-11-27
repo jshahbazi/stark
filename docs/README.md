@@ -48,6 +48,8 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Contributing](../CONTRIBUTING.md) | Toolchains, local checks, test layout, running a model-bound smoke test, where validation records go |
 | [Manual desktop user simulation](USER_SIMULATION.md) | Explicitly invoked OpenWork, OpenCode Desktop and Pi project-building workflow, independent acceptance checks and aggregate reporting |
 | [Adding model support](MODEL_ONBOARDING.md) | Required tool-calling assessment, prefix reuse, artifact qualification and lifecycle checks for each new inference path |
+| [Generation context sizing follow-up](CONTEXT_SIZING_FOLLOW_UP.md) | PR #203 audit findings, proposed worker contract changes and outstanding artifact checks |
+| [Generation context artifact inventory](CONTEXT_SIZING_INVENTORY.md) | Catalog revision provenance, preparation profiles and audited installed receipts |
 | [Model changes and experiments](model-experiments/README.md) | Attempt ledger, image-support retrospective, failed approaches, promotion decisions and a template for future correctness/performance work |
 | [Inkling 2 Mini native Metal retrospective](archive/runs/2026-11-21-inkling-mini-native-retrospective.md) | Milestones, numerical fixes, 4K benchmark scope and lessons from the original checkpoint |
 | [Inkling 2 Mini performance follow-up](INKLING_2_MINI_PERFORMANCE_FOLLOWUP.md) | Ranked prefill and decode candidates, numerical constraints and prerequisites for measurement |

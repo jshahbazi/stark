@@ -21,6 +21,10 @@ SMALL_FILE_SHA256 = {
 }
 TOTAL_FILES = 99
 TOTAL_BYTES = 208_397_806_219
+WEIGHT_BYTES = 208_388_142_680
+CHOICE = "hy4-sushi-stq"
+# SHA-256 of the pinned filename, file size and content SHA-256 inventory.
+CONTENTS_SHA256 = "1712968162f07892fd4542723e5915ca2e698b370a98a4aab54718026963aebd"
 ENGRAM_LAYERS = (2, 12, 22, 32)
 ENGRAM_FILES = tuple(f"engram-model-{index:05}-of-00148.safetensors" for index in range(1, 5))
 ENGRAM_SHAPES = {
@@ -45,7 +49,7 @@ SIDECAR_FILES = frozenset(
 )
 
 
-def _expected_files() -> set[str]:
+def expected_files() -> set[str]:
     return {
         *SIDECAR_FILES,
         *ENGRAM_FILES,
@@ -169,7 +173,7 @@ def _scan_files(root: Path) -> tuple[set[str], int]:
         total += info.st_size
     _require(len(names), TOTAL_FILES, "file count")
     _require(total, TOTAL_BYTES, "total file bytes")
-    _require(names, _expected_files(), "top-level file inventory")
+    _require(names, expected_files(), "top-level file inventory")
     return names, total
 
 
@@ -334,8 +338,8 @@ def _tensor_summary(config: dict, index: dict, tensors: dict) -> dict:
     }
 
 
-def validation_requested(path: Path) -> bool:
-    return os.environ.get("STARK_HY4_STQ_VALIDATION") == "1" and (path / "model-dfly.safetensors").is_file()
+def matches_layout(path: Path) -> bool:
+    return (path / "model-globals.safetensors").is_file() and (path / "model-dfly.safetensors").is_file()
 
 
 def inspect_pack(model_dir: Path) -> dict:
@@ -350,7 +354,7 @@ def inspect_pack(model_dir: Path) -> dict:
     if not isinstance(weight_map, dict):
         raise ConversionError("Invalid Sushi Hy4 STQ Safetensors index")
     shard_names = set(weight_map.values())
-    expected_shards = {name for name in _expected_files() if name.endswith(".safetensors")}
+    expected_shards = {name for name in expected_files() if name.endswith(".safetensors")}
     _require(shard_names, expected_shards, "indexed shard set")
 
     tensors = {}

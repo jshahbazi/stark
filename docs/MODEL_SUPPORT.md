@@ -314,9 +314,8 @@ Hugging Face searches. Architecture tags and model-name searches are interleaved
 so a large tag cannot delay every other export type. Parsed configuration
 identifies the family. Each page inspects up to 30 distinct candidates and
 retains unsupported family variants with an **Unavailable** reason.
-Turn off **Hide Unsupported** in Hy4-flash to see the pinned Sushi STQ 4bpw
-export. It runs in Sushi. The catalog's AngelSlim Q3_K entry installs and
-runs in Stark.
+Hy4-flash offers one pinned model, **Hy4-flash Sushi STQ 4bpw**. It installs
+and runs natively in Stark with image support and a flexible context window.
 **Load more models** follows the remaining pages automatically, preserving
 results already loaded. Failed pages can be retried at the same offset.
 
@@ -632,6 +631,9 @@ results so that a check for a previous selection cannot authorize the current
 download. Metadata inspection does not execute repository model code.
 
 A browser download also pins the catalogue card's immutable primary revision.
+If a fixed installer retrieves byte-verified copies from a different immutable
+revision, the card exposes that commit as `download_revision` alongside its
+qualified `revision`. Inkling uses this for its public upload.
 The backend caches the offered repository, revision and artifact modes under
 the catalogue request and opaque entry ID. The app submits that ID and selected
 mode; it cannot supply a replacement source through this command. Installation

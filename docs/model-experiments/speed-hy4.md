@@ -14,6 +14,8 @@ The next STQ profile priced the attention-to-FFN boundary at 1.014 s on a fresh 
 
 A Sushi v1.8.1 same-binary cache-width bracket measured 29.08 s of fresh 27K prefill at KV8 and 27.90 s at BF16. The inputs matched across widths. The 27K outputs differed. The lower storage cost did not carry through to faster prefill. The Stark follow-up kept F16 and cut fresh 27K median prefill from 32.10 to 31.38 s with register-only projection preparation and finishing. All three enabled fresh runs cleared 50 tok/s decode. The first-use 16K wall time rose despite lower GPU spans, so the exact path stays opt-in. [KV width and dense follow-up](2026-11-27-hy4-stq-kv-width-dense-io.md)
 
+The pinned Sushi STQ pack is the sole Hy4-flash catalog choice. Its defaults use the measured register and dense paths with five greedy drafts and F16 KV. [Catalog and runtime verification](2026-11-27-hy4-stq-catalog-defaults.md)
+
 ## Artifact and reference
 
 - **Artifact.** `AngelSlim/Hy4-flash-GGUF` at `c50d4dd30be42f2b91138e5731de0e2f32ad56b2`. The two Q3_K shards and original BF16 projector total 156,415,403,072 bytes. Keep the original packed expert tensors, FP8 Engram table and NextN block. The target vocabulary projection remains BF16 across draft-head experiments. [Artifact inventory and digests](2026-11-25-hy4-native-q3-k.md#artifact-and-runtime-identities)

@@ -684,7 +684,7 @@ mod tests {
 
     const TENSOR: &str = r#"{"dtype":"U16","shape":[2],"data_offsets":[0,4]}"#;
 
-    #[test]
+    #[stark_engine_macros::stark_test]
     fn rejects_duplicate_tensor_names_and_metadata_fields() {
         for json in [
             format!(r#"{{"tensor":{TENSOR},"tensor":{TENSOR}}}"#),
@@ -697,7 +697,7 @@ mod tests {
         assert!(serde_json::from_str::<StringMap>(r#"{"tensor":"one","tensor":"two"}"#).is_err());
     }
 
-    #[test]
+    #[stark_engine_macros::stark_test]
     fn constrains_padding_and_rejects_bad_tensor_extents() {
         let json = format!(r#"{{"first":{TENSOR},"second":{{"dtype":"BF16","shape":[1],"data_offsets":[8,10]}}}}"#);
         let spans = |len, gap| {
@@ -741,7 +741,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[stark_engine_macros::stark_test]
     fn descriptor_and_mmap_view_match_the_tensor_payload() {
         let fixture = FixtureDirectory::new();
         let directory = File::open(&fixture.0).unwrap();
@@ -783,7 +783,7 @@ mod tests {
         assert!(mapped.tensor("missing").is_none());
     }
 
-    #[test]
+    #[stark_engine_macros::stark_test]
     fn rejects_unsafe_component_paths_and_a_replaced_inode() {
         let fixture = FixtureDirectory::new();
         let directory = File::open(&fixture.0).unwrap();

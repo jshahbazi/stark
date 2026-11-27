@@ -550,6 +550,10 @@ impl LilyModel {
         result
     }
 
+    pub(super) const fn kernel_context_limit() -> u32 {
+        MAX_SEQ as u32
+    }
+
     pub fn max_context(&self) -> usize {
         self.max_context
     }
@@ -728,6 +732,10 @@ impl LilyModel {
         } else {
             physical
         }
+    }
+
+    pub(super) fn prefix_midpoint_restore_geometry(&self) -> Option<(usize, usize)> {
+        self.prefix_midpoint.then(|| (self.model.prefill_chunk(), self.model.midpoint_restore_min_suffix_tokens()))
     }
 
     pub(super) fn prefix_suffix_compatible(

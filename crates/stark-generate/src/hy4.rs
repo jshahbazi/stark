@@ -34,7 +34,7 @@ use self::vision::Hy4PreparedImage;
 use crate::{
     cancel::CancelSignal,
     generation::{
-        FinishReason, GeneratedTokens, GenerationBackend, GenerationOptions, HY4_STQ_VISION_PROFILE,
+        ContextCapacity, FinishReason, GeneratedTokens, GenerationBackend, GenerationOptions, HY4_STQ_VISION_PROFILE,
         HY4_VISION_PROFILE, ImageArtifactIdentity, MtpCapabilities, PreparedImageMetadata, ProgressCallback, Sampling,
         TextCallback, collect_tokens_controlled,
     },
@@ -54,12 +54,12 @@ const STQ_TEMPLATE_SHA: &str = "63ddd5de294df36f10c8f2c8e5f7b2a9dc2011c848133542
 // SHA-256 of the pinned sorted file-name, size and content-digest inventory.
 const STQ_ARTIFACT_SHA: &str = "1ed7e181a27f78ffb1e93f9bef2eb00be3c9c5933cf5d7f50494320b45e9a04f";
 
-fn stq_validation(path: &Path) -> bool {
-    std::env::var("STARK_HY4_STQ_VALIDATION").as_deref() == Ok("1") && path.join("model-dfly.safetensors").is_file()
+fn is_stq_pack(path: &Path) -> bool {
+    path.join("model-globals.safetensors").is_file() && path.join("model-dfly.safetensors").is_file()
 }
 
 pub(crate) fn recognizes(path: &Path) -> bool {
-    path.join(SHARD).is_file() || stq_validation(path)
+    path.join(SHARD).is_file() || is_stq_pack(path)
 }
 
 fn verify(
@@ -298,8 +298,8 @@ impl Hy4Backend {
         path: &Path,
         cancellation: Option<CancelSignal>,
     ) -> Result<Self, &'static str> {
-        if stq_validation(path) {
-            return Self::load_stq_validation(path, cancellation);
+        if is_stq_pack(path) {
+            return Self::load_stq(path, cancellation);
         }
         let source = source::VerifiedSource::open(path)?;
         for (name, digest) in [
@@ -400,7 +400,7 @@ impl Hy4Backend {
         })
     }
 
-    fn load_stq_validation(
+    fn load_stq(
         path: &Path,
         cancellation: Option<CancelSignal>,
     ) -> Result<Self, &'static str> {
@@ -424,36 +424,35 @@ impl Hy4Backend {
             Ok("4096") | Err(std::env::VarError::NotPresent) => 4096,
             _ => return Err("invalid_hy4_prefill_chunk"),
         };
-        let context =
-            optional_bound("STARK_HY4_CONTEXT_LIMIT", 2..=u32::MAX, "invalid_hy4_context_limit")?.unwrap_or(u32::MAX);
+        let context = optional_bound("STARK_HY4_CONTEXT_LIMIT", 2..=u32::MAX, "invalid_hy4_context_limit")?;
         let profile = verify_switch("STARK_HY4_PROFILE_PREFILL", "invalid_hy4_prefill_profile", false)?;
         let round_bf16 = verify_switch("STARK_HY4_STQ_BF16", "invalid_hy4_stq_precision", false)?;
         let pair1_decode = verify_switch("STARK_HY4_STQ_PAIR1_DECODE", "invalid_hy4_stq_decode", false)?;
-        let resident = verify_switch("STARK_HY4_STQ_RESIDENT", "invalid_hy4_stq_residency", false)?;
-        let tensor_mla = verify_switch("STARK_HY4_STQ_TENSOR_MLA", "invalid_hy4_stq_tensor_mla", false)?;
-        let gpu_verify_plan = verify_switch("STARK_HY4_STQ_GPU_VERIFY", "invalid_hy4_stq_gpu_verify", false)?;
-        let register_mla = verify_switch("STARK_HY4_STQ_REGISTER_MLA", "invalid_hy4_stq_register_mla", false)?;
-        let fused_finish_reduce = verify_switch("STARK_HY4_STQ_FUSED_FINISH", "invalid_hy4_stq_fused_finish", false)?;
-        let split_spec1 = verify_switch("STARK_HY4_STQ_SPLIT_SPEC1", "invalid_hy4_stq_split_spec1", false)?;
-        let verify_register_mla = verify_switch("STARK_HY4_STQ_VERIFY_MLA", "invalid_hy4_stq_verify_mla", false)?;
+        let resident = verify_switch("STARK_HY4_STQ_RESIDENT", "invalid_hy4_stq_residency", true)?;
+        let tensor_mla = verify_switch("STARK_HY4_STQ_TENSOR_MLA", "invalid_hy4_stq_tensor_mla", true)?;
+        let gpu_verify_plan = verify_switch("STARK_HY4_STQ_GPU_VERIFY", "invalid_hy4_stq_gpu_verify", true)?;
+        let register_mla = verify_switch("STARK_HY4_STQ_REGISTER_MLA", "invalid_hy4_stq_register_mla", true)?;
+        let fused_finish_reduce = verify_switch("STARK_HY4_STQ_FUSED_FINISH", "invalid_hy4_stq_fused_finish", true)?;
+        let split_spec1 = verify_switch("STARK_HY4_STQ_SPLIT_SPEC1", "invalid_hy4_stq_split_spec1", true)?;
+        let verify_register_mla = verify_switch("STARK_HY4_STQ_VERIFY_MLA", "invalid_hy4_stq_verify_mla", true)?;
         let cache_engram_pages =
-            verify_switch("STARK_HY4_STQ_ENGRAM_PAGE_CACHE", "invalid_hy4_stq_engram_cache", false)?;
-        let wide_attention = verify_switch("STARK_HY4_STQ_WIDE_ATTENTION", "invalid_hy4_stq_wide_attention", false)?;
-        let wide_routed = verify_switch("STARK_HY4_STQ_WIDE_ROUTED", "invalid_hy4_stq_wide_routed", false)?;
+            verify_switch("STARK_HY4_STQ_ENGRAM_PAGE_CACHE", "invalid_hy4_stq_engram_cache", true)?;
+        let wide_attention = verify_switch("STARK_HY4_STQ_WIDE_ATTENTION", "invalid_hy4_stq_wide_attention", true)?;
+        let wide_routed = verify_switch("STARK_HY4_STQ_WIDE_ROUTED", "invalid_hy4_stq_wide_routed", true)?;
         let draft_register_mla =
-            verify_switch("STARK_HY4_STQ_DRAFT_REGISTER_MLA", "invalid_hy4_stq_draft_register_mla", false)?;
-        let wide_ffn = verify_switch("STARK_HY4_STQ_WIDE_FFN", "invalid_hy4_stq_wide_ffn", false)?;
-        let fast_verify = verify_switch("STARK_HY4_STQ_FAST_VERIFY", "invalid_hy4_stq_fast_verify", false)?;
-        let fused_attn_hc = verify_switch("STARK_HY4_STQ_FUSED_ATTN_HC", "invalid_hy4_stq_fused_attn_hc", false)?;
-        let batch_draft = verify_switch("STARK_HY4_STQ_BATCH_DRAFT", "invalid_hy4_stq_batch_draft", false)?;
+            verify_switch("STARK_HY4_STQ_DRAFT_REGISTER_MLA", "invalid_hy4_stq_draft_register_mla", true)?;
+        let wide_ffn = verify_switch("STARK_HY4_STQ_WIDE_FFN", "invalid_hy4_stq_wide_ffn", true)?;
+        let fast_verify = verify_switch("STARK_HY4_STQ_FAST_VERIFY", "invalid_hy4_stq_fast_verify", true)?;
+        let fused_attn_hc = verify_switch("STARK_HY4_STQ_FUSED_ATTN_HC", "invalid_hy4_stq_fused_attn_hc", true)?;
+        let batch_draft = verify_switch("STARK_HY4_STQ_BATCH_DRAFT", "invalid_hy4_stq_batch_draft", true)?;
         let register_dense_io =
-            verify_switch("STARK_HY4_STQ_REGISTER_DENSE_IO", "invalid_hy4_stq_register_dense_io", false)?;
+            verify_switch("STARK_HY4_STQ_REGISTER_DENSE_IO", "invalid_hy4_stq_register_dense_io", true)?;
         let tail_prefix_enabled =
             verify_switch("STARK_HY4_PREFILL_TAIL_PREFIX", "invalid_hy4_prefill_tail_prefix", false)?;
-        // This opt-in validation run borrows an explicitly pinned, immutable
-        // local artifact. Its caller supplies the verified weight inventory.
+        // The pinned local pack supplies the checked inventory. Its files stay
+        // immutable while the native worker maps the weights.
         let native = unsafe {
-            Session::load_stq_diagnostic(
+            Session::load_stq(
                 &source,
                 stark_engine::engine::hy4::StqOptions {
                     chunk: chunk as u32,
@@ -484,7 +483,7 @@ impl Hy4Backend {
         source.verify_unchanged().map_err(|_| "invalid_hy4_stq_artifact")?;
         let recommended_drafts =
             optional_bound("STARK_HY4_STQ_DRAFT_DEPTH", 1..=native.max_drafts() as u32, "invalid_hy4_stq_depth")?
-                .map_or(RECOMMENDED_DRAFTS, |depth| depth as usize);
+                .map_or(native.max_drafts(), |depth| depth as usize);
         let runtime = json!({
             "backend": identity.backend,
             "device_name": identity.device_name,
@@ -736,12 +735,10 @@ impl GenerationBackend for Hy4Backend {
     fn vocab_size(&self) -> usize {
         VOCAB
     }
-    fn max_context_length(&self) -> Option<u32> {
-        Some(self.native.context_sizing().context_tokens)
+    fn context_capacity(&self) -> ContextCapacity {
+        ContextCapacity::Shared(self.native.context_sizing())
     }
-    fn context_sizing_metadata(&self) -> Option<Value> {
-        Some(json!(self.native.context_sizing()))
-    }
+
     fn supports_automatic_context_planning(&self) -> bool {
         // The native graph budgets and allocates the full capacity at load.
         // Individual text requests can use any smaller logical window.
@@ -896,6 +893,13 @@ impl GenerationBackend for Hy4Backend {
         } else {
             0
         })
+    }
+    fn default_mtp_drafts(&self) -> u32 {
+        if self.stq {
+            self.recommended_drafts as u32
+        } else {
+            0
+        }
     }
     fn mtp_metadata(&self) -> Option<Value> {
         Some(if self.lookup_newline.is_some() {

@@ -13,7 +13,7 @@ use stark_engine::{
     backends::metal::Metal,
     engine::{
         Engine,
-        context::{self, ContextSizing, largest_fitting_context},
+        context::{self, BackendContextBound, ContextSizing, largest_fitting_context},
         hybrid::activity::InferenceActivity,
         inkling_slice::{
             DepthPlanner, INKLING_IMAGE_TOKEN as IMAGE_TOKEN, ImageEmbeddings, MAX_VERIFY_ROWS, Session, Snapshot,
@@ -28,7 +28,7 @@ use self::thinking_budget::{SamplingControl, THINKING, ThinkingBudget};
 use crate::{
     cancel::CancelSignal,
     generation::{
-        ContextPlanningRequest, FinishReason, GeneratedTokens, GenerationBackend, GenerationOptions,
+        ContextCapacity, ContextPlanningRequest, FinishReason, GeneratedTokens, GenerationBackend, GenerationOptions,
         GenerationProgress, ImageArtifactIdentity, MtpCapabilities, PreparedImageMetadata, ProgressCallback, Sampling,
         TextCallback, admit_request_memory, collect_tokens_controlled,
     },
@@ -392,8 +392,15 @@ impl InklingBackend {
         let memory_budget_bytes = current_context_memory_budget(&target);
         // Find the memory-derived length independently of the checkpoint and
         // device bounds, so the margin does not shorten a model that fits.
-        let context_sizing =
-            ContextSizing::fit(artifact.context_limit, engine_limit, u32::MAX, memory_budget_bytes, |context| {
+        let context_sizing = ContextSizing::fit_loaded(
+            artifact.context_limit,
+            Some(BackendContextBound {
+                context_tokens: engine_limit,
+                source: target.context_limit_source(),
+            }),
+            u32::MAX,
+            memory_budget_bytes,
+            |context| {
                 let context = context as usize;
                 let workspace = if source_grid {
                     Session::source_global_workspace_bytes(context)
@@ -405,8 +412,8 @@ impl InklingBackend {
                     .live_context_bytes(context)
                     .checked_add(workspace)?
                     .checked_add(Session::prefix_snapshot_bytes(context, target.has_dspark()))
-            })
-            .ok_or("resource_budget_exceeded")?;
+            },
+        )?;
         Ok(Self {
             tokenizer: artifact.tokenizer,
             config_sha256: artifact.config_sha256,
@@ -919,12 +926,10 @@ impl GenerationBackend for InklingBackend {
     fn vocab_size(&self) -> usize {
         VOCAB
     }
-    fn max_context_length(&self) -> Option<u32> {
-        Some(self.context_sizing.context_tokens)
+    fn context_capacity(&self) -> ContextCapacity {
+        ContextCapacity::Shared(self.context_sizing)
     }
-    fn context_sizing_metadata(&self) -> Option<Value> {
-        Some(json!(self.context_sizing))
-    }
+
     fn context_allocation_metadata(&self) -> Option<Value> {
         self.context_allocation.as_ref().map(|allocation| json!(allocation))
     }

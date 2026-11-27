@@ -1537,6 +1537,79 @@ def test_api_context_rejection_keeps_loaded_worker(desktop, model):
     assert desktop.worker.process is process
 
 
+@pytest.mark.parametrize("policy", [None, "shared_memory", "backend_fixed"])
+def test_managed_model_listing_uses_loaded_capacity_through_recoverable_errors(desktop, model, policy):
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    from stark_convert.chat import Worker
+
+    worker_read = Worker.read
+
+    def ready(worker):
+        result = worker_read(worker)
+        result.update(max_context_tokens=4096, max_new_tokens=4095)
+        if policy is not None:
+            result["context_sizing_policy"] = policy
+        return result
+
+    with patch.object(Worker, "read", autospec=True, side_effect=ready):
+        running(desktop, model)
+    worker = desktop.worker
+    desktop.start_api("a" * 64, port=0)
+    api = desktop.api
+    api.grant_client("opencode.fixture", "b" * 64, 120, api.api_session)
+    base = f"http://127.0.0.1:{desktop.api_port}/v1"
+
+    def request(route, payload=None):
+        request = Request(
+            base + route,
+            data=None if payload is None else json.dumps(payload).encode(),
+            headers={"Authorization": "Bearer " + "b" * 64, "Content-Type": "application/json"},
+        )
+        try:
+            with urlopen(request, timeout=5) as response:
+                return response.status, json.load(response)
+        except HTTPError as error:
+            with error:
+                return error.code, json.load(error)
+
+    try:
+        status, listing = request("/models")
+        assert status == 200
+        (entry,) = listing["data"]
+        assert entry["context_length"] == 4096
+        assert entry["context_capacity_known"] is True
+        assert entry["max_output_tokens"] == 4095
+        original_request = worker.request
+
+        def reply(payload, *args, **kwargs):
+            if payload["operation"] == "tokenize" and "Synthetic overflow" in payload["text"]:
+                return {"token_count": 4097, "token_ids": [2] * 4097}
+            return original_request(payload, *args, **kwargs)
+
+        for prompt, expected in (
+            ("Synthetic first request", None),
+            ("Synthetic overflow", "context_length_exceeded"),
+            ("Synthetic budget error fixture", "request_too_large"),
+            ("Synthetic recovery", None),
+        ):
+            with patch.object(worker, "request", side_effect=reply):
+                status, response = request(
+                    "/chat/completions",
+                    {"model": entry["id"], "messages": [{"role": "user", "content": prompt}], "max_tokens": 8},
+                )
+            if expected is None:
+                assert status == 200, response.get("error", {}).get("code")
+                assert response["choices"]
+            else:
+                assert status == 400 and response["error"]["code"] == expected
+            assert desktop.worker is worker and worker.process.poll() is None
+            assert request("/models") == (200, listing)
+    finally:
+        api.close()
+
+
 @pytest.mark.parametrize("stream", [False, True])
 def test_managed_opencode_fits_the_output_ceiling_to_the_rendered_prompt(desktop, model, stream):
     from urllib.error import HTTPError

@@ -101,6 +101,7 @@ from .resource_budget import (
 from .sources import huggingface_repository
 from .tool_protocols import protocol_stop_ids
 from .vision_runtime import (
+    HY4_STQ_VISION_PROFILE,
     HY4_VISION_PROFILE,
     VISION_MODEL_TYPES,
     model_image_family,
@@ -314,15 +315,6 @@ def terminate(process):
 
 
 def model_valid(path):
-    from . import hy4_stq_preflight
-
-    if hy4_stq_preflight.validation_requested(path):
-        try:
-            hy4_stq_preflight.inspect_pack(path)
-            load_template(path)
-            return True
-        except Exception:
-            return False
     if prepared_identity(path) is not None:
         try:
             load_template(path)
@@ -892,6 +884,12 @@ class Desktop:
                 not isinstance(reason, str)
                 or not 0 < len(reason.encode()) <= 240
                 or any(ord(char) < 32 or ord(char) == 127 for char in reason)
+            ):
+                raise ValueError()
+            if "download_revision" in item and (
+                not item["downloadable"]
+                or not isinstance(item["download_revision"], str)
+                or re.fullmatch(r"[0-9a-f]{40}", item["download_revision"]) is None
             ):
                 raise ValueError()
             original = item.get("original_repo")
@@ -2683,7 +2681,12 @@ class Desktop:
             return None
         if not isinstance(contract, dict) or (
             (family or {}).get("profile")
-            not in {"qwen38-lily-retained-bf16-vision-v1", "inkling2-mini-native-v1", HY4_VISION_PROFILE}
+            not in {
+                "qwen38-lily-retained-bf16-vision-v1",
+                "inkling2-mini-native-v1",
+                HY4_VISION_PROFILE,
+                HY4_STQ_VISION_PROFILE,
+            }
             and contract.get("schema_version") not in (3, 4, 5)
         ):
             return None
