@@ -560,7 +560,7 @@ class Desktop:
         self.api_condition = threading.Condition(self.lock)
         self.api_queue = []
         self.api_queue_limit = 8
-        self.api_queue_timeout = 120
+        self.api_queue_timeout = 600
         self.api_context = self.context_limit
         self.api_maximum = self.output_limit
         self.api_vocab = 0
@@ -3858,21 +3858,24 @@ class Desktop:
         ticket = object()
         self.api_queue.append(ticket)
         deadline = time.monotonic() + self.api_queue_timeout
+        was_queued = self.job is not None or self.api_queue[0] is not ticket
+        cancelled.waiting_for_worker = was_queued
         try:
-            while self.job is not None or self.api_queue[0] is not ticket:
+            while True:
                 if cancelled.is_set():
                     raise cancellation_error(cancelled)
-                if self.api_closing or self.epoch != epoch:
+                if self.api_closing or self.epoch != epoch or self.active_model != identifier:
                     raise APIError(503, "Model changed or stopped while this request waited.", "model_changed")
                 remaining = deadline - time.monotonic()
+                if self.job is None and self.api_queue[0] is ticket and (remaining > 0 or not was_queued):
+                    break
                 if remaining <= 0:
                     raise APIError(429, "Request queue wait expired. Retry shortly.", "queue_timeout")
                 self.api_condition.wait(min(0.1, remaining))
-            if cancelled.is_set():
-                raise cancellation_error(cancelled)
-            if self.api_closing or self.epoch != epoch or self.active_model != identifier:
-                raise APIError(503, "Model changed or stopped while this request waited.", "model_changed")
         finally:
+            # Resume the HTTP inactivity timer with a fresh execution budget.
+            cancelled.last_activity = time.monotonic()
+            cancelled.waiting_for_worker = False
             self.api_queue.remove(ticket)
             self.api_condition.notify_all()
         self.job = threading.current_thread()

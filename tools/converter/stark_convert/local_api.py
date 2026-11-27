@@ -114,8 +114,8 @@ class LocalAPI:
     ``complete(payload, on_delta, cancelled)`` where ``on_delta`` is ``None`` for
     buffered requests and ``cancelled`` is a ``threading.Event`` that the handler
     sets when the client disconnects or no execution activity is reported for
-    ``request_timeout`` seconds; in the
-    deadline case the handler also sets ``cancelled.reason = "deadline"`` so the
+    ``request_timeout`` seconds outside the worker queue. In the deadline
+    case the handler also sets ``cancelled.reason = "deadline"`` so the
     callee can distinguish the two. ``complete`` reports failures by raising
     ``APIError``. The HTTP contract is documented in docs/LOCAL_API.md.
     """
@@ -679,7 +679,10 @@ class LocalAPI:
                     if session_closed.is_set():
                         cancelled.set()
                         return
-                    if time.monotonic() - getattr(cancelled, "last_activity", started) >= api._request_timeout:
+                    if (
+                        not getattr(cancelled, "waiting_for_worker", False)
+                        and time.monotonic() - getattr(cancelled, "last_activity", started) >= api._request_timeout
+                    ):
                         cancelled.reason = "deadline"
                         cancelled.set()
                         return

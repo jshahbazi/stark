@@ -1926,7 +1926,7 @@ def test_stale_epoch_and_expired_deadline_preserve_worker(desktop, model):
     assert desktop.worker.process is process and process.poll() is None
 
 
-@pytest.mark.parametrize("worker_busy_seconds, expires", [(45, False), (121, True)])
+@pytest.mark.parametrize("worker_busy_seconds, expires", [(450, False), (600, True), (601, True)])
 def test_api_queue_allows_long_turns_and_keeps_a_deadline(desktop, monkeypatch, worker_busy_seconds, expires):
     import threading
 
@@ -1951,14 +1951,71 @@ def test_api_queue_allows_long_turns_and_keeps_a_deadline(desktop, monkeypatch, 
                 with pytest.raises(APIError) as error:
                     desktop.reserve_api_request(desktop.epoch, desktop.active_model, control)
                 assert (error.value.status, error.value.code) == (429, "queue_timeout")
-                assert desktop.job is active_job
-                assert elapsed == 120
+                assert desktop.job is (None if worker_busy_seconds == 600 else active_job)
+                assert elapsed == 600
             else:
                 desktop.reserve_api_request(desktop.epoch, desktop.active_model, control)
                 assert desktop.job is threading.current_thread()
                 assert elapsed >= worker_busy_seconds
             assert desktop.api_queue == []
             desktop.job = None
+
+
+def test_api_fifo_wait_pauses_http_inactivity_timer(desktop, model, monkeypatch):
+    import threading
+    import urllib.error
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor
+
+    from stark_convert.local_api import LocalAPI
+
+    running(desktop, model)
+    timeout = 0.3
+    queued = threading.Event()
+    wait = desktop.api_condition.wait
+
+    def record_queue_wait(seconds):
+        queued.set()
+        return wait(seconds)
+
+    def stall_inference(messages, maximum, *, cancelled, **options):
+        assert not cancelled.wait(timeout / 2)
+        assert cancelled.wait(2)
+        return {}
+
+    monkeypatch.setattr(desktop.api_condition, "wait", record_queue_wait)
+    monkeypatch.setattr(desktop, "infer", stall_inference)
+    desktop.job = threading.current_thread()
+    api = LocalAPI(
+        desktop.api_models, desktop.api_complete, api_key="a" * 64, port=0, cancellable=True, request_timeout=timeout
+    )
+    info = api.start()
+    request = urllib.request.Request(
+        info["base_url"] + "/chat/completions",
+        data=json.dumps({"messages": [{"role": "user", "content": "fixture"}], "stream": True}).encode(),
+        headers={"Authorization": f"Bearer {info['api_key']}", "Content-Type": "application/json"},
+    )
+
+    def call_api():
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request, timeout=5).close()
+        with error.value as response:
+            return response.code, json.load(response)["error"]["code"]
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            result = executor.submit(call_api)
+            try:
+                assert queued.wait(2)
+                time.sleep(timeout * 2)
+                assert not result.done()
+            finally:
+                with desktop.lock:
+                    desktop.job = None
+                    desktop.api_condition.notify_all()
+            assert result.result(timeout=3) == (504, "request_timeout")
+    finally:
+        api.close()
 
 
 def test_api_fifo_queue_and_waiter_cancellation(desktop, model):
