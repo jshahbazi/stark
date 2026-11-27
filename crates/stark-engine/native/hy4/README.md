@@ -14,11 +14,10 @@ and accepts different request windows within the selected capacity. A draft
 bank that exceeds the Metal buffer limit enters the memory-admission
 fallback. See [tested load profiles](../../../../docs/GENERATION.md#tested-hy4-load-profiles).
 
-The tuned profiles request the compensated sparse MLA specialization for
-selected-cell prefill. It retains Strata's indexing and the F16 cache.
-The original selected-cell specialization is available when the device
-cannot build the compensated pipeline or support its required threadgroup
-size. [Arithmetic provenance and validation](../../../../docs/model-experiments/2026-11-26-hy4-compensated-sparse-mla.md)
+The profiles use the original sparse MLA specialization for selected-cell
+prefill. The opt-in compensated specialization retains Strata's indexing
+and the F16 cache. It regressed selected-cell timing and changed greedy
+outputs in the paired OpenCode screen. [Arithmetic provenance](../../../../docs/model-experiments/2026-11-26-hy4-compensated-sparse-mla.md) · [OpenCode controls](../../../../docs/model-experiments/2026-11-26-hy4-post-sushi-controls.md)
 
 The pinned GGUF graph stores latent MLA rows by absolute position, including the sliding-attention blocks. Its IndexPool cache writes a pooled key into the first row of a complete group. At a complete group boundary Stark can rewind the text sequence by clamping the pooled-key counts and replacing the suffix. The next prefill supplies a fresh head output. MTP truncates its row count and retains the verified trunk hidden rows before the same boundary. Request identity and invalidation are tracked by the Stark caller.
 

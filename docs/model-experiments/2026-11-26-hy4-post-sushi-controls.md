@@ -13,8 +13,8 @@ rendered lengths. It used a separate pack and draft head.
 | Attempt | Change and criterion | Status |
 | --- | --- | --- |
 | HY4OC-04A | Compare compensated indexed sparse MLA with the original kernel on one build. Compare synthetic OpenCode digests and measure the selected-cell stage and whole prompts separately. | The compensated stage regressed and changed output hashes. Restored the original default. |
-| HY4OC-04B | Retain the last completed IndexPool group of the previous prompt's final prefill chunk, with the existing grid as fallback. The restored continuation must reproduce its fresh replay while reusing more than 12,288 prompt positions when the final tokens match. | Opt-in candidate. |
-| HY4OC-04C | Select the router's top 16 out of 512 in parallel. Preserve expert IDs, tie order, selected weights and invalid-row behavior. | Opt-in candidate. Synthetic GPU exactness passed. Full-model timing and parity remain open. |
+| HY4OC-04B | Retain the last completed IndexPool group of the previous prompt's final prefill chunk, with the existing grid as fallback. The restored continuation must reproduce its fresh replay while reusing more than 12,288 prompt positions when the final tokens match. | Opt-in candidate. Exact replay and image invalidation passed. The paired continuation finished 22.6% sooner. |
+| HY4OC-04C | Select the router's top 16 out of 512 in parallel. Preserve expert IDs, tie order, selected weights and invalid-row behavior. | Opt-in candidate. Matched output hashes on both sides of the router bracket. Whole-request timing provided no basis for promotion. |
 
 The prefix candidate takes the end-of-prefill idea from [Sushi's Hy4 live restore points](https://github.com/beamivalice/sushi/blob/v1.8.1/docs/hy4-flash-arch.md#the-state-and-the-prefix-cache).
 Stark retains rows in the loaded worker for the immediately preceding scoped
@@ -205,10 +205,9 @@ times unsuitable for attributing a change to tail reuse. The fresh 27K
 control moved in both directions across the two pairs.
 
 The first lifecycle check failed in the harness after all three timed
-requests had completed. The replay toggled the captured streaming payload
-to nonstreaming. Preserve the original payload for the isolated fresh
-replay. Keep the candidate opt-in while lifecycle and broader coverage
-are assessed.
+requests had completed. The replay changed the captured streaming payload,
+and the bundled Python lacked the harness's Pillow dependency. The rerun
+preserved the payload and used Stark's existing synthetic PNG fixture.
 
 | Private timing aggregate | SHA-256 |
 | --- | --- |
@@ -231,3 +230,42 @@ compensated MLA readiness field. The host now accepts the two named Hy4
 selection fields as optional booleans and keeps older readiness compatible.
 The rerun requires local image qualification and holds the image capability
 active for the text requests.
+
+## Qualified-image replay and router screen
+
+All four router arms and the tail lifecycle rerun passed local image
+qualification. They used the 49,152-position cap and the default original
+MLA. The benchmark reducer checked the same rendered inputs and 96 greedy
+outputs in both router pairs, and the runtime reported the active Metal
+pipeline only in the two requested arms. Draft and prefix counts matched.
+The candidate's paired median decode changes at fresh 16K, continued 27K,
+and fresh 27K were +0.24%, +0.12%, and −2.60%. Client wall time changed by
+−1.32%, +0.67%, and +1.49%. Two brief STQ CPU-only compiles overlapped
+control B outside the GPU lock, so this screen has an additional host
+timing confound. The component win and exact hashes do not establish a
+whole-request gain. Keep the router opt-in.
+
+| OpenCode turn | Default prefill tok/s across router controls | Default decode tok/s | Default client s |
+| --- | ---: | ---: | ---: |
+| Fresh 16K | 465.65–539.08 | 41.55–41.70 | 32.753–37.460 |
+| Continued 27K | 526.49–538.47 | 38.04–39.78 | 30.319–31.078 |
+| Fresh 27K | 504.19–540.60 | 36.86–37.10 | 53.228–56.869 |
+
+With tail reuse, the qualified-image rerun continued at 531.92 prefill
+tok/s and 39.35 decode tok/s in 23.690 seconds, reusing 16,012 positions.
+The same captured request replayed from zero retained positions and matched
+the continuation's input and output hashes. A separate text request reused
+4,428 positions on repeat, its image successor had zero reuse and MTP off,
+and the next text request had zero reuse and MTP back on. Keep tail reuse
+opt-in pending the broader sampled, corpus and lifecycle coverage for a
+default change.
+
+| Private image-qualified evidence | SHA-256 |
+| --- | --- |
+| Worker | `c7f942bb766aa0440dd24aed8c45faebdc489386906a00e9be6b622da5f5b152` |
+| Client | `7c8bfe4494b1ea71118a16079d80e1c0421a32037ed1fb53e32740e2a85fd482` |
+| Router control A | `43c18b540bb1d59531f008930576a3339f4fcacc2a59dc8377fd8a326709b71f` |
+| Router candidate A | `c13fab96dfa0f6cca0042a7a7eb904891c1d15828c0a0629145cd30867843d9e` |
+| Router candidate B | `f611e9396f6d2f5de6a86393cddb23f83c09d12dd533f6c5cfc11d4d59de22a9` |
+| Router control B | `c6b5e6897765cda237a38eccfb1055358bda297c69dde3281a618cdeef502b1d` |
+| Tail lifecycle | `398a5056932e12aa848c3e3501e1d518c1a8ce06f3ad96c655fca4f0ddd34c10` |
