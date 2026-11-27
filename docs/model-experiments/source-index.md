@@ -182,6 +182,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Hy4-Flash Sushi STQ routed experts and long-context attention](2026-11-27-hy4-stq-routed-attention-prefill.md) · Model experiment, 2026-11-27
 - [Hy4-Flash Sushi STQ wide-routing decode and FFN follow-up](2026-11-27-hy4-stq-decode-prefill-followup.md) · Model experiment, 2026-11-27
 - [Hy4-Flash Sushi STQ attention-to-FFN boundary](2026-11-27-hy4-stq-attention-ffn-boundary.md) · Model experiment, 2026-11-27
+- [Hy4-Flash STQ KV width and wide dense preparation](2026-11-27-hy4-stq-kv-width-dense-io.md) · Model experiment, 2026-11-27
 - [Hy4-flash AngelSlim Q3_K tool calling](2026-11-26-hy4-tool-calling.md) · Model experiment, 2026-11-26
 - [Hy4-flash defaults through OpenCode](2026-11-26-hy4-opencode-defaults.md) · Model experiment, 2026-11-26
 - [Resident Hy4-flash through OpenCode](2026-11-26-hy4-resident-opencode.md) · Model experiment, 2026-11-26

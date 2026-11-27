@@ -111,7 +111,7 @@ bool DenseBank::open(mtl::Context& metal, Format rate, uint32_t input_width, uin
 
 bool ExpertProgram::open(mtl::Context& metal, bool round_bf16, bool pair1_decode, bool fused_finish_reduce,
                          bool split_spec1, bool wide_attention, bool wide_routed, bool wide_ffn,
-                         bool fast_verify) {
+                         bool fast_verify, bool register_dense_io) {
     if (!metal.supports_metal4()) return false;
     try {
         std::vector<std::string> sources{"pair1_k4_grouped.metal", "pair1_k4_io.metal", "spec1_dense.metal"};
@@ -124,12 +124,16 @@ bool ExpertProgram::open(mtl::Context& metal, bool round_bf16, bool pair1_decode
         project_ = metal.pipeline(library, "stark_hy4_stq_pair1_k4_grouped");
         project_k32_ = wide_routed || (split_spec1 && fast_verify) ?
             metal.pipeline(library, "stark_hy4_stq_pair1_k4_prefill") : mtl::Pipeline{};
-        prepare_register_ = wide_routed ?
+        prepare_register_ = wide_routed || register_dense_io ?
             metal.pipeline(library, "stark_hy4_stq_pair1_prepare_register", boundary) : mtl::Pipeline{};
         prepare_down_register_ = wide_routed ?
             metal.pipeline(library, "stark_hy4_stq_pair1_prepare_down_register") : mtl::Pipeline{};
         finish_ = metal.pipeline(library, "stark_hy4_stq_pair1_finish");
         dense_finish_ = round_bf16 ? metal.pipeline(library, "stark_hy4_stq_pair1_finish", boundary) : finish_;
+        if (register_dense_io) {
+            dense_finish_register_ = metal.pipeline(library, "stark_hy4_stq_dense_finish_register", boundary);
+            attention_gate_prepare_register_ = metal.pipeline(library, "stark_hy4_stq_attention_gate_prepare_register", boundary);
+        }
         prepare_down_ = metal.pipeline(library, "stark_hy4_stq_pair1_prepare_down");
         combine_ = metal.pipeline(library, "stark_hy4_stq_pair1_combine");
         finish_reduce_ = fused_finish_reduce ? metal.pipeline(library, "stark_hy4_stq_pair1_finish_reduce") : mtl::Pipeline{};
@@ -153,8 +157,12 @@ bool ExpertProgram::open(mtl::Context& metal, bool round_bf16, bool pair1_decode
                dense_k4_.max_threads >= 128 && dense_k6_.max_threads >= 128 && dense_finish_.max_threads >= 128 &&
                (!(wide_routed || (split_spec1 && fast_verify)) ||
                    (project_k32_.max_threads >= 128 && project_k32_.simd_width == 32)) &&
-               (!wide_routed || (prepare_register_.max_threads >= 128 && prepare_register_.simd_width == 32 &&
-                                 prepare_down_register_.max_threads >= 128 && prepare_down_register_.simd_width == 32)) &&
+               (!(wide_routed || register_dense_io) ||
+                   (prepare_register_.max_threads >= 128 && prepare_register_.simd_width == 32)) &&
+               (!wide_routed || (prepare_down_register_.max_threads >= 128 && prepare_down_register_.simd_width == 32)) &&
+               (!register_dense_io ||
+                   (dense_finish_register_.max_threads >= 128 && dense_finish_register_.simd_width == 32 &&
+                    attention_gate_prepare_register_.max_threads >= 128 && attention_gate_prepare_register_.simd_width == 32)) &&
                (!pair1_decode || (decode_.max_threads >= 128 && decode_.simd_width == 32)) &&
                (!fused_finish_reduce || (finish_reduce_.max_threads >= 512 && finish_reduce_.simd_width == 32)) &&
                (!split_spec1 || (dense_split_.max_threads >= 128 && dense_split_.simd_width == 32 &&
@@ -226,7 +234,7 @@ bool ExpertProgram::append_routed(std::vector<mtl::Dispatch>& commands, const Ex
         const uint32_t shape[2] = {width, width};
         const bool use_decode = pair1_decode_enabled() && tokens == 1 && rows == topk && job_count == topk &&
                                 projection_grid == nullptr;
-        const bool wide = prepare_register_.handle && tokens >= min_wide_tokens;
+        const bool wide = prepare_down_register_.handle && tokens >= min_wide_tokens;
         // Narrow indirect verification uses the same grouped layout. Keep
         // its existing input preparation and the separate direct GEMV.
         const bool wide_verify = dense_split_k32_.handle && projection_grid && tokens <= 6;
@@ -299,9 +307,12 @@ bool ExpertProgram::append_dense(std::vector<mtl::Dispatch>& commands, const Den
 
     using mtl::Arg;
     const uint32_t shape[4] = {bank.inputs, bank.outputs, rows, splits};
+    const bool register_io = prefill && rows >= 1024 && dense_finish_register_.handle;
     if (needs_prepare) {
-        commands.push_back({&prepare_, {Arg::B(input), bank.suh.argument(), Arg::B(row_map), Arg::B(prepared),
-                                       Arg::V(bank.inputs)}, {bank.inputs / 128, rows, 1}, {128, 1, 1}});
+        const bool use_register = register_io && bank.inputs % 512 == 0;
+        const auto& prepare = use_register ? prepare_register_ : prepare_;
+        commands.push_back({&prepare, {Arg::B(input), bank.suh.argument(), Arg::B(row_map), Arg::B(prepared),
+                                      Arg::V(bank.inputs)}, {bank.inputs / (use_register ? 512u : 128u), rows, 1}, {128, 1, 1}});
     }
     if (splits != 0) {
         const bool narrow_k32 = dense_split_k32_.handle && bank.inputs % (splits * 32) == 0 &&
@@ -318,8 +329,10 @@ bool ExpertProgram::append_dense(std::vector<mtl::Dispatch>& commands, const Den
     commands.push_back({&project, {bank.trellis.argument(), Arg::B(prepared), Arg::B(raw), Arg::V(shape)},
                         {bank.outputs / 128, (rows + 31) / 32, 1}, {128, 1, 1}});
     if (needs_finish) {
-        commands.push_back({&dense_finish_, {Arg::B(raw), bank.svh.argument(), Arg::B(row_map), Arg::B(output),
-                                           Arg::V(bank.outputs)}, {bank.outputs / 128, rows, 1}, {128, 1, 1}});
+        const bool use_register = register_io && bank.outputs % 512 == 0;
+        const auto& finish = use_register ? dense_finish_register_ : dense_finish_;
+        commands.push_back({&finish, {Arg::B(raw), bank.svh.argument(), Arg::B(row_map), Arg::B(output),
+                                     Arg::V(bank.outputs)}, {bank.outputs / (use_register ? 512u : 128u), rows, 1}, {128, 1, 1}});
     }
     return true;
 }
@@ -363,10 +376,12 @@ bool ExpertProgram::append_attention_gate_prepare(std::vector<mtl::Dispatch>& co
         !prepared.handle || prepared.bytes < elements * sizeof(uint16_t)) return false;
 
     using mtl::Arg;
-    mtl::Dispatch command{&attention_gate_prepare_,
+    const bool use_register = !splits && attention_gate_prepare_register_.handle && width % 512 == 0;
+    const auto& prepare = use_register ? attention_gate_prepare_register_ : attention_gate_prepare_;
+    mtl::Dispatch command{&prepare,
                           {Arg::B(raw), gate_bank.svh.argument(), Arg::B(value),
                            output_bank.suh.argument(), Arg::B(prepared)},
-                          {width / 128, rows, 1}, {128, 1, 1}};
+                          {width / (use_register ? 512u : 128u), rows, 1}, {128, 1, 1}};
     if (splits) {
         const uint32_t shape[] = {gate_bank.inputs, width, rows, splits};
         command.p = &attention_gate_prepare_split_;

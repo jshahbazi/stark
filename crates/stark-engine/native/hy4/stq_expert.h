@@ -71,7 +71,8 @@ public:
     // Round incoming activations for both formats and final dense outputs to BF16.
     bool open(mtl::Context& metal, bool round_bf16 = false, bool pair1_decode = false,
               bool fused_finish_reduce = false, bool split_spec1 = false, bool wide_attention = false,
-              bool wide_routed = false, bool wide_ffn = false, bool fast_verify = false);
+              bool wide_routed = false, bool wide_ffn = false, bool fast_verify = false,
+              bool register_dense_io = false);
     bool pair1_decode_enabled() const { return decode_.handle != nullptr; }
     static constexpr uint32_t kFusedFinishMinTokens = 1024;
     bool fuses_finish_reduce(uint32_t tokens) const {
@@ -132,7 +133,8 @@ private:
     mtl::Pipeline prepare_register_, project_k32_, prepare_down_register_;
     mtl::Pipeline dense_k4_, dense_k6_, dense_finish_, dense_split_, dense_split_finish_, dense_prefill_;
     mtl::Pipeline dense_split_k32_;
-    mtl::Pipeline attention_gate_prepare_, attention_gate_prepare_split_;
+    mtl::Pipeline dense_finish_register_, attention_gate_prepare_, attention_gate_prepare_split_;
+    mtl::Pipeline attention_gate_prepare_register_;
     mtl::Pipeline ffn_prepare_down_;
 };
 

@@ -12,6 +12,8 @@ The 27K same-loaded follow-up observed 49.15 tok/s median warm decode with wide 
 
 The next STQ profile priced the attention-to-FFN boundary at 1.014 s on a fresh 27K OpenCode request. It comprises the output RMSNorm, residual write-back, and the FFN input mix and norms. The opt-in fusion consolidates three exact dispatches before the existing FFN mix projection. With batched DFly2 correction it measured 31.87 s prefill and 51.88 useful decode tok/s at fresh 27K. The same binary with both options off measured 32.42 s and 51.62 tok/s across a separate load. [Boundary measurement and OpenCode reruns](2026-11-27-hy4-stq-attention-ffn-boundary.md)
 
+A Sushi v1.8.1 same-binary cache-width bracket measured 29.08 s of fresh 27K prefill at KV8 and 27.90 s at BF16. The inputs matched across widths. The 27K outputs differed. The lower storage cost did not carry through to faster prefill. The Stark follow-up kept F16 and cut fresh 27K median prefill from 32.10 to 31.38 s with register-only projection preparation and finishing. All three enabled fresh runs cleared 50 tok/s decode. The first-use 16K wall time rose despite lower GPU spans, so the exact path stays opt-in. [KV width and dense follow-up](2026-11-27-hy4-stq-kv-width-dense-io.md)
+
 ## Artifact and reference
 
 - **Artifact.** `AngelSlim/Hy4-flash-GGUF` at `c50d4dd30be42f2b91138e5731de0e2f32ad56b2`. The two Q3_K shards and original BF16 projector total 156,415,403,072 bytes. Keep the original packed expert tensors, FP8 Engram table and NextN block. The target vocabulary projection remains BF16 across draft-head experiments. [Artifact inventory and digests](2026-11-25-hy4-native-q3-k.md#artifact-and-runtime-identities)

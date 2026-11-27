@@ -281,7 +281,7 @@ extern "C" int stark_hy4_open_stq_diagnostic(
         if (auto error = load_trunk(s.model, s.metal, {weights, weight_count}, {experts, expert_count},
                                     round_bf16 != 0, pair1_decode != 0, (tuning & 8u) != 0, (tuning & 16u) != 0,
                                     (tuning & 128u) != 0, (tuning & 256u) != 0, (tuning & 1024u) != 0,
-                                    (tuning & 2048u) != 0);
+                                    (tuning & 2048u) != 0, (tuning & 16384u) != 0);
             !error.empty())
             return fail(error);
         if (auto error = bind_engram(s.model, {tables, 4}, {token_map, map_len}); !error.empty())

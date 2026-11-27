@@ -229,6 +229,43 @@ static inline void stark_hy4_stq_lane4_store(device half* base, float4 v) {
     base[0] = half(v.x); base[32] = half(v.y); base[64] = half(v.z); base[96] = half(v.w);
 }
 
+kernel void stark_hy4_stq_dense_finish_register(
+    device const half* input [[buffer(0)]], device const half* scales [[buffer(1)]],
+    device const uint2* row_map [[buffer(2)]], device float* output [[buffer(3)]],
+    constant uint& width [[buffer(4)]], uint2 group [[threadgroup_position_in_grid]],
+    ushort simd [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
+    const uint channel = (group.x * 4u + simd) * 128u + lane;
+    const ulong offset = ulong(group.y) * width + channel;
+    const ulong scale = ulong(row_map[group.y].x) * width + channel;
+    const float4 value = stark_hy4_stq_hadamard_lane4(stark_hy4_stq_lane4_load(input + offset), lane) *
+                         stark_hy4_stq_lane4_load(scales + scale);
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < 4; ++i)
+        output[offset + 32u * i] = stark_hy4_stq_projection_boundary(value[i]);
+}
+
+kernel void stark_hy4_stq_attention_gate_prepare_register(
+    device const half* raw_gate [[buffer(0)]], device const half* gate_scale [[buffer(1)]],
+    device const float* value [[buffer(2)]], device const half* input_scale [[buffer(3)]],
+    device half* prepared [[buffer(4)]], constant uint& width [[buffer(5)]],
+    uint2 group [[threadgroup_position_in_grid]], ushort simd [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]) {
+    const uint channel = (group.x * 4u + simd) * 128u + lane;
+    const ulong offset = ulong(group.y) * width + channel;
+    const float4 gate = stark_hy4_stq_hadamard_lane4(stark_hy4_stq_lane4_load(raw_gate + offset), lane) *
+                        stark_hy4_stq_lane4_load(gate_scale + channel);
+    const float4 attention = stark_hy4_stq_lane4_load(value + offset);
+    const float4 scales = stark_hy4_stq_lane4_load(input_scale + channel);
+    float4 source;
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < 4; ++i) {
+        const float g = stark_hy4_stq_projection_boundary(gate[i]);
+        const float gated = attention[i] * (1.0f / (1.0f + precise::exp(-g)));
+        source[i] = stark_hy4_stq_projection_boundary(gated) * scales[i];
+    }
+    stark_hy4_stq_lane4_store(prepared + offset, stark_hy4_stq_hadamard_lane4(source, lane));
+}
+
 // Finish the dense or shared gate and up projections, then prepare the
 // down projection without storing three intermediate F32 planes.
 kernel void stark_hy4_stq_ffn_prepare_down(

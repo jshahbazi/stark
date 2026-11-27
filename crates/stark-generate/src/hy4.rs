@@ -446,6 +446,8 @@ impl Hy4Backend {
         let fast_verify = verify_switch("STARK_HY4_STQ_FAST_VERIFY", "invalid_hy4_stq_fast_verify", false)?;
         let fused_attn_hc = verify_switch("STARK_HY4_STQ_FUSED_ATTN_HC", "invalid_hy4_stq_fused_attn_hc", false)?;
         let batch_draft = verify_switch("STARK_HY4_STQ_BATCH_DRAFT", "invalid_hy4_stq_batch_draft", false)?;
+        let register_dense_io =
+            verify_switch("STARK_HY4_STQ_REGISTER_DENSE_IO", "invalid_hy4_stq_register_dense_io", false)?;
         let tail_prefix_enabled =
             verify_switch("STARK_HY4_PREFILL_TAIL_PREFIX", "invalid_hy4_prefill_tail_prefix", false)?;
         // This opt-in validation run borrows an explicitly pinned, immutable
@@ -474,6 +476,7 @@ impl Hy4Backend {
                     fast_verify,
                     fused_attn_hc,
                     batch_draft,
+                    register_dense_io,
                 },
             )
         }
@@ -506,6 +509,7 @@ impl Hy4Backend {
             "verify_stq_fast": fast_verify,
             "stq_fused_attn_hc": fused_attn_hc,
             "stq_batch_draft": batch_draft,
+            "stq_register_dense_io": register_dense_io,
             "prefill_stage_profile_requested": profile,
             "draft_head_format": "spec1-k4-dfly2",
         });

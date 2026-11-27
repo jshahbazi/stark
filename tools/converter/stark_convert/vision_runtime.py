@@ -152,6 +152,7 @@ def _valid_runtime_identity(value: object, family_profile: str | None = None) ->
             "verify_stq_fast",
             "stq_fused_attn_hc",
             "stq_batch_draft",
+            "stq_register_dense_io",
         }
         if stq
         else set()
