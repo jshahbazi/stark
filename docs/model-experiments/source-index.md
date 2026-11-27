@@ -32,6 +32,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ## Qwen3.8-Flash-Next and Lily
 
+- [Generation context policy follow-up](2026-11-26-context-sizing-follow-up.md) · Experiment, 2026-11-26, attempt 20261126-CTX-02
 - [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
 
 ### Native decode, kernels and engine comparisons
@@ -116,6 +117,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ## Dense Qwen, Qwen MoE and GGUF
 
+- [Generation context policy follow-up](2026-11-26-context-sizing-follow-up.md) · Experiment, 2026-11-26, attempt 20261126-CTX-02
 - [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
 
 ### Qwen3.8 27B, catalog admission and image parity
@@ -358,6 +360,7 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 
 ## Shared runtime, catalog and image qualification
 
+- [Generation context policy follow-up](2026-11-26-context-sizing-follow-up.md) · Experiment, 2026-11-26, attempt 20261126-CTX-02
 - [Shared load-time generation context sizing](2026-11-25-shared-generation-context-sizing.md) · Experiment, 2026-11-25, attempt 20261125-CTX-01
 - [Image-support work: findings, failed attempts and remaining qualification](2026-11-08-image-support-retrospective.md) · Experiment, 2026-11-08
 - [Resource ceilings and installed-app recovery](2026-11-09-resource-admission.md) · Experiment, 2026-11-09
