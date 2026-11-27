@@ -14,6 +14,14 @@ the release BF16 vision tower and the five-layer DFly2 drafter. Its packed
 kernels preserve the Sushi and MLX notices beside the source.
 [Native STQ evidence](../../../../docs/model-experiments/2026-11-27-hy4-stq-native.md)
 
+Stark's STQ worker can open up to four forward graphs over the same Metal
+context, library, model weights, vision tower and DFly2 drafter. Each graph
+keeps its own context capacity, KV and IndexPool buffers, Engram readers and
+readout. Each slot also keeps the target state that DFly2 reads between
+phases. The forward scratch used within one prefill chunk or decode round is
+shared and stays under the native FIFO phase gate. An allocation failure can
+leave a smaller set of slots open on the same loaded model.
+
 The generation worker tries `resident-decode` before `streamed-prefill` on
 Metal 4. It uses the existing context fitter before allocating each graph
 and accepts different request windows within the selected capacity. A draft

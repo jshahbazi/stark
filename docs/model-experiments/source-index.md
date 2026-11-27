@@ -187,6 +187,8 @@ For before/after results, use the [family speed histories](../MODEL_RESEARCH.md)
 - [Hy4-Flash Sushi STQ attention-to-FFN boundary](2026-11-27-hy4-stq-attention-ffn-boundary.md) · Model experiment, 2026-11-27
 - [Hy4-Flash STQ KV width and wide dense preparation](2026-11-27-hy4-stq-kv-width-dense-io.md) · Model experiment, 2026-11-27
 - [Hy4-Flash STQ catalog and runtime defaults](2026-11-27-hy4-stq-catalog-defaults.md) · Model experiment, 2026-11-27
+- [Hy4-Flash STQ shared-weight text slots](2026-11-27-hy4-stq-dual-slot.md) · Model experiment, 2026-11-27
+- [Hy4-Flash STQ default shared-weight text slots](2026-11-27-hy4-stq-four-slots.md) · Model experiment, 2026-11-27
 - [Hy4-flash AngelSlim Q3_K tool calling](2026-11-26-hy4-tool-calling.md) · Model experiment, 2026-11-26
 - [Hy4-flash defaults through OpenCode](2026-11-26-hy4-opencode-defaults.md) · Model experiment, 2026-11-26
 - [Resident Hy4-flash through OpenCode](2026-11-26-hy4-resident-opencode.md) · Model experiment, 2026-11-26

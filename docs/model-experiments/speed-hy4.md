@@ -16,6 +16,17 @@ A Sushi v1.8.1 same-binary cache-width bracket measured 29.08 s of fresh 27K pre
 
 The pinned Sushi STQ pack is the sole Hy4-flash catalog choice. Its defaults use the measured register and dense paths with five greedy drafts and F16 KV. [Catalog and runtime verification](2026-11-27-hy4-stq-catalog-defaults.md)
 
+The two-slot preview shared loaded STQ weights across two text requests. At
+27K with four OpenCode agents, all clients finished in 150.13 seconds versus
+154.16 seconds serial, while the median first delta arrived 8.73 seconds
+later. Solo decode held near 52 tok/s. The preview was opt-in. [Agent fan-out qualification](2026-11-27-hy4-stq-dual-slot.md)
+
+The later STQ default shares phase-local scratch and admits up to four
+text requests on one loaded model. The 128 GiB M5 Max admitted all four,
+with 45,056 API positions. Four-agent OpenCode groups took 96.46 seconds
+at 16K and 139.44 seconds at 27K. Solo 27K decode was 51.15 tok/s.
+[Four-slot default qualification](2026-11-27-hy4-stq-four-slots.md)
+
 ## Artifact and reference
 
 - **Artifact.** `AngelSlim/Hy4-flash-GGUF` at `c50d4dd30be42f2b91138e5731de0e2f32ad56b2`. The two Q3_K shards and original BF16 projector total 156,415,403,072 bytes. Keep the original packed expert tensors, FP8 Engram table and NextN block. The target vocabulary projection remains BF16 across draft-head experiments. [Artifact inventory and digests](2026-11-25-hy4-native-q3-k.md#artifact-and-runtime-identities)
