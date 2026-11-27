@@ -645,7 +645,8 @@ struct Forward::Impl {
         ds.push_back(d);
     }
 
-    std::string open(Model& mm, mtl::Context& c, const std::string& pack_dir, const Prefill& p);
+    std::string open(Model& mm, mtl::Context& c, const std::string& pack_dir, const Prefill& p,
+                     int context_capacity, int shared_library);
     std::string alloc();
     void alloc_scratch(int Tm, int as, int ms, const std::function<mtl::Buffer(size_t)>& get);
     std::string attach_prefill();
@@ -678,7 +679,8 @@ struct Forward::Impl {
 };
 
 // ---- opening -------------------------------------------------------------------------------------------------------
-std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& pack_dir, const Prefill& p) {
+std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& pack_dir, const Prefill& p,
+                                int context_capacity, int shared_library) {
     m = &mm;
     cx = &c;
     pack = pack_dir;
@@ -730,7 +732,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     n_experts = g.n_experts;
     latent = g.expert_dim;
     expert_ff = g.expert_ff;
-    ctx = g.max_context;
+    ctx = context_capacity > 0 ? context_capacity : g.max_context;
     eps = g.rms_norm_eps;
     idx_dim = g.idx_key_dim;
     idx_heads = g.idx_heads;
@@ -762,7 +764,9 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     const bool can_fuse_attn_hc = m->stq && pf.stq_fused_attn_hc && n_embd == 3072 && hc == 4;
     if (can_fuse_attn_hc) kernel_files.emplace_back("stq_attn_hc.metal");
     if (pf.routed_fragments) kernel_files.emplace_back("stark_hy4_flash_moe_fragments.metal");
-    lib = cx->compile(kernel_files, strata_hy4_flash_metal::hy4_flash_prelude(), false);
+    lib = shared_library >= 0
+        ? shared_library
+        : cx->compile(kernel_files, strata_hy4_flash_metal::hy4_flash_prelude(), false);
     p_rms_w = cx->pipeline(lib, "hy4_flash_rmsnorm", mtl::Constants().b(40, true));
     p_rms_nw = cx->pipeline(lib, "hy4_flash_rmsnorm", mtl::Constants().b(40, false));
     p_rms_part = cx->pipeline(lib, "hy4_flash_rms_part");
@@ -2419,10 +2423,11 @@ void Forward::Impl::dump_block(const BW& b, int T, Dump* dump, const Inject& inj
 // ---- the public face -----------------------------------------------------------------------------------------------
 Forward::~Forward() { delete im_; }
 
-std::string Forward::open(Model& m, mtl::Context& cx, const std::string& pack_dir, const Prefill& pf) {
+std::string Forward::open(Model& m, mtl::Context& cx, const std::string& pack_dir, const Prefill& pf,
+                          int context_capacity, int shared_library) {
     if (im_ != nullptr) return "already open";
     im_ = new Impl();
-    const std::string e = im_->open(m, cx, pack_dir, pf);
+    const std::string e = im_->open(m, cx, pack_dir, pf, context_capacity, shared_library);
     if (!e.empty()) {
         delete im_;
         im_ = nullptr;
@@ -2767,7 +2772,7 @@ void Forward::Impl::prune_barriers(std::vector<mtl::Dispatch>& ds, const std::ve
         ++pr_dropped;
         live.insert(live.end(), mine.begin(), mine.end());
     }
-    static int calls = 0;
+    static thread_local int calls = 0;
     if (++calls == 200 && stark::hy4::vendor_option("HY4_FLASH_PRUNE_STATS"))
         std::fprintf(stderr, "strata_hy4_flash_metal: prune_barriers: %llu of %llu barriers dropped over %d dispatch lists\n",
                      (unsigned long long) pr_dropped, (unsigned long long) pr_seen, calls);

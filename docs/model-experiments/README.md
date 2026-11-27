@@ -180,6 +180,7 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 | [HY4STQ-PERF-05 · Hy4 STQ attention-to-FFN boundary](2026-11-27-hy4-stq-attention-ffn-boundary.md) | Fresh 27K layer attribution, exact boundary fusion, batched DFly2 correction and 16K and 27K OpenCode reruns. |
 | [HY4STQ-PERF-06 · Hy4 STQ KV width and wide dense preparation](2026-11-27-hy4-stq-kv-width-dense-io.md) | Matched Sushi KV8 and BF16 OpenCode controls, exact prefill transform screens and Stark flexible-window reruns. |
 | [HY4STQ-NATIVE-02 · Hy4 STQ catalog and defaults](2026-11-27-hy4-stq-catalog-defaults.md) | Pinned native install, measured settings by default and flexible OpenCode context. |
+| [HY4STQ-SERVE-01 · Hy4 STQ shared-weight text slots](2026-11-27-hy4-stq-dual-slot.md) | Two text slots over one weight load and managed OpenCode fan-out qualification. |
 | [20261126-HY4TOOLS-01 · Hy4-flash tool calling](2026-11-26-hy4-tool-calling.md) | Signed desktop build verified typed tool calls, streamed reasoning and tool-result replay on the catalog artifact. |
 | [20261126-HY4OC-01 · Hy4-flash defaults through OpenCode](2026-11-26-hy4-opencode-defaults.md) | Paired 16K–27K OpenCode runs on the legacy and automatic tuned profiles with memory-fitted context and prefix reuse. |
 | [20261126-HY4OC-02 · Resident Hy4-flash through OpenCode](2026-11-26-hy4-resident-opencode.md) | Resident Q3_K with 4,096-row prefill reached 35.74–40.77 decode tok/s across the three earlier OpenCode turns, with identical inputs, outputs and draft counts. Startup took 97.50 s. |

@@ -836,6 +836,7 @@ pub(crate) struct GenerationWorker<B: GenerationBackend> {
     /// `Some(enabled)` when the host requested prefix reuse at startup.
     prefix_cache: Option<bool>,
     budget: Budget,
+    hy4_secondary_context_tokens: Option<u32>,
 }
 
 fn valid_ids(
@@ -914,7 +915,16 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             prepared: None,
             prefix_cache,
             budget,
+            hy4_secondary_context_tokens: None,
         })
+    }
+
+    #[cfg(all(feature = "hy4", target_os = "macos", target_arch = "aarch64"))]
+    pub(crate) fn advertise_hy4_secondary(
+        &mut self,
+        context_tokens: u32,
+    ) {
+        self.hy4_secondary_context_tokens = Some(context_tokens);
     }
 
     fn prefix_cache_enabled(&self) -> bool {
@@ -1758,6 +1768,9 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         readiness["loaded_memory"] = memory;
     }
     let capacity = worker.backend.context_capacity();
+    if let Some(context_tokens) = worker.hy4_secondary_context_tokens {
+        readiness["hy4_secondary_context_tokens"] = json!(context_tokens);
+    }
     readiness["context_sizing_policy"] = json!(capacity.policy());
     if let Some(sizing) = capacity.sizing_metadata() {
         readiness["context_sizing"] = sizing;

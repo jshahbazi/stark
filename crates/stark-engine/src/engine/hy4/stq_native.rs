@@ -172,6 +172,7 @@ impl Binding {
 pub struct StqOptions {
     pub chunk: u32,
     pub context_limit: Option<u32>,
+    pub secondary_context_limit: Option<u32>,
     pub profile: bool,
     pub round_bf16: bool,
     pub pair1_decode: bool,
@@ -210,9 +211,10 @@ unsafe extern "C" {
         pair1_decode: c_int,
         resident: c_int,
         tuning: u32,
-        select_context: unsafe extern "C" fn(*const ContextMemory, *mut c_void) -> u32,
+        select_context: unsafe extern "C" fn(*const ContextMemory, *mut c_void, *mut u32) -> u32,
         sizing: *mut c_void,
         session: *mut *mut c_void,
+        secondary: *mut *mut c_void,
         vision: *mut VisionGeometry,
         detail: *mut c_char,
         detail_len: usize,
@@ -224,7 +226,8 @@ impl Session {
     ///
     /// # Safety
     /// The validated files must remain immutable for this session's lifetime,
-    /// including all GPU work. The native runtime maps the original packed pages.
+    /// and any secondary slot's lifetime, including all GPU work. The native
+    /// runtime maps the original packed pages.
     pub unsafe fn load_stq(
         source: &StqSource,
         options: StqOptions,
@@ -283,8 +286,11 @@ impl Session {
             limit: options.context_limit,
             pool_size: None,
             sizing: None,
+            secondary_limit: options.secondary_context_limit,
+            secondary_sizing: None,
         };
         let mut inner = ptr::null_mut();
+        let mut secondary = ptr::null_mut();
         let mut vision = VisionGeometry::default();
         let mut detail = [0; 256];
         // Only the mapped page ranges and duplicated table descriptors survive
@@ -323,14 +329,38 @@ impl Session {
                 select_context,
                 ptr::from_mut(&mut selection).cast(),
                 &mut inner,
+                &mut secondary,
                 &mut vision,
                 detail.as_mut_ptr(),
                 detail.len(),
             )
         };
+        if status == 2 && options.secondary_context_limit.is_some() {
+            // A partial secondary graph's allocations belong to the old queue.
+            // Native open destroyed that owner. Start again with the single-slot fit.
+            let options = StqOptions {
+                secondary_context_limit: None,
+                ..options
+            };
+            return unsafe { Self::load_stq(source, options) };
+        }
         if status != 0 {
             return Err(unsafe { CStr::from_ptr(detail.as_ptr()) }.to_string_lossy().into_owned());
         }
+        let pool_size = selection.pool_size.expect("successful STQ open selected a pool size");
+        let secondary = NonNull::new(secondary).map(|inner| {
+            Box::new(Self {
+                inner,
+                vision,
+                mapped_experts: true,
+                draft_head_q5: false,
+                arena_bytes: 0,
+                sizing: selection.secondary_sizing.expect("successful STQ secondary open selected a context"),
+                pool_size,
+                max_drafts: dfly.drafts as usize,
+                secondary: None,
+            })
+        });
         let session = Self {
             inner: NonNull::new(inner).ok_or("invalid STQ native session")?,
             vision,
@@ -338,8 +368,9 @@ impl Session {
             draft_head_q5: false,
             arena_bytes: 0,
             sizing: selection.sizing.ok_or("invalid finite context limit")??,
-            pool_size: selection.pool_size.expect("successful STQ open selected a pool size"),
+            pool_size,
             max_drafts: dfly.drafts as usize,
+            secondary,
         };
         source.verify_unchanged().map_err(|e| e.to_string())?;
         Ok(session)

@@ -181,6 +181,20 @@ pub(crate) trait RequestInput: BufRead {
     ) -> io::Result<bool>;
 }
 
+#[cfg(all(feature = "hy4", target_os = "macos", target_arch = "aarch64"))]
+impl RequestInput for BufReader<std::fs::File> {
+    fn wait_readable(
+        &mut self,
+        timeout: Duration,
+    ) -> io::Result<bool> {
+        use std::os::fd::AsRawFd;
+        if !self.buffer().is_empty() {
+            return Ok(true);
+        }
+        wait_for_descriptor(self.get_ref().as_raw_fd(), timeout)
+    }
+}
+
 impl<T: AsRef<[u8]>> RequestInput for Cursor<T> {
     fn wait_readable(
         &mut self,
@@ -223,23 +237,30 @@ impl RequestInput for BufReader<StandardInput> {
         if !self.buffer().is_empty() {
             return Ok(true);
         }
-        let mut descriptor = libc::pollfd {
-            fd: libc::STDIN_FILENO,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let milliseconds = timeout.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
-        loop {
-            match unsafe { libc::poll(&mut descriptor, 1, milliseconds) } {
-                0 => return Ok(false),
-                count if count > 0 => return Ok(true),
-                _ => {
-                    let error = io::Error::last_os_error();
-                    if error.kind() != io::ErrorKind::Interrupted {
-                        return Err(error);
-                    }
-                },
-            }
+        wait_for_descriptor(libc::STDIN_FILENO, timeout)
+    }
+}
+
+fn wait_for_descriptor(
+    fd: libc::c_int,
+    timeout: Duration,
+) -> io::Result<bool> {
+    let mut descriptor = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let milliseconds = timeout.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
+    loop {
+        match unsafe { libc::poll(&mut descriptor, 1, milliseconds) } {
+            0 => return Ok(false),
+            count if count > 0 => return Ok(true),
+            _ => {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            },
         }
     }
 }

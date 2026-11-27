@@ -65,7 +65,7 @@ def run_decision(desktop, payload, cancelled):
         if payload.get("model") not in (None, public_id, desktop.active_model, active["name"]):
             raise APIError(404, "Select the running model ID from /v1/models.", "model_not_found")
         epoch, identifier = desktop.epoch, desktop.active_model
-        desktop.reserve_api_request(epoch, identifier, cancelled)
+        worker = desktop.reserve_api_request(epoch, identifier, cancelled)
         desktop.status("deciding", "Deciding for an app…", epoch)
     try:
         result = worker.decide_request(request, image=image, cancelled=cancelled)
@@ -98,9 +98,7 @@ def run_decision(desktop, payload, cancelled):
         raise APIError(503, "Decision failed. Run the model again in Stark.", "decision_failed") from None
     finally:
         with desktop.lock:
-            if desktop.job is threading.current_thread():
-                desktop.job = None
-                desktop.api_condition.notify_all()
+            desktop.release_api_request()
             if desktop.epoch == epoch:
                 desktop.status(
                     "ready" if desktop.worker else "error", "Ready" if desktop.worker else "Model stopped", epoch

@@ -121,6 +121,9 @@ def make_desktop(worker):
     desktop.output_failed = False
     desktop.epoch = 1
     desktop.job = None
+    desktop.api_primary_job = None
+    desktop.api_primary_text = False
+    desktop.api_secondary_job = None
     desktop.install_cancelled = None
     desktop.download_retry_wake = threading.Event()
     desktop.worker = worker

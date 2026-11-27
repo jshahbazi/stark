@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 from jinja2.exceptions import TemplateError
@@ -429,7 +430,7 @@ def _hy4_runtime_template(source):
 
 
 class Worker:
-    def __init__(self, executable, model, timeout, gpu_memory_callback=None):
+    def _init_protocol(self, timeout):
         self.timeout = timeout
         self.pending = b""
         self.cancellation = False
@@ -442,9 +443,19 @@ class Worker:
         self.image_verification = "unverified"
         self.image_check_cached = False
         self.image_check_dir = None
+        self.media = None
+        self.prefix_cache = False
+        self.prefix_chunk_tokens = None
+        self.prefix_subchunk_tokens = None
+        self.generation_budget_inputs = False
+        self._ready_seen = False
+
+    def __init__(self, executable, model, timeout, gpu_memory_callback=None):
+        self._init_protocol(timeout)
         self.model_path = Path(model)
         self._closed = False
-        self._ready_seen = False
+        self.secondary = None
+        self._pending_secondary = None
         self.executable = Path(executable)
         try:
             # Bind later image qualification to the exact executable observed
@@ -453,19 +464,14 @@ class Worker:
             self._launch_worker_sha256 = file_hash(self.executable)
         except (OSError, ValueError, TypeError, ConversionError):
             self._launch_worker_sha256 = None
-        self.media = None
-        self.prefix_cache = False
-        self.prefix_chunk_tokens = None
-        self.prefix_subchunk_tokens = None
-        self.generation_budget_inputs = False
         command = [str(executable), "--model-path", str(model)]
         try:
             config = read_model_config(Path(model))
         except (OSError, ValueError, ConversionError):
             config = {}
-        if isinstance(config, dict) and (
-            config.get("type") in VISION_MODEL_TYPES or model_image_family(config, Path(model)) is not None
-        ):
+        converted_vision = isinstance(config, dict) and config.get("type") in VISION_MODEL_TYPES
+        family = model_image_family(config, Path(model)) if isinstance(config, dict) and not converted_vision else None
+        if converted_vision or family is not None:
             from .image_checks import ImageCheckError, preflight_family_memory
 
             try:
@@ -481,22 +487,35 @@ class Worker:
         os.set_blocking(self.cancel_fd, False)
         telemetry_fd = None
         try:
-            self.process, telemetry_fd = _popen_with_gpu_memory(
-                command,
-                callback=gpu_memory_callback,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                bufsize=0,
-                start_new_session=True,
-                pass_fds=(read_fd,),
-                env=dict(
+            with ExitStack() as child_pipes:
+                env = dict(
                     os.environ,
                     STARK_CANCEL_FD=str(read_fd),
                     STARK_REQUEST_BUDGET_MIB=str(REQUEST_BUDGET_MIB),
-                ),
-            )
+                )
+                env.pop("STARK_HY4_LANE_FDS", None)
+                inherited = (read_fd,)
+                if (
+                    env.get("STARK_HY4_CONCURRENT_SLOTS") == "2"
+                    and (family or {}).get("profile") == HY4_STQ_VISION_PROFILE
+                ):
+                    self._pending_secondary, lane_fds = _Hy4Lane.open(timeout, child_pipes)
+                    inherited += lane_fds
+                    env["STARK_HY4_LANE_FDS"] = ",".join(map(str, lane_fds))
+                self.process, telemetry_fd = _popen_with_gpu_memory(
+                    command,
+                    callback=gpu_memory_callback,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    bufsize=0,
+                    start_new_session=True,
+                    pass_fds=inherited,
+                    env=env,
+                )
         except BaseException:
+            if self._pending_secondary is not None:
+                self._pending_secondary.close()
             os.close(self.cancel_fd)
             if self.media is not None:
                 self.media.close()
@@ -619,11 +638,10 @@ class Worker:
                 self.cancel(request_id)
             if remaining <= 0:
                 raise ChatError("Worker timed out; chat closed.")
-            if not select.select(
-                [self.process.stdout], [], [], min(remaining, 0.1) if cancelled is not None else remaining
-            )[0]:
+            output = self._output_pipe
+            if not select.select([output], [], [], min(remaining, 0.1) if cancelled is not None else remaining)[0]:
                 continue
-            chunk = os.read(self.process.stdout.fileno(), 65536)
+            chunk = os.read(output.fileno(), 65536)
             if not chunk:
                 raise ChatError("Worker stopped; chat closed.")
             self.pending += chunk
@@ -658,6 +676,7 @@ class Worker:
                 self.prefix_subchunk_tokens = prefix_settings.get("subchunk_tokens")
                 self.cancellation = reply.get("cancellation") == "pipe-v1"
                 self.image_input = image_input_contract(reply.get("image_input"))
+                self._read_secondary_ready(reply)
                 launch_hash = getattr(self, "_launch_worker_sha256", None)
                 self.images = (
                     getattr(self, "media", None) is not None
@@ -702,6 +721,48 @@ class Worker:
         except (ValueError, UnicodeError):
             raise ChatError("Invalid worker reply; chat closed.") from None
 
+    @property
+    def _input_pipe(self):
+        return self.process.stdin
+
+    @property
+    def _output_pipe(self):
+        return self.process.stdout
+
+    def _read_secondary_ready(self, primary):
+        lane = getattr(self, "_pending_secondary", None)
+        if lane is None:
+            return
+        capacity = primary.get("hy4_secondary_context_tokens")
+        if capacity is None:
+            lane.close()
+            self._pending_secondary = None
+            return
+        if type(capacity) is not int or capacity < 2:
+            raise ChatError("Invalid Hy4 secondary worker capacity; restart the model.")
+        ready = lane.read()
+        if (
+            ready.get("ready") is not True
+            or ready.get("mode") != "text-generation-v1"
+            or ready.get("max_context_tokens") != capacity
+            or type(ready.get("max_new_tokens")) is not int
+            or ready["max_new_tokens"] < 1
+            or ready.get("vocab_size") != primary.get("vocab_size")
+            or lane.mtp != self.mtp
+            or not lane.cancellation
+            or lane.prefix_cache
+            or lane.image_input is not None
+        ):
+            raise ChatError("Invalid Hy4 secondary worker readiness; restart the model.")
+        lane.context_limit = capacity
+        lane.streaming = ready.get("streaming") == "text-delta-v1"
+        lane.stop_sequences = ready.get("stop_sequences") is True
+        if lane.streaming != (primary.get("streaming") == "text-delta-v1") or lane.stop_sequences != (
+            primary.get("stop_sequences") is True
+        ):
+            raise ChatError("Invalid Hy4 secondary worker features; restart the model.")
+        self.secondary, self._pending_secondary = lane, None
+
     def request(self, payload, on_delta=None, cancelled=None, *, on_progress=None):
         lock = getattr(self, "_transaction_lock", None)
         if lock is None:
@@ -742,7 +803,7 @@ class Worker:
             # FileIO writes can be partial for large prompts.
             view = memoryview(data)
             while view:
-                count = self.process.stdin.write(view)
+                count = self._input_pipe.write(view)
                 if not count:
                     raise ChatError("Cannot send request to worker.")
                 view = view[count:]
@@ -1004,6 +1065,10 @@ class Worker:
                 signal_worker(signal.SIGKILL)
                 self.process.wait()
         finally:
+            for lane in (getattr(self, "secondary", None), getattr(self, "_pending_secondary", None)):
+                if lane is not None:
+                    lane.close()
+            self.secondary = self._pending_secondary = None
             for pipe in (self.process.stdin, self.process.stdout):
                 try:
                     pipe.close()
@@ -1019,6 +1084,43 @@ class Worker:
             media, self.media = getattr(self, "media", None), None
             if media is not None:
                 media.close()
+
+
+class _Hy4Lane(Worker):
+    """A text protocol connection owned by the primary Hy4 process."""
+
+    @classmethod
+    def open(cls, timeout, child_pipes):
+        lane = cls.__new__(cls)
+        lane._init_protocol(timeout)
+        with ExitStack() as host_pipes:
+            child_in, host_out = os.pipe()
+            child_pipes.callback(os.close, child_in)
+            lane._lane_input = host_pipes.enter_context(os.fdopen(host_out, "wb", buffering=0))
+            host_in, child_out = os.pipe()
+            child_pipes.callback(os.close, child_out)
+            lane._lane_output = host_pipes.enter_context(os.fdopen(host_in, "rb", buffering=0))
+            child_cancel, lane.cancel_fd = os.pipe()
+            child_pipes.callback(os.close, child_cancel)
+            host_pipes.callback(os.close, lane.cancel_fd)
+            os.set_blocking(lane.cancel_fd, False)
+            lane._pipes = host_pipes.pop_all()
+        return lane, (child_in, child_out, child_cancel)
+
+    @property
+    def _input_pipe(self):
+        return self._lane_input
+
+    @property
+    def _output_pipe(self):
+        return self._lane_output
+
+    def invalidate_image_checks(self):
+        pass  # Image readiness and verification belong to the primary lane.
+
+    def close(self):
+        self.cancel_fd = None
+        self._pipes.close()
 
 
 def _read_image_file(path: Path) -> ImageData:

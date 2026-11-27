@@ -158,7 +158,8 @@ public:
 
     /// Compiles the kernels, resolves every weight and allocates the state.  `pack_dir` may be empty, and then the
     /// Engram tables cannot be read - which is an error only when a block that has one is actually run.
-    std::string open(Model& m, mtl::Context& cx, const std::string& pack_dir, const Prefill& pf = {});
+    std::string open(Model& m, mtl::Context& cx, const std::string& pack_dir, const Prefill& pf = {},
+                     int context_capacity = 0, int shared_library = -1);
 
     static constexpr int kMaxWindow = 8;        ///< a decode window
     static constexpr int kSelCap = 2051;        ///< the widest selection a query may have

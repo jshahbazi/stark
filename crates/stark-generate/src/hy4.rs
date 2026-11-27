@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Hy4 Metal backend through Stark's serialized generation worker.
+//! Hy4 Metal backend. Each protocol lane owns one request state.
 
 mod source;
 mod vision;
@@ -297,9 +297,10 @@ impl Hy4Backend {
     pub(crate) fn load(
         path: &Path,
         cancellation: Option<CancelSignal>,
+        secondary: bool,
     ) -> Result<Self, &'static str> {
         if is_stq_pack(path) {
-            return Self::load_stq(path, cancellation);
+            return Self::load_stq(path, cancellation, secondary);
         }
         let source = source::VerifiedSource::open(path)?;
         for (name, digest) in [
@@ -403,6 +404,7 @@ impl Hy4Backend {
     fn load_stq(
         path: &Path,
         cancellation: Option<CancelSignal>,
+        secondary: bool,
     ) -> Result<Self, &'static str> {
         let source = stq_source::StqSource::open(path).map_err(|_| "invalid_hy4_stq_artifact")?;
         for (name, digest) in [
@@ -476,6 +478,7 @@ impl Hy4Backend {
                     fused_attn_hc,
                     batch_draft,
                     register_dense_io,
+                    secondary_context_limit: secondary.then(|| context.unwrap_or(49_152).min(49_152)),
                 },
             )
         }
@@ -530,6 +533,35 @@ impl Hy4Backend {
             stq: true,
             recommended_drafts,
         })
+    }
+
+    pub(crate) fn take_secondary(
+        &mut self,
+        cancellation: CancelSignal,
+    ) -> Option<(Self, u32)> {
+        let native = self.native.take_secondary()?;
+        let capacity = native.context_sizing().context_tokens;
+        Some((
+            Self {
+                native,
+                tokenizer: self.tokenizer.clone(),
+                cancellation: Some(cancellation),
+                mapper: ProbabilityMapper::default(),
+                retained: None,
+                pending: None,
+                tail_retained: None,
+                tail_pending: None,
+                stats: DraftStats::default(),
+                lookup_stats: LookupStats::default(),
+                lookup_newline: None,
+                tail_prefix_enabled: false,
+                runtime: self.runtime.clone(),
+                chunk: self.chunk,
+                stq: true,
+                recommended_drafts: self.recommended_drafts,
+            },
+            capacity,
+        ))
     }
 
     fn generate_inner(

@@ -156,6 +156,7 @@ struct ContextMemory {
     draft_cache_bytes_per_token: u64,
     pool_bytes_per_row: u64,
     draft_pool_bytes_per_row: u64,
+    secondary_scratch_bytes: u64,
 }
 
 impl ContextMemory {
@@ -178,21 +179,47 @@ struct ContextSelection {
     limit: Option<u32>,
     pool_size: Option<u32>,
     sizing: Option<Result<ContextSizing, &'static str>>,
+    secondary_limit: Option<u32>,
+    secondary_sizing: Option<ContextSizing>,
 }
 
 unsafe extern "C" fn select_context(
     memory: *const ContextMemory,
     selection: *mut c_void,
+    secondary_context: *mut u32,
 ) -> u32 {
     // The native open call owns the borrowed inventory and calls this synchronously.
     let memory = unsafe { &*memory };
     let selection = unsafe { &mut *selection.cast::<ContextSelection>() };
     selection.pool_size = Some(memory.pool_size);
     let budget = stark_resource_budget::inference_memory_budget(memory.budget as usize);
+    if let Some(cap) = selection.secondary_limit.filter(|_| !secondary_context.is_null()) {
+        if let Some((primary, secondary)) = fit_slot_pair(memory, budget, selection.limit, cap) {
+            // The STQ caller supplies a writable output for the independently sized slot.
+            unsafe { secondary_context.write(secondary.context_tokens) };
+            selection.sizing = Some(Ok(primary));
+            selection.secondary_sizing = Some(secondary);
+            return primary.context_tokens;
+        }
+    }
     let sizing = hy4_context_sizing(memory, budget, selection.limit);
     let context_tokens = sizing.as_ref().map_or(0, |sizing| sizing.context_tokens);
     selection.sizing = Some(sizing);
     context_tokens
+}
+
+fn fit_slot_pair(
+    memory: &ContextMemory,
+    budget: usize,
+    primary_cap: Option<u32>,
+    secondary_cap: u32,
+) -> Option<(ContextSizing, ContextSizing)> {
+    let budget = budget.checked_sub(memory.secondary_scratch_bytes as usize)?;
+    let primary_budget = budget.checked_sub(memory.estimate(secondary_cap)?)?;
+    let primary = hy4_context_sizing(memory, primary_budget, primary_cap).ok()?;
+    let secondary_budget = budget.checked_sub(memory.estimate(primary.context_tokens)?)?;
+    let secondary = hy4_context_sizing(memory, secondary_budget, Some(secondary_cap)).ok()?;
+    (secondary.context_tokens == secondary_cap).then_some((primary, secondary))
 }
 
 fn hy4_context_sizing(
@@ -237,7 +264,7 @@ unsafe extern "C" {
         dense_ffn_device_views: c_int,
         resident_draft_experts: c_int,
         draft_head_q5: c_int,
-        select_context: unsafe extern "C" fn(*const ContextMemory, *mut c_void) -> u32,
+        select_context: unsafe extern "C" fn(*const ContextMemory, *mut c_void, *mut u32) -> u32,
         sizing: *mut c_void,
         session: *mut *mut c_void,
         vision: *mut VisionGeometry,
@@ -289,7 +316,12 @@ pub struct Session {
     sizing: ContextSizing,
     pool_size: u32,
     max_drafts: usize,
+    secondary: Option<Box<Session>>,
 }
+
+// The handle owns its request and readout state. STQ slots share a model
+// whose native phase lock serializes all use of mutable GPU resources.
+unsafe impl Send for Session {}
 
 fn path_arg(path: &Path) -> Result<CString, &'static str> {
     CString::new(path.as_os_str().as_bytes()).map_err(|_| "invalid_hy4_path")
@@ -334,6 +366,8 @@ impl Session {
             limit: options.context_limit,
             pool_size: None,
             sizing: None,
+            secondary_limit: None,
+            secondary_sizing: None,
         };
         // The path arguments remain alive throughout initialization. The returned
         // handle owns all model data and the device queue.
@@ -393,7 +427,13 @@ impl Session {
             sizing: selection.sizing.ok_or("invalid_finite_context_limit")??,
             pool_size: selection.pool_size.ok_or("invalid_hy4_pool_size")?,
             max_drafts: options.max_drafts,
+            secondary: None,
         })
+    }
+
+    /// Take the independently sized STQ slot when the shared load admitted it.
+    pub fn take_secondary(&mut self) -> Option<Self> {
+        self.secondary.take().map(|session| *session)
     }
 
     pub fn vision_geometry(&self) -> VisionGeometry {
@@ -577,13 +617,16 @@ mod context_tests {
             draft_cache_bytes_per_token: 16,
             pool_bytes_per_row: 16,
             draft_pool_bytes_per_row: 16,
+            secondary_scratch_bytes: 0,
         };
         let mut selection = ContextSelection {
             limit: Some(32_768),
             pool_size: None,
             sizing: None,
+            secondary_limit: None,
+            secondary_sizing: None,
         };
-        let context = unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast()) };
+        let context = unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast(), ptr::null_mut()) };
         assert_eq!(context, 32_768);
         assert_eq!(selection.pool_size, Some(memory.pool_size));
         let sizing = selection.sizing.unwrap().unwrap();
@@ -591,10 +634,35 @@ mod context_tests {
         assert_eq!(sizing.user_context_cap, Some(32_768));
         assert_eq!(sizing.backend_bound.unwrap().source, "hy4_metal_buffer_or_i32_index");
         memory.pool_size = 0;
-        assert_eq!(unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast()) }, 0);
+        assert_eq!(unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast(), ptr::null_mut()) }, 0);
         assert_eq!(selection.sizing.unwrap().unwrap_err(), "context_memory_estimate_unavailable");
         memory.engine_context = 1;
-        assert_eq!(unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast()) }, 0);
+        assert_eq!(unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast(), ptr::null_mut()) }, 0);
         assert_eq!(selection.sizing.unwrap().unwrap_err(), "invalid_finite_context_limit");
+    }
+
+    #[stark_test]
+    fn shared_fit_accounts_for_both_contexts_and_second_scratch() {
+        let memory = ContextMemory {
+            checkpoint_context: 262_144,
+            engine_context: 131_072,
+            pool_size: 128,
+            draft_slack: 0,
+            budget: 0,
+            cache_bytes_per_token: 1_024,
+            draft_cache_bytes_per_token: 0,
+            pool_bytes_per_row: 16,
+            draft_pool_bytes_per_row: 0,
+            secondary_scratch_bytes: 16 * 1024 * 1024,
+        };
+        let budget = 96 * 1024 * 1024;
+        let (primary, secondary) = fit_slot_pair(&memory, budget, Some(43_000), 32_768).unwrap();
+        assert_eq!(primary.context_tokens, 40_960);
+        assert_eq!(secondary.context_tokens, 32_768);
+        let combined = memory.estimate(primary.context_tokens).unwrap()
+            + memory.estimate(secondary.context_tokens).unwrap()
+            + memory.secondary_scratch_bytes as usize;
+        assert!(combined <= budget);
+        assert!(fit_slot_pair(&memory, 32 * 1024 * 1024, None, 32_768).is_none());
     }
 }

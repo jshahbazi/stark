@@ -469,7 +469,7 @@ class Desktop:
     requests and in-flight replies carry the epoch they started under and are
     discarded when it no longer matches, so a late reply from a previous worker
     can never reach the app or a client. App chat turns and API completions share
-    one FIFO queue (``api_queue``) in front of the single worker. See
+    one FIFO queue (``api_queue``) in front of the running worker. See
     docs/TECHNICAL_OVERVIEW.md for the control protocol and docs/LOCAL_API.md for
     the HTTP contract.
     """
@@ -498,6 +498,9 @@ class Desktop:
         self.current_status = "No model running"
         self.epoch = 0
         self.job = None
+        self.api_primary_job = None
+        self.api_primary_text = False
+        self.api_secondary_job = None
         self.worker = None
         self.converter = None
         self.catalog_process = None
@@ -1100,7 +1103,7 @@ class Desktop:
 
     def install_catalog(self, payload):
         with self.lock:
-            if self.job is not None and self.job.is_alive():
+            if self.api_secondary_job is not None or (self.job is not None and self.job.is_alive()):
                 raise DesktopError("Wait for the current operation or choose Stop.")
             if payload.get("catalog_request_id") != self.catalog_request_id:
                 raise DesktopError("Refresh this family before downloading a model.")
@@ -1447,7 +1450,7 @@ class Desktop:
         if not self.request_id(request_id):
             raise DesktopError("Check the starting model again before downloading.")
         with self.lock:
-            if self.job is not None and self.job.is_alive():
+            if self.api_secondary_job is not None or (self.job is not None and self.job.is_alive()):
                 raise DesktopError("Wait for the current operation before downloading another model.")
             recipe = self.guided_recipe(payload)
             previous = next(
@@ -1510,7 +1513,7 @@ class Desktop:
             resources = self.guided_resources(self.guided_hardware.get(payload["recommendation_request_id"]))
             if not installation_allowed(recipe, resources, installed=True):
                 raise DesktopError("This starting model is not available for the current Mac resources.")
-            if self.job is not None or self.api_queue:
+            if self.job is not None or self.api_secondary_job or self.api_queue:
                 raise DesktopError("Wait for the current request before switching models.")
             # Claim the operation slot before releasing the old worker, so an
             # API request cannot enter between the idle check and model switch.
@@ -1661,6 +1664,7 @@ class Desktop:
             self.image_identity = None
             self.codec = None
             self.template = None
+            self.api_condition.notify_all()
         if worker is not None:
             worker.close()
 
@@ -1736,14 +1740,15 @@ class Desktop:
             self.epoch += 1
             self.api_condition.notify_all()
             self.install_epoch = None
-            converter, job = self.converter, self.job
+            converter, job, secondary_job = self.converter, self.job, self.api_secondary_job
             for phase, previous in cancelled.items():
                 if previous["state"] in {"waiting", "running"}:
                     self.emit("progress", phase=phase, **{**previous, "state": "cancelled"})
         self.terminate_converter(converter)
         self.close_worker()
-        if job is not None and job is not threading.current_thread():
-            job.join(timeout=5)
+        for active in (job, secondary_job):
+            if active is not None and active is not threading.current_thread():
+                active.join(timeout=5)
         with self.lock:
             # A cancelled job cannot publish events or acquire a new child.
             if self.job is job and (job is None or not job.is_alive()):
@@ -1784,7 +1789,7 @@ class Desktop:
 
     def start(self, function, state, message, *args, request_id=None, guided_install=False):
         with self.lock:
-            if self.job is not None and self.job.is_alive():
+            if self.api_secondary_job is not None or (self.job is not None and self.job.is_alive()):
                 self.emit(
                     "error",
                     message="Wait for the current operation or choose Stop.",
@@ -2888,7 +2893,7 @@ class Desktop:
 
         Reserve the existing operation slot before releasing the lock to load.
         Stop/model replacement can close a loading worker and fence its readiness.
-        Only one worker is resident; all native caches disappear on a switch.
+        All native caches disappear on a switch.
         """
         current = threading.current_thread()
         with self.lock:
@@ -2917,7 +2922,7 @@ class Desktop:
                 )
             if self.active_mode == mode:
                 return
-            if (self.job is not None and self.job is not current) or self.api_queue:
+            if (self.job is not None and self.job is not current) or self.api_secondary_job or self.api_queue:
                 raise APIError(
                     429, "Stark is using the model. Wait for the current operation, then retry.", "model_busy"
                 )
@@ -3072,7 +3077,7 @@ class Desktop:
                 raise DesktopError("MTP options are available in Chat mode.")
             if payload["model_id"] != self.active_model:
                 raise DesktopError("Model changed. Refresh its MTP options.")
-            if self.job is not None or self.api_queue:
+            if self.job is not None or self.api_secondary_job or self.api_queue:
                 raise DesktopError("Wait for the current operation or choose Stop.")
             capability, _ = self.mtp_settings()
             enabled = payload["enabled"]
@@ -3109,7 +3114,7 @@ class Desktop:
 
     def configure(self, payload):
         with self.lock:
-            if self.job is not None or self.api_queue:
+            if self.job is not None or self.api_secondary_job or self.api_queue:
                 raise DesktopError("Wait for the current operation or choose Stop.")
             if self.worker is None:
                 raise DesktopError("Run a model before changing advanced options.")
@@ -3323,13 +3328,19 @@ class Desktop:
         estimate_key=None,
         cache_scope=None,
         fit_output_to_context=False,
+        lane=None,
     ):
         with self.lock:
             if epoch is not None and epoch != self.epoch:
                 raise APIError(503, "Model changed or stopped before this request started.", "model_changed")
-            worker, template, codec = self.worker, self.template, self.codec
+            primary, template, codec = self.worker, self.template, self.codec
+            if lane is not None and lane is not primary and lane is not getattr(primary, "secondary", None):
+                raise APIError(503, "Model changed or stopped before this request started.", "model_changed")
+            worker = lane if lane is not None else primary
             prefix_cache = getattr(worker, "prefix_cache", False) is True
-            reset_prefix = getattr(self, "prefix_reset_pending", False) and prefix_cache
+            reset_prefix = worker is primary and getattr(self, "prefix_reset_pending", False) and prefix_cache
+            if self.api_secondary_job is not None:
+                cache_scope = None
             dispatch_epoch, identifier = self.epoch, self.active_model
             if worker is None or template is None:
                 raise APIError(503, "Run a model before sending a prompt.", "model_not_loaded")
@@ -3343,7 +3354,8 @@ class Desktop:
                     raise DesktopError("This model or worker does not support the requested Thinking Budget.")
                 if maximum not in (None, 0) and maximum < MIN_THINKING_BUDGET_OUTPUT_TOKENS:
                     raise DesktopError("Leave at least four output tokens when Thinking Budget is enabled.")
-            self.prefix_reset_pending = False
+            if worker is primary:
+                self.prefix_reset_pending = False
             context = context or self.context
             capability, default_mtp = self.mtp_settings()
             enabled_mtp = (default_mtp and image is None) if mtp is None else mtp
@@ -3381,7 +3393,7 @@ class Desktop:
                 # writer has a bounded timeout. OSError asks Worker to cancel
                 # and consume the terminal reply before the next request.
                 with self.lock:
-                    if self.epoch != dispatch_epoch or self.worker is not worker or self.active_model != identifier:
+                    if self.epoch != dispatch_epoch or self.worker is not primary or self.active_model != identifier:
                         raise OSError("Request no longer belongs to the running model.")
                     deliver(text)
 
@@ -3394,7 +3406,7 @@ class Desktop:
 
         def progress(value):
             with self.lock:
-                if self.epoch != dispatch_epoch or self.worker is not worker or self.active_model != identifier:
+                if self.epoch != dispatch_epoch or self.worker is not primary or self.active_model != identifier:
                     raise OSError("Request no longer belongs to the running model.")
                 if cancelled is not None and cancelled.is_set():
                     raise OSError("Request cancelled.")
@@ -3405,8 +3417,14 @@ class Desktop:
 
         progress_options = {"on_progress": progress} if on_progress is not None and worker.streaming else {}
         if reset_prefix:
-            if worker.request({"operation": "reset_cache"}, cancelled=cancelled).get("cache_reset") is not True:
-                raise ValueError
+            try:
+                if worker.request({"operation": "reset_cache"}, cancelled=cancelled).get("cache_reset") is not True:
+                    raise ValueError
+            except BaseException:
+                with self.lock:
+                    if self.worker is primary and self.epoch == dispatch_epoch:
+                        self.prefix_reset_pending = True
+                raise
 
         parser = tool_parser_for(codec)
         try:
@@ -3595,7 +3613,7 @@ class Desktop:
             worker = self.worker
             if worker is None or getattr(worker, "prefix_cache", False) is not True:
                 return
-            if self.job is not None:
+            if self.job is not None or self.api_secondary_job is not None:
                 self.prefix_reset_pending = True
                 return
             try:
@@ -3805,11 +3823,14 @@ class Desktop:
         with self.lock:
             capability, enabled = self.mtp_settings()
             native_decision = bool(self.worker and getattr(self.worker, "backend", None) == "decision-native")
+            loaded = self.active_model is not None and (self.active_mode == "chat" or native_decision)
             return {
                 "status": "ok",
                 "resource_budget": self.resource_budget_summary(),
-                "model_loaded": self.active_model is not None and (self.active_mode == "chat" or native_decision),
-                "busy": self.job is not None,
+                "model_loaded": loaded,
+                "busy": self.job is not None or self.api_secondary_job is not None,
+                "worker_slots": (1 + int(self.api_secondary_worker() is not None)) if loaded else 0,
+                "running_requests": int(self.api_primary_job is not None) + int(self.api_secondary_job is not None),
                 "queued_requests": len(self.api_queue),
                 "queue_limit": self.api_queue_limit,
                 "queue_timeout_seconds": self.api_queue_timeout,
@@ -3851,14 +3872,26 @@ class Desktop:
     def api_decide(self, payload, cancelled=None):
         return run_decision(self, payload, cancelled)
 
-    def reserve_api_request(self, epoch, identifier, cancelled):
-        """Claim the shared FIFO worker slot while holding self.lock."""
+    def api_secondary_worker(self):
+        secondary = getattr(self.worker, "secondary", None)
+        return secondary if secondary is not None and self.api_context <= secondary.context_limit else None
+
+    def available_api_worker(self, *, text, maximum):
+        if self.job is None and (text or self.api_secondary_job is None):
+            return self.worker
+        if not text or not self.api_primary_text or self.job is not self.api_primary_job or self.api_secondary_job:
+            return None
+        secondary = self.api_secondary_worker()
+        return secondary if secondary is not None and maximum <= secondary.max_new_tokens else None
+
+    def reserve_api_request(self, epoch, identifier, cancelled, *, text=False, maximum=0):
+        """Claim a compatible lane in FIFO order while holding self.lock."""
         if len(self.api_queue) >= self.api_queue_limit:
             raise APIError(429, "Stark's request queue is full. Retry shortly.", "queue_full")
         ticket = object()
         self.api_queue.append(ticket)
         deadline = time.monotonic() + self.api_queue_timeout
-        was_queued = self.job is not None or self.api_queue[0] is not ticket
+        was_queued = self.available_api_worker(text=text, maximum=maximum) is None or self.api_queue[0] is not ticket
         cancelled.waiting_for_worker = was_queued
         try:
             while True:
@@ -3867,7 +3900,8 @@ class Desktop:
                 if self.api_closing or self.epoch != epoch or self.active_model != identifier:
                     raise APIError(503, "Model changed or stopped while this request waited.", "model_changed")
                 remaining = deadline - time.monotonic()
-                if self.job is None and self.api_queue[0] is ticket and (remaining > 0 or not was_queued):
+                worker = self.available_api_worker(text=text, maximum=maximum)
+                if worker is not None and self.api_queue[0] is ticket and (remaining > 0 or not was_queued):
                     break
                 if remaining <= 0:
                     raise APIError(429, "Request queue wait expired. Retry shortly.", "queue_timeout")
@@ -3878,7 +3912,27 @@ class Desktop:
             cancelled.waiting_for_worker = False
             self.api_queue.remove(ticket)
             self.api_condition.notify_all()
-        self.job = threading.current_thread()
+        current = threading.current_thread()
+        if worker is self.worker:
+            self.job = self.api_primary_job = current
+            self.api_primary_text = text
+        else:
+            self.api_secondary_job = current
+            self.prefix_reset_pending = True
+        return worker
+
+    def release_api_request(self):
+        """Release the caller's lane while holding self.lock."""
+        current = threading.current_thread()
+        if self.api_primary_job is current:
+            if self.job is current:
+                self.job = None
+            self.api_primary_job = None
+            self.api_primary_text = False
+        if self.api_secondary_job is current:
+            self.api_secondary_job = None
+            self.prefix_reset_pending = True
+        self.api_condition.notify_all()
 
     def api_complete(self, payload, on_delta=None, cancelled=None):
         """Run one chat completion for the HTTP API and return the response body.
@@ -3889,8 +3943,8 @@ class Desktop:
         asked for streaming. ``cancelled`` is the handler's event: it is set when
         the client disconnects or the request deadline passes, and its optional
         ``reason`` attribute (``"deadline"``) selects the 504 response. While the
-        completion runs, ``self.job`` is the serving thread, which ``stop`` uses to
-        fence it. Failures map to ``APIError``: a cancelled request, a context
+        completion runs, ``stop`` fences both serving threads. Failures map to
+        ``APIError``: a cancelled request, a context
         overflow or oversized worker request (400), or a worker fault (503, after which the worker is closed
         and the app shows the model as stopped).
         """
@@ -3948,7 +4002,6 @@ class Desktop:
             enabled_mtp = (default_mtp and request["image"] is None) if request["mtp"] is None else request["mtp"]
             drafts = self.resolve_request_mtp(enabled_mtp, capability, request["image"], request["sampling"])
             epoch, identifier, worker = self.epoch, self.active_model, self.worker
-            self.reserve_api_request(epoch, identifier, cancelled)
             estimate_key = self.estimate_key(
                 context=self.api_context,
                 sampling=request["sampling"],
@@ -3958,6 +4011,9 @@ class Desktop:
                 tools=tool_request,
                 stop=request["stop"],
                 mtp_drafts=drafts,
+            )
+            lane = self.reserve_api_request(
+                epoch, identifier, cancelled, text=request["image"] is None, maximum=maximum or self.api_maximum
             )
             principal = getattr(cancelled, "cache_principal", None)
             cache_scope = self.api_cache_scope(principal)
@@ -4006,6 +4062,7 @@ class Desktop:
                 estimate_key=estimate_key,
                 cache_scope=cache_scope,
                 fit_output_to_context=fit_output_to_context,
+                lane=lane,
             )
             with self.lock:
                 if epoch != self.epoch or self.worker is not worker or self.active_model != identifier:
@@ -4108,10 +4165,8 @@ class Desktop:
             raise APIError(503, "Generation failed. Run the model again in Stark.", "generation_failed") from None
         finally:
             with self.lock:
-                if self.job is threading.current_thread():
-                    self.job = None
-                    self.api_condition.notify_all()
-                if epoch == self.epoch:
+                self.release_api_request()
+                if epoch == self.epoch and self.job is None and self.api_secondary_job is None:
                     self.status(
                         "ready" if self.worker else "error", "Ready" if self.worker else "Model stopped", epoch
                     )
@@ -4180,7 +4235,12 @@ class Desktop:
 
     def monitor(self):
         with self.lock:
-            if self.worker is None or self.job is not None or self.worker.process.poll() is None:
+            if (
+                self.worker is None
+                or self.job is not None
+                or self.api_secondary_job
+                or self.worker.process.poll() is None
+            ):
                 return
         self.close_worker()
         self.emit("error", message="The model stopped unexpectedly. Choose Run to restart it.")
@@ -4382,7 +4442,9 @@ class Desktop:
                 self.discard_decision_attachment(reference)
                 raise
             with self.lock:
-                if reference is not None and self.job is not None and self.job.is_alive():
+                if reference is not None and (
+                    self.api_secondary_job is not None or (self.job is not None and self.job.is_alive())
+                ):
                     self.discard_decision_attachment(reference)
                     self.emit(
                         "error",
@@ -4403,7 +4465,7 @@ class Desktop:
             )
         elif command == "reset":
             with self.lock:
-                if self.job is not None:
+                if self.job is not None or self.api_secondary_job is not None:
                     raise DesktopError("Wait for the current operation or choose Stop.")
                 self.reset()
         elif command == "configure":

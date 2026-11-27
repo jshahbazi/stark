@@ -8,7 +8,17 @@ from unittest.mock import patch
 
 import pytest
 
-from stark_convert.chat import ChatError, ChatRequestTooLarge, Worker, load_template, main, run_chat, terminal_text
+from stark_convert.chat import (
+    ChatCancelled,
+    ChatError,
+    ChatRequestTooLarge,
+    Worker,
+    load_template,
+    main,
+    run_chat,
+    terminal_text,
+)
+from stark_convert.vision_runtime import HY4_STQ_VISION_PROFILE
 
 
 @pytest.fixture
@@ -28,6 +38,66 @@ def model(tmp_path):
         )
     )
     return tmp_path
+
+
+@pytest.mark.parametrize("admit", [False, True])
+def test_hy4_secondary_pipes_follow_readiness_and_cancel_independently(model, monkeypatch, admit):
+    import threading
+
+    path = model / "fake Hy4 lane process"
+    path.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys, threading\n"
+        "lane_in, lane_out, lane_cancel = map(int, os.environ['STARK_HY4_LANE_FDS'].split(','))\n"
+        "ready = {'ready': True, 'mode': 'text-generation-v1', 'vocab_size': 256, "
+        "'max_context_tokens': 4096, 'max_new_tokens': 4095, 'streaming': 'text-delta-v1', "
+        "'stop_sequences': True, 'cancellation': 'pipe-v1'}\n"
+        "admit = os.environ['STARK_TEST_LANE_ADMIT'] == 'yes'\n"
+        "def serve(source, sink, name, cancel_fd, start):\n"
+        "    def write(reply): print(json.dumps(reply), file=sink, flush=True)\n"
+        "    write(start)\n"
+        "    for line in source:\n"
+        "        request = json.loads(line)\n"
+        "        if request['operation'] == 'generate':\n"
+        "            write({'event': 'delta', 'text': name})\n"
+        "            received = int.from_bytes(os.read(cancel_fd, 8), 'little')\n"
+        "            if received != request['request_id']: return\n"
+        "            write({'error': 'generation_cancelled'})\n"
+        "        else: write({'lane': name})\n"
+        "if admit:\n"
+        "    args = (os.fdopen(lane_in), os.fdopen(lane_out, 'w'), 'secondary', lane_cancel, ready)\n"
+        "    threading.Thread(target=serve, args=args, daemon=True).start()\n"
+        "else:\n"
+        "    for fd in (lane_in, lane_out, lane_cancel): os.close(fd)\n"
+        "primary = dict(ready, hy4_secondary_context_tokens=4096 if admit else None)\n"
+        "serve(sys.stdin, sys.stdout, 'primary', int(os.environ['STARK_CANCEL_FD']), primary)\n"
+    )
+    path.chmod(0o755)
+    monkeypatch.setenv("STARK_HY4_CONCURRENT_SLOTS", "2")
+    monkeypatch.setenv("STARK_TEST_LANE_ADMIT", "yes" if admit else "no")
+    monkeypatch.setattr("stark_convert.chat.model_image_family", lambda *_: {"profile": HY4_STQ_VISION_PROFILE})
+    monkeypatch.setattr("stark_convert.image_checks.preflight_family_memory", lambda *_: None)
+    worker = Worker(path, model, timeout=2)
+    try:
+        assert worker.read()["ready"] is True
+        assert worker.request({"operation": "tokenize"}) == {"lane": "primary"}
+        if admit:
+            lane = worker.secondary
+            assert lane.context_limit == 4096
+            cancellation = threading.Event()
+            with pytest.raises(ChatCancelled):
+                lane.request(
+                    {"operation": "generate", "stream": True},
+                    on_delta=lambda _: cancellation.set(),
+                    cancelled=cancellation,
+                )
+            assert lane.request({"operation": "tokenize"}) == {"lane": "secondary"}
+            assert worker.request({"operation": "tokenize"}) == {"lane": "primary"}
+            assert worker.request_sequence == 0
+        else:
+            assert worker.secondary is None
+    finally:
+        worker.close()
 
 
 class FakeWorker:

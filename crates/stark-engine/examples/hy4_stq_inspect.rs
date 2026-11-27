@@ -109,6 +109,7 @@ fn run_trunk(
             StqOptions {
                 chunk: test.chunk as u32,
                 context_limit: Some(test.context),
+                secondary_context_limit: None,
                 profile,
                 round_bf16,
                 pair1_decode,
