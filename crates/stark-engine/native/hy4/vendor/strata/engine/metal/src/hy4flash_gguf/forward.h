@@ -76,6 +76,9 @@ struct Prefill {
     bool profile_stages = false;    ///< Sample aggregate prefill encoder times in the diagnostic worker
     bool mapped_gpu_plan = false;  ///< Build decode/verify expert groups on Metal for mapped banks
     bool optimize_mapped_decode = false;  ///< Consolidate resident-target commands and reuse Q8 decode work
+    bool stq_register_mla = false;    ///< Register-fragment attention for wide STQ windows
+    bool stq_verify_register_mla = false;  ///< Key-partitioned register attention for STQ verification
+    bool stq_cache_engram_pages = false;   ///< Use the filesystem cache and overlap STQ Engram reads with prefill
     bool routed_half = false;       ///< Stage grouped expert GEMM operands as F16, keeping F32 accumulation
     bool routed_fragments = false;  ///< Use gathered F16 tensor fragments for packed grouped experts
     bool dense_packed = false;      ///< Read packed Q8_0 attention projections into prefill tensor fragments
@@ -108,6 +111,9 @@ struct Prefill {
 /// Per-token timings of the last window, in milliseconds.
 struct Timing {
     double gpu_ms = 0, wall_ms = 0, host_cut_ms = 0, engram_wait_ms = 0, expert_wait_ms = 0;
+    double verify_mla_ms = 0, verify_index_ms = 0, verify_dense_ms = 0;
+    double verify_router_ms = 0, verify_expert_ms = 0, verify_other_ms = 0;
+    uint64_t verify_profiled_graphs = 0;
     uint64_t windows = 0, positions = 0;
     // prefill, kept apart from decode so the I/O and the compute can be timed separately
     double pf_gpu_ms = 0;      ///< the GPU time of the chunks' command buffers

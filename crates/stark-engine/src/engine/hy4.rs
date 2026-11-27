@@ -14,6 +14,7 @@ use super::context::ContextSizing;
 pub mod stq_dfly;
 pub mod stq_layout;
 mod stq_native;
+pub use stq_native::StqOptions;
 pub mod stq_source;
 pub mod stq_trunk;
 
@@ -109,6 +110,13 @@ pub struct DraftStats {
     pub prefill_attention_index_seconds: f64,
     pub prefill_attention_mla_seconds: f64,
     pub prefill_attention_misc_seconds: f64,
+    pub verify_mla_seconds: f64,
+    pub verify_index_seconds: f64,
+    pub verify_dense_seconds: f64,
+    pub verify_router_seconds: f64,
+    pub verify_expert_seconds: f64,
+    pub verify_other_seconds: f64,
+    pub verify_profiled_graphs: u64,
 }
 
 #[derive(Clone, Copy)]

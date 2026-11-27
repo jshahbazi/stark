@@ -67,8 +67,13 @@ std::optional<ExpertRoutes> plan_routes(std::span<const int32_t> expert_ids);
 class ExpertProgram {
 public:
     // Round incoming activations for both formats and final dense outputs to BF16.
-    bool open(mtl::Context& metal, bool round_bf16 = false, bool pair1_decode = false);
+    bool open(mtl::Context& metal, bool round_bf16 = false, bool pair1_decode = false,
+              bool fused_finish_reduce = false, bool split_spec1 = false);
     bool pair1_decode_enabled() const { return decode_.handle != nullptr; }
+    static constexpr uint32_t kFusedFinishMinTokens = 1024;
+    bool fuses_finish_reduce(uint32_t tokens) const {
+        return finish_reduce_.handle && tokens >= kFusedFinishMinTokens;
+    }
 
     // Appends one PAIR1 projection to the caller's encoder. Each sorted row has
     // `(expert, source_row)` and each job has `(expert, first_row, count, 0)`.
@@ -89,12 +94,14 @@ public:
 
     // The row map contains (0, row) for each source row. The head may submit a
     // short window without materializing logits for the rest of the prompt.
+    // Narrow split-K uses raw as F32 partial planes when it has room.
     bool append_dense(std::vector<mtl::Dispatch>& commands, const DenseBank& bank, const mtl::Buffer& input,
                       const mtl::Buffer& row_map, uint32_t rows, const mtl::Buffer& prepared,
                       const mtl::Buffer& raw, const mtl::Buffer& output) const;
 
 private:
-    mtl::Pipeline prepare_, project_, decode_, finish_, prepare_down_, combine_, dense_k4_, dense_k6_, dense_finish_;
+    mtl::Pipeline prepare_, project_, decode_, finish_, prepare_down_, combine_, finish_reduce_;
+    mtl::Pipeline dense_k4_, dense_k6_, dense_finish_, dense_split_, dense_split_finish_;
 };
 
 }  // namespace stark::hy4::stq

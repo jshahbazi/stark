@@ -36,7 +36,7 @@ EngramRows::~EngramRows() {
 }
 
 bool EngramRows::open(const std::string& path, uint64_t table_offset, uint64_t n_rows, uint32_t row_bytes,
-                      std::string& err) {
+                      std::string& err, bool cache_pages) {
     if (impl_->reader.is_open()) return true;
     // Check int64 Engram row IDs before narrowing to the reader's uint32 index.
     if (n_rows == 0 || n_rows > (uint64_t) std::numeric_limits<uint32_t>::max()) {
@@ -52,7 +52,7 @@ bool EngramRows::open(const std::string& path, uint64_t table_offset, uint64_t n
     // whole point of reusing it is to inherit its tuning rather than invent a second set of constants.
     const kernels::PleIoOptions io{};
     if (!impl_->reader.open(path, table_offset, n_rows, io.max_inflight, io.cache_rows, err, io.io_thread,
-                            row_bytes))
+                            row_bytes, cache_pages))
         return false;
     impl_->reader.set_keepalive(io.keepalive_ms, io.keepalive_window_s);
     impl_->n_rows = n_rows;

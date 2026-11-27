@@ -230,7 +230,7 @@ extern "C" int stark_hy4_open_stq_diagnostic(
     const stark::hy4::stq::ProjectionSource* experts, size_t expert_count,
     const stark::hy4::stq::TensorSlice* tables, const int32_t* token_map, size_t map_len,
     const stark::hy4::stq::TensorSlice* vision_weights, size_t vision_count,
-    int chunk, int profile, int round_bf16, int pair1_decode, int resident,
+    int chunk, int profile, int round_bf16, int pair1_decode, int resident, uint32_t tuning,
     uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
     StarkHy4** output, StarkHy4VisionGeometry* vision, char* detail, size_t detail_len) noexcept {
     *output = nullptr;
@@ -279,7 +279,7 @@ extern "C" int stark_hy4_open_stq_diagnostic(
             return fail("cannot fit STQ context");
         s.model.geo.max_context = int32_t(context);
         if (auto error = load_trunk(s.model, s.metal, {weights, weight_count}, {experts, expert_count},
-                                    round_bf16 != 0, pair1_decode != 0);
+                                    round_bf16 != 0, pair1_decode != 0, (tuning & 8u) != 0, (tuning & 16u) != 0);
             !error.empty())
             return fail(error);
         if (auto error = bind_engram(s.model, {tables, 4}, {token_map, map_len}); !error.empty())
@@ -287,6 +287,11 @@ extern "C" int stark_hy4_open_stq_diagnostic(
         Prefill prefill;
         prefill.chunk = chunk;
         prefill.profile_stages = profile != 0;
+        prefill.tensor_mla = (tuning & 1u) != 0;
+        prefill.mapped_gpu_plan = (tuning & 2u) != 0;
+        prefill.stq_register_mla = (tuning & 4u) != 0;
+        prefill.stq_verify_register_mla = (tuning & 32u) != 0;
+        prefill.stq_cache_engram_pages = (tuning & 64u) != 0;
         if (auto error = s.forward.open(s.model, s.metal, "", prefill); !error.empty()) return fail(error);
         if (auto error = s.vision.build(s.metal, s.forward.library()); !error.empty()) return fail(error);
         if (s.model.stq->has_dfly) {
@@ -516,5 +521,12 @@ extern "C" StarkHy4Stats stark_hy4_stats(StarkHy4* session) noexcept {
         graph.pf_attention_index_ms / 1e3 - base.prefill_attention_index_seconds,
         graph.pf_attention_mla_ms / 1e3 - base.prefill_attention_mla_seconds,
         graph.pf_attention_misc_ms / 1e3 - base.prefill_attention_misc_seconds,
+        graph.verify_mla_ms / 1e3 - base.verify_mla_seconds,
+        graph.verify_index_ms / 1e3 - base.verify_index_seconds,
+        graph.verify_dense_ms / 1e3 - base.verify_dense_seconds,
+        graph.verify_router_ms / 1e3 - base.verify_router_seconds,
+        graph.verify_expert_ms / 1e3 - base.verify_expert_seconds,
+        graph.verify_other_ms / 1e3 - base.verify_other_seconds,
+        graph.verify_profiled_graphs - base.verify_profiled_graphs,
     };
 }

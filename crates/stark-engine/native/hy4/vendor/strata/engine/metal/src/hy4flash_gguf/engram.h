@@ -40,7 +40,7 @@ public:
     /// Opens one reader per table on the Engram shard and loads the token map from the pack.  Returns "" or the
     /// problem.  `pack_dir` is a run-time dependency of the forward pass: the map has 120,832 entries, too many
     /// for the shared metadata reader's array cap.
-    std::string open(const Model& m, const std::string& pack_dir);
+    std::string open(const Model& m, const std::string& pack_dir, bool cache_pages);
     bool ready() const { return !tables_.empty(); }
     int n_tables() const { return (int) tables_.size(); }
     int block_of(int table) const;

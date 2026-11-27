@@ -69,6 +69,13 @@ struct StarkHy4Stats {
     double prefill_attention_index_seconds;
     double prefill_attention_mla_seconds;
     double prefill_attention_misc_seconds;
+    double verify_mla_seconds;
+    double verify_index_seconds;
+    double verify_dense_seconds;
+    double verify_router_seconds;
+    double verify_expert_seconds;
+    double verify_other_seconds;
+    uint64_t verify_profiled_graphs;
 };
 
 extern "C" {

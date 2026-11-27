@@ -133,7 +133,21 @@ def _valid_runtime_identity(value: object, family_profile: str | None = None) ->
     stq = family_profile == HY4_STQ_VISION_PROFILE
     required = _RUNTIME_KEYS | (_HY4_RUNTIME_KEYS if hy4 else _HY4_STQ_RUNTIME_KEYS if stq else set())
     optional = (
-        _HY4_OPTIONAL_RUNTIME_KEYS if hy4 else {"pair1_single_token_gemv", "mapped_weight_residency"} if stq else set()
+        _HY4_OPTIONAL_RUNTIME_KEYS
+        if hy4
+        else {
+            "pair1_single_token_gemv",
+            "mapped_weight_residency",
+            "prefill_tensor_mla_requested",
+            "gpu_verify_plan",
+            "prefill_register_mla",
+            "prefill_fused_expert_finish",
+            "verify_split_spec1",
+            "verify_register_mla",
+            "cache_engram_pages",
+        }
+        if stq
+        else set()
     )
     return (
         isinstance(value, dict)

@@ -288,6 +288,7 @@ struct Forward::Impl {
     AttnPipes attn_range, attn_sel;   // attn.h: the score row, the softmax, PV
     mtl::Pipeline attn_pf_range, attn_pf_sel;   // the prefill MMA attention (hy4_flash_attn_pf.metal), prompt chunks only
     mtl::Pipeline attn_pf_tensor;
+    mtl::Pipeline attn_stq_range, attn_stq_sel, attn_stq_finish;
     mtl::Pipeline p_dense_pack, p_dense_device;
     bool dense_ffn_device_views = false;
     bool pf_mma_ok = false, pf_mma_idx_ok = false;
@@ -751,6 +752,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     if (pf.dense_packed) kernel_files.emplace_back("stark_hy4_flash_dense_packed.metal");
     if (pf.dense_device_views) kernel_files.emplace_back("stark_hy4_flash_dense_device.metal");
     if (pf.tensor_mla) kernel_files.emplace_back("stark_hy4_flash_mla_prefill.metal");
+    if (pf.stq_register_mla || pf.stq_verify_register_mla) kernel_files.emplace_back("stq_mla_register.metal");
     if (pf.routed_fragments) kernel_files.emplace_back("stark_hy4_flash_moe_fragments.metal");
     lib = cx->compile(kernel_files, strata_hy4_flash_metal::hy4_flash_prelude(), false);
     p_rms_w = cx->pipeline(lib, "hy4_flash_rmsnorm", mtl::Constants().b(40, true));
@@ -783,7 +785,8 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
         std::fprintf(stderr, "  MoE router top-16: %s\n",
                      p_router_parallel.handle ? "parallel SIMD path enabled" : "incumbent fallback (shape or launch limit)");
     }
-    if (pf.mapped_gpu_plan) p_mapped_gpu_plan = cx->pipeline(lib, "hy4_flash_mapped_moe_plan");
+    if (pf.mapped_gpu_plan)
+        p_mapped_gpu_plan = cx->pipeline(lib, m->stq ? "stark_hy4_stq_verify_plan" : "hy4_flash_mapped_moe_plan");
     p_idx_w = cx->pipeline(lib, "hy4_flash_indexer_weights");
     p_idx_kpool = cx->pipeline(lib, "hy4_flash_indexer_kpool",
                                mut.pool_rope_last ? mtl::Constants().i(53, 1) : mtl::Constants());
@@ -834,6 +837,12 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
         if (!attn_pf_sel.handle) attn_pf_sel = cx->pipeline(lib, "hy4_flash_mla_pf5_s32", selection);
     }
     if (pf.tensor_mla && pf_mma_ok) attn_pf_tensor = cx->pipeline(lib, "stark_hy4_mla_prefill_tensor");
+    if ((pf.stq_register_mla || pf.stq_verify_register_mla) && pf_mma_ok) {
+        attn_stq_range = cx->pipeline(lib, "stark_hy4_stq_register_mla", mtl::Constants().b(43, false));
+        attn_stq_sel = cx->pipeline(lib, "stark_hy4_stq_register_mla", mtl::Constants().b(43, true));
+        if (pf.stq_verify_register_mla)
+            attn_stq_finish = cx->pipeline(lib, "stark_hy4_stq_register_mla_finish");
+    }
     if (pf_mma_idx_ok) p_idx_score_pf = cx->pipeline(lib, "hy4_flash_indexer_score_pf");
     p_idx_topk = cx->pipeline(lib, "hy4_flash_indexer_topk",
                               mut.no_tail ? mtl::Constants().i(51, 3) : mtl::Constants());
@@ -857,9 +866,9 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     if (const std::string e = resolve(); !e.empty()) return e;
     if (const std::string e = alloc(); !e.empty()) return e;
     if (!pack.empty() || m->stq) {
-        if (const std::string e = eng.open(mm, pack); !e.empty()) return "Engram: " + e;
+        if (const std::string e = eng.open(mm, pack, pf.stq_cache_engram_pages); !e.empty()) return "Engram: " + e;
         eng_ready = true;
-        if (pf.optimize_mapped_decode) {
+        if (pf.optimize_mapped_decode || (m->stq && pf.mapped_gpu_plan)) {
             const size_t cells = size_t(Forward::kMaxWindow) * eng.rows_per_token();
             decode_engram_inputs.resize((size_t) eng.n_tables());
             for (auto& input : decode_engram_inputs) {
@@ -1014,7 +1023,10 @@ void Forward::Impl::alloc_scratch(int Tm, int as, int ms, const std::function<mt
     attn_out = f32((size_t) Tm * n_embd);
     kvp = f32((size_t) Tm * kv_w);
     kvn = f32((size_t) Tm * kv_lora);
-    sc = f32((size_t) as * max_heads * Forward::kSelCap);
+    constexpr size_t stq_mla_partial_rows = (Forward::kSelCap + 255) / 256 * (512 + 2);
+    size_t scores = (size_t) as * Forward::kSelCap;
+    if (pf.stq_verify_register_mla) scores = std::max(scores, Forward::kMaxWindow * stq_mla_partial_rows);
+    sc = f32(max_heads * scores);
     pos_b = get(4 * (size_t) Tm);
     rope_pos = get(4 * 3 * (size_t) Tm);   // [3][Tm], the M-RoPE planes
     ik = f32((size_t) Tm * idx_dim);
@@ -1210,7 +1222,17 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     const uint32_t H = (uint32_t) b.heads;
     const mtl::Buffer* resid = &x_in;
     const auto stage = [&](double& total_ms) {
-        if (profile != nullptr) profile->stages.push_back({ds.size(), &total_ms});
+        if (profile == nullptr) return;
+        double* total = &total_ms;
+        if (!pr_in_chunk) {
+            if (total == &tm.pf_attention_mla_ms) total = &tm.verify_mla_ms;
+            else if (total == &tm.pf_attention_index_ms) total = &tm.verify_index_ms;
+            else if (total == &tm.pf_attention_dense_ms || total == &tm.pf_dense_ms) total = &tm.verify_dense_ms;
+            else if (total == &tm.pf_moe_route_ms) total = &tm.verify_router_ms;
+            else if (total == &tm.pf_moe_expert_ms) total = &tm.verify_expert_ms;
+            else total = &tm.verify_other_ms;
+        }
+        profile->stages.push_back({ds.size(), total});
     };
 
     // ---- Engram, BEFORE the attention pre-mix
@@ -1512,6 +1534,11 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     // multiple of 32 keeps the decode attention (its last partial block would write the next token's rows).
     stage(tm.pf_attention_mla_ms);
     const bool attn_mma = pf_mma_ok && T > Forward::kMaxWindow && H % 32 == 0;
+    const bool register_available = attn_stq_sel.max_threads >= 288 && attn_stq_range.max_threads >= 288 &&
+                                    kv_w == 576 && kv_lora == 512 && H % 16 == 0 &&
+                                    mut.none && pf.probe == 0 && inj == nullptr;
+    const bool partition_mla = pf.stq_verify_register_mla && register_available && !pr_in_chunk && !images() &&
+                               attn_stq_finish.max_threads >= 256 && T <= Forward::kMaxWindow;
     AttnArgs a{H,
                (uint32_t) kv_w,
                (uint32_t) kv_lora,
@@ -1566,8 +1593,28 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
                   mtl::Arg::B(sc),
                   mtl::Arg::B(attn_o, 4 * (size_t) t0 * H * (size_t) kv_lora),
                   mtl::Arg::V(a)};
-        if (attn_mma) {
-            // the MMA kernel's eight arguments: q, kv, sinks, sel, n_sel, pos, o, the args bytes (no score scratch)
+        const bool register_mla = pf.stq_register_mla && attn_mma && register_available;
+        if (register_mla || partition_mla) {
+            // Use the same per-row partition boundaries for greedy and speculative verification.
+            const uint32_t cap = !use_selection && a.window != 0 ? a.window : (uint32_t) Forward::kSelCap;
+            const uint32_t parts = partition_mla ? (cap + 255) / 256 : 0;
+            mtl::Dispatch d;
+            d.p = use_selection ? &attn_stq_sel : &attn_stq_range;
+            d.args = {args[0], args[1], args[2], args[3], args[4], args[5], parts ? args[6] : args[7], args[8],
+                      mtl::Arg::V(parts)};
+            d.grid[0] = nt;
+            d.grid[1] = H / 16;
+            d.grid[2] = std::max(1u, parts);
+            d.tg[0] = 288;
+            mtl::require_fit(d, "stark_hy4_stq_register_mla");
+            ds.push_back(d);
+            if (parts) {
+                mtl::Dispatch finish{&attn_stq_finish, {args[6], args[7], args[8], mtl::Arg::V(parts)},
+                                     {nt, H, 1}, {256, 1, 1}};
+                mtl::require_fit(finish, "stark_hy4_stq_register_mla_finish");
+                ds.push_back(finish);
+            }
+        } else if (attn_mma) {
             mtl::Dispatch d;
             d.p = use_selection ? &attn_pf_sel : &attn_pf_range;
             d.args = {args[0], args[1], args[2], args[3], args[4], args[5], args[7], args[8]};
@@ -1696,11 +1743,20 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         if (m->stq) {
             const auto& banks = m->stq->experts.at(size_t(b.ordinal));
             const uint32_t rows = uT * uint32_t(topk);
+            if (gpu_plan) {
+                using mtl::Arg;
+                mtl::Dispatch d{&p_mapped_gpu_plan,
+                    {Arg::B(ids), Arg::B(stq_rows), Arg::B(stq_jobs), Arg::B(stq_inverse), Arg::B(stq_grid),
+                     Arg::B(badflag, sizeof(uint32_t)), Arg::V(rows)},
+                    {1, 1, 1}, {128, 1, 1}};
+                mtl::require_fit(d, "stark_hy4_stq_verify_plan");
+                ds.push_back(d);
+            }
             stage(tm.pf_moe_expert_ms);
             if (!m->stq->program.append_routed(ds, banks[kGate], banks[kUp], banks[kDown],
                     rdown, stq_rows, stq_jobs, stq_inverse, rw, uT, rows,
                     std::min(rows, rows / 32 + uint32_t(n_experts)), stq_prepared, stq_gate,
-                    stq_up, stq_routed, mlat, stq_gemv() ? nullptr : &stq_grid))
+                    stq_up, stq_routed, mlat, (!gpu_plan && stq_gemv()) ? nullptr : &stq_grid))
                 throw std::runtime_error("invalid STQ routed dispatch");
         } else {
         const ExpertSlices& es = m->experts[(size_t) b.ordinal];
@@ -2687,7 +2743,9 @@ std::string Forward::window(const int32_t* all_tokens, int p0, int T, Dump* dump
         im.tm.engram_wait_ms += (mtl::now_s() - te) * 1e3;
     }
     if (const std::string e = im.embed_window(all_tokens, T); !e.empty()) return e;
-    const bool gpu_plan = im.pf.mapped_gpu_plan && im.m->stream.mapped() && moe_indirect() &&
+    const bool can_plan = im.m->stq ? (im.mut.none && !im.images() && im.topk == 16)
+                                   : (im.m->stream.mapped() && moe_indirect());
+    const bool gpu_plan = im.pf.mapped_gpu_plan && can_plan &&
         dump == nullptr && im.pr_record == nullptr && im.pr_force == nullptr &&
         0 < im.topk && T * im.topk <= 128;
     const bool one_command = gpu_plan && !im.images() && !im.decode_engram_inputs.empty();
@@ -2712,11 +2770,15 @@ std::string Forward::window(const int32_t* all_tokens, int p0, int T, Dump* dump
     // never swapped by value - the pointers are.
     const mtl::Buffer* in = &im.hcA;
     const mtl::Buffer* out = &im.hcB;
+    mtl::Context::GraphProfile profile;
+    auto* verify_profile = im.m->stq && im.pf.profile_stages ? &profile : nullptr;
     auto flush = [&]() -> std::string {
         if (ds.empty()) return {};
         im.prune_barriers(ds, cuts, im.cut_wait);
         const double t0 = mtl::now_s();
-        im.tm.gpu_ms += im.cx->run_graph_seg(ds, cuts, im.cut_wait, cut_tramp, &im) * 1e3;
+        im.tm.gpu_ms += im.cx->run_graph_seg(ds, cuts, im.cut_wait, cut_tramp, &im, verify_profile) * 1e3;
+        if (profile.sampled) ++im.tm.verify_profiled_graphs;
+        profile.stages.clear();
         im.tm.wall_ms += (mtl::now_s() - t0) * 1e3;
         ds.clear();
         cuts.clear();
@@ -2737,9 +2799,10 @@ std::string Forward::window(const int32_t* all_tokens, int p0, int T, Dump* dump
             }
             if (const std::string e = im.engram_rows_for(b.id, T, engram_input); !e.empty()) return e;
         }
-        im.encode_block(ds, cuts, b, *in, *out, T, false, gpu_plan, nullptr, engram_input);
+        im.encode_block(ds, cuts, b, *in, *out, T, false, gpu_plan, verify_profile, engram_input);
         std::swap(in, out);
     }
+    if (verify_profile) profile.stages.push_back({ds.size(), &im.tm.verify_dense_ms});
     im.encode_head(ds, *in, 0, T);
     if (const std::string e = flush(); !e.empty()) return e;
     // The cache is written; the flag is readable now and not before.
@@ -2829,10 +2892,13 @@ std::string Forward::prefill(const int32_t* all_tokens, int p0, int T, const Pre
     const double te = mtl::now_s();
     if (const std::string e = im.prepare_window(all_tokens, p0, T, need_engram); !e.empty()) return e;
     if (need_engram) {
-        for (int i = 0; i < im.eng.n_tables(); ++i) {
-            std::string err;
-            if (im.eng.join(im.eng.block_of(i), err) == nullptr)
-                return "Engram block " + std::to_string(im.eng.block_of(i)) + ": " + err;
+        // The STQ reader can finish each table while earlier blocks execute.
+        if (!im.pf.stq_cache_engram_pages) {
+            for (int i = 0; i < im.eng.n_tables(); ++i) {
+                std::string err;
+                if (im.eng.join(im.eng.block_of(i), err) == nullptr)
+                    return "Engram block " + std::to_string(im.eng.block_of(i)) + ": " + err;
+            }
         }
         im.tm.pf_engram_ms += (mtl::now_s() - te) * 1e3;   // the PROMPT's, not a decode position's
     }
@@ -2861,8 +2927,10 @@ std::string Forward::prefill(const int32_t* all_tokens, int p0, int T, const Pre
     mtl::Context::GraphProfile profile;
     for (size_t l = 0; l < im.blk.size(); ++l) {
         const Impl::BW& b = im.blk[l];
-        if (b.engram_table >= 0)
+        if (b.engram_table >= 0) {
             if (const std::string e = im.engram_rows_for(b.id, T); !e.empty()) return e;
+            if (im.pf.stq_cache_engram_pages) im.tm.pf_engram_ms += im.eng.wait_us(b.id) / 1e3;
+        }
         const double t_enc = mtl::now_s();
         ds.clear();
         cuts.clear();

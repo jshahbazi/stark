@@ -62,19 +62,20 @@ static inline void stark_hy4_spec1_load(thread Fragment& target, device const ha
     }
 }
 
-template <typename Fragment>
-static inline void stark_hy4_spec1_store(const thread Fragment& source, device half* output,
+template <typename Fragment, typename Output>
+static inline void stark_hy4_spec1_store(const thread Fragment& source, device Output* output,
     uint channel, uint first_row, uint live_rows, uint width) {
     #pragma clang loop unroll(full)
     for (ushort i = 0; i < source.get_capacity(); ++i) {
         const auto at = source.get_multidimensional_index(i);
-        if (at[1] < live_rows) output[ulong(first_row + at[1]) * width + channel + at[0]] = half(source[i]);
+        if (at[1] < live_rows) output[ulong(first_row + at[1]) * width + channel + at[0]] = Output(source[i]);
     }
 }
 
-template <uint Rate, bool TwoTiles>
+template <uint Rate, bool TwoTiles, typename Output>
 static inline void stark_hy4_spec1_project(device const uint* weights, device const half* input,
-    device half* output, uint2 widths, uint first_row, uint live_rows, uint channel, uint lane) {
+    device Output* output, uint2 widths, uint first_row, uint live_rows, uint channel, uint lane,
+    uint begin_k, uint end_k) {
     constexpr uint K = 16, Rows = 16, TileWords = Rate * 8;
     constexpr auto descriptor = matmul2d_descriptor(Rows, 32, K, false, true, true,
         matmul2d_descriptor::mode::multiply_accumulate);
@@ -99,11 +100,11 @@ static inline void stark_hy4_spec1_project(device const uint* weights, device co
     device const half* top1 = start + ulong(min(row + 8u, last)) * widths.x;
     device const half* bottom0 = start + ulong(min(row + Rows, last)) * widths.x;
     device const half* bottom1 = start + ulong(min(row + Rows + 8u, last)) * widths.x;
-    device const uint* tiles = weights + (channel / 16u) * TileWords;
     const ulong tile_stride = ulong(widths.y / 16u) * TileWords;
+    device const uint* tiles = weights + (begin_k / K) * tile_stride + (channel / K) * TileWords;
 
     #pragma clang loop unroll_count(2)
-    for (uint k = 0; k < widths.x; k += K, tiles += tile_stride) {
+    for (uint k = begin_k; k < end_k; k += K, tiles += tile_stride) {
         const auto w0 = stark_hy4_spec1_fragment<Rate>(tiles, lane);
         const auto w1 = stark_hy4_spec1_fragment<Rate>(tiles + TileWords, lane);
         #pragma clang loop unroll(full)
@@ -141,9 +142,9 @@ kernel void stark_hy4_stq_spec1_dense(
     if (first_row >= shape.z || channel >= shape.y) return;
     const uint live_rows = min(32u, shape.z - first_row);
     if (live_rows > 16u) {
-        stark_hy4_spec1_project<Rate, true>(weights, input, output, shape.xy, first_row, live_rows, channel, lane);
+        stark_hy4_spec1_project<Rate, true>(weights, input, output, shape.xy, first_row, live_rows, channel, lane, 0u, shape.x);
     } else {
-        stark_hy4_spec1_project<Rate, false>(weights, input, output, shape.xy, first_row, live_rows, channel, lane);
+        stark_hy4_spec1_project<Rate, false>(weights, input, output, shape.xy, first_row, live_rows, channel, lane, 0u, shape.x);
     }
 }
 
@@ -151,3 +152,21 @@ template [[host_name("stark_hy4_stq_spec1_k4_dense")]] kernel decltype(stark_hy4
     stark_hy4_stq_spec1_dense<4>;
 template [[host_name("stark_hy4_stq_spec1_k6_dense")]] kernel decltype(stark_hy4_stq_spec1_dense<6>)
     stark_hy4_stq_spec1_dense<6>;
+
+// The narrow NAX projection partitions its contiguous K tiles across threadgroups,
+// as in Sushi v1.8.1 src/exl3/project_rows.zig. Each split writes an F32 plane
+// [rows, output channels]. The F16 round occurs after the ordered split reduction.
+// shape is (input channels, output channels, rows <= 16, split count).
+// Launch (output channels / 128, split count, 1) groups of 128.
+kernel void stark_hy4_stq_spec1_k6_split(
+    device const uint* weights [[buffer(0)]], device const half* input [[buffer(1)]],
+    device float* partials [[buffer(2)]], constant uint4& shape [[buffer(3)]],
+    uint3 group [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    const uint channel = group.x * 128u + sg * 32u;
+    const uint tiles = shape.x / 16u;
+    const uint begin_k = (group.y * tiles / shape.w) * 16u;
+    const uint end_k = ((group.y + 1u) * tiles / shape.w) * 16u;
+    device float* plane = partials + ulong(group.y) * shape.z * shape.y;
+    stark_hy4_spec1_project<6, false>(weights, input, plane, shape.xy, 0u, shape.z, channel, lane, begin_k, end_k);
+}

@@ -49,7 +49,7 @@ EngramSupply::Table* EngramSupply::find(int block_id) const {
     return nullptr;
 }
 
-std::string EngramSupply::open(const Model& m, const std::string& pack_dir) {
+std::string EngramSupply::open(const Model& m, const std::string& pack_dir, bool cache_pages) {
     if (ready()) return "the Engram supply is already open";
     if (m.geo.engram_tables.empty()) return "this model declares no Engram tables";
     if (m.engram_row_bytes == 0) return "the Engram table's row size is not known (an unsupported element type)";
@@ -101,7 +101,7 @@ std::string EngramSupply::open(const Model& m, const std::string& pack_dir) {
         // Each layer has an independent reader. GGUF supplies a shared tensor with global row IDs.
         // STQ supplies a shard per layer with the offsets rebased above.
         if (!e->reader.open(segment ? segment->path : m.engram_path, segment ? segment->offset : m.engram_offset,
-                            segment ? segment->rows : m.engram_rows, m.engram_row_bytes, err)) {
+                            segment ? segment->rows : m.engram_rows, m.engram_row_bytes, err, cache_pages)) {
             return "Engram block " + std::to_string(t.block_id) + ": " + err;
         }
         opened.push_back(std::move(e));

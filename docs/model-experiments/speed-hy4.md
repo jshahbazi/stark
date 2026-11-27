@@ -2,6 +2,8 @@
 
 Stark's best measured prefill and decode use different load profiles. A streamed worker with 4,096-row prefill chunks and guarded FFN device views reached **711.61 tok/s first-use prefill** on the fixed 4K fixture. A prepared resident worker reached **58.28 tok/s warm K2 decode** on that fixture. An exploratory resident K3 run peaked at **68.58 tok/s** on one short TypeScript task. These are worker diagnostics with their own build and workload controls. The standard benchmark profile is still draft. [Performance checkpoint](speed-other-families.md#november-26-performance-checkpoint) · [Standard profile](../../scripts/benchmark_profiles/hy4-flash.toml)
 
+The Sushi STQ 4bpw pack has separate 16K and 27K OpenCode measurements, a five-draft verifier and different packed projections. [Measured STQ attempts and Sushi comparison](2026-11-27-hy4-stq-open-code-performance.md)
+
 ## Artifact and reference
 
 - **Artifact.** `AngelSlim/Hy4-flash-GGUF` at `c50d4dd30be42f2b91138e5731de0e2f32ad56b2`. The two Q3_K shards and original BF16 projector total 156,415,403,072 bytes. Keep the original packed expert tensors, FP8 Engram table and NextN block. The target vocabulary projection remains BF16 across draft-head experiments. [Artifact inventory and digests](2026-11-25-hy4-native-q3-k.md#artifact-and-runtime-identities)

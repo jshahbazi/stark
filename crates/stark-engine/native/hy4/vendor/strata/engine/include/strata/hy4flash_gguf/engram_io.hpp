@@ -33,7 +33,7 @@ public:
     /// row (102 for this model's Q8_0 x 96). All three come from the GGUF directory, never hard-coded.
     /// False with `err` leaves the caller on its mapping path, which is not an error.
     bool open(const std::string& path, uint64_t table_offset, uint64_t n_rows, uint32_t row_bytes,
-              std::string& err);
+              std::string& err, bool cache_pages = false);
     bool is_open() const;
     void close();
 

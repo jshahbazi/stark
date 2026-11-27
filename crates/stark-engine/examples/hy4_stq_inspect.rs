@@ -5,7 +5,9 @@ use std::{env, error::Error, path::Path, time::Instant};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use stark_engine::engine::hy4::{ImageInput, MAX_DRAFTS, Session, stq_layout::StqFormat, stq_source::StqSource};
+use stark_engine::engine::hy4::{
+    ImageInput, MAX_DRAFTS, Session, StqOptions, stq_layout::StqFormat, stq_source::StqSource,
+};
 
 struct Diagnostic {
     rows: usize,
@@ -104,12 +106,21 @@ fn run_trunk(
     let mut session = unsafe {
         Session::load_stq_diagnostic(
             source,
-            test.chunk as u32,
-            test.context,
-            profile,
-            round_bf16,
-            pair1_decode,
-            resident,
+            StqOptions {
+                chunk: test.chunk as u32,
+                context_limit: test.context,
+                profile,
+                round_bf16,
+                pair1_decode,
+                resident,
+                tensor_mla: env::var_os("STARK_HY4_STQ_TENSOR_MLA").is_some(),
+                gpu_verify_plan: env::var_os("STARK_HY4_STQ_GPU_VERIFY").is_some(),
+                register_mla: env::var_os("STARK_HY4_STQ_REGISTER_MLA").is_some(),
+                fused_finish_reduce: env::var_os("STARK_HY4_STQ_FUSED_FINISH").is_some(),
+                split_spec1: env::var_os("STARK_HY4_STQ_SPLIT_SPEC1").is_some(),
+                verify_register_mla: env::var_os("STARK_HY4_STQ_VERIFY_MLA").is_some(),
+                cache_engram_pages: env::var_os("STARK_HY4_STQ_ENGRAM_PAGE_CACHE").is_some(),
+            },
         )
     }?;
     let context = session.context_sizing().context_tokens;

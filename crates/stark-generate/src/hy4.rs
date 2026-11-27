@@ -120,6 +120,7 @@ pub(crate) struct Hy4Backend {
     runtime: Value,
     chunk: usize,
     stq: bool,
+    recommended_drafts: usize,
 }
 
 #[derive(Default, serde::Serialize)]
@@ -395,6 +396,7 @@ impl Hy4Backend {
             runtime,
             chunk: options.chunk,
             stq: false,
+            recommended_drafts: RECOMMENDED_DRAFTS,
         })
     }
 
@@ -428,15 +430,43 @@ impl Hy4Backend {
         let round_bf16 = verify_switch("STARK_HY4_STQ_BF16", "invalid_hy4_stq_precision", false)?;
         let pair1_decode = verify_switch("STARK_HY4_STQ_PAIR1_DECODE", "invalid_hy4_stq_decode", false)?;
         let resident = verify_switch("STARK_HY4_STQ_RESIDENT", "invalid_hy4_stq_residency", false)?;
+        let tensor_mla = verify_switch("STARK_HY4_STQ_TENSOR_MLA", "invalid_hy4_stq_tensor_mla", false)?;
+        let gpu_verify_plan = verify_switch("STARK_HY4_STQ_GPU_VERIFY", "invalid_hy4_stq_gpu_verify", false)?;
+        let register_mla = verify_switch("STARK_HY4_STQ_REGISTER_MLA", "invalid_hy4_stq_register_mla", false)?;
+        let fused_finish_reduce = verify_switch("STARK_HY4_STQ_FUSED_FINISH", "invalid_hy4_stq_fused_finish", false)?;
+        let split_spec1 = verify_switch("STARK_HY4_STQ_SPLIT_SPEC1", "invalid_hy4_stq_split_spec1", false)?;
+        let verify_register_mla = verify_switch("STARK_HY4_STQ_VERIFY_MLA", "invalid_hy4_stq_verify_mla", false)?;
+        let cache_engram_pages =
+            verify_switch("STARK_HY4_STQ_ENGRAM_PAGE_CACHE", "invalid_hy4_stq_engram_cache", false)?;
         let tail_prefix_enabled =
             verify_switch("STARK_HY4_PREFILL_TAIL_PREFIX", "invalid_hy4_prefill_tail_prefix", false)?;
         // This opt-in validation run borrows an explicitly pinned, immutable
         // local artifact. Its caller supplies the verified weight inventory.
         let native = unsafe {
-            Session::load_stq_diagnostic(&source, chunk as u32, context, profile, round_bf16, pair1_decode, resident)
+            Session::load_stq_diagnostic(
+                &source,
+                stark_engine::engine::hy4::StqOptions {
+                    chunk: chunk as u32,
+                    context_limit: context,
+                    profile,
+                    round_bf16,
+                    pair1_decode,
+                    resident,
+                    tensor_mla,
+                    gpu_verify_plan,
+                    register_mla,
+                    fused_finish_reduce,
+                    split_spec1,
+                    verify_register_mla,
+                    cache_engram_pages,
+                },
+            )
         }
         .map_err(|_| "hy4_stq_native_load_failed")?;
         source.verify_unchanged().map_err(|_| "invalid_hy4_stq_artifact")?;
+        let recommended_drafts =
+            optional_bound("STARK_HY4_STQ_DRAFT_DEPTH", 1..=native.max_drafts() as u32, "invalid_hy4_stq_depth")?
+                .map_or(RECOMMENDED_DRAFTS, |depth| depth as usize);
         let runtime = json!({
             "backend": identity.backend,
             "device_name": identity.device_name,
@@ -447,6 +477,13 @@ impl Hy4Backend {
             "bf16_projection_boundaries": round_bf16,
             "pair1_single_token_gemv": pair1_decode,
             "mapped_weight_residency": resident,
+            "prefill_tensor_mla_requested": tensor_mla,
+            "gpu_verify_plan": gpu_verify_plan,
+            "prefill_register_mla": register_mla,
+            "prefill_fused_expert_finish": fused_finish_reduce,
+            "verify_split_spec1": split_spec1,
+            "verify_register_mla": verify_register_mla,
+            "cache_engram_pages": cache_engram_pages,
             "prefill_stage_profile_requested": profile,
             "draft_head_format": "spec1-k4-dfly2",
         });
@@ -466,6 +503,7 @@ impl Hy4Backend {
             runtime,
             chunk,
             stq: true,
+            recommended_drafts,
         })
     }
 
@@ -814,7 +852,7 @@ impl GenerationBackend for Hy4Backend {
     fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
         Some(MtpCapabilities {
             max_drafts: self.native.max_drafts(),
-            recommended_drafts: RECOMMENDED_DRAFTS,
+            recommended_drafts: self.recommended_drafts,
             sampling: "greedy-target-match-v1",
             verification: if self.stq {
                 "hy4-dfly2-greedy-prefix-match-v1"

@@ -109,7 +109,8 @@ bool DenseBank::open(mtl::Context& metal, Format rate, uint32_t input_width, uin
     return false;
 }
 
-bool ExpertProgram::open(mtl::Context& metal, bool round_bf16, bool pair1_decode) {
+bool ExpertProgram::open(mtl::Context& metal, bool round_bf16, bool pair1_decode, bool fused_finish_reduce,
+                         bool split_spec1) {
     if (!metal.supports_metal4()) return false;
     try {
         std::vector<std::string> sources{"pair1_k4_grouped.metal", "pair1_k4_io.metal", "spec1_dense.metal"};
@@ -124,13 +125,19 @@ bool ExpertProgram::open(mtl::Context& metal, bool round_bf16, bool pair1_decode
         dense_finish_ = round_bf16 ? metal.pipeline(library, "stark_hy4_stq_pair1_finish", boundary) : finish_;
         prepare_down_ = metal.pipeline(library, "stark_hy4_stq_pair1_prepare_down");
         combine_ = metal.pipeline(library, "stark_hy4_stq_pair1_combine");
+        finish_reduce_ = fused_finish_reduce ? metal.pipeline(library, "stark_hy4_stq_pair1_finish_reduce") : mtl::Pipeline{};
         dense_k4_ = metal.pipeline(library, "stark_hy4_stq_spec1_k4_dense");
         dense_k6_ = metal.pipeline(library, "stark_hy4_stq_spec1_k6_dense");
+        dense_split_ = split_spec1 ? metal.pipeline(library, "stark_hy4_stq_spec1_k6_split") : mtl::Pipeline{};
+        dense_split_finish_ = split_spec1 ? metal.pipeline(library, "stark_hy4_stq_spec1_split_finish", boundary) : mtl::Pipeline{};
         decode_ = pair1_decode ? metal.pipeline(library, "stark_hy4_stq_pair1_k4_decode") : mtl::Pipeline{};
         return prepare_.max_threads >= 128 && project_.max_threads >= 128 && finish_.max_threads >= 128 &&
                prepare_down_.max_threads >= 128 && combine_.max_threads >= 128 &&
                dense_k4_.max_threads >= 128 && dense_k6_.max_threads >= 128 && dense_finish_.max_threads >= 128 &&
-               (!pair1_decode || (decode_.max_threads >= 128 && decode_.simd_width == 32));
+               (!pair1_decode || (decode_.max_threads >= 128 && decode_.simd_width == 32)) &&
+               (!fused_finish_reduce || (finish_reduce_.max_threads >= 512 && finish_reduce_.simd_width == 32)) &&
+               (!split_spec1 || (dense_split_.max_threads >= 128 && dense_split_.simd_width == 32 &&
+                               dense_split_finish_.max_threads >= 128 && dense_split_finish_.simd_width == 32));
     } catch (...) {
         return false;
     }
@@ -171,11 +178,13 @@ bool ExpertProgram::append_routed(std::vector<mtl::Dispatch>& commands, const Ex
     const size_t positions = size_t(tokens) * width;
     const size_t slots = size_t(tokens) * topk;
     const size_t elements = size_t(rows) * width;
+    const bool fused_finish = rows != 0 && fuses_finish_reduce(tokens);
     auto fits = [](const mtl::Buffer& buffer, size_t bytes) { return buffer.handle && buffer.bytes >= bytes; };
     if (tokens == 0 || tokens > max_tokens || rows > slots || job_count > rows || (rows != 0 && job_count == 0) ||
         combine_.max_threads < 128 || !fits(inverse, slots * sizeof(uint32_t)) ||
         !fits(route_weights, slots * sizeof(float)) || !fits(output, positions * sizeof(float)) ||
-        !fits(routed, elements * sizeof(float)) || (projection_grid && !fits(*projection_grid, 12))) return false;
+        (!fused_finish && !fits(routed, elements * sizeof(float))) ||
+        (projection_grid && !fits(*projection_grid, 12))) return false;
 
     using mtl::Arg;
     if (rows != 0) {
@@ -207,6 +216,12 @@ bool ExpertProgram::append_routed(std::vector<mtl::Dispatch>& commands, const Ex
                                             Arg::B(prepared), Arg::V(width), Arg::V(clamp)},
                             {blocks, rows, 1}, {128, 1, 1}});
         project(down, gate_raw, use_decode);
+        if (fused_finish) {
+            commands.push_back({&finish_reduce_, {Arg::B(gate_raw), down.svh.argument(), Arg::B(row_map),
+                                                   Arg::B(inverse), Arg::B(route_weights), Arg::B(output), Arg::V(width)},
+                                {blocks, tokens, 1}, {512, 1, 1}});
+            return true;
+        }
         commands.push_back({&finish_, {Arg::B(gate_raw), down.svh.argument(), Arg::B(row_map), Arg::B(routed),
                                        Arg::V(width)}, {blocks, rows, 1}, {128, 1, 1}});
     }
@@ -226,10 +241,36 @@ bool ExpertProgram::append_dense(std::vector<mtl::Dispatch>& commands, const Den
         !fits(row_map, size_t(rows) * 8) || !fits(prepared, in_elements * sizeof(uint16_t)) ||
         !fits(raw, out_elements * sizeof(uint16_t)) || !fits(output, out_elements * sizeof(float))) return false;
 
+    uint32_t splits = 0;
+    if (dense_split_.handle && bank.format == Format::spec1_k6 && rows <= 6) {
+        // Fixed geometry from the real packed projection sweep at these row counts.
+        constexpr uint32_t tested_shapes[][3] = {
+            {1024, 8192, 4}, {1024, 16384, 4},
+            {1536, 3072, 8},
+            {3072, 1024, 16}, {3072, 1536, 16}, {3072, 8192, 3}, {3072, 16384, 4},
+            {8192, 3072, 8}, {16384, 3072, 8},
+        };
+        for (const auto& [inputs, outputs, split_count] : tested_shapes) {
+            if (bank.inputs == inputs && bank.outputs == outputs) {
+                splits = split_count;
+                break;
+            }
+        }
+        if (raw.chunks || raw.bias % alignof(float) != 0 || !fits(raw, out_elements * splits * sizeof(float)))
+            splits = 0;
+    }
+
     using mtl::Arg;
-    const uint32_t shape[4] = {bank.inputs, bank.outputs, rows, 0};
+    const uint32_t shape[4] = {bank.inputs, bank.outputs, rows, splits};
     commands.push_back({&prepare_, {Arg::B(input), bank.suh.argument(), Arg::B(row_map), Arg::B(prepared),
                                    Arg::V(bank.inputs)}, {bank.inputs / 128, rows, 1}, {128, 1, 1}});
+    if (splits != 0) {
+        commands.push_back({&dense_split_, {bank.trellis.argument(), Arg::B(prepared), Arg::B(raw), Arg::V(shape)},
+                            {bank.outputs / 128, splits, 1}, {128, 1, 1}});
+        commands.push_back({&dense_split_finish_, {Arg::B(raw), bank.svh.argument(), Arg::B(output), Arg::V(shape)},
+                            {bank.outputs / 128, rows, 1}, {128, 1, 1}});
+        return true;
+    }
     commands.push_back({&project, {bank.trellis.argument(), Arg::B(prepared), Arg::B(raw), Arg::V(shape)},
                         {bank.outputs / 128, (rows + 31) / 32, 1}, {128, 1, 1}});
     commands.push_back({&dense_finish_, {Arg::B(raw), bank.svh.argument(), Arg::B(row_map), Arg::B(output),

@@ -168,6 +168,23 @@ impl Binding {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct StqOptions {
+    pub chunk: u32,
+    pub context_limit: u32,
+    pub profile: bool,
+    pub round_bf16: bool,
+    pub pair1_decode: bool,
+    pub resident: bool,
+    pub tensor_mla: bool,
+    pub gpu_verify_plan: bool,
+    pub register_mla: bool,
+    pub fused_finish_reduce: bool,
+    pub split_spec1: bool,
+    pub verify_register_mla: bool,
+    pub cache_engram_pages: bool,
+}
+
 unsafe extern "C" {
     fn stark_hy4_open_stq_diagnostic(
         weights: *const WeightSource,
@@ -184,6 +201,7 @@ unsafe extern "C" {
         round_bf16: c_int,
         pair1_decode: c_int,
         resident: c_int,
+        tuning: u32,
         select_context: unsafe extern "C" fn(*const ContextMemory, *mut c_void) -> u32,
         sizing: *mut c_void,
         session: *mut *mut c_void,
@@ -201,12 +219,7 @@ impl Session {
     /// including all GPU work. The native runtime maps the original packed pages.
     pub unsafe fn load_stq_diagnostic(
         source: &StqSource,
-        chunk: u32,
-        context_limit: u32,
-        profile: bool,
-        round_bf16: bool,
-        pair1_decode: bool,
-        resident: bool,
+        options: StqOptions,
     ) -> Result<Self, String> {
         let trunk = source.stq_trunk().map_err(|e| e.to_string())?;
         let dfly = source.stq_dfly().map_err(|e| e.to_string())?;
@@ -259,7 +272,7 @@ impl Session {
         }
         source.verify_unchanged().map_err(|e| e.to_string())?;
         let mut selection = ContextSelection {
-            limit: Some(context_limit),
+            limit: Some(options.context_limit),
             pool_size: None,
             sizing: None,
         };
@@ -279,11 +292,18 @@ impl Session {
                 token_map.len(),
                 vision_weights.as_ptr(),
                 vision_weights.len(),
-                chunk as c_int,
-                c_int::from(profile),
-                c_int::from(round_bf16),
-                c_int::from(pair1_decode),
-                c_int::from(resident),
+                options.chunk as c_int,
+                c_int::from(options.profile),
+                c_int::from(options.round_bf16),
+                c_int::from(options.pair1_decode),
+                c_int::from(options.resident),
+                u32::from(options.tensor_mla)
+                    | (u32::from(options.gpu_verify_plan) << 1)
+                    | (u32::from(options.register_mla) << 2)
+                    | (u32::from(options.fused_finish_reduce) << 3)
+                    | (u32::from(options.split_spec1) << 4)
+                    | (u32::from(options.verify_register_mla) << 5)
+                    | (u32::from(options.cache_engram_pages) << 6),
                 select_context,
                 ptr::from_mut(&mut selection).cast(),
                 &mut inner,

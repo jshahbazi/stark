@@ -62,6 +62,29 @@ kernel void stark_hy4_stq_pair1_finish(
     output[offset] = stark_hy4_stq_projection_boundary(value * float(scales[ulong(expert) * width + channel]));
 }
 
+static inline half stark_hy4_stq_spec1_split_round(device const float* partials, ulong offset,
+                                                    ulong plane_size, uint splits) {
+    float sum = partials[offset];
+    for (uint split = 1u; split < splits; ++split) sum += partials[ulong(split) * plane_size + offset];
+    return half(sum);
+}
+
+// SPEC1 split-K restores the F16 product boundary before H128/SVH. A split
+// plane holds shape.z rows of shape.y channels. Launch (shape.y/128, shape.z, 1)
+// groups of 128 with shape.w partials per output element.
+kernel void stark_hy4_stq_spec1_split_finish(
+    device const float* partials [[buffer(0)]], device const half* scales [[buffer(1)]],
+    device float* output [[buffer(2)]], constant uint4& shape [[buffer(3)]],
+    uint3 group [[threadgroup_position_in_grid]], uint position [[thread_index_in_threadgroup]]) {
+    threadgroup float workspace[128];
+    const uint channel = group.x * 128u + position;
+    const ulong offset = ulong(group.y) * shape.y + channel;
+    const ulong plane_size = ulong(shape.z) * shape.y;
+    const float value = stark_hy4_stq_hadamard128(
+        float(stark_hy4_stq_spec1_split_round(partials, offset, plane_size, shape.w)), position, workspace);
+    output[offset] = stark_hy4_stq_projection_boundary(value * float(scales[channel]));
+}
+
 // Finish both projections, apply the routed SwiGLU clamp, and prepare the
 // down projection's input without materializing gate and up in F32 buffers.
 kernel void stark_hy4_stq_pair1_prepare_down(
@@ -96,4 +119,49 @@ kernel void stark_hy4_stq_pair1_combine(
         if (index != 0xffffffffu) sum = fma(route_weights[base + slot], routed[ulong(index) * width + channel], sum);
     }
     output[ulong(group.y) * width + channel] = sum;
+}
+
+// The inverse-indexed finish follows Sushi v1.8.1's sorted_windows.zig and
+// REDUCE_SOURCE in expert_exl3_kernels.zig. Each SIMD group finishes one
+// route's H128/SVH in F32. Group zero reduces the original router slots in
+// their original order with the separate Stark combine's explicit FMA.
+kernel void stark_hy4_stq_pair1_finish_reduce(
+    device const half* raw [[buffer(0)]], device const half* svh [[buffer(1)]],
+    device const uint2* row_map [[buffer(2)]], device const uint* inverse [[buffer(3)]],
+    device const float* route_weights [[buffer(4)]], device float* output [[buffer(5)]],
+    constant uint& width [[buffer(6)]], uint3 group [[threadgroup_position_in_grid]],
+    uint slot [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float values[16 * 128];
+    const uint base = group.y * 16u;
+    const uint row = inverse[base + slot];
+    const uint channel = group.x * 128u + lane;
+    if (row != 0xffffffffu) {
+        const ulong at = ulong(row) * width + channel;
+        float4 v = float4(raw[at], raw[at + 32u], raw[at + 64u], raw[at + 96u]);
+        #pragma clang loop unroll(full)
+        for (ushort step = 1; step < 32; step <<= 1) {
+            const float4 peer = float4(simd_shuffle_xor(v.x, step), simd_shuffle_xor(v.y, step),
+                                       simd_shuffle_xor(v.z, step), simd_shuffle_xor(v.w, step));
+            v = lane & step ? peer - v : v + peer;
+        }
+        const float a = v.x + v.y, b = v.x - v.y, c = v.z + v.w, d = v.z - v.w;
+        v = float4(a + c, b + d, a - c, b - d) * 0.08838834764831845f;
+        const ulong scale = ulong(row_map[row].x) * width + channel;
+        v *= float4(svh[scale], svh[scale + 32u], svh[scale + 64u], svh[scale + 96u]);
+        #pragma clang loop unroll(full)
+        for (uint i = 0; i < 4; ++i) values[slot * 128u + lane + 32u * i] = v[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (slot == 0u) {
+        float4 sum = 0.0f;
+        for (uint i = 0; i < 16u; ++i) {
+            if (inverse[base + i] == 0xffffffffu) continue;
+            const uint at = i * 128u + lane;
+            const float4 v = float4(values[at], values[at + 32u], values[at + 64u], values[at + 96u]);
+            sum = fma(float4(route_weights[base + i]), v, sum);
+        }
+        const ulong at = ulong(group.y) * width + channel;
+        #pragma clang loop unroll(full)
+        for (uint i = 0; i < 4; ++i) output[at + 32u * i] = sum[i];
+    }
 }
