@@ -300,6 +300,8 @@ struct Forward::Impl {
     mtl::Buffer hcA, hcB, hc_eng, hc_mid, flat, mixes_a, mixes_f, pre_a, post_a, pre_f, post_f, cur;
     mtl::Buffer anorm, fnorm, fout;   // attn_norm / ffn_norm / ffn_out: three nodes gate 1's neighbours look at
     mtl::Buffer dense_device_scratch;
+    mtl::Buffer stq_identity, stq_dense_input, stq_dense_output, stq_embedding_ids, stq_embedding_rows;
+    mtl::Buffer stq_rows, stq_jobs, stq_inverse, stq_grid, stq_prepared, stq_gate, stq_up, stq_routed;
     mtl::Buffer q_resid, qb, Q, qpe, kpe, attn_o, kqv, gproj, gated, attn_y, attn_out, kvp, kvn, sc, pos_b, rope_pos;
     mtl::Buffer ik, iv, ig, iq, iwraw, iw, pool32, score, sel, nsel;
     mtl::Buffer mlogits, ids, rw, pred, pred2, rdown, xp, hbuf, hp, ye, mlat, upo, shg, shu, sha, sho, ffn_sum;
@@ -467,6 +469,17 @@ struct Forward::Impl {
     void append_dense_projection(std::vector<mtl::Dispatch>& ds, const gguf::Tensor* w,
                                  const mtl::Buffer& input, uint32_t n_in, const mtl::Buffer& output,
                                  uint32_t n_out, uint32_t n_tok, bool attention) {
+        if (m->stq) {
+            auto it = m->stq->dense.find(w->name);
+            if (it != m->stq->dense.end()) {
+                const auto& bank = *it->second;
+                if (bank.inputs != n_in || bank.outputs != n_out ||
+                    !m->stq->program.append_dense(ds, bank, input, stq_identity, n_tok,
+                                                  stq_dense_input, stq_dense_output, output))
+                    throw std::runtime_error("invalid STQ dense dispatch for " + w->name);
+                return;
+            }
+        }
         const bool device_view_requested = attention || (dense_ffn_device_views && !images());
         if (!pf.dense_device_views || !device_view_requested || n_tok < 512 || w->type != ref::Q8_0 ||
             n_in % 64 || n_out % 64) {
@@ -676,7 +689,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     // Assess the same routed blocks the forward encoder runs. The draft
     // block has BF16 experts and uses its own graph, so it cannot force the
     // target to keep GEMV scratch or split its routed plan.
-    mm_supported = c.supports_metal4() && mm_mode() != MoeMm::Off;
+    mm_supported = !m->stq && c.supports_metal4() && mm_mode() != MoeMm::Off;
     int covered = 0;
     int target_ordinals = 0;
     for (const auto& layer : mm.geo.layers) {
@@ -827,13 +840,13 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
         p_dense_pack = cx->pipeline(lib, "stark_hy4_dense_pack_device");
         p_dense_device = cx->pipeline(lib, "stark_hy4_dense_device_views");
     }
-    p_eng_rows = cx->pipeline(lib, "hy4_flash_engram_rows");
-    p_eng_gate = cx->pipeline(lib, "hy4_flash_engram_gate");
+    p_eng_rows = cx->pipeline(lib, "hy4_flash_engram_rows", mtl::Constants().b(63, m->geo.engram_table_type == 30));
+    p_eng_gate = cx->pipeline(lib, m->stq ? "stark_hy4_stq_engram_gate" : "hy4_flash_engram_gate");
     p_eng_delta = cx->pipeline(lib, "hy4_flash_engram_delta");
 
     if (const std::string e = resolve(); !e.empty()) return e;
     if (const std::string e = alloc(); !e.empty()) return e;
-    if (!pack.empty()) {
+    if (!pack.empty() || m->stq) {
         if (const std::string e = eng.open(mm, pack); !e.empty()) return "Engram: " + e;
         eng_ready = true;
         if (pf.optimize_mapped_decode) {
@@ -1018,10 +1031,12 @@ void Forward::Impl::alloc_scratch(int Tm, int as, int ms, const std::function<mt
     // bounds.  Sizing them for the GEMM alone would let a GEMV tail write past them.
     const bool mm_raw = mm_all && ms > Forward::kMaxWindow;
     const uint32_t ms_prep = mm_raw ? (uint32_t) Forward::kMaxWindow : (uint32_t) ms;
-    xp = f32(strata_hy4_flash_metal::xprep_floats((uint32_t) latent, ms_prep));
-    hbuf = f32((size_t) ms * topk * expert_ff);
-    hp = f32(strata_hy4_flash_metal::xprep_floats((uint32_t) expert_ff, (uint32_t) (ms_prep * topk)));
-    ye = f32((size_t) ms * topk * latent);
+    if (!m->stq) {
+        xp = f32(strata_hy4_flash_metal::xprep_floats((uint32_t) latent, ms_prep));
+        hbuf = f32((size_t) ms * topk * expert_ff);
+        hp = f32(strata_hy4_flash_metal::xprep_floats((uint32_t) expert_ff, (uint32_t) (ms_prep * topk)));
+        ye = f32((size_t) ms * topk * latent);
+    }
     mlat = f32((size_t) Tm * latent);
     upo = f32((size_t) Tm * n_embd);
     shg = f32((size_t) Tm * expert_ff);
@@ -1080,7 +1095,7 @@ std::string Forward::Impl::alloc() {
     // the score rows (537 GB), the MoE's entry-indexed buffers (635 MB) and the logits (495 MB) - see forward.h.
     // HY4_FLASH_SCRATCH_SPLIT (default on): with a prefill chunk, only the DECODE scratch is allocated here; the prompt's
     // (1.47 GB at 1024 positions) goes into a region of the expert arena while a prompt runs (attach_prefill).
-    split = tcap > Forward::kMaxWindow && scratch_split_on();
+    split = !m->stq && tcap > Forward::kMaxWindow && scratch_split_on();
     if (split) alloc_scratch(Forward::kMaxWindow, Forward::kMaxWindow, Forward::kMaxWindow, [&](size_t n) { return cx->alloc(n); });
     else alloc_scratch(tcap, asub, msub, [&](size_t n) { return cx->alloc(n); });
     auto f32 = [&](size_t n) { return cx->alloc(4 * n); };
@@ -1147,6 +1162,28 @@ std::string Forward::Impl::alloc() {
     h_mixes = f32((size_t) hsub * hc);
     h_cur = f32((size_t) hsub * n_embd);
     h_rnorm = f32((size_t) hsub * n_embd);
+    if (m->stq) {
+        const size_t routes = size_t(tcap) * topk;
+        const size_t elements = routes * latent;
+        const size_t width = std::max({max_heads * qk, max_heads * v_mla, m->geo.dense_ff});
+        stq_identity = cx->alloc(size_t(tcap) * 2 * sizeof(uint32_t));
+        stq_embedding_ids = cx->alloc(size_t(tcap) * sizeof(int32_t));
+        stq_embedding_rows = f32(size_t(tcap) * n_embd);
+        stq_dense_input = cx->alloc(2 * size_t(tcap) * width);
+        stq_dense_output = cx->alloc(2 * std::max(size_t(tcap) * width, size_t(hsub) * vocab));
+        stq_grid = cx->alloc(3 * sizeof(uint32_t));
+        stq_rows = cx->alloc(routes * 2 * sizeof(uint32_t));
+        stq_jobs = cx->alloc((routes / 32 + n_experts) * 4 * sizeof(uint32_t));
+        stq_inverse = cx->alloc(routes * sizeof(uint32_t));
+        stq_prepared = cx->alloc(elements * sizeof(uint16_t));
+        stq_gate = cx->alloc(elements * sizeof(uint16_t));
+        stq_up = cx->alloc(elements * sizeof(uint16_t));
+        stq_routed = f32(elements);
+        for (int row = 0; row < tcap; ++row) {
+            stq_identity.as<uint32_t>()[2 * row] = 0;
+            stq_identity.as<uint32_t>()[2 * row + 1] = row;
+        }
+    }
     return {};
 }
 
@@ -1226,13 +1263,20 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     // ---- MLA
     stage(tm.pf_attention_dense_ms);
     const gguf::Tensor* qa = b.t[W_Q_A];
-    gv(qa, true).append(ds, m->dense, qa->offset, anorm, (uint32_t) n_embd, q_resid, (uint32_t) m->geo.q_lora_rank, 0, uT);
+    if (m->stq)
+        append_dense_projection(ds, qa, anorm, uint32_t(n_embd), q_resid, uint32_t(m->geo.q_lora_rank), uT, true);
+    else
+        gv(qa, true).append(ds, m->dense, qa->offset, anorm, uint32_t(n_embd), q_resid,
+                            uint32_t(m->geo.q_lora_rank), 0, uT);
     stage(tm.pf_attention_misc_ms);
     rms(ds, q_resid, 0, (uint32_t) m->geo.q_lora_rank, b.t[W_Q_A_NORM], q_resid, 0,
         (uint32_t) m->geo.q_lora_rank, (uint32_t) m->geo.q_lora_rank, T, eps);
     stage(tm.pf_attention_dense_ms);
     const gguf::Tensor* qbw = b.t[W_Q_B];
-    gv(qbw, true).append(ds, m->dense, qbw->offset, q_resid, (uint32_t) m->geo.q_lora_rank, qb, H * (uint32_t) qk, 0, uT);
+    if (m->stq)
+        append_dense_projection(ds, qbw, q_resid, uint32_t(m->geo.q_lora_rank), qb, H * uint32_t(qk), uT, true);
+    else
+        gv(qbw, true).append(ds, m->dense, qbw->offset, q_resid, uint32_t(m->geo.q_lora_rank), qb, H * uint32_t(qk), 0, uT);
     stage(tm.pf_attention_misc_ms);
     rope(ds, qb, H, (uint32_t) qk, (uint32_t) (qk - rope_dim), H * (uint32_t) qk, b.tscale, T);
     // q_abs = wk_b[h] . q_nope[h], every head in one dispatch (grid.y = head, bitwise the per-head dispatches it
@@ -1593,7 +1637,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
             cut_block.push_back(b.id);
         }
         // the MoE split (moe_split_min): decided here, from T alone, so the encoder and at_cut agree
-        const bool split = !mapped && moe_split_min() > 0 && T >= moe_split_min() && T <= Forward::kMaxWindow &&
+        const bool split = !m->stq && !mapped && moe_split_min() > 0 && T >= moe_split_min() && T <= Forward::kMaxWindow &&
                            plan_of(T).subs_for(uT) == 1;
         if (!gpu_plan) cut_role.push_back(split ? 1 : 0);
 
@@ -1617,6 +1661,16 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         const gguf::Tensor* rd = b.t[W_RDOWN];
         append_dense_projection(ds, rd, fnorm, (uint32_t) n_embd, rdown, (uint32_t) latent, uT, false);
         if (!gpu_plan) cut_wait.push_back(early ? (int) ds.size() : cuts.back());
+        if (m->stq) {
+            const auto& banks = m->stq->experts.at(size_t(b.ordinal));
+            const uint32_t rows = uT * uint32_t(topk);
+            stage(tm.pf_moe_expert_ms);
+            if (!m->stq->program.append_routed(ds, banks[kGate], banks[kUp], banks[kDown],
+                    rdown, stq_rows, stq_jobs, stq_inverse, rw, uT, rows,
+                    std::min(rows, rows / 32 + uint32_t(n_experts)), stq_prepared, stq_gate,
+                    stq_up, stq_routed, mlat, &stq_grid))
+                throw std::runtime_error("invalid STQ routed dispatch");
+        } else {
         const ExpertSlices& es = m->experts[(size_t) b.ordinal];
         const MoeF32& mo = moe(es.type[kGate], es.type[kDown]);
         MoeArgs ma{};
@@ -1773,6 +1827,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
             }
             mo.append_combine(ds, ps.for_chunk(sa, 0, s), ye, pb, mlat, xo);
         }
+        }
 
         stage(tm.pf_dense_ms);
         const gguf::Tensor* ru = b.t[W_RUP];
@@ -1813,7 +1868,7 @@ void Forward::Impl::encode_head(std::vector<mtl::Dispatch>& ds, const mtl::Buffe
     }
     rms(ds, h_cur, 0, (uint32_t) n_embd, h_norm, h_rnorm, 0, (uint32_t) n_embd, (uint32_t) n_embd, T, eps);
     if (!with_logits) return;   // the MTP block's `h` only (PrefillSink::hidden)
-    gv(h_out).append(ds, m->dense, h_out->offset, h_rnorm, (uint32_t) n_embd, logits_b, (uint32_t) vocab, 0, uT);
+    append_dense_projection(ds, h_out, h_rnorm, (uint32_t) n_embd, logits_b, (uint32_t) vocab, uT, false);
     {
         mtl::Dispatch d;
         d.p = &p_argmax;
@@ -1950,6 +2005,21 @@ void Forward::Impl::at_cut(int s) {
             for (int k = 0; k < topk; ++k)
                 w[(size_t) t * topk + k] = w[(size_t) t * topk + k] / den * m->geo.routed_scale;
         }
+    }
+    if (m->stq) {
+        const auto route = stark::hy4::stq::plan_routes({id, size_t(n_tok) * topk});
+        if (!route || route->rows.size() != size_t(n_tok) * topk ||
+            route->jobs.size() * sizeof(route->jobs.front()) > stq_jobs.bytes) {
+            cut_err = "invalid STQ expert plan";
+            return;
+        }
+        std::memcpy(stq_rows.ptr, route->rows.data(), route->rows.size() * sizeof(route->rows.front()));
+        std::memcpy(stq_jobs.ptr, route->jobs.data(), route->jobs.size() * sizeof(route->jobs.front()));
+        std::memcpy(stq_inverse.ptr, route->inverse.data(), route->inverse.size() * sizeof(uint32_t));
+        const uint32_t grid[3] = {uint32_t(latent / 128), uint32_t(route->jobs.size()), 1};
+        std::memcpy(stq_grid.ptr, grid, sizeof(grid));
+        tm.host_cut_ms += (mtl::now_s() - t0) * 1e3;
+        return;
     }
     const bool mapped = m->stream.mapped();
     const float* pr = !mapped && prefetch_enabled() ? pred.as<float>() : nullptr;
@@ -2437,7 +2507,15 @@ std::string Forward::Impl::engram_rows_for(int block_id, int T, const EngramDeco
 std::string Forward::Impl::embed_window(const int32_t* all_tokens, int T) {
     const gguf::Tensor* te = m->find("token_embd.weight");
     if (te == nullptr) return "no tensor token_embd.weight";
-    const size_t rb = ref::row_bytes(te->type, n_embd);
+    const size_t rb = m->stq ? 0 : ref::row_bytes(te->type, n_embd);
+    if (m->stq) {
+        std::memcpy(stq_embedding_ids.ptr, all_tokens + p0, sizeof(int32_t) * size_t(T));
+        std::vector<mtl::Dispatch> ds;
+        const auto& bank = *m->stq->dense.at(te->name);
+        if (!m->stq->embedding.append(ds, bank, stq_embedding_ids, uint32_t(T), stq_embedding_rows))
+            return "invalid STQ embedding dispatch";
+        tm.gpu_ms += cx->run_graph(ds) * 1e3;
+    }
     std::vector<float> row((size_t) n_embd);
     std::vector<uint8_t> raw(rb);
     float* dst = hcA.as<float>();
@@ -2445,14 +2523,16 @@ std::string Forward::Impl::embed_window(const int32_t* all_tokens, int T) {
         const int32_t tok = all_tokens[p0 + t];
         if (tok < 0 || tok >= vocab) return "token id " + std::to_string(tok) + " is outside the vocabulary";
         // the row's bytes from the dense buffer or, when token_embd is not resident (model.h on_file), the file
-        if (!m->tensor_bytes("token_embd.weight", (uint64_t) tok * rb, rb, raw.data()))
-            return "cannot read row " + std::to_string(tok) + " of token_embd.weight";
-        ref::dequant(te->type, raw.data(), row.data(), (size_t) n_embd);
+        if (!m->stq) {
+            if (!m->tensor_bytes("token_embd.weight", uint64_t(tok) * rb, rb, raw.data()))
+                return "cannot read row " + std::to_string(tok) + " of token_embd.weight";
+            ref::dequant(te->type, raw.data(), row.data(), size_t(n_embd));
+        }
         // A picture's positions take the tower's row instead of the placeholder token's embedding, into all
         // four hyper-connection planes exactly as the token embedding goes.  Done here rather than with a
         // kernel because hcA is shared host-visible memory: upstream needs a scatter kernel only because
         // its state lives in device memory the host cannot write.
-        const float* src = row.data();
+        const float* src = m->stq ? stq_embedding_rows.as<float>() + size_t(t) * n_embd : row.data();
         if (images()) {
             const int64_t at = (int64_t) p0 + t;
             for (const Forward::ImageSpanRows& s : *img)
@@ -2529,7 +2609,8 @@ std::string Forward::window(const int32_t* all_tokens, int p0, int T, Dump* dump
     Impl& im = *im_;
     if (T < 1 || T > kMaxWindow)
         return "the window is " + std::to_string(T) + ", outside 1.." + std::to_string(kMaxWindow);
-    if (!im.m->stream.ready()) return "the expert arena was not built (--no-arena cannot run a forward pass)";
+    if (!im.m->stq && !im.m->stream.ready())
+        return "the expert arena was not built (--no-arena cannot run a forward pass)";
     im.inj = nullptr;
     im.clamp_pools(p0);
     bool need_engram = false;
@@ -2660,7 +2741,8 @@ std::string Forward::prefill(const int32_t* all_tokens, int p0, int T, const Pre
     } scratch(im);
     if (T < 1 || T > im.tcap)
         return "the chunk is " + std::to_string(T) + ", outside 1.." + std::to_string(im.tcap);
-    if (!im.m->stream.ready()) return "the expert arena was not built (--no-arena cannot run a forward pass)";
+    if (!im.m->stq && !im.m->stream.ready())
+        return "the expert arena was not built (--no-arena cannot run a forward pass)";
     if (p0 + T > im.ctx)
         return "the chunk ends at position " + std::to_string(p0 + T) + ", past --context " +
                std::to_string(im.ctx);
@@ -2827,7 +2909,7 @@ std::string Forward::block_window(int L, const int32_t* all_tokens, int p0, int 
     if (L < 0 || (size_t) L >= im.blk.size()) return "block " + std::to_string(L) + " is outside the trunk";
     if (T < 1 || T > kMaxWindow) return "the window is outside 1.." + std::to_string(kMaxWindow);
     const Impl::BW& b = im.blk[(size_t) L];
-    if (b.ordinal >= 0 && !im.m->stream.ready()) return "the expert arena was not built";
+    if (b.ordinal >= 0 && !im.m->stq && !im.m->stream.ready()) return "the expert arena was not built";
     im.inj = &inj;
     if (const std::string e = im.prepare_window(all_tokens, p0, T, b.engram_table >= 0); !e.empty()) return e;
     if (b.engram_table >= 0)

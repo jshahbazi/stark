@@ -29,6 +29,8 @@ struct Hy4FlashEngramRowArgs {
     float eps;
 };
 
+constant bool HY4_FLASH_ENGRAM_BF16 [[function_constant(63)]];
+
 // E4M3, the OCP FN variant (tmp/tests/hy4_flash/pyref/dequant.py _fp8_e4m3_table, which is bitwise ggml's to_float).
 static inline float hy4_flash_f8_e4m3(uchar b) {
     const float s = (b & 0x80) ? -1.0f : 1.0f;
@@ -37,6 +39,14 @@ static inline float hy4_flash_f8_e4m3(uchar b) {
     if (e == 0xF && m == 7) return NAN;
     if (e == 0) return s * (float(m) / 8.0f) * 0.015625f;            // 2^-6
     return s * (1.0f + float(m) / 8.0f) * exp2(float(int(e) - 7));
+}
+
+static inline float hy4_flash_engram_row_value(device const uchar* src, uint dim) {
+    if (is_function_constant_defined(HY4_FLASH_ENGRAM_BF16) && HY4_FLASH_ENGRAM_BF16) {
+        const uint word = uint(src[2 * dim]) | (uint(src[2 * dim + 1]) << 8);
+        return as_type<float>(word << 16);
+    }
+    return hy4_flash_f8_e4m3(src[dim]);
 }
 
 // grid (columns * n_tok), threads HY4_FLASH_TG.  `rows` is token major: row (t, c) at (t * columns + c) * row_bytes.
@@ -51,7 +61,7 @@ kernel void hy4_flash_engram_rows(device const uchar* rows [[buffer(0)]], device
     device const uchar* src = rows + (ulong)r * a.row_bytes;
     float ss = 0.0f;
     for (uint d = tid; d < a.dim; d += HY4_FLASH_TG) {
-        const float v = hy4_flash_f8_e4m3(src[d]);
+        const float v = hy4_flash_engram_row_value(src, d);
         ss += v * v;
     }
     const float scale = precise::rsqrt(hy4_flash_tg_sum(ss, part, sg, lane) / float(a.dim) + a.eps);
@@ -59,7 +69,7 @@ kernel void hy4_flash_engram_rows(device const uchar* rows [[buffer(0)]], device
     device float* o = y + (ulong)t * a.out_stride + (ulong)c * a.dim;
     device const float* w = wnorm + (ulong)c * a.dim;
     for (uint d = tid; d < a.dim; d += HY4_FLASH_TG)
-        o[d] = hy4_flash_f8_e4m3(src[d]) * scale * w[d] * keep;
+        o[d] = hy4_flash_engram_row_value(src, d) * scale * w[d] * keep;
 }
 
 struct Hy4FlashEngramArgs {
@@ -102,6 +112,49 @@ kernel void hy4_flash_engram_gate(device const float* x [[buffer(0)]], device co
         const float sgn = dot < 0.0f ? -1.0f : 1.0f;   // step(-dot) * -2 + 1: dot == 0 gives +1
         dot_out[t * a.hc + i] = dot;
         gate_out[t * a.hc + i] = hy4_flash_sigmoid(mag * sgn);
+    }
+}
+
+// STQ supplies independent RMSNorm weights for the key and query of each
+// stream, in [stream, key/query, dim] order. Sushi v1.8.1's engramAdd and
+// rowsTimes (hy4_forward.zig and hy4_norm.zig) apply both weights before
+// multiplying the normalized rows. Keep the native threadgroup reduction.
+kernel void stark_hy4_stq_engram_gate(device const float* x [[buffer(0)]], device const float* kv [[buffer(1)]],
+                                      device const float* norms [[buffer(2)]], device float* dot_out [[buffer(3)]],
+                                      device float* gate_out [[buffer(4)]],
+                                      constant Hy4FlashEngramArgs& a [[buffer(5)]],
+                                      uint3 tgp [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]],
+                                      ushort sg [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
+    threadgroup float part[HY4_FLASH_TG_SG];
+    const uint i = tgp.x, t = tgp.y;
+    const ulong channel = (ulong)i * a.n_embd;
+    device const float* xr = x + (ulong)t * a.x_stride + channel;
+    device const float* kr = kv + (ulong)t * a.kv_stride + channel;
+    device const float* kw = norms + 2 * channel;
+    device const float* qw = kw + a.n_embd;
+
+    float sx = 0.0f, sk = 0.0f;
+    for (uint d = tid; d < a.n_embd; d += HY4_FLASH_TG) {
+        sx += xr[d] * xr[d];
+        sk += kr[d] * kr[d];
+    }
+    const float nx = precise::rsqrt(hy4_flash_tg_sum(sx, part, sg, lane) / float(a.n_embd) + a.eps);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float nk = precise::rsqrt(hy4_flash_tg_sum(sk, part, sg, lane) / float(a.n_embd) + a.eps);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float product = 0.0f;
+    for (uint d = tid; d < a.n_embd; d += HY4_FLASH_TG) {
+        const float k = kw[d] * (kr[d] * nk);
+        const float q = qw[d] * (xr[d] * nx);
+        product += k * q;
+    }
+    const float dot = hy4_flash_tg_sum(product, part, sg, lane) * (1.0f / a.sqrt_n);
+    if (tid == 0) {
+        const float mag = precise::sqrt(max(fabs(dot), 1e-6f));
+        const float sign = float(int(dot > 0.0f) - int(dot < 0.0f));
+        dot_out[t * a.hc + i] = dot;
+        gate_out[t * a.hc + i] = hy4_flash_sigmoid(mag * sign);
     }
 }
 

@@ -7,6 +7,8 @@
 #include "forward.h"
 #include "model.h"
 #include "mtp.h"
+#include "stq_engram.h"
+#include "stq_geometry.h"
 
 #include <algorithm>
 #include <array>
@@ -218,6 +220,69 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
 
 extern "C" void stark_hy4_close(StarkHy4* session) noexcept { delete session; }
 
+extern "C" int stark_hy4_open_stq_diagnostic(
+    const stark::hy4::stq::WeightSource* weights, size_t weight_count,
+    const stark::hy4::stq::ProjectionSource* experts, size_t expert_count,
+    const stark::hy4::stq::TensorSlice* tables, const int32_t* token_map, size_t map_len,
+    int chunk, uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
+    StarkHy4** output, char* detail, size_t detail_len) noexcept {
+    *output = nullptr;
+    auto fail = [&](const std::string& error) {
+        if (detail_len != 0) {
+            const size_t n = std::min(error.size(), detail_len - 1);
+            std::memcpy(detail, error.data(), n);
+            detail[n] = '\0';
+        }
+        return 1;
+    };
+    try {
+        using namespace stark::hy4::stq;
+        if (chunk != 1024 && chunk != 4096) return fail("unsupported STQ prefill chunk");
+        auto session = std::make_unique<StarkHy4>();
+        auto& s = *session;
+        if (!s.metal.supports_metal4()) return fail("STQ requires Metal 4");
+        s.metal.lock_safe_math();
+        if (auto error = make_geometry(0, s.model.geo); !error.empty()) return fail(error);
+        // Reserve the full packed weight set separately from anonymous scratch
+        // and context. Engram tables use positional reads outside this budget.
+        double packed_bytes = 0;
+        for (const auto& p : std::span(experts, expert_count)) packed_bytes += p.trellis.size + p.suh.size + p.svh.size;
+        for (const auto& w : std::span(weights, weight_count))
+            if (w.use == WeightUse::linear)
+                packed_bytes += w.projection.trellis.size + w.projection.suh.size + w.projection.svh.size;
+        const double phys = strata::metal_engine::sys_phys();
+        const double available = strata::metal_engine::sys_avail(phys);
+        const double current = strata::metal_engine::proc_mem().footprint;
+        const double matrices = 2.0 * kGiB;
+        const double scratch = 2.5 * kGiB * (chunk / 1024.0);
+        const double room = std::min({available, phys - current - 16.0 * kGiB - packed_bytes,
+                                     s.metal.recommended_working_set() - packed_bytes - 2.0 * kGiB})
+                            - matrices - scratch;
+        if (room <= 0) return fail("insufficient live memory for the STQ pack and context");
+        auto memory = context_memory(s.model.geo, s.metal, chunk, static_cast<uint64_t>(room));
+        memory.draft_slack = 0;
+        memory.draft_cache_bytes_per_token = 0;
+        memory.draft_pool_bytes_per_row = 0;
+        const uint32_t context = select_context(&memory, sizing);
+        if (context < 2 || context > memory.engine_context || context > memory.checkpoint_context)
+            return fail("cannot fit STQ context");
+        s.model.geo.max_context = int32_t(context);
+        if (auto error = load_trunk(s.model, s.metal, {weights, weight_count}, {experts, expert_count}); !error.empty())
+            return fail(error);
+        if (auto error = bind_engram(s.model, {tables, 4}, {token_map, map_len}); !error.empty())
+            return fail(error);
+        Prefill prefill;
+        prefill.chunk = chunk;
+        if (auto error = s.forward.open(s.model, s.metal, "", prefill); !error.empty()) return fail(error);
+        s.capacity = int(context);
+        s.tokens.reserve(context);
+        *output = session.release();
+        return 0;
+    } catch (...) {
+        return fail("STQ native model initialization failed");
+    }
+}
+
 extern "C" int stark_hy4_parallel_router_active(const StarkHy4* session) noexcept {
     return session->forward.parallel_router_active();
 }
@@ -226,7 +291,7 @@ extern "C" void stark_hy4_clear(StarkHy4* session) noexcept {
     auto& s = *session;
     s.image.reset();
     s.forward.reset();
-    s.mtp.reset();
+    if (!s.model.stq) s.mtp.reset();
     s.tokens.clear();
     s.position = 0;
     s.context = 0;
@@ -237,7 +302,7 @@ extern "C" int stark_hy4_retain_prefix(StarkHy4* session, int position) noexcept
     auto& s = *session;
     try {
         if (s.image || position < 1 || position > s.position || !s.forward.rewind(position).empty()) return 1;
-        s.mtp.truncate(position);
+        if (!s.model.stq) s.mtp.truncate(position);
         s.tokens.resize(static_cast<size_t>(position));
         s.position = position;
         return 0;
@@ -251,7 +316,7 @@ extern "C" int stark_hy4_begin(StarkHy4* session, const uint32_t* tokens, int co
     auto& s = *session;
     try {
         if (context > s.capacity || count < 1 || count >= context || reuse < 0 || reuse >= count ||
-            drafts < 0 || drafts > s.max_drafts || (image && (reuse || drafts))) return 1;
+            drafts < 0 || drafts > s.max_drafts || (image && (reuse || drafts || s.model.stq))) return 1;
         const auto valid = [](uint32_t token) { return token < kVocab; };
         if (!std::all_of(tokens, tokens + count, valid)) return 1;
         if (reuse == 0) {
@@ -261,7 +326,7 @@ extern "C" int stark_hy4_begin(StarkHy4* session, const uint32_t* tokens, int co
                 static_cast<size_t>(reuse) > s.tokens.size() ||
                 !std::equal(tokens, tokens + reuse, s.tokens.begin()) ||
                 !s.forward.rewind(reuse).empty()) return 1;
-            s.mtp.truncate(reuse);
+            if (!s.model.stq) s.mtp.truncate(reuse);
             s.mtp.stats() = {};
         }
         s.tokens.assign(tokens, tokens + count);

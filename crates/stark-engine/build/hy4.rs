@@ -45,10 +45,20 @@ pub(super) fn build(out_dir: &Path) -> anyhow::Result<()> {
         "metal/src/ref_quant.cpp",
         "metal/src/gguf_lite.cpp",
     ];
-    let sources = sources
-        .into_iter()
-        .map(|path| vendor.join(path))
-        .chain([native.join("stark_hy4.cpp"), native.join("stark_hy4_vision.cpp")]);
+    let sources = sources.into_iter().map(|path| vendor.join(path)).chain(
+        [
+            "stark_hy4.cpp",
+            "stark_hy4_vision.cpp",
+            "stq_codec.cpp",
+            "stq_attention.cpp",
+            "stq_engram.cpp",
+            "stq_embedding.cpp",
+            "stq_expert.cpp",
+            "stq_geometry.cpp",
+            "stq_model.cpp",
+        ]
+        .map(|path| native.join(path)),
+    );
     let mut jobs = Vec::new();
     for (index, source) in sources.enumerate() {
         let object = out_dir.join(format!("hy4_{index}.o"));
@@ -56,7 +66,9 @@ pub(super) fn build(out_dir: &Path) -> anyhow::Result<()> {
         clang
             .args(["-sdk", "macosx", "clang++", "-arch", "arm64", "-std=c++20", "-O2", "-Wno-deprecated-declarations"])
             .arg("-I")
-            .arg(out_dir);
+            .arg(out_dir)
+            .arg("-I")
+            .arg(native);
         for header in headers {
             clang.arg("-I").arg(vendor.join(header));
         }

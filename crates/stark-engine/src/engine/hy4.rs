@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! In-process AngelSlim Hy4 Flash Metal graph on macOS arm64.
+//! In-process Hy4 Flash Metal graph and native artifact readers on macOS arm64.
 
 use std::{
     ffi::{CString, c_char, c_int, c_void},
@@ -10,6 +10,11 @@ use std::{
 };
 
 use super::context::ContextSizing;
+
+pub mod stq_layout;
+mod stq_native;
+pub mod stq_source;
+pub mod stq_trunk;
 
 pub const VOCAB: usize = 120_832;
 pub const PREFILL_CHUNK: usize = 1024;

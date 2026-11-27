@@ -23,6 +23,7 @@
 #include "engine/stream.h"
 #include "gguf_lite.h"
 #include "mtl_rt.h"
+#include "stq_model.h"
 #include "strata/hy4flash_gguf/geometry.hpp"
 
 #include <cstdint>
@@ -49,6 +50,13 @@ struct ExpertSlices {
     int32_t n_experts = 0;
 };
 
+struct EngramSegment {
+    int32_t block_id;
+    std::string path;
+    uint64_t offset;
+    uint64_t rows;
+};
+
 struct Model {
     hy4_flash::Geometry geo;
     std::string shard1_path;
@@ -56,6 +64,8 @@ struct Model {
     uint64_t engram_offset = 0;          ///< row 0's byte offset in `engram_path` (data_start + the tensor's)
     uint64_t engram_rows = 0;            ///< the merged table's row count
     uint32_t engram_row_bytes = 0;       ///< one row in the file (102 for Q8_0 x 96; F8_E4M3 differs)
+    std::vector<EngramSegment> engram_segments;  ///< local BF16 tables in an STQ source
+    std::vector<int32_t> engram_token_map;      ///< digest-verified STQ map including identity entries at the end
     gguf::File tensors;                  ///< SHARD 1 only (see the header comment)
     std::vector<ExpertSlices> experts;   ///< geo.n_expert_ordinals() entries, indexed by ordinal
     std::vector<std::string> skipped;    ///< the MTP block's tensors, by name (and the on_file ones below)
@@ -71,6 +81,7 @@ struct Model {
     uint64_t dense_bytes = 0;            ///< what was read (0 until load_dense)
     double load_s = 0;
     mtl::Buffer dense;
+    std::unique_ptr<stark::hy4::stq::Trunk> stq;
     strata::metal_engine::ExpertStream stream;
 
     /// Shard 1's entry for `name`, or nullptr.  After `load_dense` a dense tensor's `offset` is its offset in
