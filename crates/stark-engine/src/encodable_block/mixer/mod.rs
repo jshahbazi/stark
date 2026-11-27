@@ -142,6 +142,7 @@ pub trait Mixer<B: Backend>: Any + Send + Sync {
     }
 
     /// Largest individual cache address reservation that scales with context.
+    /// Model-specific position limits are checked independently.
     /// Recurrent mixers have constant state, already covered by their profile.
     fn context_cache_buffer_bytes(
         &self,

@@ -33,8 +33,8 @@ mod gemma4_mtp;
 use crate::{
     cancel::CancelSignal,
     generation::{
-        ContextPlanningRequest, GeneratedTokens, GenerationBackend, GenerationOptions, ImageArtifactIdentity,
-        PreparedImageMetadata, ProgressCallback, Sampling, TextCallback, admit_request_memory,
+        ContextCapacity, ContextPlanningRequest, GeneratedTokens, GenerationBackend, GenerationOptions,
+        ImageArtifactIdentity, PreparedImageMetadata, ProgressCallback, Sampling, TextCallback, admit_request_memory,
         collect_tokens_controlled, native_result_after_cleanup,
     },
     prefix_cache::{self, PrefixEntry},
@@ -111,7 +111,7 @@ fn disabled_dense_mtp_stats() -> Value {
 
 pub(crate) struct NativeBackend {
     model: NativeModel,
-    context_sizing: Option<ContextSizing>,
+    context_capacity: ContextCapacity,
     idle_engine: Option<std::sync::Arc<Engine<Metal>>>,
     vocab_size: usize,
     eos_token_ids: Vec<u32>,
@@ -148,6 +148,38 @@ macro_rules! dense_model_call {
     };
 }
 
+// These recurrent mixers have no position limit and all provide request
+// memory estimates. A graph made from them can plan each request separately.
+fn undeclared_native_text(config: &Value) -> bool {
+    config.pointer("/decoder_config/transformer_config/layer_configs").and_then(Value::as_array).is_some_and(|layers| {
+        !layers.is_empty()
+            && layers.iter().all(|layer| {
+                matches!(
+                    layer.pointer("/mixer_config/type").and_then(Value::as_str),
+                    Some("Mamba2Config" | "ShortConvConfig" | "DeltaNetConfig")
+                ) && layer.get("rope_config").is_none_or(Value::is_null)
+            })
+    })
+}
+
+fn select_native_context(
+    checkpoint_context_tokens: Option<u32>,
+    undeclared: bool,
+    backend_bound: Option<context::BackendContextBound>,
+    budget: usize,
+    estimate: impl Fn(u32) -> Option<usize>,
+) -> Result<ContextCapacity, &'static str> {
+    match checkpoint_context_tokens {
+        Some(limit) => {
+            let estimate_limit = backend_bound.map_or(limit, |bound| limit.min(bound.context_tokens));
+            ContextSizing::fit_loaded(limit, backend_bound, estimate_limit, budget, estimate)
+                .map(ContextCapacity::Shared)
+        },
+        None if undeclared => Ok(ContextCapacity::Undeclared),
+        None => Err("invalid_finite_context_limit"),
+    }
+}
+
 impl NativeModel {
     fn max_context_length(&self) -> Option<u32> {
         match self {
@@ -158,12 +190,19 @@ impl NativeModel {
         }
     }
 
-    fn context_sizing(&self) -> Result<Option<ContextSizing>, &'static str> {
-        let Some(limit) = self.max_context_length() else {
-            return Ok(None);
+    fn context_capacity(
+        &self,
+        config: Option<&Value>,
+    ) -> Result<ContextCapacity, &'static str> {
+        let undeclared = matches!(self, Self::Text(_)) && config.is_some_and(undeclared_native_text);
+        let bound = match self {
+            Self::Text(model) => model.generation_cache_context_bound(),
+            Self::Vision(model) => model.generation_cache_context_bound(),
+            Self::Gemma4Vision(model) => model.generation_cache_context_bound(),
+            Self::Gemma3Vision(model) => model.generation_cache_context_bound(),
         };
         let budget = context::current_memory_budget(context::metal_memory_headroom());
-        ContextSizing::fit_loaded(limit, limit, budget, |capacity| {
+        select_native_context(self.max_context_length(), undeclared, bound, budget, |capacity| {
             let input = (capacity - 1).min(context::LOAD_PREFILL_PROBE_TOKENS);
             let output = capacity - input;
             let ordinary = match self {
@@ -536,11 +575,11 @@ impl NativeBackend {
         };
         #[cfg(not(feature = "gemma4-assistant-staging"))]
         let gemma4_assistant = None;
-        let context_sizing = model.context_sizing()?;
+        let context_capacity = model.context_capacity(config.as_ref())?;
         Ok(Self {
             idle_engine: matches!(&model, NativeModel::Text(_)).then(|| engine.clone()),
             model,
-            context_sizing,
+            context_capacity,
             vocab_size,
             eos_token_ids,
             cancellation,
@@ -625,12 +664,10 @@ impl GenerationBackend for NativeBackend {
     fn vocab_size(&self) -> usize {
         self.vocab_size
     }
-    fn max_context_length(&self) -> Option<u32> {
-        self.context_sizing.map(|sizing| sizing.context_tokens).or_else(|| self.model.max_context_length())
+    fn context_capacity(&self) -> ContextCapacity {
+        self.context_capacity
     }
-    fn context_sizing_metadata(&self) -> Option<Value> {
-        self.context_sizing.map(|sizing| serde_json::json!(sizing))
-    }
+
     fn automatic_context_length(
         &self,
         input_tokens: u32,
@@ -2023,5 +2060,70 @@ mod dense_mtp_stats_tests {
         }
         assert_eq!(rounds_by_accepted_drafts, [2, 1, 2, 1]);
         assert!(!super::record_accepted_prefix_round(&mut rounds_by_accepted_drafts, 4));
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    #[test]
+    fn converted_native_load_requires_estimation_unless_recurrent_capacity_is_undeclared() {
+        let llamba = serde_json::json!({"decoder_config": {"transformer_config": {"layer_configs": [
+            {"mixer_config": {"type": "Mamba2Config"}, "rope_config": null}
+        ]}}});
+        assert!(undeclared_native_text(&llamba));
+        let mut short_conv = llamba.clone();
+        short_conv["decoder_config"]["transformer_config"]["layer_configs"][0]["mixer_config"]["type"] =
+            serde_json::json!("ShortConvConfig");
+        assert!(undeclared_native_text(&short_conv));
+        let mut mixed = llamba.clone();
+        let layers = mixed["decoder_config"]["transformer_config"]["layer_configs"].as_array_mut().unwrap();
+        layers.push(serde_json::json!({"mixer_config": {"type": "ShortConvConfig"}, "rope_config": null}));
+        layers.push(serde_json::json!({"mixer_config": {"type": "DeltaNetConfig"}, "rope_config": null}));
+        assert!(undeclared_native_text(&mixed));
+        mixed["decoder_config"]["transformer_config"]["layer_configs"][2]["mixer_config"]["type"] =
+            serde_json::json!("AttentionConfig");
+        assert!(!undeclared_native_text(&mixed));
+        assert!(!undeclared_native_text(&serde_json::json!({})));
+        assert!(matches!(
+            select_native_context(None, true, None, 0, |_| panic!("undeclared capacity bypasses load estimation")),
+            Ok(ContextCapacity::Undeclared)
+        ));
+        assert_eq!(select_native_context(None, false, None, 0, |_| None).unwrap_err(), "invalid_finite_context_limit");
+        assert_eq!(
+            select_native_context(Some(4096), false, None, 4096, |_| None).unwrap_err(),
+            "context_memory_estimate_unavailable"
+        );
+        assert_eq!(
+            select_native_context(Some(4096), false, None, 1, |n| Some(n as usize)).unwrap_err(),
+            "resource_budget_exceeded"
+        );
+        let ContextCapacity::Shared(sizing) =
+            select_native_context(Some(4096), false, None, 8192, |n| Some(n as usize)).unwrap()
+        else {
+            panic!("finite native models must publish shared sizing")
+        };
+        assert_eq!(sizing.context_tokens, 4096);
+        assert!(sizing.backend_bound.is_none());
+    }
+
+    #[test]
+    fn native_estimation_preserves_a_fully_fitting_backend_limit() {
+        let backend_bound = context::BackendContextBound {
+            context_tokens: 3072,
+            source: "test_kv_buffer",
+        };
+        let ContextCapacity::Shared(sizing) =
+            select_native_context(Some(4096), false, Some(backend_bound), 8192, |n| {
+                assert!(n <= backend_bound.context_tokens);
+                Some(n as usize)
+            })
+            .unwrap()
+        else {
+            panic!("finite native models must publish shared sizing")
+        };
+        assert_eq!(sizing.context_tokens, 3072);
+        assert_eq!(sizing.limiting_factor, context::ContextConstraint::Backend);
     }
 }

@@ -39,7 +39,9 @@ If a window shrinks with ample headroom, compare the candidate against its base 
 
 ## 4. Repair the inventory and queue the remaining hardware runs
 
-Start this work alongside the worker changes. Join the **110 base rows and 10 extensions** with fixed native entries, supported import/preparation profiles, and installed receipts. Record catalog status, loader and format, enabled tower and draft head, shipped pin, resolved source revision and converted artifact identity separately. The audit found revision evidence for 104 rows (99 local snapshots and five profile/catalog pins), with 16 unresolved. Export the provenance of each revision and use an explicit unresolved value where necessary. Downloadable rows should expose their immutable resolved revision before installation. Existing receipts remain authoritative for the bytes tested. [Shipped inventory](../tools/converter/stark_convert/catalog.json) · [Download resolution and fixed entries](../tools/converter/stark_convert/model_catalog.py)
+The [artifact inventory](CONTEXT_SIZING_INVENTORY.md) reconciles the shipped registry, supported preparations and audit receipts. Use its artifact-specific dispositions when selecting hardware runs.
+
+Join the **110 base rows and 10 extensions** with fixed native entries, supported import/preparation profiles, and installed receipts. Record catalog status, loader and format, enabled tower and draft head, shipped pin, resolved source revision and converted artifact identity separately. The audit had revision evidence for 104 rows and left 16 unresolved. The inventory lists the per-row provenance. Downloadable rows should expose their immutable resolved revision before installation. Existing receipts remain authoritative for the bytes tested. [Shipped registry](../tools/converter/stark_convert/catalog.json) · [Download resolution](../tools/converter/stark_convert/model_catalog.py) · [Fixed entries](../tools/converter/stark_convert/native_catalog.py)
 
 Correct two classifications before using the matrix to schedule hardware.
 

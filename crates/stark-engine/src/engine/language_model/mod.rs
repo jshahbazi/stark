@@ -293,6 +293,22 @@ impl<B: Backend> LanguageModel<B> {
         self.decoder.max_context_length()
     }
 
+    /// Capacity of the reserved decoder and draft KV buffers, independently
+    /// of checkpoint RoPE lengths and physical memory headroom.
+    pub fn generation_cache_context_bound(&self) -> Option<super::context::BackendContextBound> {
+        let maximum_bytes = self.engine.context.max_buffer_length()?;
+        let reserved = |context| {
+            let decoder = self.decoder.context_cache_buffer_bytes(context)?;
+            let draft = self.dense_mtp.as_ref().map_or(Some(0), |head| head.context_cache_buffer_bytes(context))?;
+            Some(decoder.max(draft))
+        };
+        let context_tokens = super::context::largest_fitting_context(2, u32::MAX, maximum_bytes, reserved).unwrap_or(0);
+        (context_tokens != u32::MAX).then_some(super::context::BackendContextBound {
+            context_tokens,
+            source: "metal_kv_buffer_length_or_u32_index",
+        })
+    }
+
     fn request_memory_estimate(
         &self,
         context_tokens: u32,
@@ -474,6 +490,9 @@ impl<B: Backend> LanguageModel<B> {
             )?)?;
         let mut reserved = self.decoder.context_cache_buffer_bytes(context_tokens)?;
         if let Some(head) = self.dense_mtp.as_ref().filter(|_| dense_mtp) {
+            if head.max_context_length().is_some_and(|maximum| context_tokens > maximum) {
+                return None;
+            }
             reserved = reserved.max(head.context_cache_buffer_bytes(context_tokens)?);
         }
         if self.engine.context.max_buffer_length().is_some_and(|limit| estimate.max_buffer_bytes.max(reserved) > limit)

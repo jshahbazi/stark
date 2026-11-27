@@ -629,6 +629,9 @@ results so that a check for a previous selection cannot authorize the current
 download. Metadata inspection does not execute repository model code.
 
 A browser download also pins the catalogue card's immutable primary revision.
+If a fixed installer retrieves byte-verified copies from a different immutable
+revision, the card exposes that commit as `download_revision` alongside its
+qualified `revision`. Inkling uses this for its public upload.
 The backend caches the offered repository, revision and artifact modes under
 the catalogue request and opaque entry ID. The app submits that ID and selected
 mode; it cannot supply a replacement source through this command. Installation

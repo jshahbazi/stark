@@ -73,7 +73,8 @@ struct CatalogModelRow: View {
                 Text("Likely too large for this Mac's memory").font(.caption).foregroundStyle(.orange)
             }
         }
-        .help(item.repo + "\nVersion " + item.revision)
+        .help(item.repo + "\nVersion " + item.revision
+              + (item.downloadRevision.map { "\nDownload version " + $0 } ?? ""))
         .accessibilityElement(children: .contain)
         .accessibilityLabel(item.name + ", version " + item.revision.prefix(7))
     }
