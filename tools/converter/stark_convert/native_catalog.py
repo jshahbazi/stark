@@ -16,6 +16,8 @@ FLINT_CHOICE = "flint-int4"
 RIPPLE_FAMILY_ID = "ricursive"
 HY4_FAMILY_ID = "hy4_flash"
 HY4_CHOICE = "hy4-q3-k"
+HY4_SUSHI_REPO = "beamster/Hy4-Flash-Sushi-STQ-4bpw"
+HY4_SUSHI_REVISION = "61528ba635a623f127c5a7b1e1f4ac2c2b0d4885"
 
 _NATIVE_CHOICES = {
     FAMILY_ID: (CHOICE,),
@@ -139,9 +141,28 @@ def catalog_item(choice: str = CHOICE) -> dict:
     }
 
 
-def catalog_items(family: str) -> list[dict]:
-    """Return the fixed native choices for a family, without generic duplicates."""
-    return [catalog_item(choice) for choice in _NATIVE_CHOICES.get(family, ())]
+def catalog_items(family: str, *, include_unavailable: bool = False) -> list[dict]:
+    """Return fixed native choices and, for browsing, known unavailable exports."""
+    items = [catalog_item(choice) for choice in _NATIVE_CHOICES.get(family, ())]
+    if family == HY4_FAMILY_ID and include_unavailable:
+        items.append(
+            {
+                "id": hashlib.sha256(f"{HY4_SUSHI_REPO}@{HY4_SUSHI_REVISION}".encode()).hexdigest()[:32],
+                "repo": HY4_SUSHI_REPO,
+                "revision": HY4_SUSHI_REVISION,
+                "name": "Hy4-flash Sushi STQ 4bpw",
+                "size_label": None,
+                "parameter_count": None,
+                "weight_bytes": 208_397_806_219,
+                "quantization": "STQ 4bpw",
+                "artifact_modes": ["vision-language"],
+                "default_artifact_mode": "vision-language",
+                "downloadable": False,
+                "model_group": None,
+                "unavailable_reason": "Requires Sushi. To run Hy4-flash in Stark, choose AngelSlim Q3_K.",
+            }
+        )
+    return items
 
 
 def source_choice(family: str, item: object) -> str | None:

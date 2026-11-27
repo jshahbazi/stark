@@ -314,6 +314,9 @@ Hugging Face searches. Architecture tags and model-name searches are interleaved
 so a large tag cannot delay every other export type. Parsed configuration
 identifies the family. Each page inspects up to 30 distinct candidates and
 retains unsupported family variants with an **Unavailable** reason.
+Turn off **Hide Unsupported** in Hy4-flash to see the pinned Sushi STQ 4bpw
+export. It runs in Sushi. The catalog's AngelSlim Q3_K entry installs and
+runs in Stark.
 **Load more models** follows the remaining pages automatically, preserving
 results already loaded. Failed pages can be retried at the same offset.
 

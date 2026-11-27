@@ -1100,7 +1100,7 @@ def family_catalog(
         return report(family, "offline", "Connect to the internet to browse models.")
     if family in {RIPPLE_FAMILY_ID, INKLING_FAMILY_ID, HY4_FAMILY_ID}:
         # Serve the pinned original-format artifacts with their exact revisions.
-        choices = native_catalog_items(family)
+        choices = native_catalog_items(family, include_unavailable=not planning)
         items = choices[offset : offset + limit]
         if on_item is not None:
             for item in items:
@@ -1638,7 +1638,7 @@ def _search_fixed_items(query):
 
     fixed = []
     for family in (FAMILY_ID, FLINT_FAMILY_ID, RIPPLE_FAMILY_ID, QWEN_FAMILY_ID, INKLING_FAMILY_ID, HY4_FAMILY_ID):
-        for item in catalog_items(family):
+        for item in catalog_items(family, include_unavailable=True):
             if _search_matches(query, [family, item["repo"], item["name"], item["quantization"]]):
                 fixed.append({**item, "family_id": family})
     for family in sorted(_DECISION_FAMILIES):
