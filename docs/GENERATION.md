@@ -66,7 +66,12 @@ The worker fits a maximum context at load and reports it in `context_sizing`.
 Each request can choose a smaller window. The planner clamps the request to
 the fitted limit and prefix reuse is scoped to the selected window.
 `STARK_HY4_CONTEXT_LIMIT` is an optional load-time ceiling.
-[Catalog, defaults and flexible context evidence](model-experiments/2026-11-27-hy4-stq-catalog-defaults.md)
+Desktop requests up to four shared-weight text slots. The loader fits the
+admitted slots and their common API ceiling from live headroom. The primary
+keeps its own separately fitted capacity for Playground and exclusive image
+work. Set `STARK_GENERATION_SLOTS=1` to use the serial automatic fit.
+[Catalog and defaults](model-experiments/2026-11-27-hy4-stq-catalog-defaults.md) ·
+[Four-slot qualification](model-experiments/2026-11-27-hy4-stq-four-slots.md)
 
 ## AngelSlim Hy4 Flash Q3_K local preparation
 

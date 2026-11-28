@@ -315,7 +315,8 @@ so a large tag cannot delay every other export type. Parsed configuration
 identifies the family. Each page inspects up to 30 distinct candidates and
 retains unsupported family variants with an **Unavailable** reason.
 Hy4-flash offers one pinned model, **Hy4-flash Sushi STQ 4bpw**. It installs
-and runs natively in Stark with image support and a flexible context window.
+and runs natively in Stark with image support, a flexible context window and
+up to four shared-weight text slots. [Hy4 runtime policy](GENERATION.md#hy4-flash-sushi-stq-4bpw)
 **Load more models** follows the remaining pages automatically, preserving
 results already loaded. Failed pages can be retried at the same offset.
 

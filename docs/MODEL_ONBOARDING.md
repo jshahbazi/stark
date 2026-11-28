@@ -1,5 +1,9 @@
 # Adding model support
 
+Four shared text generation slots are a support requirement for each new
+artifact. Complete the [four-slot gate](#qualify-four-shared-generation-slots)
+below before promotion.
+
 Every new model family, checkpoint template and import route must assess function
 tools as well as native execution. Complete the [tool-calling acceptance
 checks](#assess-and-qualify-function-tools) below. A missing parser must have an
@@ -18,6 +22,54 @@ This is a development acceptance requirement. Installation metadata and catalogu
 entries do not enable reuse; the loaded worker's readiness contract remains the
 runtime authority. Follow the [model-family support contract](MODEL_SUPPORT.md),
 [generation contract](GENERATION.md#prefix-reuse) and [repository rules](../AGENTS.md).
+
+## Qualify four shared generation slots
+
+Every new text-generating family, checkpoint, quantization, format or backend
+must support **four active text requests by default** on a documented target
+configuration. Requalify slot behavior when an inference change affects request
+state, memory admission or scheduling. Finish this gate before promoting the
+new artifact as supported in the catalog or normal import flow. If it cannot
+pass, record the specific blocker and leave support pending. Decision requests
+continue to serialize against one loaded model.
+
+1. Reuse the [shared slot design](GENERATION_SLOTS.md) and normal Desktop/API
+   admission path. Load one immutable weight inventory, isolate each request's
+   KV, recurrent, index and draft state, and budget scratch at its peak
+   lifetime. Share temporary GPU buffers only across phases with established
+   ownership and completion boundaries.
+2. On the exact artifact and release worker, use default settings to admit
+   four distinct overlapping text requests. Verify four active slots in
+   `/v1/health`, and compare each response, finish reason, and token counts
+   with its own matched fresh one-slot control. Check the fifth request waits
+   and reaches the worker when a slot frees. Exercise cancellation and
+   recoverable failure on one slot while peers run, and verify the next
+   request on the affected slot.
+3. Verify automatic context sizing and explicit smaller windows on each
+   advertised slot. Use both typical and long prompts that fit the named
+   configuration. Force a tighter memory budget and verify the backend
+   exposes the smaller fitted windows or fewer slots it can actually admit,
+   keeps the serial path usable, and handles requests beyond available
+   headroom through its documented resource behavior. Record the primary
+   and API ceilings separately if they differ.
+4. Preserve eligible primary prefix reuse and verify its invalidation after
+   auxiliary activity, cancellation and images. For vision-capable models, run
+   text with the tower loaded and verify a real image waits for exclusive
+   primary access. Check supported MTP modes with matching draft policy and
+   sampling controls. Apply the image and prefix gates elsewhere on this page.
+5. Alternate warmed one-slot and four-slot configurations for solo prefill and
+   decode with the same artifact, inputs, effective window, precision, output
+   budget and MTP policy. Set a regression bound from repeated controls before
+   measuring. Also measure first delta, useful decode per agent and time until
+   all four complete. Record startup, live and post-request memory, fitted
+   ceilings and actual peak concurrency. Use the [standard benchmark](BENCHMARK.md)
+   for speed claims and label separate serving diagnostics by their measurement
+   boundary.
+
+Publish artifact and build identities, the admitted settings, aggregate
+results and hashes in the [experiment ledger](model-experiments/README.md)
+and link the attempt from the onboarding PR. Shared code invokes the same
+contract for each artifact.
 
 ## Default images must preserve text behavior
 

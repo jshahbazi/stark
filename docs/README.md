@@ -47,7 +47,8 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | --- | --- |
 | [Contributing](../CONTRIBUTING.md) | Toolchains, local checks, test layout, running a model-bound smoke test, where validation records go |
 | [Manual desktop user simulation](USER_SIMULATION.md) | Explicitly invoked OpenWork, OpenCode Desktop and Pi project-building workflow, independent acceptance checks and aggregate reporting |
-| [Adding model support](MODEL_ONBOARDING.md) | Required tool-calling assessment, prefix reuse, artifact qualification and lifecycle checks for each new inference path |
+| [Adding model support](MODEL_ONBOARDING.md) | Required four-slot serving, tool-calling assessment, prefix reuse and artifact-specific lifecycle checks |
+| [Shared generation slots](GENERATION_SLOTS.md) | Desktop admission, backend state ownership, context policy and qualified artifacts |
 | [Generation context sizing follow-up](CONTEXT_SIZING_FOLLOW_UP.md) | PR #203 audit findings, proposed worker contract changes and outstanding artifact checks |
 | [Generation context artifact inventory](CONTEXT_SIZING_INVENTORY.md) | Catalog revision provenance, preparation profiles and audited installed receipts |
 | [Model changes and experiments](model-experiments/README.md) | Attempt ledger, image-support retrospective, failed approaches, promotion decisions and a template for future correctness/performance work |

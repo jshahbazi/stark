@@ -336,13 +336,13 @@ tool calls private until that validation completes.
 `STARK_GENERATION_SLOTS` accepts `1` through `4` as an operator override. The
 Hy4-specific `STARK_HY4_CONCURRENT_SLOTS` setting remains available when the
 generic override is unset. For fixed per-slot capacities the API advertises
-the common window, while Playground retains the primary's own capacity.
+the common window. Hy4 STQ fits the primary separately for Playground.
 Hy4 auxiliary slots reserve at most 49,152 positions. Native language and
 vision-language decoders and Lily retain their normal context ceiling and
 reserve memory when admitting each request. Lily releases auxiliary prefill,
 MTP verify, and grown context allocations between requests. A request whose state does not fit can
 receive a resource-limit error. Playground, the CLI and install checks use
-the primary lane.
+the primary lane. [Backend coverage and memory policy](GENERATION_SLOTS.md)
 
 ### Prefix reuse
 

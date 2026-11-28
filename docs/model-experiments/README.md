@@ -164,6 +164,10 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 ## Starting records
 
+The [Hy4 STQ history](speed-hy4-stq.md) connects the native port and OpenCode
+runs. The [shared-slot design](../GENERATION_SLOTS.md) links the evidence for
+Hy4, native decoders, Flint, Ripple and Lily.
+
 | Record | Scope |
 | --- | --- |
 | [20261125-HY4NATIVE-01–10: Hy4-flash AngelSlim Q3_K](2026-11-25-hy4-native-q3-k.md) | The image-loaded streamed worker matched reference AR and depth-two greedy outputs at 4K and restored a 3,072-token prefix exactly. The grouped F32 path agreed on all 13 natural-text top-1 rows. The final paired mapped diagnostic matched IDs and missed the reference stage times. |
