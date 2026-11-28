@@ -182,6 +182,7 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 | [HY4STQ-NATIVE-02 · Hy4 STQ catalog and defaults](2026-11-27-hy4-stq-catalog-defaults.md) | Pinned native install, measured settings by default and flexible OpenCode context. |
 | [HY4STQ-SERVE-01 · Hy4 STQ shared-weight text slots](2026-11-27-hy4-stq-dual-slot.md) | Two text slots over one weight load and managed OpenCode fan-out qualification. |
 | [HY4STQ-SERVE-02 · Default Hy4 STQ text slots](2026-11-27-hy4-stq-four-slots.md) | Up to four active text requests under one shared memory budget. |
+| [GEN-SERVE-02 · Lily shared generation slots](2026-11-27-lily-shared-generation-slots.md) | Four text lanes with one Metal weight residency, flexible context, solo decode timings, MTP and primary-only images. |
 | [GEN-SERVE-01 · Shared desktop text slots](2026-11-27-shared-generation-slots.md) | Common worker handoff, backend-specific slot admission, and native Qwen qualification. |
 | [20261126-HY4TOOLS-01 · Hy4-flash tool calling](2026-11-26-hy4-tool-calling.md) | Signed desktop build verified typed tool calls, streamed reasoning and tool-result replay on the catalog artifact. |
 | [20261126-HY4OC-01 · Hy4-flash defaults through OpenCode](2026-11-26-hy4-opencode-defaults.md) | Paired 16K–27K OpenCode runs on the legacy and automatic tuned profiles with memory-fitted context and prefix reuse. |

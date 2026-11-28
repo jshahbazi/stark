@@ -5,6 +5,7 @@ use std::{
     fs::File,
     io::Write,
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -25,6 +26,7 @@ use crate::{
         ProgressCallback, Sampling, TextCallback, admit_request_memory, collect_tokens_controlled,
         native_result_after_cleanup,
     },
+    native::{AuxiliaryActivity, RequestMemory, SharedSlots},
     prefix_cache::{self, BoundaryEntry},
     text_stop::StopFilter,
 };
@@ -107,6 +109,9 @@ pub(crate) struct HybridBackend {
     model: Model,
     context_capacity: ContextCapacity,
     slot_memory_budget: Option<usize>,
+    shared_slots: Option<Arc<SharedSlots>>,
+    auxiliary: bool,
+    prefix_epoch: u64,
     cancellation: Option<CancelSignal>,
     profile_output: Option<ProfileOutput>,
     profile_mode: Option<AggregateProfileMode>,
@@ -128,17 +133,23 @@ pub(crate) struct HybridBackend {
 pub(crate) struct HybridLane {
     model: SharedRequestSlot,
     context: context::ContextSizing,
+    shared_slots: Option<Arc<SharedSlots>>,
 }
 
 impl HybridLane {
     pub(crate) fn into_backend(
         self,
         cancellation: Option<CancelSignal>,
-    ) -> HybridBackend {
-        let mut backend =
-            HybridBackend::new(self.model.into_model(), ContextCapacity::Shared(self.context), cancellation);
-        backend.slot_memory_budget = Some(self.context.memory_budget_bytes);
-        backend
+    ) -> Result<HybridBackend, &'static str> {
+        let model = self.model.into_model().map_err(|_| "generation_lane_start_failed")?;
+        let mut backend = HybridBackend::new(model, ContextCapacity::Shared(self.context), cancellation);
+        backend.auxiliary = true;
+        if let Some(shared) = self.shared_slots {
+            backend.shared_slots = Some(shared);
+        } else {
+            backend.slot_memory_budget = Some(self.context.memory_budget_bytes);
+        }
+        Ok(backend)
     }
 }
 
@@ -379,6 +390,9 @@ impl HybridBackend {
             model,
             context_capacity,
             slot_memory_budget: None,
+            shared_slots: None,
+            auxiliary: false,
+            prefix_epoch: 0,
             cancellation,
             profile_output: None,
             profile_mode: None,
@@ -397,7 +411,11 @@ impl HybridBackend {
         &mut self,
         additional_slots: usize,
     ) -> Vec<(HybridLane, u32)> {
-        if additional_slots == 0 || self.slot_memory_budget.is_some() || self.profile_output.is_some() {
+        if additional_slots == 0
+            || self.slot_memory_budget.is_some()
+            || self.shared_slots.is_some()
+            || self.profile_output.is_some()
+        {
             return Vec::new();
         }
         let Some(first_slot) = self.model.new_shared_request_slot() else {
@@ -406,10 +424,33 @@ impl HybridBackend {
         let ContextCapacity::Shared(primary) = self.context_capacity else {
             return Vec::new();
         };
+        let budget = primary.memory_budget_bytes.min(context::current_memory_budget(context::metal_memory_headroom()));
+        // Reserve enough for a cold prefill chunk on each proposed Lily slot.
+        // Once loaded, the lanes draw on live headroom and share in-flight
+        // reservations. A quiet machine keeps the primary's flexible window.
+        if let Some(cold) = self.model.cold_shared_slot_bytes(primary.context_tokens.min(4096)) {
+            let slots = additional_slots.min(budget.checked_div(cold).unwrap_or(0).saturating_sub(1));
+            if slots == 0 {
+                return Vec::new();
+            }
+            let shared = Arc::new(SharedSlots::default());
+            self.shared_slots = Some(shared.clone());
+            return (0..slots)
+                .map(|_| {
+                    (
+                        HybridLane {
+                            model: first_slot.new_request_slot(),
+                            context: primary,
+                            shared_slots: Some(shared.clone()),
+                        },
+                        primary.context_tokens,
+                    )
+                })
+                .collect();
+        }
         let Some(weight_bytes) = first_slot.mapped_weight_bytes() else {
             return Vec::new();
         };
-        let budget = primary.memory_budget_bytes.min(context::current_memory_budget(context::metal_memory_headroom()));
         // Keep one reserve for lazy mapped weight residency. Charge each lane
         // for cold KV growth and a prompt filling its window.
         let budget = budget.saturating_sub(weight_bytes);
@@ -423,6 +464,7 @@ impl HybridBackend {
                 HybridLane {
                     model,
                     context,
+                    shared_slots: None,
                 },
                 context.context_tokens,
             )
@@ -432,6 +474,19 @@ impl HybridBackend {
         self.context_capacity = ContextCapacity::Shared(context);
         self.slot_memory_budget = Some(context.memory_budget_bytes);
         models
+    }
+
+    fn reserve_request_memory(
+        &self,
+        estimate: Option<usize>,
+    ) -> Result<RequestMemory, &'static str> {
+        let mut reservation = RequestMemory::new(self.shared_slots.clone());
+        if self.shared_slots.is_some() {
+            reservation.admit(estimate, || Ok(0))?;
+        } else {
+            admit_request_memory(estimate, stark_resource_budget::available_memory_bytes().unwrap_or(0))?;
+        }
+        Ok(reservation)
     }
 
     fn record_mtp_metadata(
@@ -796,8 +851,18 @@ impl HybridBackend {
 
 impl GenerationBackend for HybridBackend {
     type PreparedImage = HybridPreparedRequest;
+
+    fn begin_generation_request(&mut self) {
+        if let Some(shared) = &self.shared_slots {
+            let (active, epoch) = shared.auxiliary_activity();
+            if active != 0 || epoch != self.prefix_epoch {
+                self.clear_prefix_cache();
+            }
+            self.prefix_epoch = epoch;
+        }
+    }
     fn idle_maintenance_interval(&self) -> Option<std::time::Duration> {
-        self.model.idle_maintenance_interval()
+        (!self.auxiliary).then(|| self.model.idle_maintenance_interval()).flatten()
     }
     fn maintain_idle_queue(&mut self) -> Result<(), &'static str> {
         self.model.maintain_idle_queue().map_err(|_| "native_idle_maintenance_failed")
@@ -874,18 +939,16 @@ impl GenerationBackend for HybridBackend {
         }
         // Prepared image tokens contribute to the same growing text caches.
         // The separately bounded encoder is not an automatic-context planner.
-        let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
-        admit_request_memory(
-            self.model
-                .generation_memory_bytes_for_request(
-                    end,
-                    input_tokens,
-                    false,
-                    greedy_host_workspace(&options.sampling, options.mtp_drafts),
-                )
-                .and_then(|decoder| decoder.checked_add(self.model.image_request_memory_bytes(&prepared.image)?)),
-            available,
-        )?;
+        let estimate = self
+            .model
+            .generation_memory_bytes_for_request(
+                end,
+                input_tokens,
+                false,
+                greedy_host_workspace(&options.sampling, options.mtp_drafts),
+            )
+            .and_then(|decoder| decoder.checked_add(self.model.image_request_memory_bytes(&prepared.image)?));
+        let _reservation = self.reserve_request_memory(estimate)?;
         self.clear_prefix_cache();
         self.last_mtp = None;
         self.nucleus_sampler.clear();
@@ -965,6 +1028,10 @@ impl GenerationBackend for HybridBackend {
         };
         let memory_budget_bytes =
             self.slot_memory_budget.map_or(memory_budget_bytes, |share| share.min(memory_budget_bytes));
+        let memory_budget_bytes = self
+            .shared_slots
+            .as_ref()
+            .map_or(Ok(memory_budget_bytes), |shared| shared.available_budget(memory_budget_bytes))?;
         let Some(input) = request.input_token_ids else {
             return Ok(self.model.automatic_context_length(request.input_tokens, request.maximum, memory_budget_bytes));
         };
@@ -1033,7 +1100,6 @@ impl GenerationBackend for HybridBackend {
             return Err("context_overflow");
         }
         self.model.prepare_request_memory().map_err(|_| "native_generation_failed")?;
-        let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
         let reused = self.prefix_cache_plan(input, options);
         let capture = self.prefix_boundary(input, options).is_some_and(|boundary| boundary > reused);
         let estimate = self.model.generation_memory_bytes_for_request(
@@ -1045,7 +1111,9 @@ impl GenerationBackend for HybridBackend {
         if self.slot_memory_budget.is_some_and(|share| estimate.is_none_or(|bytes| bytes > share)) {
             return Err("resource_budget_exceeded");
         }
-        admit_request_memory(estimate, available)?;
+        let _reservation = self.reserve_request_memory(estimate)?;
+        let _auxiliary_activity =
+            self.shared_slots.as_ref().filter(|_| self.auxiliary).cloned().map(AuxiliaryActivity::begin);
         self.nucleus_sampler.clear();
         // A miss drops the snapshot; the next prefill overwrites the rows.
         let retained = self.prefix_cache.take().map(|entry| entry.state);
@@ -1098,9 +1166,11 @@ impl GenerationBackend for HybridBackend {
                     Some(BoundaryEntry::new(snapshot, scope, options.context_tokens, &input[..boundary]));
             }
         }
-        self.record_mtp_metadata(options.mtp_drafts, options.mtp_scheduling)?;
+        let metadata = self.record_mtp_metadata(options.mtp_drafts, options.mtp_scheduling);
         self.model.reset();
-        result = native_result_after_cleanup(result, self.model.is_fenced());
+        let auxiliary_cleanup_failed = self.auxiliary && self.model.retire_auxiliary_state().is_err();
+        result = native_result_after_cleanup(result, self.model.is_fenced() || auxiliary_cleanup_failed);
+        metadata?;
         if result.is_err() {
             self.pending_prefix = None;
         }
@@ -1214,6 +1284,13 @@ impl GenerationBackend for HybridBackend {
         }
     }
     fn publish_prefix_cache(&mut self) {
+        if self.shared_slots.as_ref().is_some_and(|shared| {
+            let (active, epoch) = shared.auxiliary_activity();
+            active != 0 || epoch != self.prefix_epoch
+        }) {
+            self.clear_prefix_cache();
+            return;
+        }
         if let Some(entry) = self.pending_prefix.take() {
             self.prefix_cache = Some(entry);
         }

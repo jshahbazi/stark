@@ -20,7 +20,7 @@ pub enum GateAct {
     Sigmoid,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 pub struct RopeParameters {
     pub rope_theta: f32,
     pub partial_rotary_factor: f32,
@@ -564,7 +564,7 @@ pub fn checkpoint_identity(dir: &Path) -> Result<String> {
 pub const MROPE_SECTION: &[usize] = &[11, 11, 10];
 
 /// The parsed, validated Qwen3.8-Flash-Next text model configuration.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Qwen4ExpConfig {
     pub hidden_size: usize,
     pub num_hidden_layers: usize,

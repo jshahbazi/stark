@@ -20,13 +20,16 @@ use stark_lily_core::{
     metal::{EncodedPass, MetalContext, PendingPass, gpu_busy_ns, stage_profile},
     qwen4exp::{
         DecodeState, HostVerification, ImageEmbeds, ImageSpan, NgramStorage, Qwen4ExpModel, Scratch, VisionInput,
-        config::Qwen4ExpConfig, model::Snapshot, positions_for_prompt,
+        config::Qwen4ExpConfig,
+        model::{SharedTextWeights, Snapshot},
+        positions_for_prompt,
     },
 };
 
 use super::{Error, MtpSampler, MtpStats, Result, profile};
 
 const INITIAL_CONTEXT_CAPACITY: usize = 16_384;
+const AUXILIARY_INITIAL_CONTEXT: usize = 256;
 
 /// Reserve capacity grows geometrically; it does not define model capacity.
 fn planned_context_capacity(
@@ -316,7 +319,7 @@ impl LilyModel {
         if images && !model.has_vision() {
             return Err(Error::Unsupported("checkpoint does not retain an admitted vision tower"));
         }
-        Self::from_model(context, model)
+        Self::from_model(context, model, INITIAL_CONTEXT_CAPACITY)
     }
 
     pub fn load_uzu(
@@ -328,16 +331,33 @@ impl LilyModel {
         let context = MetalContext::new().map_err(|_| Error::Unsupported("Uzu Qwen Metal context unavailable"))?;
         let model = Qwen4ExpModel::load_uzu(&context, architecture, checkpoint)
             .map_err(|_| Error::Invalid("Uzu Qwen converted model admission failed"))?;
-        Self::from_model(context, model)
+        Self::from_model(context, model, INITIAL_CONTEXT_CAPACITY)
+    }
+
+    pub(super) fn shared_text_weights(&self) -> SharedTextWeights {
+        self.model.shared_text_weights()
+    }
+
+    pub(super) fn from_shared_weights(weights: SharedTextWeights) -> Result<Self> {
+        let (context, model) = weights.into_model().map_err(|_| Error::Invalid("mixed precision shared weights"))?;
+        Self::from_model(context, model, AUXILIARY_INITIAL_CONTEXT)
+    }
+
+    pub(super) fn auxiliary_startup_bytes(
+        &self,
+        input_tokens: u32,
+    ) -> Option<usize> {
+        self.model.request_memory_bytes(&self.context, input_tokens as usize, input_tokens as usize)
     }
 
     fn from_model(
         context: MetalContext,
         mut model: Qwen4ExpModel,
+        initial_context: usize,
     ) -> Result<Self> {
         let vocab_size = model.config.vocab_size;
         let max_context = model.config.max_position_embeddings;
-        let initial_capacity = max_context.min(INITIAL_CONTEXT_CAPACITY);
+        let initial_capacity = max_context.min(initial_context);
         if vocab_size == 0 || vocab_size > 1_000_000 || max_context == 0 || max_context > MAX_SEQ {
             return Err(Error::Invalid("mixed precision model geometry"));
         }
@@ -808,6 +828,31 @@ impl LilyModel {
         }
         self.last_greedy = None;
         self.last_full_readout = None;
+        Ok(())
+    }
+
+    /// Free grown auxiliary allocations once the request has been reset.
+    /// Keep the queue and its compiled pipelines available for the next turn.
+    pub(super) fn retire_auxiliary_state(&mut self) -> Result<()> {
+        if self.is_fenced() {
+            return Err(Error::Invalid("mixed precision context requires reload"));
+        }
+        self.scratch.release_prefill_and_verify();
+        let minimum = self.max_context.min(AUXILIARY_INITIAL_CONTEXT);
+        if self.scratch_capacity > minimum {
+            let state = self
+                .model
+                .new_state(&self.context, minimum)
+                .map_err(|_| Error::Invalid("mixed precision auxiliary state reset failed"))?;
+            let scratch = self
+                .model
+                .new_scratch_with_capacity(&self.context, minimum)
+                .map_err(|_| Error::Invalid("mixed precision auxiliary scratch reset failed"))?;
+            scratch.begin_request();
+            self.state = state;
+            self.scratch = scratch;
+            self.scratch_capacity = minimum;
+        }
         Ok(())
     }
 

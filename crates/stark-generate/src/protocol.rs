@@ -159,7 +159,7 @@ impl GenerationLanes {
     ) -> Result<Vec<u32>, &'static str>
     where
         B: crate::generation::GenerationBackend,
-        F: FnOnce(crate::cancel::CancelSignal) -> B + Send + 'static,
+        F: FnOnce(crate::cancel::CancelSignal) -> Result<B, &'static str> + Send + 'static,
     {
         let mut capacities = Vec::new();
         for (
@@ -171,12 +171,16 @@ impl GenerationLanes {
             },
         ) in slots.into_iter().zip(std::mem::take(&mut self.channels))
         {
+            let (initialized, startup) = std::sync::mpsc::sync_channel(0);
             std::thread::Builder::new()
                 .name(format!("stark-generation-lane-{}", capacities.len() + 1))
                 .spawn(move || {
-                    let backend = make_backend(cancellation);
-                    if let Ok(mut worker) = crate::generation::GenerationWorker::new_with_options(backend, None, false)
-                    {
+                    let Ok(mut worker) = make_backend(cancellation).and_then(|backend| {
+                        crate::generation::GenerationWorker::new_with_options(backend, None, false)
+                    }) else {
+                        return;
+                    };
+                    if initialized.send(()).is_ok() {
                         let _ = crate::generation::run_lines(
                             &mut worker,
                             &mut io::BufReader::new(input),
@@ -185,6 +189,11 @@ impl GenerationLanes {
                     }
                 })
                 .map_err(|_| "generation_lane_start_failed")?;
+            // The launcher assigns pipes by index. Stop at the first
+            // unavailable lane and advertise only the initialized prefix.
+            if startup.recv().is_err() {
+                break;
+            }
             capacities.push(capacity);
         }
         Ok(capacities)
@@ -236,7 +245,7 @@ pub fn main() {
                     lanes.start(backend.take_additional_slots().into_iter().map(|(mut backend, capacity)| {
                         (capacity, move |cancellation| {
                             backend.set_cancellation(cancellation);
-                            backend
+                            Ok(backend)
                         })
                     }))?;
                 let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
@@ -302,7 +311,7 @@ pub fn main() {
                     let capacity = backend.context_capacity().limit().unwrap_or(u32::MAX);
                     (capacity, move |cancellation| {
                         backend.set_cancellation(cancellation);
-                        backend
+                        Ok(backend)
                     })
                 }))?;
             let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;

@@ -95,10 +95,23 @@ fn current_memory_budget() -> usize {
 }
 
 #[derive(Default)]
-struct SharedSlots {
+pub(crate) struct SharedSlots {
     memory: Mutex<SlotMemory>,
     auxiliary_epoch: AtomicU64,
     active_auxiliaries: AtomicUsize,
+}
+
+impl SharedSlots {
+    pub(crate) fn available_budget(
+        &self,
+        budget: usize,
+    ) -> Result<usize, &'static str> {
+        self.memory.lock().map(|memory| memory.available(budget)).map_err(|_| "native_generation_failed")
+    }
+
+    pub(crate) fn auxiliary_activity(&self) -> (usize, u64) {
+        (self.active_auxiliaries.load(Ordering::Acquire), self.auxiliary_epoch.load(Ordering::Acquire))
+    }
 }
 
 #[derive(Default)]
@@ -117,20 +130,20 @@ impl SlotMemory {
     }
 }
 
-struct RequestMemory {
+pub(crate) struct RequestMemory {
     shared: Option<Arc<SharedSlots>>,
     bytes: usize,
 }
 
 impl RequestMemory {
-    fn new(shared: Option<Arc<SharedSlots>>) -> Self {
+    pub(crate) fn new(shared: Option<Arc<SharedSlots>>) -> Self {
         Self {
             shared,
             bytes: 0,
         }
     }
 
-    fn admit(
+    pub(crate) fn admit(
         &mut self,
         request_bytes: Option<usize>,
         reclaim: impl FnOnce() -> Result<usize, &'static str>,
@@ -164,10 +177,10 @@ impl Drop for RequestMemory {
     }
 }
 
-struct AuxiliaryActivity(Arc<SharedSlots>);
+pub(crate) struct AuxiliaryActivity(Arc<SharedSlots>);
 
 impl AuxiliaryActivity {
-    fn begin(shared: Arc<SharedSlots>) -> Self {
+    pub(crate) fn begin(shared: Arc<SharedSlots>) -> Self {
         shared.active_auxiliaries.fetch_add(1, Ordering::AcqRel);
         shared.auxiliary_epoch.fetch_add(1, Ordering::AcqRel);
         Self(shared)
@@ -480,9 +493,7 @@ impl NativeBackend {
         &self,
         budget: usize,
     ) -> Result<usize, &'static str> {
-        self.shared_slots.as_ref().map_or(Ok(budget), |shared| {
-            shared.memory.lock().map(|memory| memory.available(budget)).map_err(|_| "native_generation_failed")
-        })
+        self.shared_slots.as_ref().map_or(Ok(budget), |shared| shared.available_budget(budget))
     }
 
     fn prefix_epoch_changed(&self) -> bool {
@@ -778,8 +789,7 @@ impl GenerationBackend for NativeBackend {
         let Some(shared) = &self.shared_slots else {
             return;
         };
-        let active = shared.active_auxiliaries.load(Ordering::Acquire);
-        let epoch = shared.auxiliary_epoch.load(Ordering::Acquire);
+        let (active, epoch) = shared.auxiliary_activity();
         if active != 0 || epoch != self.prefix_epoch {
             self.clear_prefix_cache();
         }

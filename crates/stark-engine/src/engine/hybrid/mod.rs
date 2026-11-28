@@ -371,6 +371,8 @@ pub struct Model {
 }
 
 enum SharedRequestForward {
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    Lily(stark_lily_core::qwen4exp::model::SharedTextWeights),
     Flint(flint::FlintModel),
     Ripple(ripple::RippleModel),
 }
@@ -390,6 +392,8 @@ pub struct SharedRequestSlot {
 impl SharedRequestSlot {
     pub fn mapped_weight_bytes(&self) -> Option<usize> {
         match &self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            SharedRequestForward::Lily(_) => None,
             SharedRequestForward::Flint(model) => model.mapped_weight_bytes(),
             SharedRequestForward::Ripple(model) => model.mapped_weight_bytes(),
         }
@@ -397,6 +401,8 @@ impl SharedRequestSlot {
 
     pub fn new_request_slot(&self) -> Self {
         let forward = match &self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            SharedRequestForward::Lily(weights) => SharedRequestForward::Lily(weights.clone()),
             SharedRequestForward::Flint(model) => SharedRequestForward::Flint(model.new_request_slot()),
             SharedRequestForward::Ripple(model) => SharedRequestForward::Ripple(model.new_request_slot()),
         };
@@ -411,9 +417,13 @@ impl SharedRequestSlot {
         }
     }
 
-    pub fn into_model(self) -> Model {
-        Model {
+    pub fn into_model(self) -> Result<Model> {
+        Ok(Model {
             forward: match self.forward {
+                #[cfg(all(feature = "metal", target_os = "macos"))]
+                SharedRequestForward::Lily(weights) => {
+                    Forward::Lily(Box::new(lily::LilyModel::from_shared_weights(weights)?))
+                },
                 SharedRequestForward::Flint(model) => Forward::Flint(model),
                 SharedRequestForward::Ripple(model) => Forward::Ripple(model),
             },
@@ -424,13 +434,28 @@ impl SharedRequestSlot {
             eos: self.eos,
             image_artifact: None,
             mtp_schedule_default: self.mtp_schedule_default,
-        }
+        })
     }
 }
 
 impl Model {
+    /// Estimate a cold Lily text lane. Resident shared weights are already
+    /// reflected in live headroom, while each lane needs its own allocation.
+    pub fn cold_shared_slot_bytes(
+        &self,
+        _context_tokens: u32,
+    ) -> Option<usize> {
+        match &self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => model.auxiliary_startup_bytes(_context_tokens),
+            _ => None,
+        }
+    }
+
     pub fn new_shared_request_slot(&self) -> Option<SharedRequestSlot> {
         let forward = match &self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => SharedRequestForward::Lily(model.shared_text_weights()),
             Forward::Flint(model) => SharedRequestForward::Flint(model.new_request_slot()),
             Forward::Ripple(model) => SharedRequestForward::Ripple(model.new_request_slot()),
             _ => return None,
@@ -1000,6 +1025,14 @@ impl Model {
     }
     pub fn eos_token_ids(&self) -> &[u32] {
         &self.eos
+    }
+
+    pub fn retire_auxiliary_state(&mut self) -> Result<()> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &mut self.forward {
+            return model.retire_auxiliary_state();
+        }
+        Ok(())
     }
 
     /// Each worker request starts from reset state, optionally resumed at a

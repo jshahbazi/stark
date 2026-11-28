@@ -207,11 +207,14 @@ when it admits auxiliaries, with a capacity for each accepted group.
 `4294967295` indicates an undeclared capacity and requires the worker's
 request context planner. Hy4 Sushi STQ also accepts the legacy
 `STARK_HY4_LANE_FDS` flag and reports `hy4_lane_context_tokens` in that mode.
-A worker closes unused groups at startup. Each additional slot publishes its
-own readiness and uses the same JSON request and response shapes with text and
+A worker advertises the initialized prefix of auxiliary slots and closes
+unused groups at startup. Each admitted slot publishes its own readiness and uses the same JSON request and response shapes with text and
 request-local cancellation. The desktop continues to use the primary slot for
 image transactions. Each slot has its own mutable inference state.
-Only the primary slot supports retained prefixes across requests. All slots
+Only the primary slot supports retained prefixes across requests. Lily
+auxiliary text slots attach the shared weight residency to their own Metal
+queues and admit context growth from live headroom minus active reservations.
+All slots
 stop when the owning desktop closes the worker process.
 
 Image readiness describes implemented functionality and loaded identity. Its `qualified: false` field leaves the evidence decision to the host. A matching [execution catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json) record enables the exact schema-2 tuple as `reference_verified`. The [family path](VISION_FAMILY_CONTRACT.md) enables an admitted compatible model as `locally_tested` after bounded automatic execution checks. Both bind all five artifact-file hashes, the worker hash observed before launch and checked again at readiness, the Metal device and macOS version; local receipts additionally bind the actual family/version, admitted vocabulary, checker and Python dependency identities. Current readers accept fixed version-1 and config-derived version-2 families; older readers reject the unknown version-2 profile. [Generation](GENERATION.md#image-qualification) defines the evidence levels and scope.

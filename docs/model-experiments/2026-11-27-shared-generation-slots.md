@@ -32,7 +32,8 @@ validation remains open because the local model store lacks full copies.
 | Native language and vision-language decoders | Shared loaded decoders, independent native sequence state and per-request reservation. Image work uses the primary. |
 | Flint and Ripple | Shared mapped weights and independently sized caches. Synthetic CPU isolation and Metal compile coverage. |
 | Native GLM and generic Qwen hybrid | Current paths remain serial. GLM needs one-time expert residency setup and independent recurrent and attention state. Generic Qwen needs to separate layer parameters from mutable GDN, KV and index state. |
-| Lily, GLM EXL3, Inkling, and Hy4 AngelSlim GGUF | Current paths remain serial. These loaders bind mutable execution state to loaded runtime owners. GLM EXL3 also claims a single thread-affine bridge model per process. |
+| Lily | Serial in this rollout. See the [Lily follow-up](2026-11-27-lily-shared-generation-slots.md) for shared resident weights and independent request slots. |
+| GLM EXL3, Inkling, and Hy4 AngelSlim GGUF | Current paths remain serial. These loaders bind mutable execution state to loaded runtime owners. GLM EXL3 also claims a single thread-affine bridge model per process. |
 | Decision | Continues to serialize each complete decision against the loaded model. |
 
 ## Measurement
