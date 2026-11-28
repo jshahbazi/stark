@@ -679,6 +679,199 @@ def test_serialized_api_requests_never_interleave_progress(desktop, model, monke
     assert progress[0]["id"] != progress[3]["id"]
 
 
+@pytest.mark.parametrize(
+    ("action", "dynamic"),
+    [("complete", False), ("complete", True), ("cancel", False), ("eof", False), ("stop", False)],
+)
+def test_api_second_lane_runs_while_first_is_active(desktop, model, monkeypatch, action, dynamic):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    from stark_convert.chat import ChatCancelled, ChatError
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    if dynamic:
+        desktop.context_capacity_known = False
+        desktop.api_context = 0xFFFFFFFF
+    primary = desktop.worker
+    primary_request = primary.request
+    generating, release = threading.Event(), threading.Event()
+    secondary_generating, release_secondary = threading.Event(), threading.Event()
+
+    def hold_primary(payload, **options):
+        if payload["operation"] == "generate":
+            generating.set()
+            assert release.wait(5)
+        return primary_request(payload, **options)
+
+    def secondary_request(payload, *, cancelled=None, **_options):
+        if payload["operation"] == "tokenize":
+            return {"token_count": 2, "token_ids": [4, 5]}
+        assert "cache_scope" not in payload
+        assert payload["context_tokens"] == (18 if dynamic else desktop.api_context)
+        secondary_generating.set()
+        assert release_secondary.wait(5)
+        if cancelled.is_set():
+            raise ChatCancelled("Request cancelled.")
+        if action == "eof":
+            raise ChatError("Worker stopped; chat closed.")
+        return {"text": "secondary answer", "input_tokens": 2, "output_tokens": 3, "finish_reason": "eos"}
+
+    def close_secondary():
+        release.set()
+        release_secondary.set()
+
+    lane = SimpleNamespace(
+        context_limit=desktop.api_context,
+        max_new_tokens=16,
+        request=secondary_request,
+        streaming=False,
+        stop_sequences=True,
+        close=close_secondary,
+    )
+    monkeypatch.setattr(primary, "generation_lanes", (lane,))
+    monkeypatch.setattr(primary, "request", hold_primary)
+    payload = {"messages": [{"role": "user", "content": "synthetic text"}], "max_tokens": 16}
+    cancelled = threading.Event()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(desktop.api_complete, payload)
+        try:
+            assert generating.wait(3)
+            with desktop.lock:
+                assert desktop.available_api_worker(text=False, maximum=16) is None
+                assert desktop.available_api_worker(text=True, maximum=17) is None
+            second = pool.submit(desktop.api_complete, payload, cancelled=cancelled)
+            assert secondary_generating.wait(3)
+            status = desktop.api_status()
+            assert status["worker_slots"] == status["running_requests"] == 2
+            if action == "stop":
+                desktop.stop(quiet=True)
+            else:
+                if action == "cancel":
+                    cancelled.set()
+                release_secondary.set()
+            if action == "complete":
+                assert second.result(timeout=3)["choices"][0]["message"]["content"] == "secondary answer"
+            else:
+                with pytest.raises(APIError) as error:
+                    second.result(timeout=3)
+                assert (
+                    error.value.code
+                    == {
+                        "cancel": "request_cancelled",
+                        "eof": "generation_failed",
+                        "stop": "model_changed",
+                    }[action]
+                )
+            if action in {"complete", "cancel"}:
+                assert desktop.current_state == "generating"
+                assert desktop.prefix_reset_pending is True
+                assert desktop.api_status()["running_requests"] == 1
+                assert first.done() is False
+        finally:
+            release.set()
+            release_secondary.set()
+        if action in {"complete", "cancel"}:
+            assert first.result(timeout=3)["choices"][0]["message"]["content"] == "synthetic answer"
+            assert desktop.current_state == "ready"
+        else:
+            with pytest.raises(APIError, match="Model changed or stopped"):
+                first.result(timeout=3)
+            assert desktop.api_status()["worker_slots"] == 0
+    assert desktop.api_status()["running_requests"] == 0
+    assert desktop.job is None and not desktop.api_auxiliary_jobs
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_admitted_api_lanes_keep_image_exclusive_and_fifo(desktop, model, monkeypatch, dynamic):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    from stark_convert.chat import Worker
+
+    read = Worker.read
+    lane_limits = [(0xFFFFFFFF, 65536)] * 3 if dynamic else [(4096, 4095), (3072, 3071), (2048, 1024)]
+    lanes = tuple(
+        SimpleNamespace(context_limit=context, max_new_tokens=maximum, close=lambda: None)
+        for context, maximum in lane_limits
+    )
+
+    def read_ready(worker):
+        reply = read(worker)
+        if reply.get("ready") is True:
+            worker.generation_lanes = lanes
+            if dynamic:
+                return dict(reply, max_context_tokens=0xFFFFFFFF, max_new_tokens=65536)
+        return reply
+
+    monkeypatch.setattr(Worker, "read", read_ready)
+    identifier = running(desktop, model)
+    primary = desktop.worker
+    assert desktop.context_limit == desktop.context == (0xFFFFFFFF if dynamic else 8192)
+    assert desktop.api_models()[0]["context_length"] == (None if dynamic else 2048)
+    assert desktop.api_models()[0]["max_output_tokens"] == (65536 if dynamic else 1024)
+    assert desktop.api_status()["worker_slots"] == 4
+
+    started = [threading.Event() for _ in range(6)]
+    release = [threading.Event() for _ in started]
+
+    def reserve(index, text=True):
+        with desktop.lock:
+            lane = desktop.reserve_api_request(desktop.epoch, identifier, threading.Event(), text=text, maximum=64)
+        try:
+            started[index].set()
+            assert release[index].wait(5)
+            return lane
+        finally:
+            with desktop.lock:
+                desktop.release_api_request()
+
+    def wait_for_queue(size):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with desktop.lock:
+                if len(desktop.api_queue) == size:
+                    return
+            time.sleep(0.005)
+        pytest.fail(f"expected {size} waiting requests")
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        try:
+            active = []
+            for index in range(4):
+                active.append(pool.submit(reserve, index))
+                assert started[index].wait(2)
+            assert desktop.api_status()["running_requests"] == 4
+
+            image = pool.submit(reserve, 4, False)
+            wait_for_queue(1)
+            text = pool.submit(reserve, 5)
+            wait_for_queue(2)
+
+            release[2].set()
+            assert active[2].result(timeout=2) is lanes[1]
+            assert not started[4].is_set()
+            assert not started[5].is_set()
+            for index in (0, 1, 3):
+                release[index].set()
+            for index, lane in [(0, primary), (1, lanes[0]), (3, lanes[2])]:
+                assert active[index].result(timeout=2) is lane
+            assert started[4].wait(2)
+            assert not started[5].is_set()
+            release[4].set()
+            assert image.result(timeout=2) is primary
+            assert started[5].wait(2)
+            release[5].set()
+            assert text.result(timeout=2) is primary
+        finally:
+            for event in release:
+                event.set()
+    assert desktop.api_status()["running_requests"] == 0
+
+
 def test_api_progress_and_metrics_report_worker_prefix_reuse(desktop, model, monkeypatch):
     running(desktop, model)
 
@@ -1924,6 +2117,100 @@ def test_stale_epoch_and_expired_deadline_preserve_worker(desktop, model):
         desktop.api_complete({"messages": [{"role": "user", "content": "hello"}]}, cancelled=control)
     assert expired.value.status == 504
     assert desktop.worker.process is process and process.poll() is None
+
+
+@pytest.mark.parametrize("worker_busy_seconds, expires", [(450, False), (600, True), (601, True)])
+def test_api_queue_allows_long_turns_and_keeps_a_deadline(desktop, model, monkeypatch, worker_busy_seconds, expires):
+    import threading
+
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    elapsed = 0.0
+    active_job = object()
+
+    def wait(seconds):
+        nonlocal elapsed
+        elapsed += seconds
+        if elapsed >= worker_busy_seconds:
+            desktop.job = None
+
+    with monkeypatch.context() as clock:
+        clock.setattr("stark_convert.desktop.time.monotonic", lambda: elapsed)
+        clock.setattr(desktop.api_condition, "wait", wait)
+        with desktop.lock:
+            desktop.job = active_job
+            control = threading.Event()
+            if expires:
+                with pytest.raises(APIError) as error:
+                    desktop.reserve_api_request(desktop.epoch, desktop.active_model, control)
+                assert (error.value.status, error.value.code) == (429, "queue_timeout")
+                assert desktop.job is (None if worker_busy_seconds == 600 else active_job)
+                assert elapsed == 600
+            else:
+                assert desktop.reserve_api_request(desktop.epoch, desktop.active_model, control) is desktop.worker
+                assert desktop.job is threading.current_thread()
+                assert elapsed >= worker_busy_seconds
+            assert desktop.api_queue == []
+            desktop.release_api_request()
+            desktop.job = None
+
+
+def test_api_fifo_wait_pauses_http_inactivity_timer(desktop, model, monkeypatch):
+    import threading
+    import urllib.error
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor
+
+    from stark_convert.local_api import LocalAPI
+
+    running(desktop, model)
+    timeout = 0.3
+    queued = threading.Event()
+    wait = desktop.api_condition.wait
+
+    def record_queue_wait(seconds):
+        queued.set()
+        return wait(seconds)
+
+    def stall_inference(messages, maximum, *, cancelled, **options):
+        assert not cancelled.wait(timeout / 2)
+        assert cancelled.wait(2)
+        return {}
+
+    monkeypatch.setattr(desktop.api_condition, "wait", record_queue_wait)
+    monkeypatch.setattr(desktop, "infer", stall_inference)
+    desktop.job = threading.current_thread()
+    api = LocalAPI(
+        desktop.api_models, desktop.api_complete, api_key="a" * 64, port=0, cancellable=True, request_timeout=timeout
+    )
+    info = api.start()
+    request = urllib.request.Request(
+        info["base_url"] + "/chat/completions",
+        data=json.dumps({"messages": [{"role": "user", "content": "fixture"}], "stream": True}).encode(),
+        headers={"Authorization": f"Bearer {info['api_key']}", "Content-Type": "application/json"},
+    )
+
+    def call_api():
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request, timeout=5).close()
+        with error.value as response:
+            return response.code, json.load(response)["error"]["code"]
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            result = executor.submit(call_api)
+            try:
+                assert queued.wait(2)
+                time.sleep(timeout * 2)
+                assert not result.done()
+            finally:
+                with desktop.lock:
+                    desktop.job = None
+                    desktop.api_condition.notify_all()
+            assert result.result(timeout=3) == (504, "request_timeout")
+    finally:
+        api.close()
 
 
 def test_api_fifo_queue_and_waiter_cancellation(desktop, model):

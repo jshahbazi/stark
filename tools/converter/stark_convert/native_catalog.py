@@ -16,7 +16,7 @@ FLINT_FAMILY_ID = "flint"
 FLINT_CHOICE = "flint-int4"
 RIPPLE_FAMILY_ID = "ricursive"
 HY4_FAMILY_ID = "hy4_flash"
-HY4_CHOICE = "hy4-q3-k"
+HY4_CHOICE = "hy4-sushi-stq"
 
 _NATIVE_CHOICES = {
     FAMILY_ID: (CHOICE,),
@@ -64,7 +64,9 @@ def family_definition(family: str = FAMILY_ID) -> dict:
         "model_kind": "language",
         "conversion": {
             "status": "implemented",
-            "containers": [".safetensors"] if family in {FLINT_FAMILY_ID, INKLING_FAMILY_ID} else [".gguf"],
+            "containers": [".safetensors"]
+            if family in {FLINT_FAMILY_ID, INKLING_FAMILY_ID, HY4_FAMILY_ID}
+            else [".gguf"],
             "source_formats": [source_for(choice)["quantization"] for choice in _NATIVE_CHOICES[family]]
             if family in {RIPPLE_FAMILY_ID, INKLING_FAMILY_ID, HY4_FAMILY_ID}
             else ["MLX affine INT4"]
@@ -107,7 +109,7 @@ def catalog_item(choice: str = CHOICE) -> dict:
     elif choice in {"ripple-q8", "ripple-q4-k-m"}:
         name = "Ripple-65B-Preview-GGUF"
     elif choice == HY4_CHOICE:
-        name = "Hy4-flash AngelSlim Q3_K"
+        name = "Hy4-flash Sushi STQ 4bpw"
     elif choice == FLINT_CHOICE:
         name = "Flint INT4"
     elif choice == QWEN_CHOICE:
@@ -142,7 +144,7 @@ def catalog_item(choice: str = CHOICE) -> dict:
 
 
 def catalog_items(family: str) -> list[dict]:
-    """Return the fixed native choices for a family, without generic duplicates."""
+    """Return fixed native catalog choices."""
     return [catalog_item(choice) for choice in _NATIVE_CHOICES.get(family, ())]
 
 

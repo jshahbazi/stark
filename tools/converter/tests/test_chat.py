@@ -8,7 +8,17 @@ from unittest.mock import patch
 
 import pytest
 
-from stark_convert.chat import ChatError, ChatRequestTooLarge, Worker, load_template, main, run_chat, terminal_text
+from stark_convert.chat import (
+    ChatCancelled,
+    ChatError,
+    ChatRequestTooLarge,
+    Worker,
+    load_template,
+    main,
+    run_chat,
+    terminal_text,
+)
+from stark_convert.vision_runtime import HY4_STQ_VISION_PROFILE, HY4_VISION_PROFILE
 
 
 @pytest.fixture
@@ -28,6 +38,110 @@ def model(tmp_path):
         )
     )
     return tmp_path
+
+
+@pytest.mark.parametrize(
+    ("configured", "profile", "enabled", "auxiliaries", "admitted", "protocol"),
+    [
+        (None, HY4_STQ_VISION_PROFILE, True, 3, 3, "hy4"),
+        (None, HY4_STQ_VISION_PROFILE, True, 3, 2, "hy4"),
+        (None, HY4_STQ_VISION_PROFILE, True, 3, 1, "hy4"),
+        (None, HY4_STQ_VISION_PROFILE, True, 3, 0, "hy4"),
+        ("1", HY4_STQ_VISION_PROFILE, True, 0, 0, "hy4"),
+        ("2", HY4_STQ_VISION_PROFILE, True, 1, 1, "legacy-hy4"),
+        ("3", HY4_STQ_VISION_PROFILE, True, 2, 2, "generation"),
+        (None, HY4_VISION_PROFILE, True, 3, 0, "ignored"),
+        ("4", None, True, 3, 3, "dynamic"),
+        ("3", None, True, 2, 2, "generation"),
+        ("2", None, True, 1, 1, "generation"),
+        ("1", None, True, 0, 0, "generation"),
+        (None, None, True, 3, 0, "ignored"),
+        (None, None, False, 0, 0, "ignored"),
+    ],
+)
+def test_auxiliary_pipes_follow_readiness_and_cancel_independently(
+    model, monkeypatch, configured, profile, enabled, auxiliaries, admitted, protocol
+):
+    import threading
+
+    path = model / "fake generation lane process"
+    path.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys, threading\n"
+        "fd_key = os.environ['STARK_TEST_LANE_FD_KEY']\n"
+        "other_key = ('STARK_HY4_LANE_FDS' if fd_key == 'STARK_GENERATION_LANE_FDS' "
+        "else 'STARK_GENERATION_LANE_FDS')\n"
+        "assert other_key not in os.environ\n"
+        "fds = list(map(int, filter(None, os.environ.get(fd_key, '').split(','))))\n"
+        "protocol = os.environ['STARK_TEST_LANE_PROTOCOL']\n"
+        "capacity = 0xffffffff if protocol == 'dynamic' else 4096\n"
+        "ready = {'ready': True, 'mode': 'text-generation-v1', 'vocab_size': 256, "
+        "'max_context_tokens': capacity, 'max_new_tokens': 4095, 'streaming': 'text-delta-v1', "
+        "'stop_sequences': True, 'cancellation': 'pipe-v1'}\n"
+        "if protocol == 'dynamic': ready['generation_budget'] = 'memory-context-v1'\n"
+        "admitted = int(os.environ['STARK_TEST_LANES_ADMITTED'])\n"
+        "def serve(source, sink, name, cancel_fd, start):\n"
+        "    def write(reply): print(json.dumps(reply), file=sink, flush=True)\n"
+        "    write(start)\n"
+        "    for line in source:\n"
+        "        request = json.loads(line)\n"
+        "        if request['operation'] == 'generate':\n"
+        "            write({'event': 'delta', 'text': name})\n"
+        "            received = int.from_bytes(os.read(cancel_fd, 8), 'little')\n"
+        "            if received != request['request_id']: return\n"
+        "            write({'error': 'generation_cancelled'})\n"
+        "        else: write({'lane': name, 'auxiliaries': len(fds) // 3})\n"
+        "for ordinal, (lane_in, lane_out, lane_cancel) in enumerate(zip(fds[::3], fds[1::3], fds[2::3])):\n"
+        "    if ordinal < admitted:\n"
+        "        args = (os.fdopen(lane_in), os.fdopen(lane_out, 'w'), str(ordinal), lane_cancel, ready)\n"
+        "        threading.Thread(target=serve, args=args, daemon=True).start()\n"
+        "    elif protocol != 'ignored':\n"
+        "        for fd in (lane_in, lane_out, lane_cancel): os.close(fd)\n"
+        "primary = dict(ready)\n"
+        "if protocol == 'legacy-hy4': primary['hy4_secondary_context_tokens'] = capacity\n"
+        "elif protocol == 'hy4': primary['hy4_lane_context_tokens'] = [capacity] * admitted\n"
+        "elif protocol != 'ignored': primary['generation_lane_context_tokens'] = [capacity] * admitted\n"
+        "serve(sys.stdin, sys.stdout, 'primary', int(os.environ['STARK_CANCEL_FD']), primary)\n"
+    )
+    path.chmod(0o755)
+    monkeypatch.delenv("STARK_GENERATION_SLOTS", raising=False)
+    monkeypatch.delenv("STARK_HY4_CONCURRENT_SLOTS", raising=False)
+    hy4 = profile == HY4_STQ_VISION_PROFILE
+    if configured is not None:
+        monkeypatch.setenv("STARK_HY4_CONCURRENT_SLOTS" if hy4 else "STARK_GENERATION_SLOTS", configured)
+    monkeypatch.setenv("STARK_GENERATION_LANE_FDS", "stale")
+    monkeypatch.setenv("STARK_HY4_LANE_FDS", "stale")
+    monkeypatch.setenv("STARK_TEST_LANE_FD_KEY", "STARK_HY4_LANE_FDS" if hy4 else "STARK_GENERATION_LANE_FDS")
+    monkeypatch.setenv("STARK_TEST_LANES_ADMITTED", str(admitted))
+    monkeypatch.setenv("STARK_TEST_LANE_PROTOCOL", protocol)
+    monkeypatch.setattr("stark_convert.chat.model_image_family", lambda *_: {"profile": profile} if profile else None)
+    monkeypatch.setattr("stark_convert.image_checks.preflight_family_memory", lambda *_: None)
+    worker = Worker(path, model, timeout=2, enable_generation_lanes=enabled)
+    try:
+        pending = tuple(worker._pending_generation_lanes)
+        assert worker.read()["ready"] is True
+        primary_reply = {"lane": "primary", "auxiliaries": auxiliaries}
+        assert worker.request({"operation": "tokenize"}) == primary_reply
+        assert len(worker.generation_lanes) == admitted
+        assert not worker._pending_generation_lanes
+        assert all(
+            lane._input_pipe.closed and lane._output_pipe.closed and lane.cancel_fd is None
+            for lane in pending[admitted:]
+        )
+        for ordinal, lane in enumerate(worker.generation_lanes):
+            assert lane.context_limit == (0xFFFFFFFF if protocol == "dynamic" else 4096)
+            cancellation = threading.Event()
+            with pytest.raises(ChatCancelled):
+                lane.request(
+                    {"operation": "generate", "stream": True},
+                    on_delta=lambda _, control=cancellation: control.set(),
+                    cancelled=cancellation,
+                )
+            assert lane.request({"operation": "tokenize"}) == {"lane": str(ordinal), "auxiliaries": auxiliaries}
+        assert worker.request({"operation": "tokenize"}) == primary_reply
+        assert worker.request_sequence == 0
+    finally:
+        worker.close()
 
 
 class FakeWorker:

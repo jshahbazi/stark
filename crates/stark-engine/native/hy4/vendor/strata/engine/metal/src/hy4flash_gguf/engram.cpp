@@ -1,15 +1,21 @@
 // engine/metal/src/hy4flash_gguf/engram.cpp - see engram.h.
 #include "engram.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 
 #include "strata/ngram/ple_reader.hpp"   // ReaderStats - engram_io.hpp only forward-declares it
 
 namespace strata::hy4_flash {
 
 namespace {
+// The pinned STQ config's image placeholder. Sushi maps it to pad before
+// compression, including when the placeholder is in a predecessor slot.
+constexpr int32_t kStqImageToken = 120120;
+
 double now_us() {
     return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -17,6 +23,7 @@ double now_us() {
 
 struct EngramSupply::Table {
     int block_id = -1;
+    bool stq = false;
     hy4_flash::EngramHashParams p;
     hy4_flash::EngramRows reader;
     std::vector<int64_t> ids;
@@ -42,17 +49,35 @@ EngramSupply::Table* EngramSupply::find(int block_id) const {
     return nullptr;
 }
 
-std::string EngramSupply::open(const Model& m, const std::string& pack_dir) {
+std::string EngramSupply::open(const Model& m, const std::string& pack_dir, bool cache_pages) {
+    if (ready()) return "the Engram supply is already open";
     if (m.geo.engram_tables.empty()) return "this model declares no Engram tables";
     if (m.engram_row_bytes == 0) return "the Engram table's row size is not known (an unsupported element type)";
-    columns_ = m.geo.engram_heads;
-    row_bytes_ = m.engram_row_bytes;
     std::string err;
-    if (!hy4_flash::engram_token_map_load(pack_dir, token_map_, err)) return err;
-
-    for (const hy4_flash::EngramTable& t : m.geo.engram_tables) {
-        Table* e = new Table();
+    std::vector<int32_t> token_map;
+    const bool segmented = !m.engram_segments.empty();
+    if (segmented) {
+        if (m.engram_segments.size() != m.geo.engram_tables.size() ||
+            m.engram_token_map.size() != size_t(m.geo.vocab_size) ||
+            m.engram_token_map.size() <= size_t(kStqImageToken) ||
+            m.geo.engram_pad_token < 0 || size_t(m.geo.engram_pad_token) >= m.engram_token_map.size())
+            return "the Engram shards and token map differ from the model geometry";
+        token_map = m.engram_token_map;
+        token_map[kStqImageToken] = token_map[size_t(m.geo.engram_pad_token)];
+    } else if (!hy4_flash::engram_token_map_load(pack_dir, token_map, err)) {
+        return err;
+    }
+    std::vector<std::unique_ptr<Table>> opened;
+    opened.reserve(m.geo.engram_tables.size());
+    for (size_t table = 0; table < m.geo.engram_tables.size(); ++table) {
+        const hy4_flash::EngramTable& t = m.geo.engram_tables[table];
+        const EngramSegment* segment = segmented ? &m.engram_segments[table] : nullptr;
+        if (segment && (segment->block_id != t.block_id || segment->rows != t.rows ||
+                        t.head_offsets.size() != t.head_bucket_counts.size()))
+            return "the Engram shard layout differs from the model's table geometry";
+        auto e = std::make_unique<Table>();
         e->block_id = t.block_id;
+        e->stq = segmented;
         e->p.ngram_size = m.geo.engram_ngram_size;
         e->p.heads_per_ngram = m.geo.engram_heads_per_ngram;
         e->p.columns = m.geo.engram_heads;
@@ -60,18 +85,32 @@ std::string EngramSupply::open(const Model& m, const std::string& pack_dir) {
         e->p.multipliers = t.multipliers;
         e->p.primes = t.head_bucket_counts;
         e->p.offsets = t.head_offsets;
-        e->p.token_map = token_map_.data();
-        e->p.token_map_len = (int64_t) token_map_.size();
-        if (!e->p.check(err)) { delete e; return "Engram block " + std::to_string(t.block_id) + ": " + err; }
-        // One reader per table, so the four reads really are independent and `join(block)` waits for its own
-        // table only.  They are opened on the WHOLE merged tensor (the row ids the hash gives are global across
-        // the four tables - geometry.hpp's EngramTable warns about that), so every reader sees every row.
-        if (!e->reader.open(m.engram_path, m.engram_offset, m.engram_rows, row_bytes_, err)) {
-            delete e;
+        if (segment) {
+            for (size_t head = 0; head < e->p.offsets.size(); ++head) {
+                const uint64_t offset = e->p.offsets[head];
+                if (offset < t.row_base || offset - t.row_base > segment->rows ||
+                    e->p.primes[head] > segment->rows - (offset - t.row_base)) {
+                    return "an Engram bucket exceeds its shard's table";
+                }
+                e->p.offsets[head] = offset - t.row_base;
+            }
+        }
+        e->p.token_map = token_map.data();
+        e->p.token_map_len = (int64_t) token_map.size();
+        if (!e->p.check(err)) return "Engram block " + std::to_string(t.block_id) + ": " + err;
+        // Each layer has an independent reader. GGUF supplies a shared tensor with global row IDs.
+        // STQ supplies a shard per layer with the offsets rebased above.
+        if (!e->reader.open(segment ? segment->path : m.engram_path, segment ? segment->offset : m.engram_offset,
+                            segment ? segment->rows : m.engram_rows, m.engram_row_bytes, err, cache_pages)) {
             return "Engram block " + std::to_string(t.block_id) + ": " + err;
         }
-        tables_.push_back(e);
+        opened.push_back(std::move(e));
     }
+    tables_.reserve(opened.size());
+    token_map_.swap(token_map);  // The live storage keeps every Table's token_map pointer valid.
+    for (auto& table : opened) tables_.push_back(table.release());
+    columns_ = m.geo.engram_heads;
+    row_bytes_ = m.engram_row_bytes;
     return {};
 }
 
@@ -90,6 +129,13 @@ std::string EngramSupply::issue(const int32_t* tokens, const int32_t* pos, const
         // nothing but read.
         if (!hy4_flash::engram_row_ids(t->p, tokens, pos, prev, nullptr, n_tok, t->ids, t->valid, err))
             return "Engram block " + std::to_string(t->block_id) + ": " + err;
+        if (t->stq) {
+            for (int i = 0; i < n_tok; ++i) {
+                const int32_t token = tokens[i];
+                if (token == t->p.pad_token || token == kStqImageToken)
+                    std::fill_n(t->valid.data() + size_t(i) * columns_, columns_, 0.f);
+            }
+        }
         t->rows.assign(t->ids.size() * (size_t) row_bytes_, 0);
         t->err.clear();
         t->joined = false;

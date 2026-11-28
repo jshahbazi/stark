@@ -6,7 +6,7 @@
 //! implementation uses Stark's native matrix kernels; it does not execute
 //! repository Python or invoke a foreign inference runtime.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use serde_json::Value;
 
@@ -190,14 +190,18 @@ struct AttentionState {
 }
 
 pub struct FlintModel {
-    weights: Weights,
-    config: Config,
+    weights: Arc<Weights>,
+    config: Arc<Config>,
     states: Vec<AttentionState>,
-    banks: Vec<bool>,
+    banks: Arc<[bool]>,
     position: usize,
 }
 
 impl FlintModel {
+    pub(super) fn mapped_weight_bytes(&self) -> Option<usize> {
+        self.weights.mapped_bytes()
+    }
+
     pub(super) fn request_memory_bytes(
         &self,
         context_tokens: u32,
@@ -245,12 +249,22 @@ impl FlintModel {
         let banks = validate_weights(&weights, &config)?;
         let states = config.layers.iter().map(|_| AttentionState::default()).collect();
         Ok(Self {
-            weights,
-            config,
+            weights: Arc::new(weights),
+            config: Arc::new(config),
             states,
-            banks,
+            banks: banks.into(),
             position: 0,
         })
+    }
+
+    pub(super) fn new_request_slot(&self) -> Self {
+        Self {
+            weights: Arc::clone(&self.weights),
+            config: Arc::clone(&self.config),
+            states: self.config.layers.iter().map(|_| AttentionState::default()).collect(),
+            banks: Arc::clone(&self.banks),
+            position: 0,
+        }
     }
 
     pub fn reset(&mut self) {

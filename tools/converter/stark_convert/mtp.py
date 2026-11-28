@@ -11,6 +11,7 @@ _INKLING_VERIFICATION = "inkling-dspark-target-draw-v1"
 _INKLING_SHORT_VERIFICATION = "inkling-dspark-short-target-draw-v1"
 _HY4_SAMPLING = "greedy-target-match-v1"
 _HY4_VERIFICATION = "hy4-nextn-greedy-prefix-match-v1"
+_HY4_STQ_VERIFICATION = "hy4-dfly2-greedy-prefix-match-v1"
 
 
 def _unsupported() -> dict[str, Any]:
@@ -57,6 +58,10 @@ def mtp_capabilities(readiness: Any) -> dict[str, Any]:
                 (sampling, verification, maximum) == (_INKLING_SAMPLING, _INKLING_SHORT_VERIFICATION, 3)
                 and default == maximum
             )
+            or (
+                (sampling, verification, maximum) == (_HY4_SAMPLING, _HY4_STQ_VERIFICATION, 5)
+                and default == recommended
+            )
         )
         or operations != ["generate"]
         or not isinstance(operations, list)
@@ -72,6 +77,7 @@ def mtp_capabilities(readiness: Any) -> dict[str, Any]:
                 (_HY4_SAMPLING, _HY4_VERIFICATION, 5),
                 (_HY4_SAMPLING, _HY4_VERIFICATION, 6),
                 (_HY4_SAMPLING, _HY4_VERIFICATION, 7),
+                (_HY4_SAMPLING, _HY4_STQ_VERIFICATION, 5),
             )
         )
         or not isinstance(verification, str)

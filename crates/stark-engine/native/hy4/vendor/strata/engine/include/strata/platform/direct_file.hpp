@@ -38,7 +38,8 @@ public:
     DirectFile(const DirectFile&) = delete;
     DirectFile& operator=(const DirectFile&) = delete;
 
-    bool open(const std::string& path, std::string& err);
+    /// `cache_pages` permits the OS to retain clean pages. Reads keep their aligned request format.
+    bool open(const std::string& path, std::string& err, bool cache_pages = false);
     void close();
     bool is_open() const;
     uint64_t size() const;

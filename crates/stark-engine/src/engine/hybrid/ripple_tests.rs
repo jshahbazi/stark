@@ -56,6 +56,29 @@ fn request_admission_releases_previous_ripple_state_and_preserves_reset_outputs(
     assert_eq!(model.step(1).unwrap(), expected);
 }
 
+#[stark_test]
+fn ripple_slots_share_weights_and_replay_independently_after_reset() {
+    let c = config();
+    let tensors = tensors();
+    let fixture = Fixture::new(&tensors, &c);
+    let mut first = fixture.load(&c).unwrap();
+    first.step(0).unwrap();
+    let mut second = first.new_request_slot();
+    assert!(Arc::ptr_eq(&first.weights, &second.weights));
+    assert_eq!(second.position, 0);
+
+    let sequence = [4, 2, 4, 1];
+    let expected = reference(&tensors, &sequence);
+    close(&second.step(sequence[0]).unwrap(), &expected[0]);
+    first.step(1).unwrap();
+    close(&second.step(sequence[1]).unwrap(), &expected[1]);
+    assert!(first.prepare_request_memory());
+    close(&first.step(sequence[0]).unwrap(), &expected[0]);
+    for (token, expected) in sequence[2..].iter().zip(&expected[2..]) {
+        close(&second.step(*token).unwrap(), expected);
+    }
+}
+
 fn tensors() -> Tensors {
     let c = Config::parse(&config()).unwrap();
     let mut tensors = Tensors::new();
@@ -670,7 +693,7 @@ fn run_interleaved_control_modes(
     }
     let input_sha256 = format!("{:x}", input_hash.finalize());
     let mut projection_names = vec![model.output.clone()];
-    for layer in &model.layers {
+    for layer in model.layers.iter() {
         projection_names.extend([
             layer.q.clone(),
             layer.k.clone(),

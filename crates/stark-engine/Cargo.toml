@@ -88,6 +88,10 @@ required-features = ["inkling-slice"]
 name = "inkling_grouped_nvfp4"
 required-features = ["inkling-slice"]
 
+[[example]]
+name = "hy4_stq_inspect"
+required-features = ["hy4"]
+
 [build-dependencies]
 anyhow.workspace = true
 sha2 = "=0.10.9"

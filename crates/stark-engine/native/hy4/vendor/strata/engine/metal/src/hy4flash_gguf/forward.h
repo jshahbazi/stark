@@ -40,12 +40,15 @@
 #include "mtl_rt.h"
 #include "prefill_snap.h"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace stark::hy4::stq { struct DflyTargetView; }
 
 namespace strata::hy4_flash {
 
@@ -74,6 +77,11 @@ struct Prefill {
     bool profile_stages = false;    ///< Sample aggregate prefill encoder times in the diagnostic worker
     bool mapped_gpu_plan = false;  ///< Build decode/verify expert groups on Metal for mapped banks
     bool optimize_mapped_decode = false;  ///< Consolidate resident-target commands and reuse Q8 decode work
+    bool stq_register_mla = false;    ///< Register-fragment attention for wide STQ windows
+    bool stq_verify_register_mla = false;  ///< Key-partitioned register attention for STQ verification
+    bool stq_cache_engram_pages = false;   ///< Use the filesystem cache and overlap STQ Engram reads with prefill
+    bool stq_draft_register_mla = false;  ///< Include partitioned MLA for the STQ DFly2 graph
+    bool stq_fused_attn_hc = false; ///< Fuse attention output normalization, HC residual update and FFN flat normalization
     bool routed_half = false;       ///< Stage grouped expert GEMM operands as F16, keeping F32 accumulation
     bool routed_fragments = false;  ///< Use gathered F16 tensor fragments for packed grouped experts
     bool dense_packed = false;      ///< Read packed Q8_0 attention projections into prefill tensor fragments
@@ -81,6 +89,7 @@ struct Prefill {
     bool dense_ffn_device_views = false; ///< Also use direct F16 tensor views for eligible trunk FFN projections
     bool tensor_mla = false;        ///< Use multi-query tensor attention for contiguous prefill ranges
     bool compensated_sparse_mla = false; ///< Split query and probability operands on selected-cell prefill
+    bool parallel_router = false; ///< Parallel SIMD top-16 for the 512-expert Hy4 trunk router
     bool grouped_k_quant = false;   ///< Q3_K/Q4_K gate/up with Q4_K down, on Metal 4
     /// A WRONG DECISION, ON PURPOSE, IN THE PREFILL PATH ONLY (HY4_FLASH_PREFILL_PROBE), so that
     /// `--prefill-consistency` has a case it must FAIL on.  A bitwise check that has never been seen to fail is
@@ -105,6 +114,9 @@ struct Prefill {
 /// Per-token timings of the last window, in milliseconds.
 struct Timing {
     double gpu_ms = 0, wall_ms = 0, host_cut_ms = 0, engram_wait_ms = 0, expert_wait_ms = 0;
+    double verify_mla_ms = 0, verify_index_ms = 0, verify_dense_ms = 0;
+    double verify_router_ms = 0, verify_expert_ms = 0, verify_other_ms = 0;
+    uint64_t verify_profiled_graphs = 0;
     uint64_t windows = 0, positions = 0;
     // prefill, kept apart from decode so the I/O and the compute can be timed separately
     double pf_gpu_ms = 0;      ///< the GPU time of the chunks' command buffers
@@ -122,6 +134,8 @@ struct Timing {
     // Trunk encoder spans sampled only with profile_stages. Event waits and inter-encoder gaps are excluded.
     double pf_attention_ms = 0, pf_dense_ms = 0, pf_moe_route_ms = 0, pf_moe_expert_ms = 0, pf_other_ms = 0;
     double pf_attention_dense_ms = 0, pf_attention_index_ms = 0;
+    // Q_A, Q_B, K_B, KV_A, IndexPool projections, V_B, attention gate, output.
+    std::array<double, 8> pf_stq_projection_ms{};
     double pf_attention_mla_ms = 0, pf_attention_misc_ms = 0;
     uint64_t pf_profiled_blocks = 0;
     uint64_t pf_grouped_tiles = 0, pf_grouped_tail_tiles = 0;  ///< eligible Q3_K/Q4_K M64 tiles, tail has <=32 rows
@@ -144,7 +158,10 @@ public:
 
     /// Compiles the kernels, resolves every weight and allocates the state.  `pack_dir` may be empty, and then the
     /// Engram tables cannot be read - which is an error only when a block that has one is actually run.
-    std::string open(Model& m, mtl::Context& cx, const std::string& pack_dir, const Prefill& pf = {});
+    std::string open(Model& m, mtl::Context& cx, const std::string& pack_dir, const Prefill& pf = {},
+                     int context_capacity = 0, const Forward* shared_stq_graph = nullptr);
+    /// Transfer the extra slot's private allocations to the loaded Metal context.
+    void commit_stq_slot();
 
     static constexpr int kMaxWindow = 8;        ///< a decode window
     static constexpr int kSelCap = 2051;        ///< the widest selection a query may have
@@ -189,6 +206,10 @@ public:
     /// After the arena is built and before the first prompt: puts the prompt's scratch into a region of the arena
     /// (HY4_FLASH_SCRATCH_SPLIT=0: it was allocated beside the arena at open, and this does nothing).
     std::string attach_prefill();
+
+    /// Keep IndexPool selections only for rows in the latest draft-enabled window.
+    void capture_dfly(bool enabled);
+    bool dfly_target(int position, stark::hy4::stq::DflyTargetView& view) const;
 
     /// Runs the whole prompt in chunks: prefill() over [0, n), the last chunk's last position included.  After it
     /// `last_logits()` / `last_token()` are that position's.
@@ -269,6 +290,7 @@ public:
                           int32_t delta, int32_t mrope_len1, int32_t mrope_len2);
     /// Whether a picture is attached: the text path must be able to assert it is not.
     bool has_image_prompt() const;
+    bool parallel_router_active() const;
 
     struct Impl;   // public so the run_graph_seg trampoline in forward.cpp can name it
 

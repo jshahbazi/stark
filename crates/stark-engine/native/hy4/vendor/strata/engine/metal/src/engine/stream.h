@@ -32,11 +32,16 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
 
 namespace strata::metal_engine {
+
+// Fault mapped model pages in before GPU residency. One pressure and swap
+// budget covers the complete set of spans.
+bool prepare_mapped_pages(std::span<const std::span<const uint8_t>> ranges);
 
 class ExpertStream {
 public:

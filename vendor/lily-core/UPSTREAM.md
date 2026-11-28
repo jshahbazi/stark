@@ -34,6 +34,16 @@ verification's separate head maintenance remain unchanged. Private checkpoint
 tests compare initial draft readouts before and after a different request;
 their presence alone does not establish artifact qualification.
 
+Stark shares the fully loaded read-only Qwen4Exp weight graph and paged
+n-gram table across text generation slots. The loader allocates weights in a
+separate Metal residency set, commits it before publication, and attaches it
+to each slot's queue for the model's lifetime. Shared reference counts protect
+the Metal handles. Only the private resident weight owner crosses worker
+threads. Public buffer and tensor handles, Metal contexts, command pools, and
+all request state stay thread-local. The resident loader exposes no writable
+weight handles once the graph is published. Auxiliary slots retain the draft
+head and put the vision tower behind the primary slot.
+
 Stark adds an allocation-only text-request inventory in
 `src/qwen4exp/request_memory.rs`, exposed from the loaded model. It uses the
 selected K/V format, loaded draft-head presence, cache growth alignment,

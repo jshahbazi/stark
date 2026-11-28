@@ -40,8 +40,9 @@ def artifact(path, *, schema=3, vision=True):
 
 
 class StubWorker:
-    def __init__(self, path, gpu_memory_callback=None):
+    def __init__(self, path, gpu_memory_callback=None, *, enable_generation_lanes=False):
         self.model_path = path
+        self.enable_generation_lanes = enable_generation_lanes
         self.gpu_memory_callback = gpu_memory_callback
         self.process = SimpleNamespace(closed=False)
         self.closed = False
@@ -65,10 +66,10 @@ def host(tmp_path, monkeypatch):
     instances = []
     state = {"fail": False, "after_read": None, "before_create": None, "images": True, "ready": True}
 
-    def factory(_executable, path, _timeout, *, gpu_memory_callback=None):
+    def factory(_executable, path, _timeout, *, gpu_memory_callback=None, enable_generation_lanes=False):
         if state["before_create"] is not None:
             state["before_create"]()
-        instance = StubWorker(path, gpu_memory_callback)
+        instance = StubWorker(path, gpu_memory_callback, enable_generation_lanes=enable_generation_lanes)
         instances.append(instance)
 
         def read():
@@ -351,6 +352,7 @@ def test_running_family_reports_local_evidence_in_app_and_api(host, tmp_path):
     identifier = desktop.models[0]["id"]
     desktop.run(desktop.epoch, identifier)
     assert desktop.worker.images and desktop.active_model == identifier
+    assert desktop.worker.enable_generation_lanes
     assert callable(desktop.worker.gpu_memory_callback)
     desktop.worker.gpu_memory_callback(desktop.worker, 4096)
     memory = [value for value in events(desktop) if value.get("event") == "gpu_memory"][-1]

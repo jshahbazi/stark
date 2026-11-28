@@ -81,6 +81,22 @@ def test_hy4_admits_its_greedy_verifier_and_resolves_sampled_requests_to_serial(
         assert mtp_capabilities({"mtp": dict(raw, **changes)})["supported"] is False
 
 
+def test_hy4_stq_enables_its_reported_greedy_draft_depth_by_default():
+    raw = descriptor(
+        max_drafts=5,
+        recommended_drafts=5,
+        default_drafts=5,
+        sampling="greedy-target-match-v1",
+        verification="hy4-dfly2-greedy-prefix-match-v1",
+    )
+    assert mtp_capabilities({"mtp": raw}) == raw
+    assert default_mtp_enabled(raw)
+    assert resolve_mtp(True, raw) == 5
+    assert resolve_mtp(False, raw) == 0
+    assert resolve_mtp(True, raw, {"mode": "stochastic", "temperature": 1.0}) == 0
+    assert not mtp_capabilities({"mtp": dict(raw, default_drafts=4)})["supported"]
+
+
 @pytest.mark.parametrize("maximum, expected", [(1, 1), (2, 2), (3, 2), (8, 2)])
 def test_legacy_exact_mtp_readiness_uses_bounded_compatibility_depth(maximum, expected):
     raw = descriptor(max_drafts=maximum)

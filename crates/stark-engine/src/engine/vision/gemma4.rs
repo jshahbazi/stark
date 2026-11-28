@@ -167,7 +167,7 @@ impl PreparedGemmaImage {
 
 pub struct Gemma4VisionLanguageModel<B: Backend> {
     engine: Arc<Engine<B>>,
-    language_model: LanguageModel<B>,
+    language_model: Arc<LanguageModel<B>>,
     tower: Option<ImageTower<B>>,
     failed: bool,
     identity: VisionArtifactIdentity,
@@ -494,7 +494,7 @@ impl<B: Backend> Engine<B> {
         let hash = |name| hashes.get(name).cloned().ok_or(InvalidInput("missing Gemma artifact identity"));
         Ok(Gemma4VisionLanguageModel {
             engine: self.clone(),
-            language_model,
+            language_model: Arc::new(language_model),
             tower,
             failed: false,
             codec_eos_token,
@@ -514,6 +514,21 @@ impl<B: Backend> Engine<B> {
 }
 
 impl<B: Backend> Gemma4VisionLanguageModel<B> {
+    /// Create a text-only worker owner around the already loaded decoder.
+    pub fn shared_text_lane(&self) -> Self {
+        Self {
+            engine: self.engine.clone(),
+            language_model: self.language_model.clone(),
+            tower: None,
+            failed: self.failed,
+            identity: self.identity.clone(),
+            codec_eos_token: self.codec_eos_token.clone(),
+            profile: self.profile,
+            parameter_storage: self.parameter_storage,
+            vision_parameter_bytes: self.vision_parameter_bytes,
+        }
+    }
+
     pub fn artifact_identity(&self) -> &VisionArtifactIdentity {
         &self.identity
     }

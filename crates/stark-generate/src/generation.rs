@@ -211,6 +211,7 @@ pub(crate) struct PreparedImageMetadata {
 }
 
 pub(crate) const HY4_VISION_PROFILE: &str = "hy4-flash-gguf-bf16-vision-v1";
+pub(crate) const HY4_STQ_VISION_PROFILE: &str = "hy4-flash-stq-bf16-vision-v1";
 
 pub(crate) struct ImageArtifactIdentity<'a> {
     pub schema_version: u32,
@@ -264,7 +265,7 @@ fn image_family_limits(
         ) => ((16, 3), 2520, 280),
         ("gemma3-siglip-bf16-v1", 1, 5) => ((14, 4), 4096, 256),
         ("inkling2-mini-native-v1", 1, 7) => ((20, 2), 4096, 1024),
-        (HY4_VISION_PROFILE, 1, 7) => ((16, 2), 16_384, 8_192),
+        (HY4_VISION_PROFILE | HY4_STQ_VISION_PROFILE, 1, 7) => ((16, 2), 16_384, 8_192),
         _ => return None,
     };
     (geometry == expected_geometry).then_some((patches, tokens, patches * geometry.0 * geometry.0))
@@ -330,8 +331,8 @@ fn valid_image_metadata(
 ) -> bool {
     let (patch_size, merge_size) = geometry;
     let (max_patches, max_image_tokens) = match (profile, geometry) {
-        (HY4_VISION_PROFILE, (16, 2)) => (16_384, 8192),
-        (HY4_VISION_PROFILE, _) => return false,
+        (HY4_VISION_PROFILE | HY4_STQ_VISION_PROFILE, (16, 2)) => (16_384, 8192),
+        (HY4_VISION_PROFILE | HY4_STQ_VISION_PROFILE, _) => return false,
         (_, (16, 2)) => (65_536, 16_384),
         (_, (16, 3)) => (2520, 280),
         (_, (20, 2)) => (4096, 1024),
@@ -339,7 +340,7 @@ fn valid_image_metadata(
         _ => return false,
     };
     let [temporal, height, width] = metadata.grid;
-    let count_newline = u32::from(profile == HY4_VISION_PROFILE);
+    let count_newline = u32::from(matches!(profile, HY4_VISION_PROFILE | HY4_STQ_VISION_PROFILE));
     temporal == 1
         && height > 0
         && width > 0
@@ -571,7 +572,7 @@ pub(crate) enum ContextCapacity {
 }
 
 impl ContextCapacity {
-    fn limit(self) -> Option<u32> {
+    pub(crate) fn limit(self) -> Option<u32> {
         match self {
             #[cfg(feature = "metal")]
             Self::Shared(sizing) => Some(sizing.context_tokens),
@@ -772,10 +773,16 @@ pub(crate) trait GenerationBackend {
     fn prefix_cache_supported(&self) -> bool {
         false
     }
-    /// Reused prompt tokens are a multiple of this prefill chunk length, itself
-    /// a multiple of `PREFILL_CHUNK_TOKENS`.
+
+    /// Synchronize backend state before request planning or prefix lookup.
+    fn begin_generation_request(&mut self) {}
+    /// The ordinary reuse grid, a multiple of `PREFILL_CHUNK_TOKENS`.
     fn prefix_cache_chunk_tokens(&self) -> usize {
         prefix_cache::PREFILL_CHUNK_TOKENS
+    }
+    /// Optional alignment for a backend that retains a boundary inside a chunk.
+    fn prefix_cache_subchunk_tokens(&self) -> Option<usize> {
+        None
     }
     /// Prompt tokens a request always prefills after a reuse boundary: its own
     /// boundary is the largest chunk multiple at or below its input length
@@ -800,6 +807,15 @@ pub(crate) trait GenerationBackend {
     ) -> usize {
         0
     }
+    /// Whether the reported reuse amount follows this backend's reuse policy.
+    /// Backends with opt-in sub-chunk checkpoints may extend the default grid.
+    fn prefix_cache_reuse_valid(
+        &self,
+        reused: usize,
+        input_tokens: usize,
+    ) -> bool {
+        reused < input_tokens && reused.is_multiple_of(self.prefix_cache_chunk_tokens())
+    }
     /// Make the state retained by the last successful generation reusable.
     /// Called only after its terminal reply has been written and flushed.
     fn publish_prefix_cache(&mut self) {}
@@ -823,6 +839,8 @@ pub(crate) struct GenerationWorker<B: GenerationBackend> {
     /// `Some(enabled)` when the host requested prefix reuse at startup.
     prefix_cache: Option<bool>,
     budget: Budget,
+    lane_context_tokens: Vec<u32>,
+    legacy_hy4_lanes: bool,
 }
 
 fn valid_ids(
@@ -901,7 +919,19 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             prepared: None,
             prefix_cache,
             budget,
+            lane_context_tokens: Vec::new(),
+            legacy_hy4_lanes: false,
         })
+    }
+
+    #[cfg(feature = "metal")]
+    pub(crate) fn advertise_lanes(
+        &mut self,
+        context_tokens: Vec<u32>,
+        legacy_hy4_lanes: bool,
+    ) {
+        self.lane_context_tokens = context_tokens;
+        self.legacy_hy4_lanes = legacy_hy4_lanes;
     }
 
     fn prefix_cache_enabled(&self) -> bool {
@@ -1088,7 +1118,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             None => self.backend.prefix_cache_plan(input, options),
             Some(_) => 0,
         };
-        if reused >= input_tokens || !reused.is_multiple_of(self.backend.prefix_cache_chunk_tokens()) {
+        if !self.backend.prefix_cache_reuse_valid(reused, input_tokens) {
             return Err("invalid_generation_output");
         }
         let report_reuse = self.prefix_cache_enabled();
@@ -1596,6 +1626,15 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             self.backend.clear_prefix_cache();
         }
         let generate = matches!(&request, Ok(Request::Generate { .. }));
+        if matches!(
+            &request,
+            Ok(Request::Generate { .. }
+                | Request::PlanGeneration { .. }
+                | Request::PrepareImage { .. }
+                | Request::GenerateImage { .. })
+        ) {
+            self.backend.begin_generation_request();
+        }
         let result = request.and_then(|request| self.handle(request, output));
         if result.is_err() {
             self.prepared = None;
@@ -1717,6 +1756,9 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             "tail_tokens":worker.backend.prefix_cache_tail_tokens(),"idle_seconds":prefix_cache::IDLE_SECONDS,
             "key":worker.backend.prefix_cache_key()});
         if enabled {
+            if let Some(alignment) = worker.backend.prefix_cache_subchunk_tokens() {
+                readiness["prefix_cache"]["subchunk_tokens"] = json!(alignment);
+            }
             if let Some((physical_chunk, min_suffix)) = worker.backend.prefix_cache_midpoint_restore_geometry() {
                 readiness["prefix_cache"]["physical_chunk_tokens"] = json!(physical_chunk);
                 readiness["prefix_cache"]["midpoint_restore_min_suffix_tokens"] = json!(min_suffix);
@@ -1742,6 +1784,14 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         readiness["loaded_memory"] = memory;
     }
     let capacity = worker.backend.context_capacity();
+    if !worker.lane_context_tokens.is_empty() {
+        let field = if worker.legacy_hy4_lanes {
+            "hy4_lane_context_tokens"
+        } else {
+            "generation_lane_context_tokens"
+        };
+        readiness[field] = json!(worker.lane_context_tokens);
+    }
     readiness["context_sizing_policy"] = json!(capacity.policy());
     if let Some(sizing) = capacity.sizing_metadata() {
         readiness["context_sizing"] = sizing;
@@ -1782,11 +1832,12 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             worker.backend.image_geometry(),
         )
         .ok_or("invalid_model_config")?;
-        let max_source_pixels = if identity.schema_version == 7 && family_profile != HY4_VISION_PROFILE {
-            max_processed_pixels
-        } else {
-            32_000_000
-        };
+        let max_source_pixels =
+            if identity.schema_version == 7 && !matches!(family_profile, HY4_VISION_PROFILE | HY4_STQ_VISION_PROFILE) {
+                max_processed_pixels
+            } else {
+                32_000_000
+            };
         readiness["image_input"] = json!({
             "version":"mediaref-v1","transport":"owner-private-file-v1","qualified":false,"qualification":"unverified",
             "operations":["prepare_image","generate_image","discard_image"],

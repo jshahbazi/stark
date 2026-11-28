@@ -164,6 +164,10 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 ## Starting records
 
+The [Hy4 STQ history](speed-hy4-stq.md) connects the native port and OpenCode
+runs. The [shared-slot design](../GENERATION_SLOTS.md) links the evidence for
+Hy4, native decoders, Flint, Ripple and Lily.
+
 | Record | Scope |
 | --- | --- |
 | [20261125-HY4NATIVE-01–10: Hy4-flash AngelSlim Q3_K](2026-11-25-hy4-native-q3-k.md) | The image-loaded streamed worker matched reference AR and depth-two greedy outputs at 4K and restored a 3,072-token prefix exactly. The grouped F32 path agreed on all 13 natural-text top-1 rows. The final paired mapped diagnostic matched IDs and missed the reference stage times. |
@@ -171,9 +175,23 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 | [20261125-HY4DENSE-01–05 · Hy4-flash prefill and retention](2026-11-25-hy4-dense-prefill-expert-retention.md) | Screened 4K K2 F16 routed prefill improved 19–33%. Repeat-demand expert retention improved second-request decode 8–12% at fixed capacity. Both options remain opt-in. Dense F16 and narrower read-ahead were removed. |
 | [20261125-HY4LADDER-01–05 · Hy4-flash context ladder and packed prefill](2026-11-25-hy4-context-ladder.md) | The native worker completed a 32,768-token prompt and 192-token decode with the projector loaded. Packed Q8_0 attention projections improved warm 4K prefill 14–15% in one bracket. The selected load profiles passed flexible-window and overflow checks with exact outputs at multiple request ceilings. |
 | [20261126-HY4DESKTOP-01 · Hy4-flash desktop catalog](2026-11-26-hy4-desktop-catalog.md) | Catalog and packaged generation lifecycle for the pinned split GGUF, BF16 projector and NextN. |
+| [HY4STQ-PREFLIGHT-01 · Hy4 Sushi STQ metadata preflight](2026-11-26-hy4-sushi-stq-preflight.md) | Pinned config and index hashes and the bounded header inventory passed for all 89 weight shards. |
+| [HY4STQ-NATIVE-01 · Hy4 Sushi STQ native bring-up](2026-11-27-hy4-stq-native.md) | Pinned STQ with vision and DFly2 ran 16K and 27K OpenCode turns. Prepared mapped residency improved decode 18–25% across one exact-output matrix and increased startup. |
+| [HY4STQ-PERF-01 · Hy4 Sushi STQ OpenCode performance](2026-11-27-hy4-stq-open-code-performance.md) | Register-fragment MLA, GPU expert planning, exact PAIR1 fusion and split-K SPEC1. The 27K fresh output matched at zero, two and five drafts within the tuned graph. Same-cap Sushi comparison and rejected component screens. |
+| [HY4STQ-PERF-02 · Dense attention prefill on Hy4 STQ](2026-11-27-hy4-stq-dense-attention-prefill.md) | Per-projection attribution, exact packed K32 and gate fusion, rejected absorbed-head precision change, and 16K and 27K OpenCode reruns. |
+| [HY4STQ-PERF-03 · Hy4 STQ routed experts and long-context attention](2026-11-27-hy4-stq-routed-attention-prefill.md) | Exact wide PAIR1 products and register H128 preparation, long-context MLA component screens, 16K and 27K OpenCode and flexible-window checks. |
+| [HY4STQ-PERF-04 · Hy4 STQ wide-routing decode and FFN follow-up](2026-11-27-hy4-stq-decode-prefill-followup.md) | Same-loaded decode attribution on the original 27K fixture, FFN and verifier component screens and flexible-context OpenCode reruns. |
+| [HY4STQ-PERF-05 · Hy4 STQ attention-to-FFN boundary](2026-11-27-hy4-stq-attention-ffn-boundary.md) | Fresh 27K layer attribution, exact boundary fusion, batched DFly2 correction and 16K and 27K OpenCode reruns. |
+| [HY4STQ-PERF-06 · Hy4 STQ KV width and wide dense preparation](2026-11-27-hy4-stq-kv-width-dense-io.md) | Matched Sushi KV8 and BF16 OpenCode controls, exact prefill transform screens and Stark flexible-window reruns. |
+| [HY4STQ-NATIVE-02 · Hy4 STQ catalog and defaults](2026-11-27-hy4-stq-catalog-defaults.md) | Pinned native install, measured settings by default and flexible OpenCode context. |
+| [HY4STQ-SERVE-01 · Hy4 STQ shared-weight text slots](2026-11-27-hy4-stq-dual-slot.md) | Two text slots over one weight load and managed OpenCode fan-out qualification. |
+| [HY4STQ-SERVE-02 · Default Hy4 STQ text slots](2026-11-27-hy4-stq-four-slots.md) | Up to four active text requests under one shared memory budget. |
+| [GEN-SERVE-02 · Lily shared generation slots](2026-11-27-lily-shared-generation-slots.md) | Four text lanes with one Metal weight residency, flexible context, solo decode timings, MTP and primary-only images. |
+| [GEN-SERVE-01 · Shared desktop text slots](2026-11-27-shared-generation-slots.md) | Common worker handoff, backend-specific slot admission, and native Qwen qualification. |
 | [20261126-HY4TOOLS-01 · Hy4-flash tool calling](2026-11-26-hy4-tool-calling.md) | Signed desktop build verified typed tool calls, streamed reasoning and tool-result replay on the catalog artifact. |
 | [20261126-HY4OC-01 · Hy4-flash defaults through OpenCode](2026-11-26-hy4-opencode-defaults.md) | Paired 16K–27K OpenCode runs on the legacy and automatic tuned profiles with memory-fitted context and prefix reuse. |
 | [20261126-HY4OC-02 · Resident Hy4-flash through OpenCode](2026-11-26-hy4-resident-opencode.md) | Resident Q3_K with 4,096-row prefill reached 35.74–40.77 decode tok/s across the three earlier OpenCode turns, with identical inputs, outputs and draft counts. Startup took 97.50 s. |
+| [20261126-HY4OC-04 · Hy4 tail retention and parallel router](2026-11-26-hy4-post-sushi-controls.md) | Opt-in tail retention and parallel expert selection, with separate paired OpenCode controls for compensated sparse MLA. Exact-artifact timing remains open. |
 | [20261126-HY4MLA-02 · Compensated sparse MLA](2026-11-26-hy4-compensated-sparse-mla.md) | Experimental selected-cell tensor arithmetic passed eleven synthetic Metal comparisons against an F64 oracle. Full-artifact quality and performance remain open. |
 | [HY4NEXTN-01–18 · Hy4-flash NextN cache construction](2026-11-25-hy4-decode-cache-construction.md) | With resident embeddings and expert banks, packed draft-cache projections reduced 32K catch-up from 0.419 to 0.127 s and raised K2 decode from 41.60 to 44.32 tok/s in one exact-output pair. The rebuilt path passed image and prefix checks. K2 reached 47.65 tok/s at 16K. The Q5_0 head improved exact warm code and passed lifecycle validation. A three-language suite measured 59.97–67.82 tok/s at K3 with exact outputs. |
 | [20261125-HY4MLA-01 · Hy4-flash multi-query prefill attention](2026-11-25-hy4-multi-query-prefill.md) | Sharing latent tiles across 16 queries improved first-use 4K K2 prefill 7–13% and warm prefill 6–14% in one bracket with exact reference output IDs. The mixed contiguous and sparse kernel path stays opt-in. |

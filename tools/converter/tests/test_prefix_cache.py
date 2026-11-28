@@ -56,15 +56,18 @@ def log(tmp_path):
 
 
 @pytest.fixture
-def executable(tmp_path, log):
+def executable(tmp_path, log, request):
     """Reuse 1024 tokens when a scoped request repeats the previous scope."""
     path = tmp_path / "fake worker"
+    ready = READY
+    if hasattr(request, "param"):
+        ready = {**READY, "prefix_cache": {**READY["prefix_cache"], "subchunk_tokens": request.param}}
     path.write_text(
         f"#!{sys.executable}\n"
         "import json, sys\n"
         f"log = open({str(log)!r}, 'a')\n"
         "log.write(json.dumps({'argv': sys.argv[1:]}) + '\\n'); log.flush()\n"
-        f"print(json.dumps({READY!r}), flush=True)\n"
+        f"print(json.dumps({ready!r}), flush=True)\n"
         "previous = None\n"
         "for line in sys.stdin:\n"
         "    request = json.loads(line)\n"
@@ -81,6 +84,7 @@ def executable(tmp_path, log):
         "    scope = request.get('cache_scope')\n"
         "    reused = 1024 if scope is not None and scope == previous else 0\n"
         "    if 'bad reuse fixture' in prompt: reused = 100\n"
+        "    if 'subchunk reuse fixture' in prompt and reused: reused = 1532\n"
         "    previous = scope\n"
         "    if request.get('stream'):\n"
         "        print(json.dumps({'event': 'delta', 'text': 'synthetic answer'}), flush=True)\n"
@@ -148,6 +152,12 @@ def test_backend_chunk_sets_the_reuse_grid():
     assert valid_reuse({"reused_input_tokens": 8192}, 9000, 4096)
     assert not valid_reuse({"reused_input_tokens": 1024}, 9000, 4096)
     assert valid_reuse({"reused_input_tokens": 1024}, 9000)
+    for alignment in (False, 0, 3, 4.0, "4", 4096, 8192):
+        settings = {**hybrid["prefix_cache"], "subchunk_tokens": alignment}
+        assert not prefix_cache_enabled({**hybrid, "prefix_cache": settings})
+    assert valid_reuse({"reused_input_tokens": 15996}, 26950, 4096, 4)
+    assert not valid_reuse({"reused_input_tokens": 15995}, 26950, 4096, 4)
+    assert not valid_reuse({"reused_input_tokens": 26948}, 26948, 4096, 4)
 
 
 def test_text_workers_request_reuse_and_playground_scope_follows_the_conversation(desktop, model, log):
@@ -269,6 +279,19 @@ def test_invalid_reuse_counts_fail_the_request(desktop, model):
         desktop.api_complete(
             {"messages": [{"role": "user", "content": "bad reuse fixture"}]}, cancelled=principal(SESSION)
         )
+
+
+@pytest.mark.parametrize("executable", [4], indirect=True)
+def test_api_accepts_advertised_subchunk_reuse(desktop, model):
+    running(desktop, model)
+    assert desktop.worker.prefix_chunk_tokens == 1024
+    assert desktop.worker.prefix_subchunk_tokens == 4
+    desktop.api = SimpleNamespace(api_session=SESSION)
+    cancelled = principal(SESSION)
+    payload = {"messages": [{"role": "user", "content": "subchunk reuse fixture"}]}
+    desktop.api_complete(payload, cancelled=cancelled)
+    response = desktop.api_complete(payload, cancelled=cancelled)
+    assert response["choices"][0]["message"]["content"] == "synthetic answer"
 
 
 def test_progress_and_estimates_count_processed_prompt_tokens():

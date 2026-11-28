@@ -126,6 +126,13 @@ def test_hy4_profile_is_bound_to_the_pinned_gguf_projector_and_metadata():
     )
     assert vision_runtime.image_input_contract(value) == value
     assert vision_runtime.family_image_input_contract(value) is True
+    for selection in (
+        {"prefill_compensated_sparse_mla_requested": False},
+        {"prefill_compensated_sparse_mla_requested": True, "parallel_router_active": False},
+        {"prefill_compensated_sparse_mla_requested": False, "parallel_router_active": True},
+    ):
+        candidate = {**value, "runtime_identity": {**value["runtime_identity"], **selection}}
+        assert vision_runtime.image_input_contract(candidate) == candidate
     for key, replacement in [
         ("model_source", "tencent/Hy4-flash"),
         ("model_revision", "a" * 40),
@@ -147,6 +154,8 @@ def test_hy4_profile_is_bound_to_the_pinned_gguf_projector_and_metadata():
         ("prefill_chunk_tokens", True),
         ("draft_head_format", "q4_0"),
         ("streamed_expert_arena_bytes", -1),
+        ("prefill_compensated_sparse_mla_requested", "false"),
+        ("parallel_router_active", 1),
         ("unreviewed_runtime_option", True),
     ]:
         runtime = {**value["runtime_identity"], key: replacement}

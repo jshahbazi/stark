@@ -41,7 +41,9 @@ struct VisionShard {
     VisionGeometry geo;
     gguf::File tensors;
     mtl::Buffer weights;         ///< one no-copy wrap of the mapped file; every tensor is an offset into it
+    mtl::Buffer expanded;        ///< STQ only: F32 vectors and position grid at their own offsets
     std::string path;
+    bool projector_tanh = false;
 
     /// The descriptor of `name`, or nullptr. Offsets are absolute in the mapped file.
     const gguf::Tensor* find(const std::string& name) const { return tensors.find(name); }

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-from . import hy4_prepare, inkling_prepare, qwen38_external
+from . import hy4_prepare, hy4_stq_preflight, inkling_prepare, qwen38_external
 from .cli import _publish
 from .progress import (
     FDProgressSink,
@@ -84,6 +84,17 @@ SOURCES = {
         "required_files": ["LICENSE", *hy4_prepare.METADATA],
         "quantization": hy4_prepare.QUANTIZATION,
         "hy4_metadata_patterns": list(hy4_prepare.METADATA),
+    },
+    hy4_stq_preflight.CHOICE: {
+        "architecture": hy4_prepare.ARCHITECTURE,
+        "weights_repo": hy4_stq_preflight.REPOSITORY,
+        "weights_revision": hy4_stq_preflight.REVISION,
+        "weights_patterns": sorted(hy4_stq_preflight.expected_files()),
+        "metadata_repo": hy4_stq_preflight.REPOSITORY,
+        "metadata_revision": hy4_stq_preflight.REVISION,
+        "weight_bytes": hy4_stq_preflight.WEIGHT_BYTES,
+        "weight_shards": hy4_stq_preflight.TOTAL_FILES - len(hy4_stq_preflight.SIDECAR_FILES),
+        "quantization": "STQ 4bpw",
     },
     "ripple-bf16": {
         "architecture": "ricursive",
@@ -550,6 +561,9 @@ def prepared_identity(directory: Path) -> dict | None:
             receipt = _json(directory / "native-source.json")
             return inkling_prepare.prepared_identity(directory, config, receipt)
         if config.get("model_type") == hy4_prepare.SOURCE_MODEL_TYPE:
+            if hy4_stq_preflight.matches_layout(directory):
+                hy4_stq_preflight.inspect_pack(directory)
+                return _identity(SOURCES[hy4_stq_preflight.CHOICE])
             return hy4_prepare.prepared_identity(directory)
         receipt = _json(directory / "native-source.json")
         marker = config.get("stark_native_hybrid")
@@ -739,10 +753,11 @@ def prepare(
     artifact_mode: str = "text",
 ) -> dict:
     inkling = choice in inkling_prepare.CHOICES
+    stq = choice == hy4_stq_preflight.CHOICE
     if artifact_mode not in {"text", "vision-language"} or (
         artifact_mode == "vision-language"
         and choice not in {"qwen38-mlx-serve-mixed", "qwen38-lily-q4-xl", "hy4-q3-k"}
-        and not inkling
+        and not (inkling or stq)
     ):
         raise ValueError("unsupported native artifact mode")
     progress = reporter(progress)
@@ -769,14 +784,23 @@ def prepare(
     if stage.is_symlink():
         raise ValueError("invalid download staging directory")
     stage.mkdir(mode=0o700, exist_ok=True)
-    marker = stage / "stark-download.json"
+    # The original STQ format has an exact top-level file inventory. Keep the
+    # ownership marker under Hub metadata so a completed rename is loadable
+    # even if the installer is interrupted before it removes the marker.
+    marker_dir = stage / ".cache" if stq else stage
+    if marker_dir.is_symlink():
+        raise ValueError("invalid download metadata directory")
+    marker = marker_dir / "stark-download.json"
+    if marker.is_symlink():
+        raise ValueError("invalid download staging marker")
     identity = {"choice": choice, "source": source}
     if marker.exists():
         if _json(marker) != identity:
             raise ValueError("staging source mismatch")
-    elif any(stage.iterdir()):
+    elif any(path != marker_dir or not path.is_dir() or any(path.iterdir()) for path in stage.iterdir()):
         raise ValueError("download staging directory is not owned by this operation")
     else:
+        marker_dir.mkdir(mode=0o700, exist_ok=True)
         marker.write_text(json.dumps(identity, sort_keys=True))
     disk_bytes = source["weight_bytes"] + (0 if source.get("ngram_in_weight_bytes") else source.get("ngram_bytes", 0))
     if published is not source:
@@ -841,7 +865,7 @@ def prepare(
             local_files_only=offline,
             max_workers=2,
         )
-    else:
+    elif not stq:
         snapshot_download(
             source["metadata_repo"],
             revision=download_source["metadata_revision"],
@@ -897,9 +921,30 @@ def prepare(
             "execution": "unverified",
             "weight_bytes": source["weight_bytes"],
         }
+    elif stq:
+        hy4_stq_preflight.inspect_pack(stage)
+        files = [stage / name for name in source["weights_patterns"]]
+        signatures, digests = _verified_hashes(files)
+        inventory = "".join(
+            f"{path.name}\0{signature[2]}\0{digest}\n"
+            for path, signature, digest in zip(files, signatures, digests, strict=True)
+        )
+        if hashlib.sha256(inventory.encode()).hexdigest() != hy4_stq_preflight.CONTENTS_SHA256:
+            raise ConversionError("Pinned Hy4 STQ file contents do not match")
+        receipt = {
+            "schema_version": 1,
+            "artifact_mode": "vision-language",
+            "architecture": source["architecture"],
+            "quantization": source["quantization"],
+            "weights_source": {"repo": source["weights_repo"], "revision": source["weights_revision"]},
+            "metadata_source": {"repo": source["metadata_repo"], "revision": source["metadata_revision"]},
+            "native_loading": "unverified",
+            "execution": "unverified",
+            "weight_bytes": weight_bytes,
+        }
     else:
         receipt = inkling_prepare.stage(stage) if inkling else finish_metadata(stage, choice, artifact_mode)
-    if artifact_mode == "vision-language" and not inkling and choice != "hy4-q3-k":
+    if artifact_mode == "vision-language" and not (inkling or stq) and choice != "hy4-q3-k":
         from .hybrid_vision import prepare_image_artifact
 
         prepare_image_artifact(stage, choice)
@@ -917,7 +962,7 @@ def prepare(
         # Publish only the completed, metadata-bound directory. The download remains
         # resumable on all preceding failures and is never treated as a ready model.
         _publish(stage, output)
-        (output / marker.name).unlink()
+        (output / marker.relative_to(stage)).unlink()
     if progress is not None:
         progress.emit("conversion", "complete", force=True)
     return {**receipt, "weight_bytes": weight_bytes, "status": "prepared"}

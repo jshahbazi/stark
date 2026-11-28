@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! In-process AngelSlim Hy4 Flash Metal graph on macOS arm64.
+//! In-process Hy4 Flash Metal graph and native artifact readers on macOS arm64.
 
 use std::{
     ffi::{CString, c_char, c_int, c_void},
@@ -11,11 +11,21 @@ use std::{
 
 use super::context::{BackendContextBound, ContextSizing};
 
+pub mod stq_dfly;
+pub mod stq_layout;
+mod stq_native;
+pub use stq_native::StqOptions;
+pub mod stq_source;
+pub mod stq_trunk;
+
 pub const VOCAB: usize = 120_832;
 pub const PREFILL_CHUNK: usize = 1024;
 pub const RECOMMENDED_DRAFTS: usize = 2;
 pub const MAX_NEXTN_DRAFTS: usize = 4;
 pub const MAX_DRAFTS: usize = 7;
+pub const MAX_STQ_SLOTS: usize = 4;
+const MAX_ADDITIONAL_STQ_SLOTS: usize = MAX_STQ_SLOTS - 1;
+const STQ_SHARED_CONTEXT_FLOOR: u32 = 32_768;
 pub const SHARD: &str = "Hy4-flash-Q3_K-00001-of-00002.gguf";
 pub const ENGRAM_SHARD: &str = "Hy4-flash-Q3_K-00002-of-00002.gguf";
 pub const PROJECTOR: &str = "mmproj-Hy4-flash-bf16.gguf";
@@ -103,6 +113,15 @@ pub struct DraftStats {
     pub prefill_attention_index_seconds: f64,
     pub prefill_attention_mla_seconds: f64,
     pub prefill_attention_misc_seconds: f64,
+    pub verify_mla_seconds: f64,
+    pub verify_index_seconds: f64,
+    pub verify_dense_seconds: f64,
+    pub verify_router_seconds: f64,
+    pub verify_expert_seconds: f64,
+    pub verify_other_seconds: f64,
+    pub verify_profiled_graphs: u64,
+    /// Q_A, Q_B, K_B, KV_A, IndexPool projections, V_B, attention gate, output.
+    pub prefill_stq_projection_seconds: [f64; 8],
 }
 
 #[derive(Clone, Copy)]
@@ -124,6 +143,7 @@ pub struct Options {
     pub draft_head_q5: bool,
     pub tensor_mla: bool,
     pub compensated_sparse_mla: bool,
+    pub parallel_router: bool,
     pub max_drafts: usize,
     pub context_limit: Option<u32>,
 }
@@ -139,6 +159,7 @@ struct ContextMemory {
     draft_cache_bytes_per_token: u64,
     pool_bytes_per_row: u64,
     draft_pool_bytes_per_row: u64,
+    additional_slot_bytes: u64,
 }
 
 impl ContextMemory {
@@ -159,21 +180,63 @@ impl ContextMemory {
 
 struct ContextSelection {
     limit: Option<u32>,
+    pool_size: Option<u32>,
     sizing: Option<Result<ContextSizing, &'static str>>,
+    additional_limit: Option<u32>,
+    requested_slots: usize,
+    additional_sizing: Option<ContextSizing>,
 }
 
 unsafe extern "C" fn select_context(
     memory: *const ContextMemory,
     selection: *mut c_void,
+    additional_contexts: *mut u32,
 ) -> u32 {
     // The native open call owns the borrowed inventory and calls this synchronously.
     let memory = unsafe { &*memory };
     let selection = unsafe { &mut *selection.cast::<ContextSelection>() };
+    selection.pool_size = Some(memory.pool_size);
+    selection.additional_sizing = None;
     let budget = stark_resource_budget::inference_memory_budget(memory.budget as usize);
+    if let Some(cap) = selection.additional_limit.filter(|_| !additional_contexts.is_null()) {
+        let cap = cap.min(selection.limit.unwrap_or(cap));
+        let requested_slots = selection.requested_slots.min(MAX_STQ_SLOTS);
+        for slots in (2..=requested_slots).rev() {
+            let Some((primary, additional)) = fit_stq_slots(memory, budget, selection.limit, cap, slots) else {
+                continue;
+            };
+            // Native STQ open supplies one writable entry per possible additional slot.
+            let contexts = unsafe { slice::from_raw_parts_mut(additional_contexts, MAX_ADDITIONAL_STQ_SLOTS) };
+            contexts[..slots - 1].fill(additional.context_tokens);
+            selection.sizing = Some(Ok(primary));
+            selection.additional_sizing = Some(additional);
+            return primary.context_tokens;
+        }
+    }
     let sizing = hy4_context_sizing(memory, budget, selection.limit);
     let context_tokens = sizing.as_ref().map_or(0, |sizing| sizing.context_tokens);
     selection.sizing = Some(sizing);
     context_tokens
+}
+
+fn fit_stq_slots(
+    memory: &ContextMemory,
+    budget: usize,
+    primary_cap: Option<u32>,
+    additional_cap: u32,
+    slots: usize,
+) -> Option<(ContextSizing, ContextSizing)> {
+    let extras = slots.checked_sub(1)?;
+    let fixed = usize::try_from(memory.additional_slot_bytes).ok()?.checked_mul(extras)?;
+    let context_budget = budget.checked_sub(fixed)?;
+    let additional = hy4_context_sizing(memory, context_budget.checked_div(slots)?, Some(additional_cap)).ok()?;
+    if additional.context_tokens < additional_cap.min(STQ_SHARED_CONTEXT_FLOOR) {
+        return None;
+    }
+    let additional_bytes = memory.estimate(additional.context_tokens)?.checked_mul(extras)?;
+    let primary_budget = context_budget.checked_sub(additional_bytes)?;
+    let primary = hy4_context_sizing(memory, primary_budget, primary_cap).ok()?;
+    (primary.context_tokens >= additional.context_tokens).then_some((primary, additional))
 }
 
 fn hy4_context_sizing(
@@ -211,13 +274,14 @@ unsafe extern "C" {
         resident_token_embeddings: c_int,
         tensor_mla: c_int,
         compensated_sparse_mla: c_int,
+        parallel_router: c_int,
         max_drafts: c_int,
         routed_fragments: c_int,
         dense_device_views: c_int,
         dense_ffn_device_views: c_int,
         resident_draft_experts: c_int,
         draft_head_q5: c_int,
-        select_context: unsafe extern "C" fn(*const ContextMemory, *mut c_void) -> u32,
+        select_context: unsafe extern "C" fn(*const ContextMemory, *mut c_void, *mut u32) -> u32,
         sizing: *mut c_void,
         session: *mut *mut c_void,
         vision: *mut VisionGeometry,
@@ -226,6 +290,7 @@ unsafe extern "C" {
         actual_draft_head_q5: *mut c_int,
     ) -> c_int;
     fn stark_hy4_close(session: *mut c_void);
+    fn stark_hy4_parallel_router_active(session: *const c_void) -> c_int;
     fn stark_hy4_clear(session: *mut c_void);
     fn stark_hy4_retain_prefix(
         session: *mut c_void,
@@ -266,8 +331,14 @@ pub struct Session {
     draft_head_q5: bool,
     arena_bytes: u64,
     sizing: ContextSizing,
+    pool_size: u32,
     max_drafts: usize,
+    additional: Vec<Session>,
 }
+
+// The handle owns its request and readout state. STQ slots share a model
+// whose native phase lock serializes all use of mutable GPU resources.
+unsafe impl Send for Session {}
 
 fn path_arg(path: &Path) -> Result<CString, &'static str> {
     CString::new(path.as_os_str().as_bytes()).map_err(|_| "invalid_hy4_path")
@@ -275,6 +346,20 @@ fn path_arg(path: &Path) -> Result<CString, &'static str> {
 
 fn generation_status(status: c_int) -> Result<(), &'static str> {
     (status == 0).then_some(()).ok_or("native_generation_failed")
+}
+
+fn completed_pool_boundary(
+    prompt_tokens: usize,
+    minimum: usize,
+    pool_size: u32,
+) -> Option<usize> {
+    let before_final_token = prompt_tokens.checked_sub(1)?;
+    let pool_size = usize::try_from(pool_size).ok()?;
+    if pool_size == 0 {
+        return None;
+    }
+    let boundary = before_final_token / pool_size * pool_size;
+    (boundary > minimum).then_some(boundary)
 }
 
 impl Session {
@@ -296,7 +381,11 @@ impl Session {
         let mut actual_draft_head_q5 = 0;
         let mut selection = ContextSelection {
             limit: options.context_limit,
+            pool_size: None,
             sizing: None,
+            additional_limit: None,
+            requested_slots: 1,
+            additional_sizing: None,
         };
         // The path arguments remain alive throughout initialization. The returned
         // handle owns all model data and the device queue.
@@ -317,6 +406,7 @@ impl Session {
                 c_int::from(options.resident_token_embeddings),
                 c_int::from(options.tensor_mla),
                 c_int::from(options.compensated_sparse_mla),
+                c_int::from(options.parallel_router),
                 options.max_drafts as c_int,
                 c_int::from(options.routed_fragments),
                 c_int::from(options.dense_device_views),
@@ -353,8 +443,15 @@ impl Session {
             draft_head_q5: actual_draft_head_q5 != 0,
             arena_bytes,
             sizing: selection.sizing.ok_or("invalid_finite_context_limit")??,
+            pool_size: selection.pool_size.ok_or("invalid_hy4_pool_size")?,
             max_drafts: options.max_drafts,
+            additional: Vec::new(),
         })
+    }
+
+    /// Take the independently sized text slots admitted by the shared STQ load.
+    pub fn take_additional_slots(&mut self) -> Vec<Self> {
+        std::mem::take(&mut self.additional)
     }
 
     pub fn vision_geometry(&self) -> VisionGeometry {
@@ -363,6 +460,10 @@ impl Session {
 
     pub fn mapped_experts(&self) -> bool {
         self.mapped_experts
+    }
+
+    pub fn parallel_router_active(&self) -> bool {
+        unsafe { stark_hy4_parallel_router_active(self.inner.as_ptr()) != 0 }
     }
 
     pub fn draft_head_format(&self) -> &'static str {
@@ -379,6 +480,20 @@ impl Session {
 
     pub fn context_sizing(&self) -> ContextSizing {
         self.sizing
+    }
+
+    pub fn index_pool_group_tokens(&self) -> u32 {
+        self.pool_size
+    }
+
+    /// Largest completed IndexPool boundary before the prompt's final token.
+    /// Keeps one token available to produce fresh logits on the next request.
+    pub fn prefill_tail_boundary(
+        &self,
+        prompt_tokens: usize,
+        minimum: usize,
+    ) -> Option<usize> {
+        completed_pool_boundary(prompt_tokens, minimum, self.pool_size)
     }
 
     pub fn max_drafts(&self) -> usize {
@@ -479,6 +594,22 @@ impl Session {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use stark_engine_macros::stark_test;
+
+    use super::completed_pool_boundary;
+
+    #[stark_test]
+    fn completed_pool_boundary_rounds_down_and_leaves_a_prompt_token() {
+        assert_eq!(completed_pool_boundary(16_701, 16_384, 128), Some(16_640));
+        assert_eq!(completed_pool_boundary(16_384, 16_000, 128), Some(16_256));
+        assert_eq!(completed_pool_boundary(4_097, 4_096, 128), None);
+        assert_eq!(completed_pool_boundary(1, 0, 128), None);
+        assert_eq!(completed_pool_boundary(16_701, 16_384, 0), None);
+    }
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         unsafe { stark_hy4_close(self.inner.as_ptr()) }
@@ -504,22 +635,76 @@ mod context_tests {
             draft_cache_bytes_per_token: 16,
             pool_bytes_per_row: 16,
             draft_pool_bytes_per_row: 16,
+            additional_slot_bytes: 0,
         };
         let mut selection = ContextSelection {
             limit: Some(32_768),
+            pool_size: None,
             sizing: None,
+            additional_limit: None,
+            requested_slots: 1,
+            additional_sizing: None,
         };
-        let context = unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast()) };
+        let context = unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast(), ptr::null_mut()) };
         assert_eq!(context, 32_768);
+        assert_eq!(selection.pool_size, Some(memory.pool_size));
         let sizing = selection.sizing.unwrap().unwrap();
         assert_eq!(sizing.limiting_factor, ContextConstraint::UserCap);
         assert_eq!(sizing.user_context_cap, Some(32_768));
         assert_eq!(sizing.backend_bound.unwrap().source, "hy4_metal_buffer_or_i32_index");
         memory.pool_size = 0;
-        assert_eq!(unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast()) }, 0);
+        assert_eq!(unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast(), ptr::null_mut()) }, 0);
         assert_eq!(selection.sizing.unwrap().unwrap_err(), "context_memory_estimate_unavailable");
         memory.engine_context = 1;
-        assert_eq!(unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast()) }, 0);
+        assert_eq!(unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast(), ptr::null_mut()) }, 0);
         assert_eq!(selection.sizing.unwrap().unwrap_err(), "invalid_finite_context_limit");
+    }
+
+    #[stark_test]
+    fn shared_fit_preserves_usable_context_across_the_slot_ladder() {
+        const MIB: u64 = 1024 * 1024;
+        let mut memory = ContextMemory {
+            checkpoint_context: 262_144,
+            engine_context: 131_072,
+            pool_size: 128,
+            draft_slack: 0,
+            budget: 0,
+            cache_bytes_per_token: 1_024,
+            draft_cache_bytes_per_token: 0,
+            pool_bytes_per_row: 16,
+            draft_pool_bytes_per_row: 0,
+            additional_slot_bytes: 16 * MIB,
+        };
+        let mut selection = ContextSelection {
+            limit: None,
+            pool_size: None,
+            sizing: None,
+            additional_limit: Some(49_152),
+            requested_slots: 4,
+            additional_sizing: None,
+        };
+        for (budget, slots, cap) in
+            [(75, 1, 49_152), (110, 2, 49_152), (165, 3, 49_152), (220, 4, 49_152), (300, 4, 49_152), (130, 4, 16_384)]
+        {
+            memory.budget = (budget + 256) * MIB;
+            selection.limit = Some(cap);
+            let mut additional = [0; MAX_ADDITIONAL_STQ_SLOTS];
+            let primary =
+                unsafe { select_context(&memory, ptr::from_mut(&mut selection).cast(), additional.as_mut_ptr()) };
+            assert!(primary >= cap.min(STQ_SHARED_CONTEXT_FLOOR) && primary <= cap);
+            let mut total = memory.estimate(primary).unwrap();
+            for (i, context) in additional.into_iter().enumerate() {
+                if i >= slots - 1 {
+                    assert_eq!(context, 0);
+                    continue;
+                }
+                assert!(context >= cap.min(STQ_SHARED_CONTEXT_FLOOR) && context <= primary);
+                if budget == 300 || cap < STQ_SHARED_CONTEXT_FLOOR {
+                    assert_eq!(context, cap);
+                }
+                total += memory.estimate(context).unwrap() + memory.additional_slot_bytes as usize;
+            }
+            assert!(total <= (budget * MIB) as usize);
+        }
     }
 }

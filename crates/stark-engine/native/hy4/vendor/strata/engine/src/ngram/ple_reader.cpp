@@ -345,11 +345,11 @@ PleReader::~PleReader() {
 }
 
 bool PleReader::open(const std::string& path, uint64_t table_offset, uint64_t n_rows, uint32_t max_inflight,
-                     uint64_t cache_rows, std::string& err, bool io_thread, uint32_t row_bytes) {
+                     uint64_t cache_rows, std::string& err, bool io_thread, uint32_t row_bytes, bool cache_pages) {
     close();
     if (max_inflight == 0 || max_inflight > 1024) { err = "PleReader: max_inflight must be 1..1024"; return false; }
     if (row_bytes == 0 || row_bytes > PAGE) { err = "PleReader: row_bytes must be 1..4096"; return false; }
-    if (!impl_->file.open(path, err)) return false;
+    if (!impl_->file.open(path, err, cache_pages)) return false;
     impl_->row_bytes = row_bytes;
     if (table_offset + n_rows * (uint64_t) row_bytes > impl_->file.size()) {
         err = "PleReader: the table extends past the end of " + path;

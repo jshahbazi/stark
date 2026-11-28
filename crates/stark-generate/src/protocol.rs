@@ -62,6 +62,144 @@ fn protocol_output() -> Result<File, &'static str> {
     Ok(output)
 }
 
+#[cfg(feature = "metal")]
+struct GenerationLane {
+    input: File,
+    output: File,
+    cancellation: crate::cancel::CancelSignal,
+}
+
+#[cfg(feature = "metal")]
+struct GenerationLanes {
+    channels: Vec<GenerationLane>,
+    legacy_hy4: bool,
+}
+
+#[cfg(feature = "metal")]
+impl GenerationLanes {
+    /// The private app host gives each additional lane independent request, reply and cancellation pipes.
+    /// Call before any native code can start threads or acquire inherited descriptors.
+    fn from_environment() -> Result<Self, &'static str> {
+        const ERROR: &str = "invalid_generation_lane_descriptors";
+        let generic = std::env::var_os("STARK_GENERATION_LANE_FDS");
+        let legacy = std::env::var_os("STARK_HY4_LANE_FDS");
+        if generic.is_some() && legacy.is_some() && generic != legacy {
+            return Err(ERROR);
+        }
+        let legacy_hy4 = legacy.is_some();
+        let Some(value) = generic.or(legacy) else {
+            return Ok(Self {
+                channels: Vec::new(),
+                legacy_hy4: false,
+            });
+        };
+        unsafe {
+            std::env::remove_var("STARK_GENERATION_LANE_FDS");
+            std::env::remove_var("STARK_HY4_LANE_FDS");
+        }
+        let descriptors = value
+            .to_str()
+            .ok_or(ERROR)?
+            .split(',')
+            .take(10)
+            .map(|part| part.parse::<i32>().ok().filter(|fd| *fd >= 3).ok_or(ERROR))
+            .collect::<Result<Vec<_>, _>>()?;
+        if descriptors.len() > 9 || !descriptors.len().is_multiple_of(3) {
+            return Err(ERROR);
+        }
+        for name in ["STARK_CANCEL_FD", "STARK_GPU_MEMORY_FD"] {
+            if let Some(fd) = std::env::var(name).ok().and_then(|fd| fd.parse::<i32>().ok())
+                && descriptors.contains(&fd)
+            {
+                return Err(ERROR);
+            }
+        }
+        for (index, &fd) in descriptors.iter().enumerate() {
+            if descriptors[index + 1..].contains(&fd) {
+                return Err(ERROR);
+            }
+            let access = if index % 3 == 1 {
+                libc::O_WRONLY
+            } else {
+                libc::O_RDONLY
+            };
+            let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0
+                || flags & libc::O_ACCMODE != access
+                || unsafe { libc::fstat(fd, &mut stat) } != 0
+                || stat.st_mode & libc::S_IFMT != libc::S_IFIFO
+                || unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+            {
+                return Err(ERROR);
+            }
+        }
+        // All validated descriptors are distinct and were transferred by the launching host.
+        let mut files =
+            descriptors.into_iter().map(|fd| unsafe { File::from_raw_fd(fd) }).collect::<Vec<_>>().into_iter();
+        let mut channels = Vec::new();
+        while let Some(input) = files.next() {
+            let output = files.next().ok_or(ERROR)?;
+            let cancellation = crate::cancel::CancelSignal::new(files.next().ok_or(ERROR)?)?;
+            channels.push(GenerationLane {
+                input,
+                output,
+                cancellation,
+            });
+        }
+        Ok(Self {
+            channels,
+            legacy_hy4,
+        })
+    }
+
+    fn start<B, F>(
+        &mut self,
+        slots: impl IntoIterator<Item = (u32, F)>,
+    ) -> Result<Vec<u32>, &'static str>
+    where
+        B: crate::generation::GenerationBackend,
+        F: FnOnce(crate::cancel::CancelSignal) -> Result<B, &'static str> + Send + 'static,
+    {
+        let mut capacities = Vec::new();
+        for (
+            (capacity, make_backend),
+            GenerationLane {
+                input,
+                output,
+                cancellation,
+            },
+        ) in slots.into_iter().zip(std::mem::take(&mut self.channels))
+        {
+            let (initialized, startup) = std::sync::mpsc::sync_channel(0);
+            std::thread::Builder::new()
+                .name(format!("stark-generation-lane-{}", capacities.len() + 1))
+                .spawn(move || {
+                    let Ok(mut worker) = make_backend(cancellation).and_then(|backend| {
+                        crate::generation::GenerationWorker::new_with_options(backend, None, false)
+                    }) else {
+                        return;
+                    };
+                    if initialized.send(()).is_ok() {
+                        let _ = crate::generation::run_lines(
+                            &mut worker,
+                            &mut io::BufReader::new(input),
+                            &mut io::BufWriter::new(output),
+                        );
+                    }
+                })
+                .map_err(|_| "generation_lane_start_failed")?;
+            // The launcher assigns pipes by index. Stop at the first
+            // unavailable lane and advertise only the initialized prefix.
+            if startup.recv().is_err() {
+                break;
+            }
+            capacities.push(capacity);
+        }
+        Ok(capacities)
+    }
+}
+
 pub fn main() {
     std::panic::set_hook(Box::new(|_| {}));
     let Ok(output) = protocol_output() else {
@@ -90,6 +228,8 @@ pub fn main() {
         let _request_budget = stark_resource_budget::Budget::from_environment()?;
         #[cfg(feature = "metal")]
         {
+            use crate::generation::GenerationBackend;
+            let mut lanes = GenerationLanes::from_environment()?;
             let cancellation = crate::cancel::CancelSignal::from_environment()?;
             // SAFETY: startup is single-threaded here, and the inherited pipe
             // write FD is transferred exclusively to the sampler.
@@ -100,8 +240,16 @@ pub fn main() {
                 if validation_gemma_text_only {
                     return Err("validation_family_not_supported");
                 }
-                let backend = crate::hy4::Hy4Backend::load(&path, cancellation)?;
+                let mut backend = crate::hy4::Hy4Backend::load(&path, cancellation, lanes.channels.len() + 1)?;
+                let capacities =
+                    lanes.start(backend.take_additional_slots().into_iter().map(|(mut backend, capacity)| {
+                        (capacity, move |cancellation| {
+                            backend.set_cancellation(cancellation);
+                            Ok(backend)
+                        })
+                    }))?;
                 let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
+                worker.advertise_lanes(capacities, lanes.legacy_hy4);
                 return crate::generation::run_lines(
                     &mut worker,
                     &mut crate::prefix_cache::StandardInput::reader(),
@@ -134,26 +282,40 @@ pub fn main() {
                 if validation_gemma_text_only {
                     return Err("validation_family_not_supported");
                 }
-                let backend = if media.is_some() {
+                let mut backend = if media.is_some() {
                     crate::hybrid::HybridBackend::load_vision(&path, cancellation)?
                 } else {
                     crate::hybrid::HybridBackend::load(&path, cancellation)?
                 };
+                let capacities =
+                    lanes.start(backend.take_additional_slots(lanes.channels.len()).into_iter().map(
+                        |(lane, capacity)| (capacity, move |cancellation| lane.into_backend(Some(cancellation))),
+                    ))?;
                 let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
+                worker.advertise_lanes(capacities, lanes.legacy_hy4);
                 return crate::generation::run_lines(
                     &mut worker,
                     &mut crate::prefix_cache::StandardInput::reader(),
                     &mut output,
                 );
             }
-            let backend = if validation_gemma_text_only {
+            let mut backend = if validation_gemma_text_only {
                 crate::native::NativeBackend::load_gemma4_text_validation(&path, cancellation)?
             } else if media.is_some() {
                 crate::native::NativeBackend::load_vision(&path, cancellation)?
             } else {
                 crate::native::NativeBackend::load(&path, cancellation)?
             };
+            let capacities =
+                lanes.start(backend.take_additional_slots(lanes.channels.len()).into_iter().map(|mut backend| {
+                    let capacity = backend.context_capacity().limit().unwrap_or(u32::MAX);
+                    (capacity, move |cancellation| {
+                        backend.set_cancellation(cancellation);
+                        Ok(backend)
+                    })
+                }))?;
             let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
+            worker.advertise_lanes(capacities, lanes.legacy_hy4);
             crate::generation::run_lines(&mut worker, &mut crate::prefix_cache::StandardInput::reader(), &mut output)
         }
         #[cfg(not(feature = "metal"))]

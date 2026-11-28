@@ -7,12 +7,17 @@
 #include "forward.h"
 #include "model.h"
 #include "mtp.h"
+#include "stq_dfly.h"
+#include "stq_engram.h"
+#include "stq_geometry.h"
 
 #include <algorithm>
 #include <array>
+#include <condition_variable>
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -22,6 +27,7 @@ namespace {
 constexpr int kVocab = 120832;
 constexpr int kRecommendedDrafts = 2;
 constexpr int kMaxDrafts = 7;
+constexpr size_t kMaxAdditionalStqSlots = 3;
 static_assert(kMaxDrafts + 1 <= Forward::kMaxWindow && kMaxDrafts < Mtp::kCacheSlack);
 constexpr uint64_t kGiB = 1ull << 30;
 
@@ -64,18 +70,42 @@ StarkHy4ContextMemory context_memory(const Geometry& g, const mtl::Context& meta
         draft_hidden + kv + index,
         pooled + sizeof(float) * (chunk + Forward::kMaxWindow),
         pooled + sizeof(float),
+        0,
     };
 }
 }
 
 // Members are destroyed in reverse dependency order. Metal submissions complete
 // before the calls that encode them return.
-struct StarkHy4 {
+struct LoadedHy4 {
     mtl::Context metal;
     Model model;
+    stark::hy4::stq::Dfly2 dfly;
+    StarkHy4Vision vision;
+    std::mutex gpu;
+    std::condition_variable phase_ready;
+    uint64_t issued_phase = 0;
+    uint64_t serving_phase = 0;
+    bool shared_slots = false;
+
+    ~LoadedHy4() {
+        metal.stop_keepalive();
+        if (model.stq) metal.end_expert_residency();
+    }
+};
+
+struct StarkHy4 {
+    explicit StarkHy4(std::shared_ptr<LoadedHy4> loaded = std::make_shared<LoadedHy4>())
+        : loaded(std::move(loaded)), metal(this->loaded->metal), model(this->loaded->model),
+          dfly(this->loaded->dfly), vision(this->loaded->vision) {}
+
+    std::shared_ptr<LoadedHy4> loaded;
+    mtl::Context& metal;
+    Model& model;
+    stark::hy4::stq::Dfly2& dfly;
+    StarkHy4Vision& vision;
     Forward forward;
     Mtp mtp;
-    StarkHy4Vision vision;
     std::unique_ptr<StarkHy4ImagePrompt> image;
     std::vector<int32_t> tokens;
     int capacity = 0;
@@ -83,20 +113,58 @@ struct StarkHy4 {
     int position = 0;
     int drafts = 0;
     int max_drafts = 0;
+    bool additional = false;
     StarkHy4Stats start_stats{};
     mtl::Context::SegTiming decode_start{};
+    mtl::Context::SegTiming slot_timing{};
     double decode_engram_start_ms = 0;
     uint64_t request_start_invalid_spans = 0;
-    ~StarkHy4() { metal.stop_keepalive(); }
+
+    const mtl::Context::SegTiming& timing() const {
+        return loaded->shared_slots ? slot_timing : metal.seg_timing();
+    }
 };
+
+namespace {
+// The STQ queue, DFly2 scratch and image tower execute one phase at a time.
+// Keep the queue's cumulative diagnostic counters local to each slot.
+class SlotPhase {
+public:
+    explicit SlotPhase(StarkHy4& slot) : slot_(slot) {
+        if (!slot.loaded->shared_slots) return;
+        auto& loaded = *slot.loaded;
+        std::unique_lock lock(loaded.gpu);
+        const uint64_t ticket = loaded.issued_phase++;
+        loaded.phase_ready.wait(lock, [&] { return loaded.serving_phase == ticket; });
+        slot_.metal.restore_seg_timing(slot_.slot_timing);
+    }
+
+    ~SlotPhase() {
+        auto& loaded = *slot_.loaded;
+        if (!loaded.shared_slots) return;
+        slot_.slot_timing = slot_.metal.seg_timing();
+        {
+            std::lock_guard lock(loaded.gpu);
+            ++loaded.serving_phase;
+        }
+        loaded.phase_ready.notify_all();
+    }
+
+    SlotPhase(const SlotPhase&) = delete;
+    SlotPhase& operator=(const SlotPhase&) = delete;
+
+private:
+    StarkHy4& slot_;
+};
+}
 
 extern "C" int stark_hy4_open(const char* model, const char* projector, const char* pack, int chunk,
                                int storage, int grouped, int gpu_plan, int profile_prefill, uint64_t arena_bytes_requested,
                                int demand_retention, int routed_half, int dense_packed, int resident_token_embeddings,
-                               int tensor_mla, int compensated_sparse_mla, int max_drafts, int routed_fragments,
+                               int tensor_mla, int compensated_sparse_mla, int parallel_router, int max_drafts, int routed_fragments,
                                int dense_device_views,
                                int dense_ffn_device_views, int resident_draft_experts, int draft_head_q5,
-                               uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
+                               uint32_t (*select_context)(const StarkHy4ContextMemory*, void*, uint32_t*), void* sizing,
                                StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
                                uint64_t* arena_bytes, int* actual_draft_head_q5) noexcept {
     *output = nullptr;
@@ -145,7 +213,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         }
         if (context_room <= 0) return arena_bytes_requested != 0 ? 9 : require_mapped ? 8 : 10;
         const auto memory = context_memory(geo, s.metal, chunk, static_cast<uint64_t>(context_room));
-        const uint32_t selected = select_context(&memory, sizing);
+        const uint32_t selected = select_context(&memory, sizing, nullptr);
         if (selected < 2 || selected > memory.engine_context || selected > memory.checkpoint_context) return 10;
         const int context = static_cast<int>(selected);
         s.model.geo.max_context = context;
@@ -162,6 +230,7 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
         prefill.dense_ffn_device_views = dense_ffn_device_views != 0;
         prefill.tensor_mla = tensor_mla != 0;
         prefill.compensated_sparse_mla = compensated_sparse_mla != 0;
+        prefill.parallel_router = parallel_router != 0;
         if (!s.forward.open(s.model, s.metal, pack, prefill).empty()) return 4;
         const bool resident_nextn = resident_draft_experts != 0;
         if (!s.mtp.open(s.model, s.metal, s.forward.library(), 1024, pack, resident_nextn,
@@ -216,11 +285,145 @@ extern "C" int stark_hy4_open(const char* model, const char* projector, const ch
 
 extern "C" void stark_hy4_close(StarkHy4* session) noexcept { delete session; }
 
+extern "C" int stark_hy4_open_stq(
+    const stark::hy4::stq::WeightSource* weights, size_t weight_count,
+    const stark::hy4::stq::ProjectionSource* experts, size_t expert_count,
+    const stark::hy4::stq::TensorSlice* tables, const int32_t* token_map, size_t map_len,
+    const stark::hy4::stq::TensorSlice* vision_weights, size_t vision_count,
+    int chunk, int profile, int round_bf16, int pair1_decode, int resident, uint32_t tuning,
+    uint32_t (*select_context)(const StarkHy4ContextMemory*, void*, uint32_t*), void* sizing,
+    StarkHy4** output, StarkHy4** additional_outputs, StarkHy4VisionGeometry* vision,
+    char* detail, size_t detail_len) noexcept {
+    *output = nullptr;
+    std::fill_n(additional_outputs, kMaxAdditionalStqSlots, nullptr);
+    auto fail = [&](const std::string& error) {
+        if (detail_len != 0) {
+            const size_t n = std::min(error.size(), detail_len - 1);
+            std::memcpy(detail, error.data(), n);
+            detail[n] = '\0';
+        }
+        return 1;
+    };
+    try {
+        using namespace stark::hy4::stq;
+        if (chunk != 1024 && chunk != 4096) return fail("unsupported STQ prefill chunk");
+        auto session = std::make_unique<StarkHy4>();
+        auto& s = *session;
+        if (!s.metal.supports_metal4()) return fail("STQ requires Metal 4");
+        s.metal.lock_safe_math();
+        s.metal.stop_keepalive();
+        if (auto error = make_geometry(0, s.model.geo); !error.empty()) return fail(error);
+        if (auto error = s.vision.open_stq(s.metal, {vision_weights, vision_count}); !error.empty())
+            return fail(error);
+        // Reserve the full packed weight set separately from anonymous scratch
+        // and context. Engram tables use positional reads outside this budget.
+        double packed_bytes = 0;
+        for (const auto& p : std::span(experts, expert_count)) packed_bytes += p.trellis.size + p.suh.size + p.svh.size;
+        for (const auto& w : std::span(weights, weight_count))
+            if (w.use == WeightUse::linear)
+                packed_bytes += w.projection.trellis.size + w.projection.suh.size + w.projection.svh.size;
+        const double phys = strata::metal_engine::sys_phys();
+        const double available = strata::metal_engine::sys_avail(phys);
+        const double current = strata::metal_engine::proc_mem().footprint;
+        const double matrices = 2.0 * kGiB;
+        const double scratch = 2.5 * kGiB * (chunk / 1024.0);
+        const double image = s.metal.allocated() + s.vision.reserved_bytes();
+        const double room = std::min({available, phys - current - 16.0 * kGiB - packed_bytes,
+                                     s.metal.recommended_working_set() - packed_bytes - 2.0 * kGiB})
+                            - matrices - scratch - image;
+        if (room <= 0) return fail("insufficient live memory for the STQ pack and context");
+        auto memory = context_memory(s.model.geo, s.metal, chunk, static_cast<uint64_t>(room));
+        memory.draft_slack = 0;
+        memory.draft_cache_bytes_per_token = 0;
+        memory.draft_pool_bytes_per_row = 0;
+        // The phase queue shares the large forward scratch. Each extra slot
+        // still owns four Engram readers and host window buffers, private
+        // Metal readout and draft state, and the context priced by the callback.
+        memory.additional_slot_bytes = kGiB + (kGiB * chunk / 1024) / 8;
+        std::array<uint32_t, kMaxAdditionalStqSlots> additional_contexts{};
+        const uint32_t context = select_context(&memory, sizing, additional_contexts.data());
+        if (context < 2 || context > memory.engine_context || context > memory.checkpoint_context)
+            return fail("cannot fit STQ context");
+        s.model.geo.max_context = int32_t(context);
+        if (auto error = load_trunk(s.model, s.metal, {weights, weight_count}, {experts, expert_count},
+                                    round_bf16 != 0, pair1_decode != 0, (tuning & 8u) != 0, (tuning & 16u) != 0,
+                                    (tuning & 128u) != 0, (tuning & 256u) != 0, (tuning & 1024u) != 0,
+                                    (tuning & 2048u) != 0, (tuning & 16384u) != 0);
+            !error.empty())
+            return fail(error);
+        if (auto error = bind_engram(s.model, {tables, 4}, {token_map, map_len}); !error.empty())
+            return fail(error);
+        Prefill prefill;
+        prefill.chunk = chunk;
+        prefill.profile_stages = profile != 0;
+        prefill.tensor_mla = (tuning & 1u) != 0;
+        prefill.mapped_gpu_plan = (tuning & 2u) != 0;
+        prefill.stq_register_mla = (tuning & 4u) != 0;
+        prefill.stq_verify_register_mla = (tuning & 32u) != 0;
+        prefill.stq_cache_engram_pages = (tuning & 64u) != 0;
+        prefill.stq_draft_register_mla = (tuning & 512u) != 0;
+        prefill.stq_fused_attn_hc = (tuning & 4096u) != 0;
+        if (auto error = s.forward.open(s.model, s.metal, "", prefill, int(context)); !error.empty())
+            return fail(error);
+        if (auto error = s.vision.build(s.metal, s.forward.library()); !error.empty()) return fail(error);
+        if (s.model.stq->has_dfly) {
+            if (auto error = s.dfly.open(s.model, s.metal, s.forward.library(), prefill.stq_draft_register_mla,
+                                         (tuning & 8192u) != 0);
+                !error.empty()) return fail(error);
+            s.max_drafts = int(kDflyMaxDrafts);
+        }
+        s.capacity = int(context);
+        s.tokens.reserve(context);
+        std::array<std::unique_ptr<StarkHy4>, kMaxAdditionalStqSlots> additional;
+        size_t admitted = 0;
+        for (const uint32_t capacity : additional_contexts) {
+            if (capacity < 2 || capacity > context) break;
+            try {
+                auto slot = std::make_unique<StarkHy4>(s.loaded);
+                if (auto error = slot->forward.open(s.model, s.metal, "", prefill, int(capacity), &s.forward);
+                    !error.empty()) break;
+                slot->capacity = int(capacity);
+                slot->max_drafts = s.max_drafts;
+                slot->additional = true;
+                slot->tokens.reserve(capacity);
+                additional[admitted++] = std::move(slot);
+            } catch (...) {
+                break;
+            }
+        }
+        while (resident && !s.model.stq->begin_residency(s.metal)) {
+            if (admitted) {
+                additional[--admitted].reset();
+                continue;
+            }
+            return fail("cannot make the STQ mapped banks resident");
+        }
+        s.loaded->shared_slots = admitted > 0;
+        const auto& vg = s.vision.geometry();
+        *vision = {static_cast<uint32_t>(vg.image_token), static_cast<uint32_t>(vg.patch),
+                   static_cast<uint32_t>(vg.merge), static_cast<uint64_t>(vg.min_pixels),
+                   static_cast<uint64_t>(vg.max_pixels)};
+        for (size_t i = 0; i < admitted; ++i) {
+            additional[i]->forward.commit_stq_slot();
+            additional_outputs[i] = additional[i].release();
+        }
+        *output = session.release();
+        return 0;
+    } catch (...) {
+        return fail("STQ native model initialization failed");
+    }
+}
+
+extern "C" int stark_hy4_parallel_router_active(const StarkHy4* session) noexcept {
+    return session->forward.parallel_router_active();
+}
+
 extern "C" void stark_hy4_clear(StarkHy4* session) noexcept {
     auto& s = *session;
     s.image.reset();
     s.forward.reset();
-    s.mtp.reset();
+    if (s.model.stq) s.mtp.stats() = {};
+    else s.mtp.reset();
     s.tokens.clear();
     s.position = 0;
     s.context = 0;
@@ -231,7 +434,7 @@ extern "C" int stark_hy4_retain_prefix(StarkHy4* session, int position) noexcept
     auto& s = *session;
     try {
         if (s.image || position < 1 || position > s.position || !s.forward.rewind(position).empty()) return 1;
-        s.mtp.truncate(position);
+        if (!s.model.stq) s.mtp.truncate(position);
         s.tokens.resize(static_cast<size_t>(position));
         s.position = position;
         return 0;
@@ -244,8 +447,9 @@ extern "C" int stark_hy4_begin(StarkHy4* session, const uint32_t* tokens, int co
                                 int drafts, const StarkHy4ImageInput* image) noexcept {
     auto& s = *session;
     try {
+        SlotPhase phase(s);
         if (context > s.capacity || count < 1 || count >= context || reuse < 0 || reuse >= count ||
-            drafts < 0 || drafts > s.max_drafts || (image && (reuse || drafts))) return 1;
+            drafts < 0 || drafts > s.max_drafts || (image && (s.additional || reuse || drafts))) return 1;
         const auto valid = [](uint32_t token) { return token < kVocab; };
         if (!std::all_of(tokens, tokens + count, valid)) return 1;
         if (reuse == 0) {
@@ -255,13 +459,14 @@ extern "C" int stark_hy4_begin(StarkHy4* session, const uint32_t* tokens, int co
                 static_cast<size_t>(reuse) > s.tokens.size() ||
                 !std::equal(tokens, tokens + reuse, s.tokens.begin()) ||
                 !s.forward.rewind(reuse).empty()) return 1;
-            s.mtp.truncate(reuse);
+            if (!s.model.stq) s.mtp.truncate(reuse);
             s.mtp.stats() = {};
         }
         s.tokens.assign(tokens, tokens + count);
         s.position = reuse;
         s.context = context;
         s.drafts = drafts;
+        if (s.model.stq) s.forward.capture_dfly(drafts > 0);
         s.decode_start = s.metal.seg_timing();
         s.request_start_invalid_spans = s.decode_start.invalid_gpu_spans;
         s.decode_engram_start_ms = s.forward.timing().engram_wait_ms;
@@ -281,10 +486,11 @@ extern "C" int stark_hy4_begin(StarkHy4* session, const uint32_t* tokens, int co
 extern "C" int stark_hy4_prefill(StarkHy4* session, int rows) noexcept {
     auto& s = *session;
     try {
+        SlotPhase phase(s);
         if (rows < 1 || rows > s.forward.prefill_chunk() ||
             s.position + rows > static_cast<int>(s.tokens.size())) return 1;
         Forward::PrefillSink sink;
-        if (s.drafts) {
+        if (s.drafts && !s.model.stq) {
             sink.hidden = [&](int pos, int n, const float* h) { s.mtp.set_hidden(pos + 1, n, h); };
         }
         if (!s.forward.prefill(s.tokens.data(), s.position, rows, sink).empty()) return 1;
@@ -310,6 +516,7 @@ extern "C" const float* stark_hy4_logits(const StarkHy4* session) noexcept {
 extern "C" int stark_hy4_append(StarkHy4* session, uint32_t token) noexcept {
     auto& s = *session;
     try {
+        SlotPhase phase(s);
         if (token >= kVocab || s.position >= s.context || s.position != static_cast<int>(s.tokens.size())) return 1;
         s.tokens.push_back(static_cast<int32_t>(token));
         if (s.drafts == 0) {
@@ -328,6 +535,7 @@ extern "C" int stark_hy4_append(StarkHy4* session, uint32_t token) noexcept {
 extern "C" int stark_hy4_verify(StarkHy4* session, int count, const uint32_t* lookup, uint32_t* output) noexcept {
     auto& s = *session;
     try {
+        SlotPhase phase(s);
         const int start = s.position;
         if (!s.drafts || start + 1 != static_cast<int>(s.tokens.size()) ||
             count < 1 || count > s.drafts + 1 || start + count >= s.context) return -1;
@@ -341,6 +549,14 @@ extern "C" int stark_hy4_verify(StarkHy4* session, int count, const uint32_t* lo
             s.tokens.insert(s.tokens.end(), proposals.begin(), proposals.begin() + k);
             // The draft cache can lag here. The target history below contains
             // every committed hidden row that NextN needs to catch up later.
+        } else if (s.model.stq) {
+            if (k > 0) {
+                stark::hy4::stq::DflyTargetView target;
+                if (!s.forward.dfly_target(start, target) ||
+                    !s.dfly.propose(target, uint32_t(s.tokens.back()), {proposals.data(), size_t(k)}).empty())
+                    return -1;
+                s.tokens.insert(s.tokens.end(), proposals.begin(), proposals.begin() + k);
+            }
         } else {
             for (int i = 0; i < k; ++i) {
                 const int row = start + i;
@@ -349,7 +565,7 @@ extern "C" int stark_hy4_verify(StarkHy4* session, int count, const uint32_t* lo
                 s.tokens.push_back(proposals[i]);
             }
         }
-        s.mtp.truncate(start + 1);
+        if (!s.model.stq) s.mtp.truncate(start + 1);
         stats.draft_ms += (mtl::now_s() - t) * 1e3;
         t = mtl::now_s();
         if (!s.forward.window(s.tokens.data(), start, count).empty()) return -1;
@@ -357,7 +573,7 @@ extern "C" int stark_hy4_verify(StarkHy4* session, int count, const uint32_t* lo
         const int32_t* actual = s.forward.argmax();
         if (!std::all_of(actual, actual + count, [](int32_t t) { return t >= 0 && t < kVocab; })) return -1;
         const int accepted = accept_prefix(proposals.data(), actual, k);
-        s.mtp.set_hidden(start + 1, accepted + 1, s.forward.result_norm());
+        if (!s.model.stq) s.mtp.set_hidden(start + 1, accepted + 1, s.forward.result_norm());
         s.tokens.resize(static_cast<size_t>(start + 1));
         for (int i = 0; i <= accepted; ++i) {
             output[i] = static_cast<uint32_t>(actual[i]);
@@ -377,9 +593,9 @@ extern "C" StarkHy4Stats stark_hy4_stats(StarkHy4* session) noexcept {
     const auto& draft = session->mtp.stats();
     const auto& graph = session->forward.timing();
     const auto& base = session->start_stats;
-    const auto& schedule = session->metal.seg_timing();
+    const auto& schedule = session->timing();
     const auto& schedule_base = session->decode_start;
-    return {
+    StarkHy4Stats stats{
         draft.offered, draft.accepted, draft.rounds,
         draft.draft_ms / 1e3, draft.verify_ms / 1e3, draft.catchup_ms / 1e3,
         graph.pf_gpu_ms / 1e3 - base.prefill_gpu_span_seconds,
@@ -389,7 +605,7 @@ extern "C" StarkHy4Stats stark_hy4_stats(StarkHy4* session) noexcept {
         graph.gpu_ms / 1e3 - base.decode_gpu_span_seconds,
         graph.host_cut_ms / 1e3 - base.decode_host_cut_seconds,
         graph.pf_bytes_read - base.prefill_expert_bytes_read,
-        session->model.stream.decode_read_bytes() - base.decode_expert_bytes_read,
+        session->model.stq ? 0 : session->model.stream.decode_read_bytes() - base.decode_expert_bytes_read,
         graph.pf_attention_ms / 1e3 - base.prefill_attention_seconds,
         graph.pf_dense_ms / 1e3 - base.prefill_dense_seconds,
         graph.pf_moe_route_ms / 1e3 - base.prefill_moe_route_seconds,
@@ -411,5 +627,16 @@ extern "C" StarkHy4Stats stark_hy4_stats(StarkHy4* session) noexcept {
         graph.pf_attention_index_ms / 1e3 - base.prefill_attention_index_seconds,
         graph.pf_attention_mla_ms / 1e3 - base.prefill_attention_mla_seconds,
         graph.pf_attention_misc_ms / 1e3 - base.prefill_attention_misc_seconds,
+        graph.verify_mla_ms / 1e3 - base.verify_mla_seconds,
+        graph.verify_index_ms / 1e3 - base.verify_index_seconds,
+        graph.verify_dense_ms / 1e3 - base.verify_dense_seconds,
+        graph.verify_router_ms / 1e3 - base.verify_router_seconds,
+        graph.verify_expert_ms / 1e3 - base.verify_expert_seconds,
+        graph.verify_other_ms / 1e3 - base.verify_other_seconds,
+        graph.verify_profiled_graphs - base.verify_profiled_graphs,
+        {},
     };
+    for (size_t i = 0; i < graph.pf_stq_projection_ms.size(); ++i)
+        stats.prefill_stq_projection_seconds[i] = graph.pf_stq_projection_ms[i] / 1e3 - base.prefill_stq_projection_seconds[i];
+    return stats;
 }

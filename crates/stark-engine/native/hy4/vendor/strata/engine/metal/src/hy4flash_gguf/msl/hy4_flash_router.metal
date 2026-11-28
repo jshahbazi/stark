@@ -106,3 +106,106 @@ kernel void hy4_flash_router(device const float* logits [[buffer(0)]], device co
         }
     }
 }
+
+// Copyright (c) 2026 Theinruj Toranavikrai and David Dalcu. MIT; see
+// repository-root LICENSE.sushi-reference.
+// Experimental 512-expert / top-16 path, adapted from Sushi's Hy4 route
+// selection at beamivalice/sushi commit d9e2f9f741799ec367ab00a81d219b5d6b0b37c6
+// (src/hy4flash/hy4_route.zig). Each simdgroup sorts 32 total-order keys,
+// then three SIMD merge levels reduce 16 local lists to the global top 16.
+// Probability evaluation, selection-order sum, normalization and scaling keep
+// the incumbent order. Non-NaN scores outrank NaNs; if fewer than topk scores
+// are orderable, the whole row uses the incumbent invalid-row result.
+static inline ulong hy4_flash_route_sg_shuffle(ulong v, ushort l) {
+    return (ulong(metal::simd_shuffle(uint(v >> 32), l)) << 32) | ulong(metal::simd_shuffle(uint(v), l));
+}
+static inline ulong hy4_flash_route_sg_xor(ulong v, ushort j) {
+    return (ulong(metal::simd_shuffle_xor(uint(v >> 32), j)) << 32) |
+           ulong(metal::simd_shuffle_xor(uint(v), j));
+}
+static inline ulong hy4_flash_route_sort32(ulong key, uint lane) {
+    for (uint k = 2; k <= 32; k <<= 1) {
+        for (uint j = k >> 1; j > 0; j >>= 1) {
+            const ulong other = hy4_flash_route_sg_xor(key, ushort(j));
+            key = (((lane & j) == 0) == ((lane & k) == 0)) ? metal::min(key, other) : metal::max(key, other);
+        }
+    }
+    return key;
+}
+static inline ulong hy4_flash_route_merge32(ulong key, uint lane) {
+    for (uint j = 16; j > 0; j >>= 1) {
+        const ulong other = hy4_flash_route_sg_xor(key, ushort(j));
+        key = ((lane & j) == 0) ? metal::min(key, other) : metal::max(key, other);
+    }
+    return key;
+}
+static inline ulong hy4_flash_route_best16of4(threadgroup const ulong* lists, uint lane) {
+    const ulong a = hy4_flash_route_merge32(lane < 16 ? lists[lane] : lists[16 + (31 - lane)], lane);
+    const ulong b = hy4_flash_route_merge32(lane < 16 ? lists[32 + lane] : lists[48 + (31 - lane)], lane);
+    const ulong b_rev = hy4_flash_route_sg_shuffle(b, ushort(31 - lane));
+    return hy4_flash_route_merge32(lane < 16 ? a : b_rev, lane);
+}
+
+kernel void hy4_flash_router_parallel_512x16(
+    device const float* logits [[buffer(0)]], device const float* bias [[buffer(1)]],
+    device int* ids [[buffer(2)]], device float* w [[buffer(3)]],
+    constant Hy4FlashRouterArgs& a [[buffer(4)]], uint3 tgp [[threadgroup_position_in_grid]],
+    ushort tid [[thread_index_in_threadgroup]], ushort sg [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]) {
+    threadgroup float tp[512];
+    threadgroup ulong cand[256];
+    threadgroup ulong cand2[64];
+    device const float* lr = logits + (ulong)tgp.x * a.l_stride;
+    for (uint e = tid; e < 512; e += 512) tp[e] = hy4_flash_sigmoid(lr[e]);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint e = uint(sg) * 32u + uint(lane);
+    const float score = tp[e] + bias[e];
+    ulong key = ~0ul;
+    if (!metal::isnan(score) && score != -INFINITY) {
+        uint bits = as_type<uint>(score == 0.0f ? 0.0f : score);
+        const uint ascending = (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+        key = (ulong(~ascending) << 32) | ulong(e);
+    } else {
+        // NaNs and -infinity follow selectable values; the incumbent's strict
+        // rank comparison never chooses either when its initial best is -inf.
+        key = (0xFFFFFFFF00000000ul | ulong(e));
+    }
+    key = hy4_flash_route_sort32(key, uint(lane));
+    if (lane < 16) cand[uint(sg) * 16u + uint(lane)] = key;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sg < 4) {
+        const ulong best = hy4_flash_route_best16of4(cand + uint(sg) * 64u, uint(lane));
+        if (lane < 16) cand2[uint(sg) * 16u + uint(lane)] = best;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg != 0) return;
+
+    const ulong best = hy4_flash_route_best16of4(cand2, uint(lane));
+    // Invalid keys sort after selectable values. Every lane executes every
+    // shuffle; lane zero alone reduces probabilities in the incumbent order.
+    bool invalid = false;
+    float sum = 0.0f;
+    for (ushort r = 0; r < 16; ++r) {
+        const ulong ranked = hy4_flash_route_sg_shuffle(best, r);
+        invalid = invalid || uint(ranked >> 32) == 0xFFFFFFFFu;
+        sum += tp[uint(ranked)];
+    }
+    device int* ir = ids + (ulong)tgp.x * a.id_stride;
+    device float* wr = w + (ulong)tgp.x * a.w_stride;
+    if (invalid) {
+        if (lane == 0) {
+            for (uint j = 0; j < 16; ++j) { ir[j] = -1; wr[j] = 0.0f; }
+        }
+        return;
+    }
+    sum = max(sum, a.floor);
+    for (ushort r = 0; r < 16; ++r) {
+        const uint expert = uint(hy4_flash_route_sg_shuffle(best, r));
+        if (lane == r) {
+            ir[r] = int(expert);
+            wr[r] = tp[expert] / sum * a.w_scale;
+        }
+    }
+}

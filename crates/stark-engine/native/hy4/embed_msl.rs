@@ -19,6 +19,18 @@ pub fn generate(
             paths.push(path);
         }
     }
+    paths.extend(
+        [
+            "pair1_k4_grouped.metal",
+            "pair1_k4_decode.metal",
+            "pair1_k4_io.metal",
+            "spec1_dense.metal",
+            "stq_attn_hc.metal",
+            "stq_mla_register.metal",
+            "stq_embedding.metal",
+        ]
+        .map(|name| native.join("stq_metal").join(name)),
+    );
     paths.sort();
 
     let mut header = File::create(out.join("stark_hy4_msl.h"))?;

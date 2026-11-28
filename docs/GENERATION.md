@@ -34,10 +34,10 @@ When a backend has no declared finite context maximum, the CLI tokenizes the con
 | `--context-tokens N` | model maximum, or automatic memory planning when undeclared | Upper context budget for prompt plus reply |
 | `--max-new-tokens N` | remaining context or memory-planned execution allowance | Explicit reply budget when supplied |
 | `--thinking` | off | Enable reasoning where supported; GLM uses Max effort when on and Low when off |
-| `--mtp`, `--no-mtp` | off | Enable or disable exact MTP for this terminal session; enabling uses the loaded model's recommended draft count |
+| `--mtp`, `--no-mtp` | model default | Enable or disable exact MTP for this terminal session. Enabling uses the loaded model's recommended draft count. |
 | `--timeout SECONDS` | 300 | Startup or reply inactivity limit; validated generation activity renews image transactions |
 
-Generation is greedy. By default, the client tokenizes each rendered prompt and uses the remaining finite context for output, stopping on EOS or another termination condition. An explicit reply budget that does not fit beside the rendered prompt is refused without changing the history; use `/reset` or a larger `--context-tokens`. The menu bar app exposes generation limits, thinking and a supported-model MTP toggle through **Advanced Options** ([menu bar guide](../apps/menu-bar/README.md#models-and-requests)). The app uses model-specific MTP defaults and remembers an explicit choice per model; the terminal session defaults off.
+Generation is greedy. By default, the client tokenizes each rendered prompt and uses the remaining finite context for output, stopping on EOS or another termination condition. An explicit reply budget that does not fit beside the rendered prompt is refused without changing the history. Use `/reset` or a larger `--context-tokens`. The menu bar app exposes generation limits, thinking and a supported-model MTP toggle through **Advanced Options**. The app uses model-specific MTP defaults and remembers an explicit choice per model. [Menu bar guide](../apps/menu-bar/README.md#models-and-requests)
 
 Terminal chat consumes worker streaming frames internally, including prefill
 progress, while displaying the completed reply. `--timeout` limits inactivity
@@ -48,7 +48,32 @@ finishes before cancellation resets the request and clears its prefix state.
 
 With `--image`, the CLI reads one regular local file with a 4 MiB limit and accepts PNG or JPEG signatures. The first user turn contains an image placeholder followed by its text. Later turns keep that placeholder in the conversation and resubmit the same owned image bytes for each fresh request; `/reset` clears the conversation and attaches the image to the next first turn. The image stays in process memory between turns. Each request uses the [private staging and transaction lifecycle](#prepared-image-operations). A worker without passing image evidence and an invalid image produce fixed, path-free errors. See the [CLI implementation](../tools/converter/stark_convert/chat.py) and [private image staging](../tools/converter/stark_convert/media.py).
 
-## AngelSlim Hy4 Flash Q3_K
+## Hy4-flash Sushi STQ 4bpw
+
+In a Hy4-enabled desktop build, choose **Manage Models → Model Catalog →
+Hy4-flash → Hy4-flash Sushi STQ 4bpw**. Stark downloads the pinned source,
+verifies the original files and runs it on its own Metal worker. The source
+includes the BF16 vision tower and DFly2 draft model. It requires Metal 4
+and enough live unified memory for the loaded graph. Allow at least 199 GiB
+of free disk space for a fresh install.
+
+The default uses prepared mapped residency, F16 KV, 4,096-row prefill,
+the tuned dense and routed projections, fused attention-to-FFN work and
+five DFly2 drafts for greedy text. The model's MTP toggle remains available.
+Image turns run with zero drafts and invalidate the preceding text prefix.
+
+The worker fits a maximum context at load and reports it in `context_sizing`.
+Each request can choose a smaller window. The planner clamps the request to
+the fitted limit and prefix reuse is scoped to the selected window.
+`STARK_HY4_CONTEXT_LIMIT` is an optional load-time ceiling.
+Desktop requests up to four shared-weight text slots. The loader fits the
+admitted slots and their common API ceiling from live headroom. The primary
+keeps its own separately fitted capacity for Playground and exclusive image
+work. Set `STARK_GENERATION_SLOTS=1` to use the serial automatic fit.
+[Catalog and defaults](model-experiments/2026-11-27-hy4-stq-catalog-defaults.md) ·
+[Four-slot qualification](model-experiments/2026-11-27-hy4-stq-four-slots.md)
+
+## AngelSlim Hy4 Flash Q3_K local preparation
 
 On Apple Silicon, the `hy4` feature runs the original Q3_K split GGUF and BF16
 projector in the generation worker. It uses the Strata Metal graph and Stark's
@@ -62,13 +87,6 @@ the worker request budget. `STARK_HY4_CONTEXT_LIMIT` is an optional upper bound
 applied before allocation. The worker always loads the projector. Image requests
 use target-only generation and invalidate the preceding text prefix. [Flexible
 window verification](model-experiments/2026-11-25-hy4-context-ladder.md#20261126-hy4ladder-05--verify-flexible-windows-on-the-measured-profiles)
-
-In a Hy4-enabled desktop build, choose **Manage Models → Model Catalog → Hy4-flash → Hy4-flash AngelSlim Q3_K**.
-Stark downloads the pinned split GGUF and BF16 projector, verifies their hashes,
-and prepares the Tencent metadata before adding the model to the library. Allow
-about 150 GiB of free disk space for the weights and the first-run draft sidecar.
-Select the installed model in Playground to load it for chat.
-[Packaged install and generation check](model-experiments/2026-11-26-hy4-desktop-catalog.md)
 
 ### Prepare a local copy from source
 
@@ -93,7 +111,7 @@ transaction is available when launched with `--vision-staging-root`. The native 
 has its own worker and artifact evidence in the
 [Hy4 Q3_K record](model-experiments/2026-11-25-hy4-native-q3-k.md).
 
-### Tested Hy4 load profiles
+### Tested AngelSlim Q3_K load profiles
 
 With `STARK_HY4_LOAD_PROFILE` unset, Stark tries `resident-decode` first on
 Metal 4. If the resident banks or context exceed the memory budget, it tries
@@ -153,13 +171,27 @@ record](model-experiments/2026-11-25-hy4-prefill-decode-profile.md) covers the
 observed benefit and remaining qualification. The verification and worker
 gates remain artifact-specific.
 
-The tuned profiles request compensated indexed sparse prefill on Metal 4.
-The kernel splits queries and probabilities into F16 operands and keeps F32
+The load profiles default to the original indexed sparse prefill kernel.
+`STARK_HY4_PREFILL_COMPENSATED_SPARSE_MLA=1` requests the experimental Metal 4
+kernel. It splits queries and probabilities into F16 operands and keeps F32
 accumulation and the original F16 K/V cache. The worker uses the original
-kernel if the compensated pipeline is unavailable. Set
-`STARK_HY4_PREFILL_COMPENSATED_SPARSE_MLA=0` to select the original kernel
-explicitly. The compensated kernel has passed synthetic GPU accuracy checks.
-Full-model parity and speed are still to be measured. [Compensated sparse MLA record](model-experiments/2026-11-26-hy4-compensated-sparse-mla.md)
+kernel if the compensated pipeline is unavailable. The compensated kernel
+passed synthetic accuracy checks, took longer at 27K in OpenCode, and
+changed greedy output hashes. [Full-model comparison](model-experiments/2026-11-26-hy4-post-sushi-controls.md#selected-cell-mla-diagnostics)
+
+`STARK_HY4_PREFILL_TAIL_PREFIX=1` enables the experimental in-memory reuse
+point in the final prefill chunk. The worker retains the last complete
+IndexPool group before the final prompt token and checks for an identical
+prefix with the same scope, context and draft settings. The reported chunk
+width still describes the ordinary fallback grid. The optional
+`prefix_cache.subchunk_tokens` readiness field reports the IndexPool group
+width so hosts can validate the finer reuse counts.
+
+`STARK_HY4_PARALLEL_ROUTER=1` requests the parallel top-16 selector for
+512-expert Hy4 trunk batches of up to 16 rows on devices that admit its
+Metal pipeline. Larger batches use the original selector. The Hy4 runtime
+identity reports `parallel_router_active` for the pipeline that loaded.
+[Experiment controls and qualification](model-experiments/2026-11-26-hy4-post-sushi-controls.md)
 
 `STARK_HY4_PREFILL_ROUTED_HALF=1` selects F16 operands with F32 accumulation
 for eligible grouped routed experts. Dense projections and the small

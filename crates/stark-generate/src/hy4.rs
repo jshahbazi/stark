@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! AngelSlim Q3_K through Stark's serialized generation worker.
+//! Hy4 Metal backend. Each protocol lane owns one request state.
 
 mod source;
 mod vision;
@@ -20,7 +20,7 @@ use stark_engine::{
         Engine,
         hy4::{
             DraftStats, ExpertStorage, ImageInput, MAX_DRAFTS, MAX_NEXTN_DRAFTS, Options, PREFILL_CHUNK,
-            RECOMMENDED_DRAFTS, SHARD, Session, VOCAB,
+            RECOMMENDED_DRAFTS, SHARD, Session, VOCAB, stq_source,
         },
         hybrid::{
             activity::InferenceActivity,
@@ -34,12 +34,12 @@ use self::vision::Hy4PreparedImage;
 use crate::{
     cancel::CancelSignal,
     generation::{
-        ContextCapacity, FinishReason, GeneratedTokens, GenerationBackend, GenerationOptions, HY4_VISION_PROFILE,
-        ImageArtifactIdentity, MtpCapabilities, PreparedImageMetadata, ProgressCallback, Sampling, TextCallback,
-        collect_tokens_controlled,
+        ContextCapacity, FinishReason, GeneratedTokens, GenerationBackend, GenerationOptions, HY4_STQ_VISION_PROFILE,
+        HY4_VISION_PROFILE, ImageArtifactIdentity, MtpCapabilities, PreparedImageMetadata, ProgressCallback, Sampling,
+        TextCallback, collect_tokens_controlled,
     },
     hybrid::{ProbabilityMapper, report_prefill_progress, sample_with_mapper},
-    prefix_cache::{self, PrefixEntry},
+    prefix_cache::{self, BoundaryEntry, PrefixEntry},
     text_stop::StopFilter,
 };
 
@@ -49,9 +49,17 @@ const CONFIG_SHA: &str = "1f56ac1a3063f926e91ec43842bfdc0fd6d4401ef91bcdecd1fc27
 const PROCESSOR_SHA: &str = "cc5cc63da33e0ebf53b8ac035879982ba18c47965f82a5f341bc82d98759dc1d";
 const TEMPLATE_SHA: &str = "11b12531403da5726b7e1f6003f479043b05999e6746d39af949cbcdfd715c35";
 const ENGRAM_MAP_SHA: &str = "99ed7bbd800d9d9c087aa2cbbf0fcc497839c519045f6f3bf9aca177cc1769b5";
+const STQ_CONFIG_SHA: &str = "c1c5af8449a8e7db0dc5c5e8aa768c80673c94604997cfe13c6ee6aa98e9a3e3";
+const STQ_TEMPLATE_SHA: &str = "63ddd5de294df36f10c8f2c8e5f7b2a9dc2011c8481335422f04554256aee4ad";
+// SHA-256 of the pinned sorted file-name, size and content-digest inventory.
+const STQ_ARTIFACT_SHA: &str = "1ed7e181a27f78ffb1e93f9bef2eb00be3c9c5933cf5d7f50494320b45e9a04f";
+
+fn is_stq_pack(path: &Path) -> bool {
+    path.join("model-globals.safetensors").is_file() && path.join("model-dfly.safetensors").is_file()
+}
 
 pub(crate) fn recognizes(path: &Path) -> bool {
-    path.join(SHARD).is_file()
+    path.join(SHARD).is_file() || is_stq_pack(path)
 }
 
 fn verify(
@@ -103,11 +111,16 @@ pub(crate) struct Hy4Backend {
     mapper: ProbabilityMapper,
     retained: Option<PrefixEntry<(u32, bool)>>,
     pending: Option<PrefixEntry<(u32, bool)>>,
+    tail_retained: Option<BoundaryEntry<(u32, bool)>>,
+    tail_pending: Option<BoundaryEntry<(u32, bool)>>,
     stats: DraftStats,
     lookup_stats: LookupStats,
     lookup_newline: Option<Arc<NewlineTokens>>,
+    tail_prefix_enabled: bool,
     runtime: Value,
     chunk: usize,
+    stq: bool,
+    recommended_drafts: usize,
 }
 
 #[derive(Default, serde::Serialize)]
@@ -227,8 +240,9 @@ impl Hy4Backend {
         let compensated_sparse_mla = verify_switch(
             "STARK_HY4_PREFILL_COMPENSATED_SPARSE_MLA",
             "invalid_hy4_prefill_compensated_sparse_mla",
-            tuned,
+            false,
         )?;
+        let parallel_router = verify_switch("STARK_HY4_PARALLEL_ROUTER", "invalid_hy4_parallel_router", false)?;
         let resident_token_embeddings =
             verify_switch("STARK_HY4_EMBEDDINGS_RESIDENT", "invalid_hy4_embeddings_resident", tuned)?;
         let resident_draft_experts =
@@ -272,6 +286,7 @@ impl Hy4Backend {
                 draft_head_q5,
                 tensor_mla,
                 compensated_sparse_mla,
+                parallel_router,
                 max_drafts,
                 context_limit,
             },
@@ -282,7 +297,11 @@ impl Hy4Backend {
     pub(crate) fn load(
         path: &Path,
         cancellation: Option<CancelSignal>,
+        concurrent_slots: usize,
     ) -> Result<Self, &'static str> {
+        if is_stq_pack(path) {
+            return Self::load_stq(path, cancellation, concurrent_slots);
+        }
         let source = source::VerifiedSource::open(path)?;
         for (name, digest) in [
             ("config.json", CONFIG_SHA),
@@ -316,6 +335,8 @@ impl Hy4Backend {
                 .peekable();
         drop(engine);
         let lookup_enabled = verify_switch("STARK_HY4_MTP_LOOKUP", "invalid_hy4_mtp_lookup", false)?;
+        let tail_prefix_enabled =
+            verify_switch("STARK_HY4_PREFILL_TAIL_PREFIX", "invalid_hy4_prefill_tail_prefix", false)?;
         let (load_profile, options, native) = loop {
             let load_profile = profiles.next().ok_or("invalid_hy4_load_profile")?;
             let (mut options, profile_arena) = Self::load_options(load_profile, lookup_enabled)?;
@@ -352,6 +373,7 @@ impl Hy4Backend {
             "prefill_dense_ffn_device_views_requested": options.dense_ffn_device_views,
             "prefill_tensor_mla_requested": options.tensor_mla,
             "prefill_compensated_sparse_mla_requested": options.compensated_sparse_mla,
+            "parallel_router_active": native.parallel_router_active(),
             "token_embeddings_resident": options.resident_token_embeddings,
             "draft_experts_resident": options.resident_draft_experts,
             "draft_head_format": native.draft_head_format(),
@@ -366,12 +388,190 @@ impl Hy4Backend {
             mapper: ProbabilityMapper::default(),
             retained: None,
             pending: None,
+            tail_retained: None,
+            tail_pending: None,
             stats: DraftStats::default(),
             lookup_stats: LookupStats::default(),
             lookup_newline,
+            tail_prefix_enabled,
             runtime,
             chunk: options.chunk,
+            stq: false,
+            recommended_drafts: RECOMMENDED_DRAFTS,
         })
+    }
+
+    fn load_stq(
+        path: &Path,
+        cancellation: Option<CancelSignal>,
+        concurrent_slots: usize,
+    ) -> Result<Self, &'static str> {
+        let source = stq_source::StqSource::open(path).map_err(|_| "invalid_hy4_stq_artifact")?;
+        for (name, digest) in [
+            ("tokenizer.json", TOKENIZER_SHA),
+            ("processor_config.json", PROCESSOR_SHA),
+            ("chat_template.jinja", STQ_TEMPLATE_SHA),
+        ] {
+            verify(&path.join(name), digest)?;
+        }
+        let tokenizer = Tokenizer::from_file(path.join("tokenizer.json")).map_err(|_| "invalid_hy4_tokenizer")?;
+        if tokenizer.get_vocab_size(true) != VOCAB {
+            return Err("invalid_hy4_tokenizer");
+        }
+        let engine = Engine::<Metal>::new().map_err(|_| "native_backend_unavailable")?;
+        let identity = engine.metal_device_identity();
+        drop(engine);
+        let chunk = match std::env::var("STARK_HY4_PREFILL_CHUNK").as_deref() {
+            Ok("1024") => 1024,
+            Ok("4096") | Err(std::env::VarError::NotPresent) => 4096,
+            _ => return Err("invalid_hy4_prefill_chunk"),
+        };
+        let context = optional_bound("STARK_HY4_CONTEXT_LIMIT", 2..=u32::MAX, "invalid_hy4_context_limit")?;
+        let profile = verify_switch("STARK_HY4_PROFILE_PREFILL", "invalid_hy4_prefill_profile", false)?;
+        let round_bf16 = verify_switch("STARK_HY4_STQ_BF16", "invalid_hy4_stq_precision", false)?;
+        let pair1_decode = verify_switch("STARK_HY4_STQ_PAIR1_DECODE", "invalid_hy4_stq_decode", false)?;
+        let resident = verify_switch("STARK_HY4_STQ_RESIDENT", "invalid_hy4_stq_residency", true)?;
+        let tensor_mla = verify_switch("STARK_HY4_STQ_TENSOR_MLA", "invalid_hy4_stq_tensor_mla", true)?;
+        let gpu_verify_plan = verify_switch("STARK_HY4_STQ_GPU_VERIFY", "invalid_hy4_stq_gpu_verify", true)?;
+        let register_mla = verify_switch("STARK_HY4_STQ_REGISTER_MLA", "invalid_hy4_stq_register_mla", true)?;
+        let fused_finish_reduce = verify_switch("STARK_HY4_STQ_FUSED_FINISH", "invalid_hy4_stq_fused_finish", true)?;
+        let split_spec1 = verify_switch("STARK_HY4_STQ_SPLIT_SPEC1", "invalid_hy4_stq_split_spec1", true)?;
+        let verify_register_mla = verify_switch("STARK_HY4_STQ_VERIFY_MLA", "invalid_hy4_stq_verify_mla", true)?;
+        let cache_engram_pages =
+            verify_switch("STARK_HY4_STQ_ENGRAM_PAGE_CACHE", "invalid_hy4_stq_engram_cache", true)?;
+        let wide_attention = verify_switch("STARK_HY4_STQ_WIDE_ATTENTION", "invalid_hy4_stq_wide_attention", true)?;
+        let wide_routed = verify_switch("STARK_HY4_STQ_WIDE_ROUTED", "invalid_hy4_stq_wide_routed", true)?;
+        let draft_register_mla =
+            verify_switch("STARK_HY4_STQ_DRAFT_REGISTER_MLA", "invalid_hy4_stq_draft_register_mla", true)?;
+        let wide_ffn = verify_switch("STARK_HY4_STQ_WIDE_FFN", "invalid_hy4_stq_wide_ffn", true)?;
+        let fast_verify = verify_switch("STARK_HY4_STQ_FAST_VERIFY", "invalid_hy4_stq_fast_verify", true)?;
+        let fused_attn_hc = verify_switch("STARK_HY4_STQ_FUSED_ATTN_HC", "invalid_hy4_stq_fused_attn_hc", true)?;
+        let batch_draft = verify_switch("STARK_HY4_STQ_BATCH_DRAFT", "invalid_hy4_stq_batch_draft", true)?;
+        let register_dense_io =
+            verify_switch("STARK_HY4_STQ_REGISTER_DENSE_IO", "invalid_hy4_stq_register_dense_io", true)?;
+        let tail_prefix_enabled =
+            verify_switch("STARK_HY4_PREFILL_TAIL_PREFIX", "invalid_hy4_prefill_tail_prefix", false)?;
+        // The pinned local pack supplies the checked inventory. Its files stay
+        // immutable while the native worker maps the weights.
+        let native = unsafe {
+            Session::load_stq(
+                &source,
+                stark_engine::engine::hy4::StqOptions {
+                    chunk: chunk as u32,
+                    context_limit: context,
+                    profile,
+                    round_bf16,
+                    pair1_decode,
+                    resident,
+                    tensor_mla,
+                    gpu_verify_plan,
+                    register_mla,
+                    fused_finish_reduce,
+                    split_spec1,
+                    verify_register_mla,
+                    cache_engram_pages,
+                    wide_attention,
+                    wide_routed,
+                    draft_register_mla,
+                    wide_ffn,
+                    fast_verify,
+                    fused_attn_hc,
+                    batch_draft,
+                    register_dense_io,
+                    concurrent_slots,
+                    secondary_context_limit: (concurrent_slots > 1).then(|| context.unwrap_or(49_152).min(49_152)),
+                },
+            )
+        }
+        .map_err(|_| "hy4_stq_native_load_failed")?;
+        source.verify_unchanged().map_err(|_| "invalid_hy4_stq_artifact")?;
+        let recommended_drafts =
+            optional_bound("STARK_HY4_STQ_DRAFT_DEPTH", 1..=native.max_drafts() as u32, "invalid_hy4_stq_depth")?
+                .map_or(native.max_drafts(), |depth| depth as usize);
+        let runtime = json!({
+            "backend": identity.backend,
+            "device_name": identity.device_name,
+            "apple_gpu_family": identity.apple_gpu_family,
+            "gpu_core_count": identity.gpu_core_count,
+            "supports_mxu": identity.supports_mxu,
+            "prefill_chunk_tokens": chunk,
+            "bf16_projection_boundaries": round_bf16,
+            "pair1_single_token_gemv": pair1_decode,
+            "mapped_weight_residency": resident,
+            "prefill_tensor_mla_requested": tensor_mla,
+            "gpu_verify_plan": gpu_verify_plan,
+            "prefill_register_mla": register_mla,
+            "prefill_fused_expert_finish": fused_finish_reduce,
+            "verify_split_spec1": split_spec1,
+            "verify_register_mla": verify_register_mla,
+            "cache_engram_pages": cache_engram_pages,
+            "prefill_stq_wide_attention": wide_attention,
+            "prefill_stq_wide_routed": wide_routed,
+            "draft_register_mla": draft_register_mla,
+            "prefill_stq_wide_ffn": wide_ffn,
+            "verify_stq_fast": fast_verify,
+            "stq_fused_attn_hc": fused_attn_hc,
+            "stq_batch_draft": batch_draft,
+            "stq_register_dense_io": register_dense_io,
+            "prefill_stage_profile_requested": profile,
+            "draft_head_format": "spec1-k4-dfly2",
+        });
+        Ok(Self {
+            native,
+            tokenizer,
+            cancellation,
+            mapper: ProbabilityMapper::default(),
+            retained: None,
+            pending: None,
+            tail_retained: None,
+            tail_pending: None,
+            stats: DraftStats::default(),
+            lookup_stats: LookupStats::default(),
+            lookup_newline: None,
+            tail_prefix_enabled,
+            runtime,
+            chunk,
+            stq: true,
+            recommended_drafts,
+        })
+    }
+
+    pub(crate) fn take_additional_slots(&mut self) -> Vec<(Self, u32)> {
+        self.native
+            .take_additional_slots()
+            .into_iter()
+            .map(|native| {
+                let capacity = native.context_sizing().context_tokens;
+                (
+                    Self {
+                        native,
+                        tokenizer: self.tokenizer.clone(),
+                        cancellation: None,
+                        mapper: ProbabilityMapper::default(),
+                        retained: None,
+                        pending: None,
+                        tail_retained: None,
+                        tail_pending: None,
+                        stats: DraftStats::default(),
+                        lookup_stats: LookupStats::default(),
+                        lookup_newline: None,
+                        tail_prefix_enabled: false,
+                        runtime: self.runtime.clone(),
+                        chunk: self.chunk,
+                        stq: true,
+                        recommended_drafts: self.recommended_drafts,
+                    },
+                    capacity,
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn set_cancellation(
+        &mut self,
+        cancellation: CancelSignal,
+    ) {
+        self.cancellation = Some(cancellation);
     }
 
     fn generate_inner(
@@ -398,6 +598,8 @@ impl Hy4Backend {
         };
         self.retained = None;
         self.pending = None;
+        self.tail_retained = None;
+        self.tail_pending = None;
         self.stats = DraftStats::default();
         self.lookup_stats = LookupStats::default();
         if self.cancelled(options.request_id)? {
@@ -513,19 +715,59 @@ impl Hy4Backend {
         self.lookup_stats = lookup_stats;
         result.reused_input_tokens = reused;
         let boundary = prefix_cache::chunk_boundary(input.len(), self.chunk);
-        if let Some(scope) = options.cache_scope.filter(|_| image.is_none() && boundary > 0) {
-            self.native.retain_prefix(boundary)?;
-            self.pending = Some(PrefixEntry::with_chunk(
-                (options.mtp_drafts, options.mtp_scheduling.lookup),
-                scope,
-                options.context_tokens,
-                input,
-                self.chunk,
-            ));
+        if let Some(scope) = options.cache_scope.filter(|_| image.is_none()) {
+            let mut tail_saved = false;
+            if self.tail_prefix_enabled
+                && let Some(tail_boundary) = self.native.prefill_tail_boundary(input.len(), boundary)
+            {
+                // Keep the last complete IndexPool group before the prompt's
+                // final token. The remaining prompt suffix will be prefetched
+                // on every hit, reproducing the fresh prompt endpoint exactly.
+                if self.native.retain_prefix(tail_boundary).is_ok() {
+                    self.tail_pending = Some(BoundaryEntry::new(
+                        (options.mtp_drafts, options.mtp_scheduling.lookup),
+                        scope,
+                        options.context_tokens,
+                        &input[..tail_boundary],
+                    ));
+                    tail_saved = true;
+                }
+            }
+            if boundary > 0 {
+                if !tail_saved {
+                    self.native.retain_prefix(boundary)?;
+                }
+                self.pending = Some(PrefixEntry::with_chunk(
+                    (options.mtp_drafts, options.mtp_scheduling.lookup),
+                    scope,
+                    options.context_tokens,
+                    input,
+                    self.chunk,
+                ));
+            }
+            if boundary == 0 && !tail_saved {
+                self.native.clear();
+            }
         } else {
             self.native.clear();
         }
         Ok(result)
+    }
+
+    fn tail_prefix_cache_plan(
+        &self,
+        input: &[u32],
+        options: &GenerationOptions,
+    ) -> usize {
+        if !self.tail_prefix_enabled {
+            return 0;
+        }
+        self.tail_retained
+            .as_ref()
+            .filter(|entry| entry.state == (options.mtp_drafts, options.mtp_scheduling.lookup))
+            .map_or(0, |entry| {
+                entry.reusable_with_min_suffix(input, options.context_tokens, options.cache_scope.as_ref(), 1)
+            })
     }
 }
 
@@ -597,20 +839,43 @@ impl GenerationBackend for Hy4Backend {
         (geometry.patch, geometry.merge)
     }
     fn image_family_profile(&self) -> Option<(&str, u32)> {
-        Some((HY4_VISION_PROFILE, 1))
+        Some((
+            if self.stq {
+                HY4_STQ_VISION_PROFILE
+            } else {
+                HY4_VISION_PROFILE
+            },
+            1,
+        ))
     }
     fn image_artifact_identity(&self) -> Option<ImageArtifactIdentity<'_>> {
         Some(ImageArtifactIdentity {
             schema_version: 7,
-            artifact_sha256: source::ARTIFACT_SHA256,
-            config_sha256: CONFIG_SHA,
+            artifact_sha256: if self.stq {
+                STQ_ARTIFACT_SHA
+            } else {
+                source::ARTIFACT_SHA256
+            },
+            config_sha256: if self.stq {
+                STQ_CONFIG_SHA
+            } else {
+                CONFIG_SHA
+            },
             tokenizer_sha256: TOKENIZER_SHA,
             processor_sha256: PROCESSOR_SHA,
-            template_sha256: TEMPLATE_SHA,
+            template_sha256: if self.stq {
+                STQ_TEMPLATE_SHA
+            } else {
+                TEMPLATE_SHA
+            },
         })
     }
     fn image_source_identity(&self) -> Option<(&str, Option<&str>)> {
-        Some((source::REPOSITORY, Some(source::REVISION)))
+        Some(if self.stq {
+            (stq_source::REPOSITORY, Some(stq_source::REVISION))
+        } else {
+            (source::REPOSITORY, Some(source::REVISION))
+        })
     }
     fn runtime_identity(&self) -> Option<Value> {
         Some(self.runtime.clone())
@@ -652,9 +917,13 @@ impl GenerationBackend for Hy4Backend {
     fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
         Some(MtpCapabilities {
             max_drafts: self.native.max_drafts(),
-            recommended_drafts: RECOMMENDED_DRAFTS,
+            recommended_drafts: self.recommended_drafts,
             sampling: "greedy-target-match-v1",
-            verification: "hy4-nextn-greedy-prefix-match-v1",
+            verification: if self.stq {
+                "hy4-dfly2-greedy-prefix-match-v1"
+            } else {
+                "hy4-nextn-greedy-prefix-match-v1"
+            },
         })
     }
     fn effective_mtp_drafts(
@@ -666,6 +935,13 @@ impl GenerationBackend for Hy4Backend {
         } else {
             0
         })
+    }
+    fn default_mtp_drafts(&self) -> u32 {
+        if self.stq {
+            self.recommended_drafts as u32
+        } else {
+            0
+        }
     }
     fn mtp_metadata(&self) -> Option<Value> {
         Some(if self.lookup_newline.is_some() {
@@ -683,6 +959,10 @@ impl GenerationBackend for Hy4Backend {
     fn prefix_cache_chunk_tokens(&self) -> usize {
         self.chunk
     }
+    fn prefix_cache_subchunk_tokens(&self) -> Option<usize> {
+        let alignment = self.native.index_pool_group_tokens() as usize;
+        (self.tail_prefix_enabled && (1..self.chunk).contains(&alignment)).then_some(alignment)
+    }
     fn prefix_cache_key(&self) -> &'static str {
         if self.lookup_newline.is_some() {
             "model-instance+context-tokens+cache-scope+mtp-drafts+mtp-lookup"
@@ -695,21 +975,39 @@ impl GenerationBackend for Hy4Backend {
         input: &[u32],
         options: &GenerationOptions,
     ) -> usize {
-        self.retained
+        let coarse = self
+            .retained
             .as_ref()
             .filter(|entry| entry.state == (options.mtp_drafts, options.mtp_scheduling.lookup))
-            .map_or(0, |entry| entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()))
+            .map_or(0, |entry| entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()));
+        coarse.max(self.tail_prefix_cache_plan(input, options))
+    }
+    fn prefix_cache_reuse_valid(
+        &self,
+        reused: usize,
+        input_tokens: usize,
+    ) -> bool {
+        if reused >= input_tokens {
+            return false;
+        }
+        if reused.is_multiple_of(self.chunk) {
+            return true;
+        }
+        self.tail_prefix_enabled && self.tail_retained.as_ref().is_some_and(|entry| entry.boundary() == reused)
     }
     fn publish_prefix_cache(&mut self) {
         self.retained = self.pending.take();
+        self.tail_retained = self.tail_pending.take();
     }
     fn clear_prefix_cache(&mut self) {
         self.pending = None;
         self.retained = None;
+        self.tail_pending = None;
+        self.tail_retained = None;
         self.native.clear();
     }
     fn prefix_cache_retained(&self) -> bool {
-        self.retained.is_some() || self.pending.is_some()
+        self.retained.is_some() || self.pending.is_some() || self.tail_retained.is_some() || self.tail_pending.is_some()
     }
 }
 

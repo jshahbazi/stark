@@ -27,7 +27,7 @@ impl CancelSignal {
         Self::new(file).map(Some)
     }
 
-    fn new(file: File) -> Result<Self, &'static str> {
+    pub(crate) fn new(file: File) -> Result<Self, &'static str> {
         let fd = file.as_raw_fd();
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         if flags < 0

@@ -158,15 +158,15 @@ DirectFile::~DirectFile() {
     delete impl_;
 }
 
-bool DirectFile::open(const std::string& path, std::string& err) {
+bool DirectFile::open(const std::string& path, std::string& err, bool cache_pages) {
     close();
     const int wlen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
     std::wstring wpath((size_t) (wlen > 0 ? wlen : 1), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wpath.data(), wlen);
-    // NO_BUFFERING: the cache manager never holds these pages, so the table cannot grow into RAM.
     // RANDOM_ACCESS: no read-ahead. OVERLAPPED: many reads in flight, completed through the port below.
+    const DWORD cache_flags = cache_pages ? 0 : FILE_FLAG_NO_BUFFERING;
     impl_->file = CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                              FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED | FILE_FLAG_RANDOM_ACCESS, nullptr);
+                              cache_flags | FILE_FLAG_OVERLAPPED | FILE_FLAG_RANDOM_ACCESS, nullptr);
     if (impl_->file == INVALID_HANDLE_VALUE) {
         err = "DirectFile: cannot open " + path + " (error " + std::to_string(GetLastError()) + ")";
         return false;
@@ -317,13 +317,16 @@ struct DirectFile::Impl {
 DirectFile::DirectFile() : impl_(new Impl) {}
 DirectFile::~DirectFile() { close(); delete impl_; }
 
-bool DirectFile::open(const std::string& path, std::string& err) {
+bool DirectFile::open(const std::string& path, std::string& err, bool cache_pages) {
     close();
 #if defined(__APPLE__)   // macOS has no O_DIRECT: F_NOCACHE keeps the reads out of the unified buffer cache
     impl_->fd = ::open(path.c_str(), O_RDONLY);
-    if (impl_->fd >= 0 && fcntl(impl_->fd, F_NOCACHE, 1) != 0) { ::close(impl_->fd); impl_->fd = -1; }
+    if (impl_->fd >= 0) {
+        if (fcntl(impl_->fd, F_NOCACHE, cache_pages ? 0 : 1) != 0) { ::close(impl_->fd); impl_->fd = -1; }
+        else if (cache_pages) (void) fcntl(impl_->fd, F_RDAHEAD, 0);
+    }
 #else
-    impl_->fd = ::open(path.c_str(), O_RDONLY | O_DIRECT);
+    impl_->fd = ::open(path.c_str(), O_RDONLY | (cache_pages ? 0 : O_DIRECT));
 #endif
     if (impl_->fd < 0) { err = "DirectFile: cannot open " + path; return false; }
     struct stat st;

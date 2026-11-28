@@ -30,6 +30,7 @@ from .vision_runtime import (
     GEMMA4_31B_FAMILY_PROFILE,
     GEMMA4_E4B_FAMILY_PROFILE,
     GEMMA4_FAMILY_PROFILE,
+    HY4_STQ_VISION_PROFILE,
     HY4_VISION_PROFILE,
     _current_os_version,
     artifact_image_family,
@@ -478,7 +479,7 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
                 return True
         codec, template = load_template(worker.model_path, expected_hashes=worker.image_input)
         inkling = identity["family_profile"] == inkling_prepare.VISION_PROFILE
-        hy4 = identity["family_profile"] == HY4_VISION_PROFILE
+        hy4 = identity["family_profile"] in (HY4_VISION_PROFILE, HY4_STQ_VISION_PROFILE)
         context, maximum = min(context, 2048), min(maximum, 192 if inkling else 8)
         options = {"context_tokens": context, "max_new_tokens": maximum, "sampling": {"mode": "greedy"}}
         worker._verification_deadline = time.monotonic() + min(worker.timeout, 120)

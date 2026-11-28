@@ -334,7 +334,8 @@ std::string VisionTower::encode(mtl::Context& cx, const VisionShard& s, const ui
         elem(ds, add_row_, {mtl::Arg::B(mid_), s.arg("mm.0.bias"), mtl::Arg::B(mid_), mtl::Arg::V(a)}, CD,
              g.cells, "hy4_flash_add_row");
         ActArgs act{(uint32_t) (g.cells * CD)};
-        elem(ds, act_erf_, {mtl::Arg::B(mid_), mtl::Arg::V(act)}, act.n, 1, "hy4_flash_vis_act_erf");
+        const auto& activation = s.projector_tanh ? act_tanh_ : act_erf_;
+        elem(ds, activation, {mtl::Arg::B(mid_), mtl::Arg::V(act)}, act.n, 1, "vision projector activation");
     }
     stage("mm0", mid_, g.cells, CD);
     shape("mm.2.weight")->append(ds, s.weights, s.find("mm.2.weight")->offset, mid_, CD, co_, OD, 0,

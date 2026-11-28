@@ -31,8 +31,8 @@ struct ReaderStats {
     uint64_t requests = 0;        ///< rows asked for
     uint64_t cache_hits = 0;      ///< rows served from the row cache
     uint64_t dedup_rows = 0;      ///< rows that shared a page already being read in the same ticket
-    uint64_t reads = 0;           ///< SSD read requests issued
-    uint64_t bytes = 0;           ///< bytes read from the SSD
+    uint64_t reads = 0;           ///< file read requests issued
+    uint64_t bytes = 0;           ///< bytes requested from the file, including page-cache hits if enabled
     double wait_us = 0;           ///< time `collect` spent blocked
     double submit_us = 0;         ///< time spent inside the read submission call (non-zero = it blocks)
     double read_us_sum = 0;       ///< sum of per-read latencies (issue to completion)
@@ -60,7 +60,8 @@ public:
     /// calls. false: the caller's thread does it (A/B arm).
     /// `row_bytes`: one row's size in the file (90 IQ4_NL, 160 FP8), at most one page.
     bool open(const std::string& path, uint64_t table_offset, uint64_t n_rows, uint32_t max_inflight,
-              uint64_t cache_rows, std::string& err, bool io_thread = true, uint32_t row_bytes = ROW_BYTES);
+              uint64_t cache_rows, std::string& err, bool io_thread = true, uint32_t row_bytes = ROW_BYTES,
+              bool cache_pages = false);
     uint32_t row_bytes() const;
     void close();
     bool is_open() const;

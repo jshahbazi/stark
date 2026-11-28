@@ -1426,6 +1426,23 @@ def test_native_glm_catalog_obeys_offline_and_limit_without_hub_access():
     assert catalog.family_catalog(FAMILY_ID, limit=catalog.MAX_ITEMS + 1, hub=NoHub())["status"] == "error"
 
 
+def test_hy4_sushi_is_the_only_catalog_and_search_choice():
+    from stark_convert.native_catalog import HY4_CHOICE, HY4_FAMILY_ID, source_choice
+
+    family = catalog.family_catalog(HY4_FAMILY_ID, limit=1)
+    (sushi,) = family["items"]
+    assert family["next_offset"] is None
+    assert catalog.family_catalog(HY4_FAMILY_ID, offset=1)["items"] == []
+    assert sushi["repo"] == "beamster/Hy4-Flash-Sushi-STQ-4bpw"
+    assert sushi["revision"] == "61528ba635a623f127c5a7b1e1f4ac2c2b0d4885"
+    assert sushi["weight_bytes"] == 208_388_142_680
+    assert sushi["downloadable"] is True
+    assert "unavailable_reason" not in sushi
+    assert source_choice(HY4_FAMILY_ID, sushi) == HY4_CHOICE
+    assert catalog.family_catalog(HY4_FAMILY_ID, planning=True)["items"] == [sushi]
+    assert catalog.search_catalog("Hy4-flash Sushi", offline=True)["items"] == [{**sushi, "family_id": HY4_FAMILY_ID}]
+
+
 def test_native_glm_source_choice_rejects_modified_entry():
     from stark_convert.native_catalog import CHOICE, FAMILY_ID, catalog_item, source_choice
 

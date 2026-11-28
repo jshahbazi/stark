@@ -303,3 +303,40 @@ HY4_FLASH_DN(T_Q4_K, 8, 2, 4) HY4_FLASH_DN(T_Q4_K, 8, 1, 4) HY4_FLASH_DN(T_Q6_K,
 HY4_FLASH_GU(T_BF16, 8, 1, 4) HY4_FLASH_DN(T_BF16, 8, 1, 4)
 // and the same block with HY4_FLASH_MTP_QUANT=q8_0 (mtp.cpp): Q8_0 gate / up / down, raw plane as well
 HY4_FLASH_GU(T_Q8_0, 8, 1, 4) HY4_FLASH_DN(T_Q8_0, 8, 1, 4)
+// One verification window has at most 128 routes. Rank the unique
+// (expert, original slot) keys to preserve the host plan's stable order.
+kernel void stark_hy4_stq_verify_plan(
+    device const int* ids [[buffer(0)]], device uint2* rows [[buffer(1)]],
+    device uint4* jobs [[buffer(2)]], device uint* inverse [[buffer(3)]],
+    device uint* grid [[buffer(4)]], device atomic_uint* bad [[buffer(5)]],
+    constant uint& count [[buffer(6)]], uint slot [[thread_index_in_threadgroup]]) {
+    threadgroup uint keys[128], ordered[128];
+    if (slot < count) {
+        const uint id = uint(ids[slot]);
+        if (id >= 512) atomic_store_explicit(bad, 1u, memory_order_relaxed);
+        keys[slot] = ((id < 512 ? id : 0u) << 7) | slot;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (slot < count) {
+        const uint key = keys[slot];
+        uint rank = 0;
+        for (uint i = 0; i < count; ++i) rank += uint(keys[i] < key);
+        ordered[rank] = key >> 7;
+        rows[rank] = uint2(key >> 7, slot / 16);
+        inverse[slot] = rank;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (slot == 0) {
+        uint job = 0;
+        for (uint start = 0; start < count;) {
+            const uint expert = ordered[start];
+            uint end = start + 1;
+            while (end < count && end - start < 32 && ordered[end] == expert) ++end;
+            jobs[job++] = uint4(expert, start, end - start, 0u);
+            start = end;
+        }
+        grid[0] = 12;
+        grid[1] = job;
+        grid[2] = 1;
+    }
+}

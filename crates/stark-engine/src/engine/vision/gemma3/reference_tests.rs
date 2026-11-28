@@ -278,12 +278,12 @@ fn gemma3_first_block_stage_reference_metal() {
         };
     let mut hidden = engine.context.create_buffer(4096 * 1152 * size_of::<bf16>()).unwrap();
     let mut commands = engine.context.create_command_buffer(Some("Gemma 3 private initial stages"), None).unwrap();
-    let initial =
-        model.tower.encode_initial_with_observer(&image.patches.patches, &mut commands, &mut observe).unwrap();
+    let tower = model.tower.as_ref().unwrap();
+    let initial = tower.encode_initial_with_observer(&image.patches.patches, &mut commands, &mut observe).unwrap();
     commands.encode_copy(&initial, &mut hidden);
     commands.end_encoding().submit().wait_until_completed().unwrap();
     let mut commands = engine.context.create_command_buffer(Some("Gemma 3 private first block"), None).unwrap();
-    model.tower.encode_block_with_observer(0, &hidden, &mut commands, &mut observe).unwrap();
+    tower.encode_block_with_observer(0, &hidden, &mut commands, &mut observe).unwrap();
     commands.end_encoding().submit().wait_until_completed().unwrap();
     drop(observe);
     let reports = captures

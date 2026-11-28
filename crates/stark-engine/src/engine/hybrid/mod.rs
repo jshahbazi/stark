@@ -370,7 +370,107 @@ pub struct Model {
     mtp_schedule_default: MtpScheduleDefault,
 }
 
+enum SharedRequestForward {
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    Lily(stark_lily_core::qwen4exp::model::SharedTextWeights),
+    Flint(flint::FlintModel),
+    Ripple(ripple::RippleModel),
+}
+
+/// Owns a fresh request cache and shares the loaded weight inventory and
+/// tokenizer. Build the full hybrid model on the receiving worker thread.
+pub struct SharedRequestSlot {
+    forward: SharedRequestForward,
+    tokenizer: Arc<Tokenizer>,
+    vocab_size: usize,
+    max_context: u32,
+    checkpoint_context: u32,
+    eos: Vec<u32>,
+    mtp_schedule_default: MtpScheduleDefault,
+}
+
+impl SharedRequestSlot {
+    pub fn mapped_weight_bytes(&self) -> Option<usize> {
+        match &self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            SharedRequestForward::Lily(_) => None,
+            SharedRequestForward::Flint(model) => model.mapped_weight_bytes(),
+            SharedRequestForward::Ripple(model) => model.mapped_weight_bytes(),
+        }
+    }
+
+    pub fn new_request_slot(&self) -> Self {
+        let forward = match &self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            SharedRequestForward::Lily(weights) => SharedRequestForward::Lily(weights.clone()),
+            SharedRequestForward::Flint(model) => SharedRequestForward::Flint(model.new_request_slot()),
+            SharedRequestForward::Ripple(model) => SharedRequestForward::Ripple(model.new_request_slot()),
+        };
+        Self {
+            forward,
+            tokenizer: Arc::clone(&self.tokenizer),
+            vocab_size: self.vocab_size,
+            max_context: self.max_context,
+            checkpoint_context: self.checkpoint_context,
+            eos: self.eos.clone(),
+            mtp_schedule_default: self.mtp_schedule_default,
+        }
+    }
+
+    pub fn into_model(self) -> Result<Model> {
+        Ok(Model {
+            forward: match self.forward {
+                #[cfg(all(feature = "metal", target_os = "macos"))]
+                SharedRequestForward::Lily(weights) => {
+                    Forward::Lily(Box::new(lily::LilyModel::from_shared_weights(weights)?))
+                },
+                SharedRequestForward::Flint(model) => Forward::Flint(model),
+                SharedRequestForward::Ripple(model) => Forward::Ripple(model),
+            },
+            tokenizer: self.tokenizer,
+            vocab_size: self.vocab_size,
+            max_context: self.max_context,
+            checkpoint_context: self.checkpoint_context,
+            eos: self.eos,
+            image_artifact: None,
+            mtp_schedule_default: self.mtp_schedule_default,
+        })
+    }
+}
+
 impl Model {
+    /// Estimate a cold Lily text lane. Resident shared weights are already
+    /// reflected in live headroom, while each lane needs its own allocation.
+    pub fn cold_shared_slot_bytes(
+        &self,
+        _context_tokens: u32,
+    ) -> Option<usize> {
+        match &self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => model.auxiliary_startup_bytes(_context_tokens),
+            _ => None,
+        }
+    }
+
+    pub fn new_shared_request_slot(&self) -> Option<SharedRequestSlot> {
+        let forward = match &self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => SharedRequestForward::Lily(model.shared_text_weights()),
+            Forward::Flint(model) => SharedRequestForward::Flint(model.new_request_slot()),
+            Forward::Ripple(model) => SharedRequestForward::Ripple(model.new_request_slot()),
+            _ => return None,
+        };
+        Some(SharedRequestSlot {
+            forward,
+            tokenizer: Arc::clone(&self.tokenizer),
+            vocab_size: self.vocab_size,
+            max_context: self.max_context,
+            checkpoint_context: self.checkpoint_context,
+            eos: self.eos.clone(),
+            mtp_schedule_default: self.mtp_schedule_default,
+        })
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         Self::load_with_mtp(path, false)
     }
@@ -925,6 +1025,14 @@ impl Model {
     }
     pub fn eos_token_ids(&self) -> &[u32] {
         &self.eos
+    }
+
+    pub fn retire_auxiliary_state(&mut self) -> Result<()> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &mut self.forward {
+            return model.retire_auxiliary_state();
+        }
+        Ok(())
     }
 
     /// Each worker request starts from reset state, optionally resumed at a

@@ -16,6 +16,7 @@ struct StarkHy4ContextMemory {
     uint64_t draft_cache_bytes_per_token;
     uint64_t pool_bytes_per_row;
     uint64_t draft_pool_bytes_per_row;
+    uint64_t additional_slot_bytes;
 };
 
 struct StarkHy4VisionGeometry {
@@ -69,18 +70,27 @@ struct StarkHy4Stats {
     double prefill_attention_index_seconds;
     double prefill_attention_mla_seconds;
     double prefill_attention_misc_seconds;
+    double verify_mla_seconds;
+    double verify_index_seconds;
+    double verify_dense_seconds;
+    double verify_router_seconds;
+    double verify_expert_seconds;
+    double verify_other_seconds;
+    uint64_t verify_profiled_graphs;
+    double prefill_stq_projection_seconds[8];
 };
 
 extern "C" {
 int stark_hy4_open(const char* model, const char* projector, const char* pack, int chunk,
                    int storage, int grouped, int gpu_plan, int profile_prefill, uint64_t arena_bytes_requested,
                    int demand_retention, int routed_half, int dense_packed, int resident_token_embeddings,
-                   int tensor_mla, int compensated_sparse_mla, int max_drafts, int routed_fragments, int dense_device_views,
+                   int tensor_mla, int compensated_sparse_mla, int parallel_router, int max_drafts, int routed_fragments, int dense_device_views,
                    int dense_ffn_device_views, int resident_draft_experts, int draft_head_q5,
-                   uint32_t (*select_context)(const StarkHy4ContextMemory*, void*), void* sizing,
+                   uint32_t (*select_context)(const StarkHy4ContextMemory*, void*, uint32_t*), void* sizing,
                    StarkHy4** output, StarkHy4VisionGeometry* vision, int* mapped,
                    uint64_t* arena_bytes, int* actual_draft_head_q5) noexcept;
 void stark_hy4_close(StarkHy4* session) noexcept;
+int stark_hy4_parallel_router_active(const StarkHy4* session) noexcept;
 void stark_hy4_clear(StarkHy4* session) noexcept;
 int stark_hy4_retain_prefix(StarkHy4* session, int position) noexcept;
 int stark_hy4_begin(StarkHy4* session, const uint32_t* tokens, int count, int context, int reuse, int drafts,

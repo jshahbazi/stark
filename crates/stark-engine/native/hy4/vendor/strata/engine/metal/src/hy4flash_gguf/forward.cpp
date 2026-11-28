@@ -9,6 +9,7 @@
 #include "attn.h"
 
 #include "ref_quant.h"
+#include "stq_dfly.h"
 
 #include <algorithm>
 #include <array>
@@ -18,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <numeric>
 #include <stdexcept>
 
 namespace strata::hy4_flash {
@@ -281,12 +283,14 @@ struct Forward::Impl {
     // pipelines
     mtl::Pipeline p_rope_mrope, p_kv_finish_mrope;
     mtl::Pipeline p_mapped_gpu_plan;
-    mtl::Pipeline p_rms_w, p_rms_nw, p_rope, p_glu, p_hc_mix, p_hc_mix_norm, p_kv_finish, p_hc_head, p_hc_post, p_router, p_idx_w, p_idx_kpool,
+    mtl::Pipeline p_rms_w, p_rms_nw, p_rope, p_glu, p_hc_mix, p_hc_mix_norm, p_kv_finish, p_hc_head, p_hc_post, p_router, p_router_parallel, p_idx_w, p_idx_kpool,
         p_idx_score, p_idx_score_pf, p_idx_topk, p_argmax, p_copy, p_store_half, p_add_row, p_add,
         p_gate_mul, p_eng_rows, p_eng_gate, p_eng_delta;
     AttnPipes attn_range, attn_sel;   // attn.h: the score row, the softmax, PV
     mtl::Pipeline attn_pf_range, attn_pf_sel;   // the prefill MMA attention (hy4_flash_attn_pf.metal), prompt chunks only
     mtl::Pipeline attn_pf_tensor;
+    mtl::Pipeline attn_stq_range, attn_stq_sel, attn_stq_finish;
+    mtl::Pipeline stq_attn_hc;
     mtl::Pipeline p_dense_pack, p_dense_device;
     bool dense_ffn_device_views = false;
     bool pf_mma_ok = false, pf_mma_idx_ok = false;
@@ -300,6 +304,16 @@ struct Forward::Impl {
     mtl::Buffer hcA, hcB, hc_eng, hc_mid, flat, mixes_a, mixes_f, pre_a, post_a, pre_f, post_f, cur;
     mtl::Buffer anorm, fnorm, fout;   // attn_norm / ffn_norm / ffn_out: three nodes gate 1's neighbours look at
     mtl::Buffer dense_device_scratch;
+    mtl::Buffer stq_identity, stq_dense_input, stq_dense_output, stq_embedding_ids, stq_embedding_rows;
+    mtl::Buffer stq_rows, stq_jobs, stq_inverse, stq_grid, stq_prepared, stq_gate, stq_up, stq_routed;
+    mtl::Pipeline p_dfly_capture;
+    mtl::Buffer dfly_selected, dfly_counts;
+    bool dfly_capture = false;
+    int dfly_first = 0, dfly_rows = 0;
+    bool stq_gemv() const {
+        return m->stq && m->stq->program.pair1_decode_enabled() &&
+               n_tok == 1 && !pr_in_chunk && inj == nullptr && pr_force == nullptr;
+    }
     mtl::Buffer q_resid, qb, Q, qpe, kpe, attn_o, kqv, gproj, gated, attn_y, attn_out, kvp, kvn, sc, pos_b, rope_pos;
     mtl::Buffer ik, iv, ig, iq, iwraw, iw, pool32, score, sel, nsel;
     mtl::Buffer mlogits, ids, rw, pred, pred2, rdown, xp, hbuf, hp, ye, mlat, upo, shg, shu, sha, sho, ffn_sum;
@@ -466,7 +480,20 @@ struct Forward::Impl {
     }
     void append_dense_projection(std::vector<mtl::Dispatch>& ds, const gguf::Tensor* w,
                                  const mtl::Buffer& input, uint32_t n_in, const mtl::Buffer& output,
-                                 uint32_t n_out, uint32_t n_tok, bool attention) {
+                                 uint32_t n_out, uint32_t n_tok, bool attention,
+                                 stark::hy4::stq::DenseBoundaries boundaries = stark::hy4::stq::DenseBoundaries::full) {
+        if (m->stq) {
+            auto it = m->stq->dense.find(w->name);
+            if (it != m->stq->dense.end()) {
+                const auto& bank = *it->second;
+                if (bank.inputs != n_in || bank.outputs != n_out ||
+                    !m->stq->program.append_dense(ds, bank, input, stq_identity, n_tok,
+                                                  stq_dense_input, stq_dense_output, output, boundaries,
+                                                  pr_in_chunk))
+                    throw std::runtime_error("invalid STQ dense dispatch for " + w->name);
+                return;
+            }
+        }
         const bool device_view_requested = attention || (dense_ffn_device_views && !images());
         if (!pf.dense_device_views || !device_view_requested || n_tok < 512 || w->type != ref::Q8_0 ||
             n_in % 64 || n_out % 64) {
@@ -576,9 +603,10 @@ struct Forward::Impl {
     // `norm_w` / `norm_y`: the block's RMSNorm of `cur` (attn_norm or ffn_norm) fused into the mix - one dispatch,
     // bitwise the hy4_flash_hc_mix + hy4_flash_rmsnorm pair it replaces (hy4_flash_hc.metal, hy4_flash_hc_mix_norm)
     void hc_pre(std::vector<mtl::Dispatch>& ds, const BW& b, const mtl::Buffer& x, int which, int T,
-                const gguf::Tensor* norm_w = nullptr, const mtl::Buffer* norm_y = nullptr, float norm_eps = 0) {
+                const gguf::Tensor* norm_w = nullptr, const mtl::Buffer* norm_y = nullptr, float norm_eps = 0,
+                bool flat_ready = false) {
         // flat_norm over the WHOLE hc * n_embd row, no weight
-        rms(ds, x, 0, (uint32_t) hcw, nullptr, flat, 0, (uint32_t) hcw, (uint32_t) hcw, T, eps);
+        if (!flat_ready) rms(ds, x, 0, (uint32_t) hcw, nullptr, flat, 0, (uint32_t) hcw, (uint32_t) hcw, T, eps);
         const gguf::Tensor* fn = b.t[which == 0 ? W_HCA_FN : W_HCF_FN];
         const mtl::Buffer& mx = which == 0 ? mixes_a : mixes_f;
         gv(fn).append(ds, m->dense, fn->offset, flat, (uint32_t) hcw, mx, 2 * (uint32_t) hc, 0, (uint32_t) T);
@@ -617,8 +645,18 @@ struct Forward::Impl {
         ds.push_back(d);
     }
 
-    std::string open(Model& mm, mtl::Context& c, const std::string& pack_dir, const Prefill& p);
-    std::string alloc();
+    std::string open(Model& mm, mtl::Context& c, const std::string& pack_dir, const Prefill& p,
+                     int context_capacity, const Impl* shared_stq_graph);
+    std::string alloc(const Impl* shared_stq_graph);
+    mtl::Buffer alloc_local(size_t bytes);
+    // The Metal context owns shared scratch handles for the loaded model's lifetime.
+    std::vector<mtl::Buffer> stq_scratch;
+    // Roll back private buffers if this extra slot fails to open.
+    std::vector<mtl::Buffer> stq_slot_buffers;
+    bool extra_stq_slot = false;
+    ~Impl() {
+        for (auto& buffer : stq_slot_buffers) cx->free(buffer);
+    }
     void alloc_scratch(int Tm, int as, int ms, const std::function<mtl::Buffer(size_t)>& get);
     std::string attach_prefill();
     void swap_scratch();                    ///< the decode set <-> the prompt's (the GPU must be idle)
@@ -650,11 +688,16 @@ struct Forward::Impl {
 };
 
 // ---- opening -------------------------------------------------------------------------------------------------------
-std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& pack_dir, const Prefill& p) {
+std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& pack_dir, const Prefill& p,
+                                int context_capacity, const Impl* shared_stq_graph) {
     m = &mm;
     cx = &c;
     pack = pack_dir;
     pf = p;
+    extra_stq_slot = shared_stq_graph != nullptr;
+    if (extra_stq_slot && (!mm.stq || shared_stq_graph->m != &mm || shared_stq_graph->cx != &c ||
+                           shared_stq_graph->pf.chunk != p.chunk || shared_stq_graph->ctx < context_capacity))
+        return "incompatible Hy4 STQ scratch geometry";
     if (pf.routed_fragments && (!pf.routed_half || !pf.grouped_k_quant || !c.supports_metal4()))
         return "packed expert fragments need the grouped F16 Metal 4 prefill path";
     if (pf.dense_packed && !c.supports_metal4()) return "packed attention prefill needs Metal 4";
@@ -676,7 +719,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     // Assess the same routed blocks the forward encoder runs. The draft
     // block has BF16 experts and uses its own graph, so it cannot force the
     // target to keep GEMV scratch or split its routed plan.
-    mm_supported = c.supports_metal4() && mm_mode() != MoeMm::Off;
+    mm_supported = !m->stq && c.supports_metal4() && mm_mode() != MoeMm::Off;
     int covered = 0;
     int target_ordinals = 0;
     for (const auto& layer : mm.geo.layers) {
@@ -702,7 +745,7 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     n_experts = g.n_experts;
     latent = g.expert_dim;
     expert_ff = g.expert_ff;
-    ctx = g.max_context;
+    ctx = context_capacity > 0 ? context_capacity : g.max_context;
     eps = g.rms_norm_eps;
     idx_dim = g.idx_key_dim;
     idx_heads = g.idx_heads;
@@ -729,8 +772,14 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     if (pf.dense_packed) kernel_files.emplace_back("stark_hy4_flash_dense_packed.metal");
     if (pf.dense_device_views) kernel_files.emplace_back("stark_hy4_flash_dense_device.metal");
     if (pf.tensor_mla) kernel_files.emplace_back("stark_hy4_flash_mla_prefill.metal");
+    if (pf.stq_register_mla || pf.stq_verify_register_mla || pf.stq_draft_register_mla)
+        kernel_files.emplace_back("stq_mla_register.metal");
+    const bool can_fuse_attn_hc = m->stq && pf.stq_fused_attn_hc && n_embd == 3072 && hc == 4;
+    if (can_fuse_attn_hc) kernel_files.emplace_back("stq_attn_hc.metal");
     if (pf.routed_fragments) kernel_files.emplace_back("stark_hy4_flash_moe_fragments.metal");
-    lib = cx->compile(kernel_files, strata_hy4_flash_metal::hy4_flash_prelude(), false);
+    lib = shared_stq_graph
+        ? shared_stq_graph->lib
+        : cx->compile(kernel_files, strata_hy4_flash_metal::hy4_flash_prelude(), false);
     p_rms_w = cx->pipeline(lib, "hy4_flash_rmsnorm", mtl::Constants().b(40, true));
     p_rms_nw = cx->pipeline(lib, "hy4_flash_rmsnorm", mtl::Constants().b(40, false));
     p_rms_part = cx->pipeline(lib, "hy4_flash_rms_part");
@@ -747,8 +796,23 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
     p_kv_finish = cx->pipeline(lib, "hy4_flash_kv_finish");
     p_hc_head = cx->pipeline(lib, "hy4_flash_hc_mix", mtl::Constants().b(41, false));
     p_hc_post = cx->pipeline(lib, "hy4_flash_hc_post");
+    if (can_fuse_attn_hc) stq_attn_hc = cx->pipeline(lib, "stark_hy4_stq_attn_hc");
     p_router = cx->pipeline(lib, "hy4_flash_router");
-    if (pf.mapped_gpu_plan) p_mapped_gpu_plan = cx->pipeline(lib, "hy4_flash_mapped_moe_plan");
+    if (pf.parallel_router && n_experts == 512 && topk == 16) {
+        try {
+            auto candidate = cx->pipeline(lib, "hy4_flash_router_parallel_512x16");
+            if (candidate.max_threads >= 512) p_router_parallel = std::move(candidate);
+        } catch (const std::runtime_error&) {
+            // The optional path must not prevent loading on a device/compiler
+            // that cannot build or launch a 512-thread group.
+        }
+    }
+    if (pf.parallel_router) {
+        std::fprintf(stderr, "  MoE router top-16: %s\n",
+                     p_router_parallel.handle ? "parallel SIMD path enabled" : "incumbent fallback (shape or launch limit)");
+    }
+    if (pf.mapped_gpu_plan)
+        p_mapped_gpu_plan = cx->pipeline(lib, m->stq ? "stark_hy4_stq_verify_plan" : "hy4_flash_mapped_moe_plan");
     p_idx_w = cx->pipeline(lib, "hy4_flash_indexer_weights");
     p_idx_kpool = cx->pipeline(lib, "hy4_flash_indexer_kpool",
                                mut.pool_rope_last ? mtl::Constants().i(53, 1) : mtl::Constants());
@@ -799,6 +863,12 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
         if (!attn_pf_sel.handle) attn_pf_sel = cx->pipeline(lib, "hy4_flash_mla_pf5_s32", selection);
     }
     if (pf.tensor_mla && pf_mma_ok) attn_pf_tensor = cx->pipeline(lib, "stark_hy4_mla_prefill_tensor");
+    if ((pf.stq_register_mla || pf.stq_verify_register_mla) && pf_mma_ok) {
+        attn_stq_range = cx->pipeline(lib, "stark_hy4_stq_register_mla", mtl::Constants().b(43, false));
+        attn_stq_sel = cx->pipeline(lib, "stark_hy4_stq_register_mla", mtl::Constants().b(43, true));
+        if (pf.stq_verify_register_mla)
+            attn_stq_finish = cx->pipeline(lib, "stark_hy4_stq_register_mla_finish");
+    }
     if (pf_mma_idx_ok) p_idx_score_pf = cx->pipeline(lib, "hy4_flash_indexer_score_pf");
     p_idx_topk = cx->pipeline(lib, "hy4_flash_indexer_topk",
                               mut.no_tail ? mtl::Constants().i(51, 3) : mtl::Constants());
@@ -814,22 +884,23 @@ std::string Forward::Impl::open(Model& mm, mtl::Context& c, const std::string& p
         p_dense_pack = cx->pipeline(lib, "stark_hy4_dense_pack_device");
         p_dense_device = cx->pipeline(lib, "stark_hy4_dense_device_views");
     }
-    p_eng_rows = cx->pipeline(lib, "hy4_flash_engram_rows");
-    p_eng_gate = cx->pipeline(lib, "hy4_flash_engram_gate");
+    p_eng_rows = cx->pipeline(lib, "hy4_flash_engram_rows", mtl::Constants().b(63, m->geo.engram_table_type == 30));
+    p_eng_gate = cx->pipeline(lib, m->stq ? "stark_hy4_stq_engram_gate" : "hy4_flash_engram_gate");
     p_eng_delta = cx->pipeline(lib, "hy4_flash_engram_delta");
+    if (m->stq && m->stq->has_dfly) p_dfly_capture = cx->pipeline(lib, "stark_hy4_capture_indexer");
 
     if (const std::string e = resolve(); !e.empty()) return e;
-    if (const std::string e = alloc(); !e.empty()) return e;
-    if (!pack.empty()) {
-        if (const std::string e = eng.open(mm, pack); !e.empty()) return "Engram: " + e;
+    if (const std::string e = alloc(shared_stq_graph); !e.empty()) return e;
+    if (!pack.empty() || m->stq) {
+        if (const std::string e = eng.open(mm, pack, pf.stq_cache_engram_pages); !e.empty()) return "Engram: " + e;
         eng_ready = true;
-        if (pf.optimize_mapped_decode) {
+        if (pf.optimize_mapped_decode || (m->stq && pf.mapped_gpu_plan)) {
             const size_t cells = size_t(Forward::kMaxWindow) * eng.rows_per_token();
             decode_engram_inputs.resize((size_t) eng.n_tables());
             for (auto& input : decode_engram_inputs) {
-                input.rows = cx->alloc(cells * eng.row_bytes());
-                input.valid = cx->alloc(cells * sizeof(float));
-                input.any = cx->alloc(size_t(Forward::kMaxWindow) * sizeof(float));
+                input.rows = alloc_local(cells * eng.row_bytes());
+                input.valid = alloc_local(cells * sizeof(float));
+                input.any = alloc_local(size_t(Forward::kMaxWindow) * sizeof(float));
             }
         }
     }
@@ -978,7 +1049,10 @@ void Forward::Impl::alloc_scratch(int Tm, int as, int ms, const std::function<mt
     attn_out = f32((size_t) Tm * n_embd);
     kvp = f32((size_t) Tm * kv_w);
     kvn = f32((size_t) Tm * kv_lora);
-    sc = f32((size_t) as * max_heads * Forward::kSelCap);
+    constexpr size_t stq_mla_partial_rows = (static_cast<size_t>(Forward::kSelCap) + 255) / 256 * (512 + 2);
+    size_t scores = (size_t) as * Forward::kSelCap;
+    if (pf.stq_verify_register_mla) scores = std::max(scores, Forward::kMaxWindow * stq_mla_partial_rows);
+    sc = f32(max_heads * scores);
     pos_b = get(4 * (size_t) Tm);
     rope_pos = get(4 * 3 * (size_t) Tm);   // [3][Tm], the M-RoPE planes
     ik = f32((size_t) Tm * idx_dim);
@@ -1005,10 +1079,12 @@ void Forward::Impl::alloc_scratch(int Tm, int as, int ms, const std::function<mt
     // bounds.  Sizing them for the GEMM alone would let a GEMV tail write past them.
     const bool mm_raw = mm_all && ms > Forward::kMaxWindow;
     const uint32_t ms_prep = mm_raw ? (uint32_t) Forward::kMaxWindow : (uint32_t) ms;
-    xp = f32(strata_hy4_flash_metal::xprep_floats((uint32_t) latent, ms_prep));
-    hbuf = f32((size_t) ms * topk * expert_ff);
-    hp = f32(strata_hy4_flash_metal::xprep_floats((uint32_t) expert_ff, (uint32_t) (ms_prep * topk)));
-    ye = f32((size_t) ms * topk * latent);
+    if (!m->stq) {
+        xp = f32(strata_hy4_flash_metal::xprep_floats((uint32_t) latent, ms_prep));
+        hbuf = f32((size_t) ms * topk * expert_ff);
+        hp = f32(strata_hy4_flash_metal::xprep_floats((uint32_t) expert_ff, (uint32_t) (ms_prep * topk)));
+        ye = f32((size_t) ms * topk * latent);
+    }
     mlat = f32((size_t) Tm * latent);
     upo = f32((size_t) Tm * n_embd);
     shg = f32((size_t) Tm * expert_ff);
@@ -1061,41 +1137,69 @@ void Forward::Impl::swap_scratch() {
     big_in = !big_in;
 }
 
-std::string Forward::Impl::alloc() {
+mtl::Buffer Forward::Impl::alloc_local(size_t bytes) {
+    auto buffer = cx->alloc(bytes);
+    if (extra_stq_slot) {
+        try {
+            stq_slot_buffers.push_back(buffer);
+        } catch (...) {
+            cx->free(buffer);
+            throw;
+        }
+    }
+    return buffer;
+}
+
+std::string Forward::Impl::alloc(const Impl* shared_stq_graph) {
     // Tm is the widest run the scratch must hold: a decode window (8) with prefill off, the chunk size with it on.
     // Three stages are allocated for their SUB-BATCH instead, because at Tm = 1024 they are what does not fit:
     // the score rows (537 GB), the MoE's entry-indexed buffers (635 MB) and the logits (495 MB) - see forward.h.
     // HY4_FLASH_SCRATCH_SPLIT (default on): with a prefill chunk, only the DECODE scratch is allocated here; the prompt's
     // (1.47 GB at 1024 positions) goes into a region of the expert arena while a prompt runs (attach_prefill).
-    split = tcap > Forward::kMaxWindow && scratch_split_on();
-    if (split) alloc_scratch(Forward::kMaxWindow, Forward::kMaxWindow, Forward::kMaxWindow, [&](size_t n) { return cx->alloc(n); });
-    else alloc_scratch(tcap, asub, msub, [&](size_t n) { return cx->alloc(n); });
-    auto f32 = [&](size_t n) { return cx->alloc(4 * n); };
+    split = !m->stq && tcap > Forward::kMaxWindow && scratch_split_on();
+    // These allocations have the same order and purpose for all slots. Each
+    // prefill or verify phase overwrites the scratch before using it and
+    // completes all GPU work before another slot can run.
+    size_t shared_index = 0;
+    auto scratch = [&](size_t bytes) {
+        if (!shared_stq_graph) {
+            auto buffer = cx->alloc(bytes);
+            if (m->stq) stq_scratch.push_back(buffer);
+            return buffer;
+        }
+        auto buffer = shared_stq_graph->stq_scratch.at(shared_index++);
+        if (buffer.bytes < bytes) throw std::runtime_error("Hy4 STQ shared scratch is too small");
+        buffer.bytes = bytes;
+        return buffer;
+    };
+    if (split) alloc_scratch(Forward::kMaxWindow, Forward::kMaxWindow, Forward::kMaxWindow, scratch);
+    else alloc_scratch(tcap, asub, msub, scratch);
+    auto f32 = [&](size_t n) { return alloc_local(4 * n); };
     const size_t kv_total = (size_t) blk.size() * (size_t) ctx * (size_t) kv_w;
     size_t idx_blocks = 0;
     for (const BW& b : blk)
         if (b.has_indexer) ++idx_blocks;
-    kv = cx->alloc(2 * kv_total);
-    idxc = cx->alloc(2 * idx_blocks * (size_t) ctx * 3ull * (size_t) idx_dim);
+    kv = alloc_local(2 * kv_total);
+    idxc = alloc_local(2 * idx_blocks * (size_t) ctx * 3ull * (size_t) idx_dim);
     const size_t n_pool_max = (size_t) ctx / (size_t) idx_kpool + 1;
     pool32 = f32(n_pool_max * (size_t) idx_dim);
     slots.layout((uint32_t) Forward::kMaxWindow, (uint32_t) topk, 4, (uint32_t) n_experts);
-    plan = cx->alloc(4 * slots.buf.size());
-    plan_b = cx->alloc(4 * slots.buf.size());
-    rms_part = cx->alloc(4 * 8 * Forward::kMaxWindow);
-    moe_ind = cx->alloc(4 * 3 * 2 * 4 * 2);
+    plan = alloc_local(4 * slots.buf.size());
+    plan_b = alloc_local(4 * slots.buf.size());
+    rms_part = alloc_local(4 * 8 * Forward::kMaxWindow);
+    moe_ind = alloc_local(4 * 3 * 2 * 4 * 2);
     moe_gx.assign((size_t) m->stream.n_layers(), {0u, 0u});
 
     if (tcap > Forward::kMaxWindow) {
         pslots.layout((uint32_t) tcap, (uint32_t) topk, 4, (uint32_t) n_experts, (uint32_t) msub);
-        pplan = cx->alloc(4 * pslots.buf.size());
+        pplan = alloc_local(4 * pslots.buf.size());
         if (mm_supported) {
             // the tile lists and their grids: (sub-batch, chunk), worst case tiles each, (x, y, z) per kind
             const int tm = mm_tile().tm;
             mm_cap = MoeMmF32::tile_cap(pslots.g_max, pslots.n_entry, tm);
             mm_slots = pslots.subs_for((uint32_t) tcap) * pslots.n_chunk;
-            mm_tiles = cx->alloc(4ull * 2 * mm_cap * mm_slots);
-            mm_ind = cx->alloc(4ull * 3 * 2 * mm_slots);
+            mm_tiles = alloc_local(4ull * 2 * mm_cap * mm_slots);
+            mm_ind = alloc_local(4ull * 3 * 2 * mm_slots);
             mm_gx.assign((size_t) m->stream.n_layers(), {0u, 0u});
             const size_t ent = (size_t) msub * topk;
             // What this costs, both ways round.  Against the GEMVs AT THE SAME SUB-BATCH the GEMM saves the
@@ -1125,15 +1229,46 @@ std::string Forward::Impl::alloc() {
         }
     }
     logits_b = f32((size_t) hsub * vocab);
-    argmax_b = cx->alloc(4 * (size_t) hsub);
+    argmax_b = alloc_local(4 * (size_t) hsub);
     last_log.assign((size_t) vocab, 0.0f);
-    badflag = cx->alloc(16);
+    badflag = alloc_local(16);
     mut_sinks = f32((size_t) max_heads);
     mut_zero = f32((size_t) idx_kpool * (size_t) idx_dim);
     for (int i = 0; i < max_heads; ++i) mut_sinks.as<float>()[i] = -INFINITY;
     h_mixes = f32((size_t) hsub * hc);
     h_cur = f32((size_t) hsub * n_embd);
     h_rnorm = f32((size_t) hsub * n_embd);
+    if (m->stq) {
+        const size_t routes = size_t(tcap) * topk;
+        const size_t elements = routes * latent;
+        const size_t width = std::max({max_heads * qk, max_heads * v_mla, m->geo.dense_ff});
+        stq_identity = scratch(size_t(tcap) * 2 * sizeof(uint32_t));
+        stq_embedding_ids = scratch(size_t(tcap) * sizeof(int32_t));
+        stq_embedding_rows = scratch(sizeof(float) * size_t(tcap) * n_embd);
+        stq_dense_input = scratch(2 * size_t(tcap) * width);
+        stq_dense_output = scratch(2 * std::max(size_t(tcap) * width, size_t(hsub) * vocab));
+        stq_grid = scratch(3 * sizeof(uint32_t));
+        stq_rows = scratch(routes * 2 * sizeof(uint32_t));
+        stq_jobs = scratch((routes / 32 + n_experts) * 4 * sizeof(uint32_t));
+        stq_inverse = scratch(routes * sizeof(uint32_t));
+        stq_prepared = scratch(elements * sizeof(uint16_t));
+        stq_gate = scratch(elements * sizeof(uint16_t));
+        stq_up = scratch(elements * sizeof(uint16_t));
+        stq_routed = scratch(sizeof(float) * elements);
+        if (shared_stq_graph) {
+            if (shared_index != shared_stq_graph->stq_scratch.size()) return "incomplete Hy4 STQ scratch layout";
+        } else {
+            for (int row = 0; row < tcap; ++row) {
+                stq_identity.as<uint32_t>()[2 * row] = 0;
+                stq_identity.as<uint32_t>()[2 * row + 1] = row;
+            }
+        }
+        if (p_dfly_capture.handle) {
+            const size_t total = stark::hy4::stq::kDflyTargetBlocks.size() * Forward::kMaxWindow;
+            dfly_selected = alloc_local(total * Forward::kSelCap * sizeof(uint32_t));
+            dfly_counts = alloc_local(total * sizeof(uint32_t));
+        }
+    }
     return {};
 }
 
@@ -1145,7 +1280,21 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     const uint32_t H = (uint32_t) b.heads;
     const mtl::Buffer* resid = &x_in;
     const auto stage = [&](double& total_ms) {
-        if (profile != nullptr) profile->stages.push_back({ds.size(), &total_ms});
+        if (profile == nullptr) return;
+        double* total = &total_ms;
+        if (!pr_in_chunk) {
+            if (total == &tm.pf_attention_mla_ms) total = &tm.verify_mla_ms;
+            else if (total == &tm.pf_attention_index_ms) total = &tm.verify_index_ms;
+            else if (total == &tm.pf_attention_dense_ms || total == &tm.pf_dense_ms) total = &tm.verify_dense_ms;
+            else if (total == &tm.pf_moe_route_ms) total = &tm.verify_router_ms;
+            else if (total == &tm.pf_moe_expert_ms) total = &tm.verify_expert_ms;
+            else total = &tm.verify_other_ms;
+        }
+        profile->stages.push_back({ds.size(), total});
+    };
+    enum Projection { QueryA, QueryB, KeyB, KeyValueA, IndexPool, ValueB, Gate, Output };
+    const auto projection = [&](Projection kind) {
+        stage(pr_in_chunk && m->stq ? tm.pf_stq_projection_ms[kind] : tm.pf_attention_dense_ms);
     };
 
     // ---- Engram, BEFORE the attention pre-mix
@@ -1211,20 +1360,27 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     hc_pre(ds, b, *resid, 0, T, b.t[W_ATTN_NORM], &anorm, eps);   // + attn_norm(cur) -> anorm
 
     // ---- MLA
-    stage(tm.pf_attention_dense_ms);
+    projection(QueryA);
     const gguf::Tensor* qa = b.t[W_Q_A];
-    gv(qa, true).append(ds, m->dense, qa->offset, anorm, (uint32_t) n_embd, q_resid, (uint32_t) m->geo.q_lora_rank, 0, uT);
+    if (m->stq)
+        append_dense_projection(ds, qa, anorm, uint32_t(n_embd), q_resid, uint32_t(m->geo.q_lora_rank), uT, true);
+    else
+        gv(qa, true).append(ds, m->dense, qa->offset, anorm, uint32_t(n_embd), q_resid,
+                            uint32_t(m->geo.q_lora_rank), 0, uT);
     stage(tm.pf_attention_misc_ms);
     rms(ds, q_resid, 0, (uint32_t) m->geo.q_lora_rank, b.t[W_Q_A_NORM], q_resid, 0,
         (uint32_t) m->geo.q_lora_rank, (uint32_t) m->geo.q_lora_rank, T, eps);
-    stage(tm.pf_attention_dense_ms);
+    projection(QueryB);
     const gguf::Tensor* qbw = b.t[W_Q_B];
-    gv(qbw, true).append(ds, m->dense, qbw->offset, q_resid, (uint32_t) m->geo.q_lora_rank, qb, H * (uint32_t) qk, 0, uT);
+    if (m->stq)
+        append_dense_projection(ds, qbw, q_resid, uint32_t(m->geo.q_lora_rank), qb, H * uint32_t(qk), uT, true);
+    else
+        gv(qbw, true).append(ds, m->dense, qbw->offset, q_resid, uint32_t(m->geo.q_lora_rank), qb, H * uint32_t(qk), 0, uT);
     stage(tm.pf_attention_misc_ms);
     rope(ds, qb, H, (uint32_t) qk, (uint32_t) (qk - rope_dim), H * (uint32_t) qk, b.tscale, T);
     // q_abs = wk_b[h] . q_nope[h], every head in one dispatch (grid.y = head, bitwise the per-head dispatches it
     // replaces - gemv.metal's note on function constants 10-12); then the rotated tail is copied in beside it
-    stage(tm.pf_attention_dense_ms);
+    projection(KeyB);
     const gguf::Tensor* kb = b.t[W_K_B];
     const uint32_t nope = (uint32_t) (qk - rope_dim);
     const size_t kb_head = (size_t) kv_lora * ref::row_bytes(kb->type, (int) nope);
@@ -1245,7 +1401,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         }
     }
     // the shared key: rope on its tail, the latent normed, both into the f16 cache
-    stage(tm.pf_attention_dense_ms);
+    projection(KeyValueA);
     const gguf::Tensor* kva = b.t[W_KV_A];
     gv(kva, true).append(ds, m->dense, kva->offset, anorm, (uint32_t) n_embd, kvp, (uint32_t) kv_w, 0, uT);
     // rope on the tail, rms on the latent, both stores: one dispatch (hy4_flash_attn.metal hy4_flash_kv_finish, bitwise the
@@ -1284,12 +1440,12 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     // ---- the indexer, on the sparse blocks
     uint32_t n_pool = 0;
     if (b.has_indexer) {
-        stage(tm.pf_attention_dense_ms);
+        projection(IndexPool);
         const gguf::Tensor* ikw = b.t[W_IK];
         gv(ikw, true).append(ds, m->dense, ikw->offset, anorm, (uint32_t) n_embd, ik, (uint32_t) idx_dim, 0, uT);
         stage(tm.pf_attention_index_ms);
         rms(ds, ik, 0, (uint32_t) idx_dim, b.t[W_IK_NORM], ik, 0, (uint32_t) idx_dim, (uint32_t) idx_dim, T, eps);
-        stage(tm.pf_attention_dense_ms);
+        projection(IndexPool);
         const gguf::Tensor* cv = b.t[W_ICV];
         const gguf::Tensor* cg = b.t[W_ICG];
         gv(cv, true).append(ds, m->dense, cv->offset, ik, (uint32_t) idx_dim, iv, (uint32_t) idx_dim, 0, uT);
@@ -1338,14 +1494,14 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         }
     }
     if (use_selection) {
-        stage(tm.pf_attention_dense_ms);
+        projection(IndexPool);
         const gguf::Tensor* iqb = b.t[W_IQ_B];
         gv(iqb, true).append(ds, m->dense, iqb->offset, q_resid, (uint32_t) m->geo.q_lora_rank, iq,
                              (uint32_t) (idx_heads * idx_dim), 0, uT);
         stage(tm.pf_attention_index_ms);
         rope(ds, iq, (uint32_t) idx_heads, (uint32_t) idx_dim, (uint32_t) (idx_dim - rope_dim),
              (uint32_t) (idx_heads * idx_dim), b.tscale, T);
-        stage(tm.pf_attention_dense_ms);
+        projection(IndexPool);
         const gguf::Tensor* ip = b.t[W_IPROJ];
         gv(ip).append(ds, m->dense, ip->offset, anorm, (uint32_t) n_embd, iwraw, (uint32_t) idx_heads, 0, uT);
         stage(tm.pf_attention_index_ms);
@@ -1404,6 +1560,23 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
             mtl::require_fit(d, "hy4_flash_indexer_topk");
             ds.push_back(d);
         }
+        if (dfly_capture && !images()) {
+            const auto& targets = stark::hy4::stq::kDflyTargetBlocks;
+            const auto at = std::find(targets.begin(), targets.end(), b.id);
+            if (at != targets.end()) {
+                const size_t dst = size_t(at - targets.begin()) * Forward::kMaxWindow;
+                const size_t src = pr_in_chunk ? size_t(T - 1) : 0;
+                constexpr uint32_t width = Forward::kSelCap, group = 256;
+                using mtl::Arg;
+                mtl::Dispatch d{&p_dfly_capture,
+                               {Arg::B(sel, sizeof(uint32_t) * src * width), Arg::B(nsel, sizeof(uint32_t) * src),
+                                Arg::B(dfly_selected, sizeof(uint32_t) * dst * width),
+                                Arg::B(dfly_counts, sizeof(uint32_t) * dst), Arg::V(width)},
+                               {(width + group - 1) / group, pr_in_chunk ? 1u : uT, 1}, {group, 1, 1}};
+                mtl::require_fit(d, "stark_hy4_capture_indexer");
+                ds.push_back(d);
+            }
+        }
     }
 
     // ---- attention itself (three dispatches: the score row, the softmax, PV - attn.h).  In SUB-BATCHES of `asub`
@@ -1423,6 +1596,11 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     // multiple of 32 keeps the decode attention (its last partial block would write the next token's rows).
     stage(tm.pf_attention_mla_ms);
     const bool attn_mma = pf_mma_ok && T > Forward::kMaxWindow && H % 32 == 0;
+    const bool register_available = attn_stq_sel.max_threads >= 288 && attn_stq_range.max_threads >= 288 &&
+                                    kv_w == 576 && kv_lora == 512 && H % 16 == 0 &&
+                                    mut.none && pf.probe == 0 && inj == nullptr;
+    const bool partition_mla = pf.stq_verify_register_mla && register_available && !pr_in_chunk && !images() &&
+                               attn_stq_finish.max_threads >= 256 && T <= Forward::kMaxWindow;
     AttnArgs a{H,
                (uint32_t) kv_w,
                (uint32_t) kv_lora,
@@ -1477,8 +1655,28 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
                   mtl::Arg::B(sc),
                   mtl::Arg::B(attn_o, 4 * (size_t) t0 * H * (size_t) kv_lora),
                   mtl::Arg::V(a)};
-        if (attn_mma) {
-            // the MMA kernel's eight arguments: q, kv, sinks, sel, n_sel, pos, o, the args bytes (no score scratch)
+        const bool register_mla = pf.stq_register_mla && attn_mma && register_available;
+        if (register_mla || partition_mla) {
+            // Use the same per-row partition boundaries for greedy and speculative verification.
+            const uint32_t cap = !use_selection && a.window != 0 ? a.window : (uint32_t) Forward::kSelCap;
+            const uint32_t parts = partition_mla ? (cap + 255) / 256 : 0;
+            mtl::Dispatch d;
+            d.p = use_selection ? &attn_stq_sel : &attn_stq_range;
+            d.args = {args[0], args[1], args[2], args[3], args[4], args[5], parts ? args[6] : args[7], args[8],
+                      mtl::Arg::V(parts)};
+            d.grid[0] = nt;
+            d.grid[1] = H / 16;
+            d.grid[2] = std::max(1u, parts);
+            d.tg[0] = 288;
+            mtl::require_fit(d, "stark_hy4_stq_register_mla");
+            ds.push_back(d);
+            if (parts) {
+                mtl::Dispatch finish{&attn_stq_finish, {args[6], args[7], args[8], mtl::Arg::V(parts)},
+                                     {nt, H, 1}, {256, 1, 1}};
+                mtl::require_fit(finish, "stark_hy4_stq_register_mla_finish");
+                ds.push_back(finish);
+            }
+        } else if (attn_mma) {
             mtl::Dispatch d;
             d.p = use_selection ? &attn_pf_sel : &attn_pf_range;
             d.args = {args[0], args[1], args[2], args[3], args[4], args[5], args[7], args[8]};
@@ -1494,41 +1692,79 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
     }
 
     // kqv = wv_b[h] . o[h]
-    stage(tm.pf_attention_dense_ms);
+    projection(ValueB);
     const gguf::Tensor* vb = b.t[W_V_B];
     const size_t vb_head = (size_t) v_mla * ref::row_bytes(vb->type, kv_lora);
     gvh(vb->type, (uint32_t) kv_lora, (uint32_t) v_mla,
         GemvHeads{(uint32_t) vb_head, (uint32_t) kv_lora, (uint32_t) v_mla})
         .append_heads(ds, m->dense, vb->offset, attn_o, H * (uint32_t) kv_lora, kqv, H * (uint32_t) v_mla, 0, uT, H);
+    projection(Gate);
     const gguf::Tensor* ag = b.t[W_AGATE];
-    append_dense_projection(ds, ag, anorm, (uint32_t) n_embd, gproj, H * (uint32_t) v_mla, uT, true);
+    const gguf::Tensor* ao = b.t[W_AOUT];
+    uint32_t split_gate = 0;
+    if (m->stq && m->stq->program.verify_attention_gate_enabled() && !pr_in_chunk && !images() && !want_dump) {
+        split_gate = m->stq->program.verify_attention_gate_splits(*m->stq->dense.at(ag->name),
+            *m->stq->dense.at(ao->name), uT, stq_dense_output);
+    }
+    const bool fuse_gate = split_gate || (m->stq && pr_in_chunk && !want_dump && m->stq->program.fuses_attention_gate(uT));
+    using stark::hy4::stq::DenseBoundaries;
+    append_dense_projection(ds, ag, anorm, (uint32_t) n_embd, gproj, H * (uint32_t) v_mla, uT, true,
+                            split_gate ? DenseBoundaries::split_output :
+                                fuse_gate ? DenseBoundaries::raw_output : DenseBoundaries::full);
     stage(tm.pf_attention_misc_ms);
-    {
+    if (fuse_gate) {
+        if (!m->stq->program.append_attention_gate_prepare(ds, *m->stq->dense.at(ag->name),
+                *m->stq->dense.at(ao->name), uT, stq_dense_output, kqv, stq_dense_input, split_gate))
+            throw std::runtime_error("invalid STQ attention gate preparation");
+    } else {
         ElemArgs a{H * (uint32_t) v_mla, H * (uint32_t) v_mla, H * (uint32_t) v_mla, H * (uint32_t) v_mla};
         elem(ds, p_gate_mul, {mtl::Arg::B(kqv), mtl::Arg::B(gproj), mtl::Arg::B(gated), mtl::Arg::V(a)}, a.n, T,
              "hy4_flash_gate_mul");
     }
-    stage(tm.pf_attention_dense_ms);
-    const gguf::Tensor* ao = b.t[W_AOUT];
-    append_dense_projection(ds, ao, gated, H * (uint32_t) v_mla, attn_y, (uint32_t) n_embd, uT, true);
+    projection(Output);
+    append_dense_projection(ds, ao, gated, H * (uint32_t) v_mla, attn_y, (uint32_t) n_embd, uT, true,
+                            fuse_gate ? DenseBoundaries::prepared_input : DenseBoundaries::full);
     stage(tm.pf_attention_misc_ms);
-    rms(ds, attn_y, 0, (uint32_t) n_embd, b.t[W_POST_ATTN], attn_out, 0, (uint32_t) n_embd, (uint32_t) n_embd, T,
-        eps);
-    hc_post(ds, attn_out, *resid, post_a, hc_mid, T);
+    const bool fused_attn_hc = stq_attn_hc.max_threads >= 256 && !want_dump;
+    if (fused_attn_hc) {
+        using mtl::Arg;
+        mtl::Dispatch d{&stq_attn_hc,
+                        {Arg::B(attn_y), Arg::B(m->dense, b.t[W_POST_ATTN]->offset), Arg::B(*resid),
+                         Arg::B(post_a), Arg::B(hc_mid), Arg::B(flat), Arg::V(eps)},
+                        {uT, 1, 1}, {256, 1, 1}};
+        mtl::require_fit(d, "stark_hy4_stq_attn_hc");
+        ds.push_back(d);
+    } else {
+        rms(ds, attn_y, 0, (uint32_t) n_embd, b.t[W_POST_ATTN], attn_out, 0, (uint32_t) n_embd,
+            (uint32_t) n_embd, T, eps);
+        hc_post(ds, attn_out, *resid, post_a, hc_mid, T);
+    }
 
     // ---- the FFN half
     stage(tm.pf_other_ms);
-    hc_pre(ds, b, hc_mid, 1, T, b.t[W_FFN_NORM], &fnorm, eps);   // + ffn_norm(cur) -> fnorm
+    hc_pre(ds, b, hc_mid, 1, T, b.t[W_FFN_NORM], &fnorm, eps, fused_attn_hc);
+    const auto fused_ffn = [&](const gguf::Tensor* gate, const gguf::Tensor* up, const gguf::Tensor* down,
+                               const mtl::Buffer& output) {
+        if (!m->stq || !pr_in_chunk || want_dump || !m->stq->program.fuses_ffn(uT)) return false;
+        const auto& banks = m->stq->dense;
+        // The routed gate scratch is available before the routed experts and after their combine.
+        if (!m->stq->program.append_ffn(ds, *banks.at(gate->name), *banks.at(up->name), *banks.at(down->name),
+                                        fnorm, stq_identity, uT, stq_dense_input, stq_gate, stq_dense_output, output))
+            throw std::runtime_error("invalid STQ fused FFN dispatch for " + gate->name);
+        return true;
+    };
     const mtl::Buffer* ffn_result = nullptr;
     if (b.dense_ffn) {
         stage(tm.pf_dense_ms);
         const gguf::Tensor* wg = b.t[W_FGATE];
         const gguf::Tensor* wu = b.t[W_FUP];
         const gguf::Tensor* wd = b.t[W_FDOWN];
-        append_dense_projection(ds, wg, fnorm, (uint32_t) n_embd, dg, (uint32_t) m->geo.dense_ff, uT, false);
-        append_dense_projection(ds, wu, fnorm, (uint32_t) n_embd, du, (uint32_t) m->geo.dense_ff, uT, false);
-        glu(ds, dg, du, da, (uint32_t) m->geo.dense_ff, T, INFINITY);   // the dense FFN does NOT clamp
-        append_dense_projection(ds, wd, da, (uint32_t) m->geo.dense_ff, ffn_sum, (uint32_t) n_embd, uT, false);
+        if (!fused_ffn(wg, wu, wd, ffn_sum)) {
+            append_dense_projection(ds, wg, fnorm, (uint32_t) n_embd, dg, (uint32_t) m->geo.dense_ff, uT, false);
+            append_dense_projection(ds, wu, fnorm, (uint32_t) n_embd, du, (uint32_t) m->geo.dense_ff, uT, false);
+            glu(ds, dg, du, da, (uint32_t) m->geo.dense_ff, T, INFINITY);
+            append_dense_projection(ds, wd, da, (uint32_t) m->geo.dense_ff, ffn_sum, (uint32_t) n_embd, uT, false);
+        }
         ffn_result = &ffn_sum;
     } else {
         stage(tm.pf_moe_route_ms);
@@ -1537,13 +1773,15 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         gv(gi).append(ds, m->dense, gi->offset, fnorm, (uint32_t) n_embd, mlogits, (uint32_t) n_experts, 0, uT);
         {
             mtl::Dispatch d;
-            d.p = &p_router;
+            // Small row batches benefited in the isolated router screen.
+            const bool parallel_router = p_router_parallel.handle && uT <= 16;
+            d.p = parallel_router ? &p_router_parallel : &p_router;
             RouterArgs a{(uint32_t) n_experts, (uint32_t) topk,   (uint32_t) n_experts, (uint32_t) topk,
                          (uint32_t) topk,      uT,                m->geo.routed_scale,  6.103515625e-5f};
             d.args = {mtl::Arg::B(mlogits), mtl::Arg::B(m->dense, b.t[W_PROBS_B]->offset), mtl::Arg::B(ids),
                       mtl::Arg::B(rw), mtl::Arg::V(a)};
             d.grid[0] = uT;
-            d.tg[0] = 256;
+            d.tg[0] = parallel_router ? 512 : 256;
             mtl::require_fit(d, "hy4_flash_router");
             ds.push_back(d);
         }
@@ -1578,7 +1816,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
             cut_block.push_back(b.id);
         }
         // the MoE split (moe_split_min): decided here, from T alone, so the encoder and at_cut agree
-        const bool split = !mapped && moe_split_min() > 0 && T >= moe_split_min() && T <= Forward::kMaxWindow &&
+        const bool split = !m->stq && !mapped && moe_split_min() > 0 && T >= moe_split_min() && T <= Forward::kMaxWindow &&
                            plan_of(T).subs_for(uT) == 1;
         if (!gpu_plan) cut_role.push_back(split ? 1 : 0);
 
@@ -1592,6 +1830,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         const gguf::Tensor* su = b.t[W_SH_U];
         const gguf::Tensor* sd = b.t[W_SH_D];
         auto shared_expert = [&] {
+            if (fused_ffn(sg, su, sd, sho)) return;
             append_dense_projection(ds, sg, fnorm, (uint32_t) n_embd, shg, (uint32_t) expert_ff, uT, false);
             append_dense_projection(ds, su, fnorm, (uint32_t) n_embd, shu, (uint32_t) expert_ff, uT, false);
             glu(ds, shg, shu, sha, (uint32_t) expert_ff, T, INFINITY);
@@ -1602,6 +1841,25 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
         const gguf::Tensor* rd = b.t[W_RDOWN];
         append_dense_projection(ds, rd, fnorm, (uint32_t) n_embd, rdown, (uint32_t) latent, uT, false);
         if (!gpu_plan) cut_wait.push_back(early ? (int) ds.size() : cuts.back());
+        if (m->stq) {
+            const auto& banks = m->stq->experts.at(size_t(b.ordinal));
+            const uint32_t rows = uT * uint32_t(topk);
+            if (gpu_plan) {
+                using mtl::Arg;
+                mtl::Dispatch d{&p_mapped_gpu_plan,
+                    {Arg::B(ids), Arg::B(stq_rows), Arg::B(stq_jobs), Arg::B(stq_inverse), Arg::B(stq_grid),
+                     Arg::B(badflag, sizeof(uint32_t)), Arg::V(rows)},
+                    {1, 1, 1}, {128, 1, 1}};
+                mtl::require_fit(d, "stark_hy4_stq_verify_plan");
+                ds.push_back(d);
+            }
+            stage(tm.pf_moe_expert_ms);
+            if (!m->stq->program.append_routed(ds, banks[kGate], banks[kUp], banks[kDown],
+                    rdown, stq_rows, stq_jobs, stq_inverse, rw, uT, rows,
+                    std::min(rows, rows / 32 + uint32_t(n_experts)), stq_prepared, stq_gate,
+                    stq_up, stq_routed, mlat, (!gpu_plan && stq_gemv()) ? nullptr : &stq_grid))
+                throw std::runtime_error("invalid STQ routed dispatch");
+        } else {
         const ExpertSlices& es = m->experts[(size_t) b.ordinal];
         const MoeF32& mo = moe(es.type[kGate], es.type[kDown]);
         MoeArgs ma{};
@@ -1758,6 +2016,7 @@ void Forward::Impl::encode_block(std::vector<mtl::Dispatch>& ds, std::vector<int
             }
             mo.append_combine(ds, ps.for_chunk(sa, 0, s), ye, pb, mlat, xo);
         }
+        }
 
         stage(tm.pf_dense_ms);
         const gguf::Tensor* ru = b.t[W_RUP];
@@ -1798,7 +2057,7 @@ void Forward::Impl::encode_head(std::vector<mtl::Dispatch>& ds, const mtl::Buffe
     }
     rms(ds, h_cur, 0, (uint32_t) n_embd, h_norm, h_rnorm, 0, (uint32_t) n_embd, (uint32_t) n_embd, T, eps);
     if (!with_logits) return;   // the MTP block's `h` only (PrefillSink::hidden)
-    gv(h_out).append(ds, m->dense, h_out->offset, h_rnorm, (uint32_t) n_embd, logits_b, (uint32_t) vocab, 0, uT);
+    append_dense_projection(ds, h_out, h_rnorm, (uint32_t) n_embd, logits_b, (uint32_t) vocab, uT, false);
     {
         mtl::Dispatch d;
         d.p = &p_argmax;
@@ -1935,6 +2194,22 @@ void Forward::Impl::at_cut(int s) {
             for (int k = 0; k < topk; ++k)
                 w[(size_t) t * topk + k] = w[(size_t) t * topk + k] / den * m->geo.routed_scale;
         }
+    }
+    if (m->stq) {
+        const auto route = stark::hy4::stq::plan_routes({id, size_t(n_tok) * topk});
+        if (!route || route->rows.size() != size_t(n_tok) * topk ||
+            (stq_gemv() && route->jobs.size() != size_t(topk)) ||
+            route->jobs.size() * sizeof(route->jobs.front()) > stq_jobs.bytes) {
+            cut_err = "invalid STQ expert plan";
+            return;
+        }
+        std::memcpy(stq_rows.ptr, route->rows.data(), route->rows.size() * sizeof(route->rows.front()));
+        std::memcpy(stq_jobs.ptr, route->jobs.data(), route->jobs.size() * sizeof(route->jobs.front()));
+        std::memcpy(stq_inverse.ptr, route->inverse.data(), route->inverse.size() * sizeof(uint32_t));
+        const uint32_t grid[3] = {uint32_t(latent / 128), uint32_t(route->jobs.size()), 1};
+        std::memcpy(stq_grid.ptr, grid, sizeof(grid));
+        tm.host_cut_ms += (mtl::now_s() - t0) * 1e3;
+        return;
     }
     const bool mapped = m->stream.mapped();
     const float* pr = !mapped && prefetch_enabled() ? pred.as<float>() : nullptr;
@@ -2193,16 +2468,17 @@ void Forward::Impl::dump_block(const BW& b, int T, Dump* dump, const Inject& inj
 // ---- the public face -----------------------------------------------------------------------------------------------
 Forward::~Forward() { delete im_; }
 
-std::string Forward::open(Model& m, mtl::Context& cx, const std::string& pack_dir, const Prefill& pf) {
+std::string Forward::open(Model& m, mtl::Context& cx, const std::string& pack_dir, const Prefill& pf,
+                          int context_capacity, const Forward* shared_stq_graph) {
     if (im_ != nullptr) return "already open";
-    im_ = new Impl();
-    const std::string e = im_->open(m, cx, pack_dir, pf);
-    if (!e.empty()) {
-        delete im_;
-        im_ = nullptr;
-    }
+    auto opened = std::make_unique<Impl>();
+    const std::string e = opened->open(m, cx, pack_dir, pf, context_capacity,
+                                       shared_stq_graph ? shared_stq_graph->im_ : nullptr);
+    if (e.empty()) im_ = opened.release();
     return e;
 }
+
+void Forward::commit_stq_slot() { im_->stq_slot_buffers.clear(); }
 
 // Called after the LAST flush of a window, i.e. after the command buffer that wrote the cache has completed -
 // before that the flag is not readable.  Returns the `nonfinite` sentinel when this window added any: the request
@@ -2329,6 +2605,7 @@ void Forward::reset() {
     if (im_ == nullptr) return;
     im_->snap_used = 0;
     im_->last_tok = -1;
+    im_->dfly_rows = 0;
     std::fill(im_->pools_done.begin(), im_->pools_done.end(), 0);
     if (im_->badflag.ptr != nullptr) std::memset(im_->badflag.ptr, 0, 16);
     im_->bad_reported = 0;
@@ -2345,7 +2622,33 @@ std::string Forward::rewind(int position) {
     im_->clamp_pools(position);
     im_->snap_used = position;
     im_->last_tok = -1;
+    im_->dfly_rows = 0;
     return {};
+}
+
+void Forward::capture_dfly(bool enabled) {
+    im_->dfly_capture = enabled && im_->p_dfly_capture.handle != nullptr;
+    im_->dfly_rows = 0;
+}
+
+bool Forward::dfly_target(int position, stark::hy4::stq::DflyTargetView& view) const {
+    const auto& im = *im_;
+    const int row = position - 1 - im.dfly_first;
+    if (!im.dfly_capture || row < 0 || row >= im.dfly_rows || position > im.snap_used || im.images())
+        return false;
+    view = {};
+    view.position = uint32_t(position);
+    view.result_norm = {im.h_rnorm.as<float>() + size_t(row) * im.n_embd, size_t(im.n_embd)};
+    const auto& targets = stark::hy4::stq::kDflyTargetBlocks;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        const size_t at = i * kMaxWindow + row;
+        const size_t count = im.dfly_counts.as<uint32_t>()[at];
+        if (!count || count > kSelCap || count > size_t(position)) return false;
+        view.layers[i] = {&im.kv, sizeof(uint16_t) * im.blk.at(size_t(targets[i])).kv_off,
+                          {im.dfly_selected.as<uint32_t>() + at * kSelCap, count},
+                          &im.dfly_selected, sizeof(uint32_t) * at * kSelCap};
+    }
+    return true;
 }
 
 const float* Forward::logits() const { return im_ == nullptr ? nullptr : im_->logits_b.as<float>(); }
@@ -2390,6 +2693,7 @@ void Forward::set_image_prompt(const std::vector<ImageSpanRows>* spans, const in
 }
 
 bool Forward::has_image_prompt() const { return im_->images(); }
+bool Forward::parallel_router_active() const { return im_ && im_->p_router_parallel.handle; }
 const std::vector<int32_t>& Forward::predicted_ids() const { return im_->predicted; }
 
 namespace {
@@ -2421,7 +2725,15 @@ std::string Forward::Impl::engram_rows_for(int block_id, int T, const EngramDeco
 std::string Forward::Impl::embed_window(const int32_t* all_tokens, int T) {
     const gguf::Tensor* te = m->find("token_embd.weight");
     if (te == nullptr) return "no tensor token_embd.weight";
-    const size_t rb = ref::row_bytes(te->type, n_embd);
+    const size_t rb = m->stq ? 0 : ref::row_bytes(te->type, n_embd);
+    if (m->stq) {
+        std::memcpy(stq_embedding_ids.ptr, all_tokens + p0, sizeof(int32_t) * size_t(T));
+        std::vector<mtl::Dispatch> ds;
+        const auto& bank = *m->stq->dense.at(te->name);
+        if (!m->stq->embedding.append(ds, bank, stq_embedding_ids, uint32_t(T), stq_embedding_rows))
+            return "invalid STQ embedding dispatch";
+        tm.gpu_ms += cx->run_graph(ds) * 1e3;
+    }
     std::vector<float> row((size_t) n_embd);
     std::vector<uint8_t> raw(rb);
     float* dst = hcA.as<float>();
@@ -2429,14 +2741,16 @@ std::string Forward::Impl::embed_window(const int32_t* all_tokens, int T) {
         const int32_t tok = all_tokens[p0 + t];
         if (tok < 0 || tok >= vocab) return "token id " + std::to_string(tok) + " is outside the vocabulary";
         // the row's bytes from the dense buffer or, when token_embd is not resident (model.h on_file), the file
-        if (!m->tensor_bytes("token_embd.weight", (uint64_t) tok * rb, rb, raw.data()))
-            return "cannot read row " + std::to_string(tok) + " of token_embd.weight";
-        ref::dequant(te->type, raw.data(), row.data(), (size_t) n_embd);
+        if (!m->stq) {
+            if (!m->tensor_bytes("token_embd.weight", uint64_t(tok) * rb, rb, raw.data()))
+                return "cannot read row " + std::to_string(tok) + " of token_embd.weight";
+            ref::dequant(te->type, raw.data(), row.data(), size_t(n_embd));
+        }
         // A picture's positions take the tower's row instead of the placeholder token's embedding, into all
         // four hyper-connection planes exactly as the token embedding goes.  Done here rather than with a
         // kernel because hcA is shared host-visible memory: upstream needs a scatter kernel only because
         // its state lives in device memory the host cannot write.
-        const float* src = row.data();
+        const float* src = m->stq ? stq_embedding_rows.as<float>() + size_t(t) * n_embd : row.data();
         if (images()) {
             const int64_t at = (int64_t) p0 + t;
             for (const Forward::ImageSpanRows& s : *img)
@@ -2503,7 +2817,7 @@ void Forward::Impl::prune_barriers(std::vector<mtl::Dispatch>& ds, const std::ve
         ++pr_dropped;
         live.insert(live.end(), mine.begin(), mine.end());
     }
-    static int calls = 0;
+    static thread_local int calls = 0;
     if (++calls == 200 && stark::hy4::vendor_option("HY4_FLASH_PRUNE_STATS"))
         std::fprintf(stderr, "strata_hy4_flash_metal: prune_barriers: %llu of %llu barriers dropped over %d dispatch lists\n",
                      (unsigned long long) pr_dropped, (unsigned long long) pr_seen, calls);
@@ -2513,7 +2827,8 @@ std::string Forward::window(const int32_t* all_tokens, int p0, int T, Dump* dump
     Impl& im = *im_;
     if (T < 1 || T > kMaxWindow)
         return "the window is " + std::to_string(T) + ", outside 1.." + std::to_string(kMaxWindow);
-    if (!im.m->stream.ready()) return "the expert arena was not built (--no-arena cannot run a forward pass)";
+    if (!im.m->stq && !im.m->stream.ready())
+        return "the expert arena was not built (--no-arena cannot run a forward pass)";
     im.inj = nullptr;
     im.clamp_pools(p0);
     bool need_engram = false;
@@ -2531,7 +2846,9 @@ std::string Forward::window(const int32_t* all_tokens, int p0, int T, Dump* dump
         im.tm.engram_wait_ms += (mtl::now_s() - te) * 1e3;
     }
     if (const std::string e = im.embed_window(all_tokens, T); !e.empty()) return e;
-    const bool gpu_plan = im.pf.mapped_gpu_plan && im.m->stream.mapped() && moe_indirect() &&
+    const bool can_plan = im.m->stq ? (im.mut.none && !im.images() && im.topk == 16)
+                                   : (im.m->stream.mapped() && moe_indirect());
+    const bool gpu_plan = im.pf.mapped_gpu_plan && can_plan &&
         dump == nullptr && im.pr_record == nullptr && im.pr_force == nullptr &&
         0 < im.topk && T * im.topk <= 128;
     const bool one_command = gpu_plan && !im.images() && !im.decode_engram_inputs.empty();
@@ -2556,11 +2873,15 @@ std::string Forward::window(const int32_t* all_tokens, int p0, int T, Dump* dump
     // never swapped by value - the pointers are.
     const mtl::Buffer* in = &im.hcA;
     const mtl::Buffer* out = &im.hcB;
+    mtl::Context::GraphProfile profile;
+    auto* verify_profile = im.m->stq && im.pf.profile_stages ? &profile : nullptr;
     auto flush = [&]() -> std::string {
         if (ds.empty()) return {};
         im.prune_barriers(ds, cuts, im.cut_wait);
         const double t0 = mtl::now_s();
-        im.tm.gpu_ms += im.cx->run_graph_seg(ds, cuts, im.cut_wait, cut_tramp, &im) * 1e3;
+        im.tm.gpu_ms += im.cx->run_graph_seg(ds, cuts, im.cut_wait, cut_tramp, &im, verify_profile) * 1e3;
+        if (profile.sampled) ++im.tm.verify_profiled_graphs;
+        profile.stages.clear();
         im.tm.wall_ms += (mtl::now_s() - t0) * 1e3;
         ds.clear();
         cuts.clear();
@@ -2581,9 +2902,10 @@ std::string Forward::window(const int32_t* all_tokens, int p0, int T, Dump* dump
             }
             if (const std::string e = im.engram_rows_for(b.id, T, engram_input); !e.empty()) return e;
         }
-        im.encode_block(ds, cuts, b, *in, *out, T, false, gpu_plan, nullptr, engram_input);
+        im.encode_block(ds, cuts, b, *in, *out, T, false, gpu_plan, verify_profile, engram_input);
         std::swap(in, out);
     }
+    if (verify_profile) profile.stages.push_back({ds.size(), &im.tm.verify_dense_ms});
     im.encode_head(ds, *in, 0, T);
     if (const std::string e = flush(); !e.empty()) return e;
     // The cache is written; the flag is readable now and not before.
@@ -2592,6 +2914,8 @@ std::string Forward::window(const int32_t* all_tokens, int p0, int T, Dump* dump
                 4 * (size_t) im.vocab);
     im.last_tok = im.argmax_b.as<int32_t>()[T - 1];
     im.snap_used = p0 + T;   // what a snapshot would record: the caches now hold positions 0 .. p0 + T - 1
+    im.dfly_first = p0;
+    im.dfly_rows = im.dfly_capture ? T : 0;
     for (size_t i = 0; i < im.pools_done.size(); ++i) im.pools_done[i] = (p0 + T) / im.idx_kpool;
     if (dump != nullptr && dump->on()) {
         for (const Impl::BW& b : im.blk) {
@@ -2644,7 +2968,8 @@ std::string Forward::prefill(const int32_t* all_tokens, int p0, int T, const Pre
     } scratch(im);
     if (T < 1 || T > im.tcap)
         return "the chunk is " + std::to_string(T) + ", outside 1.." + std::to_string(im.tcap);
-    if (!im.m->stream.ready()) return "the expert arena was not built (--no-arena cannot run a forward pass)";
+    if (!im.m->stq && !im.m->stream.ready())
+        return "the expert arena was not built (--no-arena cannot run a forward pass)";
     if (p0 + T > im.ctx)
         return "the chunk ends at position " + std::to_string(p0 + T) + ", past --context " +
                std::to_string(im.ctx);
@@ -2670,10 +2995,13 @@ std::string Forward::prefill(const int32_t* all_tokens, int p0, int T, const Pre
     const double te = mtl::now_s();
     if (const std::string e = im.prepare_window(all_tokens, p0, T, need_engram); !e.empty()) return e;
     if (need_engram) {
-        for (int i = 0; i < im.eng.n_tables(); ++i) {
-            std::string err;
-            if (im.eng.join(im.eng.block_of(i), err) == nullptr)
-                return "Engram block " + std::to_string(im.eng.block_of(i)) + ": " + err;
+        // The STQ reader can finish each table while earlier blocks execute.
+        if (!im.pf.stq_cache_engram_pages) {
+            for (int i = 0; i < im.eng.n_tables(); ++i) {
+                std::string err;
+                if (im.eng.join(im.eng.block_of(i), err) == nullptr)
+                    return "Engram block " + std::to_string(im.eng.block_of(i)) + ": " + err;
+            }
         }
         im.tm.pf_engram_ms += (mtl::now_s() - te) * 1e3;   // the PROMPT's, not a decode position's
     }
@@ -2702,8 +3030,10 @@ std::string Forward::prefill(const int32_t* all_tokens, int p0, int T, const Pre
     mtl::Context::GraphProfile profile;
     for (size_t l = 0; l < im.blk.size(); ++l) {
         const Impl::BW& b = im.blk[l];
-        if (b.engram_table >= 0)
+        if (b.engram_table >= 0) {
             if (const std::string e = im.engram_rows_for(b.id, T); !e.empty()) return e;
+            if (im.pf.stq_cache_engram_pages) im.tm.pf_engram_ms += im.eng.wait_us(b.id) / 1e3;
+        }
         const double t_enc = mtl::now_s();
         ds.clear();
         cuts.clear();
@@ -2717,6 +3047,10 @@ std::string Forward::prefill(const int32_t* all_tokens, int p0, int T, const Pre
         const double g = im.cx->run_graph_seg(ds, cuts, im.cut_wait, cut_tramp, &im, stage_profile) * 1e3;
         if (profile.sampled) {
             ++im.tm.pf_profiled_blocks;
+            if (im.m->stq) {
+                const auto& parts = im.tm.pf_stq_projection_ms;
+                im.tm.pf_attention_dense_ms = std::accumulate(parts.begin(), parts.end(), 0.0);
+            }
             im.tm.pf_attention_ms = im.tm.pf_attention_dense_ms + im.tm.pf_attention_index_ms +
                                     im.tm.pf_attention_mla_ms + im.tm.pf_attention_misc_ms;
         }
@@ -2783,6 +3117,8 @@ std::string Forward::prefill(const int32_t* all_tokens, int p0, int T, const Pre
     }
     if (const std::string e = im.nonfinite_check(); !e.empty()) return e;
     im.snap_used = p0 + T;
+    im.dfly_first = p0 + T - 1;
+    im.dfly_rows = im.dfly_capture ? 1 : 0;
     im.tm.pf_wall_ms += (mtl::now_s() - t_chunk) * 1e3;
     im.tm.pf_host_ms += im.m->stream.prompt_host_ms() - host0;
     im.tm.pf_wait_ms += im.m->stream.prompt_wait_ms() - wait0;
@@ -2811,7 +3147,7 @@ std::string Forward::block_window(int L, const int32_t* all_tokens, int p0, int 
     if (L < 0 || (size_t) L >= im.blk.size()) return "block " + std::to_string(L) + " is outside the trunk";
     if (T < 1 || T > kMaxWindow) return "the window is outside 1.." + std::to_string(kMaxWindow);
     const Impl::BW& b = im.blk[(size_t) L];
-    if (b.ordinal >= 0 && !im.m->stream.ready()) return "the expert arena was not built";
+    if (b.ordinal >= 0 && !im.m->stq && !im.m->stream.ready()) return "the expert arena was not built";
     im.inj = &inj;
     if (const std::string e = im.prepare_window(all_tokens, p0, T, b.engram_table >= 0); !e.empty()) return e;
     if (b.engram_table >= 0)

@@ -51,7 +51,8 @@ These trials used different row counts, host paths and sampling policies across 
 
 ## Hy4-flash
 
-Start with the [Hy4-flash performance write-up](speed-hy4.md) for the retained
+See the [Sushi STQ performance history](speed-hy4-stq.md) for the current catalog pack and OpenCode fan-out.
+Start with the [AngelSlim Q3_K performance write-up](speed-hy4.md) for the retained
 profiles, prefill and decode results, failed approaches and remaining gates.
 The tables below index the individual trials.
 
