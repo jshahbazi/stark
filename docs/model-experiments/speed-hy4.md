@@ -2,30 +2,9 @@
 
 Stark's best measured prefill and decode use different load profiles. A streamed worker with 4,096-row prefill chunks and guarded FFN device views reached **711.61 tok/s first-use prefill** on the fixed 4K fixture. A prepared resident worker reached **58.28 tok/s warm K2 decode** on that fixture. An exploratory resident K3 run peaked at **68.58 tok/s** on one short TypeScript task. These are worker diagnostics with their own build and workload controls. The standard benchmark profile is still draft. [Performance checkpoint](speed-other-families.md#november-26-performance-checkpoint) · [Standard profile](../../scripts/benchmark_profiles/hy4-flash.toml)
 
-The Sushi STQ 4bpw pack has separate 16K and 27K OpenCode measurements, a five-draft verifier and different packed projections. [Measured STQ attempts and Sushi comparison](2026-11-27-hy4-stq-open-code-performance.md)
-
-The STQ dense attention follow-up saved 2.49 s of fresh 27K OpenCode prefill in a same-binary pair using the direct packed K32 product and fused gate preparation. The absorbed-head trials stayed out of the worker. [Dense attention measurements](2026-11-27-hy4-stq-dense-attention-prefill.md)
-
-The STQ routed follow-up used K32 PAIR1 products and register H128 preparation at 1,024 prompt rows and up. The repeated same-binary fresh 27K OpenCode pair went from 34.20 to 32.93 s of prefill with identical outputs and draft counts. Long-context MLA geometry variants produced no integrated change. [Routed and MLA measurements](2026-11-27-hy4-stq-routed-attention-prefill.md)
-
-The 27K same-loaded follow-up observed 49.15 tok/s median warm decode with wide routing and 46.58 with it off. The exact OpenCode replays reused 24,576 tokens and split the four adjacent decode pairs evenly. The earlier separate-process decode penalty did not reproduce. New FFN and verifier work is recorded with its own component and end-to-end evidence. [Decode attribution and FFN follow-up](2026-11-27-hy4-stq-decode-prefill-followup.md)
-
-The next STQ profile priced the attention-to-FFN boundary at 1.014 s on a fresh 27K OpenCode request. It comprises the output RMSNorm, residual write-back, and the FFN input mix and norms. The opt-in fusion consolidates three exact dispatches before the existing FFN mix projection. With batched DFly2 correction it measured 31.87 s prefill and 51.88 useful decode tok/s at fresh 27K. The same binary with both options off measured 32.42 s and 51.62 tok/s across a separate load. [Boundary measurement and OpenCode reruns](2026-11-27-hy4-stq-attention-ffn-boundary.md)
-
-A Sushi v1.8.1 same-binary cache-width bracket measured 29.08 s of fresh 27K prefill at KV8 and 27.90 s at BF16. The inputs matched across widths. The 27K outputs differed. The lower storage cost did not carry through to faster prefill. The Stark follow-up kept F16 and cut fresh 27K median prefill from 32.10 to 31.38 s with register-only projection preparation and finishing. All three enabled fresh runs cleared 50 tok/s decode. The first-use 16K wall time rose despite lower GPU spans, so the exact path stays opt-in. [KV width and dense follow-up](2026-11-27-hy4-stq-kv-width-dense-io.md)
-
-The pinned Sushi STQ pack is the sole Hy4-flash catalog choice. Its defaults use the measured register and dense paths with five greedy drafts and F16 KV. [Catalog and runtime verification](2026-11-27-hy4-stq-catalog-defaults.md)
-
-The two-slot preview shared loaded STQ weights across two text requests. At
-27K with four OpenCode agents, all clients finished in 150.13 seconds versus
-154.16 seconds serial, while the median first delta arrived 8.73 seconds
-later. Solo decode held near 52 tok/s. The preview was opt-in. [Agent fan-out qualification](2026-11-27-hy4-stq-dual-slot.md)
-
-The later STQ default shares phase-local scratch and admits up to four
-text requests on one loaded model. The 128 GiB M5 Max admitted all four,
-with 45,056 API positions. Four-agent OpenCode groups took 96.46 seconds
-at 16K and 139.44 seconds at 27K. Solo 27K decode was 51.15 tok/s.
-[Four-slot default qualification](2026-11-27-hy4-stq-four-slots.md)
+The current catalog uses the pinned Sushi STQ 4bpw pack. Its native port,
+separate 16K and 27K OpenCode results, and shared-weight agent work are covered
+in the [STQ performance history](speed-hy4-stq.md).
 
 ## Artifact and reference
 

@@ -6,7 +6,7 @@
 //! implementation executes Stark's native matrix kernels; model-provided
 //! Python and foreign inference runtimes are never loaded.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use serde_json::Value;
 
@@ -263,12 +263,12 @@ struct AttentionState {
 }
 
 pub struct RippleModel {
-    weights: Weights,
-    config: Config,
+    weights: Arc<Weights>,
+    config: Arc<Config>,
     embedding: String,
     output: String,
-    norm: Vec<f32>,
-    layers: Vec<Layer>,
+    norm: Arc<[f32]>,
+    layers: Arc<[Layer]>,
     states: Vec<AttentionState>,
     position: usize,
     #[cfg(feature = "metal")]
@@ -282,6 +282,10 @@ pub struct RippleModel {
 }
 
 impl RippleModel {
+    pub(super) fn mapped_weight_bytes(&self) -> Option<usize> {
+        self.weights.mapped_bytes()
+    }
+
     pub(super) fn prepare_request_memory(&mut self) -> bool {
         // No production prefix reuse: release the previous request's complete
         // graph/cache before the worker samples current headroom.
@@ -382,12 +386,12 @@ impl RippleModel {
         };
         let states = config.sliding.iter().map(|_| AttentionState::default()).collect();
         Ok(Self {
-            weights,
-            config,
+            weights: Arc::new(weights),
+            config: Arc::new(config),
             embedding,
             output,
-            norm,
-            layers,
+            norm: norm.into(),
+            layers: layers.into(),
             states,
             position: 0,
             #[cfg(feature = "metal")]
@@ -399,6 +403,27 @@ impl RippleModel {
             #[cfg(all(feature = "metal", test))]
             test_control_mode: 1,
         })
+    }
+
+    pub(super) fn new_request_slot(&self) -> Self {
+        Self {
+            weights: Arc::clone(&self.weights),
+            config: Arc::clone(&self.config),
+            embedding: self.embedding.clone(),
+            output: self.output.clone(),
+            norm: Arc::clone(&self.norm),
+            layers: Arc::clone(&self.layers),
+            states: self.config.sliding.iter().map(|_| AttentionState::default()).collect(),
+            position: 0,
+            #[cfg(feature = "metal")]
+            graph: None,
+            #[cfg(feature = "metal")]
+            graph_admitted: self.graph_admitted,
+            #[cfg(all(feature = "metal", test))]
+            graph_enabled: self.graph_enabled,
+            #[cfg(all(feature = "metal", test))]
+            test_control_mode: self.test_control_mode,
+        }
     }
 
     pub fn reset(&mut self) {

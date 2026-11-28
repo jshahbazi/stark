@@ -35,9 +35,10 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::ops::Deref;
-use std::rc::{Rc, Weak};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -67,10 +68,10 @@ pub mod stage_profile;
 pub type Pipeline = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
 
 /// A device buffer handle. Cloning shares the allocation; the allocation
-/// leaves the residency set when the last handle drops. Like the context
-/// that allocated it, a buffer stays on the thread it was created on (Metal
-/// buffers are not `Send` in these bindings, and never were here).
-pub type Buffer = Rc<GpuBuffer>;
+/// leaves the residency set when the last handle drops. The public handle
+/// stays thread-local because it can be used to create writable tensors. The
+/// private read-only weight graph uses the atomic retain count across lanes.
+pub type Buffer = Arc<GpuBuffer>;
 
 /// The commit feedback callback Metal invokes per command buffer.
 type FeedbackHandler = RcBlock<dyn Fn(NonNull<ProtocolObject<dyn MTL4CommitFeedback>>)>;
@@ -373,7 +374,7 @@ pub fn gpu_busy_ns() -> u64 {
 pub struct MetalContext {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTL4CommandQueue>>,
-    residency: Rc<Residency>,
+    residency: Arc<Residency>,
     pool: Rc<Pool>,
     /// Completion counter: every submission ends with a queue-level signal
     /// of the next value; waiting on a pass waits on its value.
@@ -404,9 +405,8 @@ pub struct MetalContext {
     profile: bool,
     /// Original Stark phase counters; disabled in normal execution.
     stage_profile: bool,
-    /// The buffers [`Self::new_buffer`] allocated while a
-    /// [`BufferRecording`] is open.
-    recorded: RefCell<Option<Vec<Weak<GpuBuffer>>>>,
+    /// During checkpoint loading, weights join their own residency set.
+    recorded: RefCell<Option<Arc<Residency>>>,
 }
 
 impl MetalContext {
@@ -425,7 +425,7 @@ impl MetalContext {
         let queue = device
             .newMTL4CommandQueue()
             .ok_or_else(|| anyhow!("failed to create a Metal 4 command queue (macOS 26 or later is required)"))?;
-        let residency = Rc::new(Residency::new(&device)?);
+        let residency = Arc::new(Residency::new(&device)?);
         queue.addResidencySet(&residency.set);
         let fence = SharedEvent::new(&device, false)?;
         let pool = Rc::new(Pool {
@@ -599,37 +599,39 @@ impl MetalContext {
     /// Allocates a zero-initialized shared-storage buffer and makes it
     /// resident for the queue.
     pub fn new_buffer(&self, len: usize) -> Result<Buffer> {
-        let buf = self.residency.new_buffer(&self.device, len)?;
-        self.record_new_buffer(&buf);
-        Ok(buf)
+        self.allocation_residency().new_buffer(&self.device, len)
     }
 
-    /// Allocates shared storage whose contents are owned by a complete GPU
-    /// overwrite before first read. Ordinary model state still uses
-    /// [`Self::new_buffer`].
+    /// Allocates storage that is overwritten by the GPU before its first read.
     pub(crate) fn new_buffer_uninitialized(&self, len: usize) -> Result<Buffer> {
-        let buf = self.residency.new_buffer_uninitialized(&self.device, len)?;
-        self.record_new_buffer(&buf);
-        Ok(buf)
+        self.allocation_residency().new_buffer_uninitialized(&self.device, len)
     }
 
-    fn record_new_buffer(&self, buf: &Buffer) {
-        if let Some(recorded) = self.recorded.borrow_mut().as_mut() {
-            recorded.push(Rc::downgrade(buf));
-        }
+    fn allocation_residency(&self) -> Arc<Residency> {
+        self.recorded.borrow().as_ref().unwrap_or(&self.residency).clone()
     }
 
-    /// Starts recording the buffers [`Self::new_buffer`] allocates (and so
-    /// [`Self::new_buffer_with_bytes`] and every tensor constructor), until
-    /// [`BufferRecording::finish`] returns the ones still alive. Mapped
-    /// buffers are not recorded (their pages belong to a file), nor are the
-    /// pool's own arenas. The model load records its weights this way, for
-    /// the server's `--pin-weights`. One recording at a time.
-    pub fn record_buffers(&self) -> Result<BufferRecording<'_>> {
+    /// Allocates the checkpoint into a separate residency set so other queues
+    /// can make the same Metal allocations resident without copying them.
+    pub(crate) fn record_buffers(&self) -> Result<BufferRecording<'_>> {
         let mut recorded = self.recorded.borrow_mut();
         ensure!(recorded.is_none(), "a buffer recording is already open");
-        *recorded = Some(Vec::new());
+        let residency = Arc::new(Residency::new(&self.device)?);
+        self.queue.addResidencySet(&residency.set);
+        *recorded = Some(residency);
         Ok(BufferRecording { ctx: self })
+    }
+
+    pub(crate) fn attach_weights(&self, weights: &WeightResidency) -> WeightAttachment {
+        self.queue.addResidencySet(&weights.0.set);
+        WeightAttachment { queue: self.queue.clone(), residency: weights.0.clone() }
+    }
+
+    fn flush_residency(&self) {
+        self.residency.flush();
+        if let Some(recorded) = self.recorded.borrow().as_ref() {
+            recorded.flush();
+        }
     }
 
     /// A read-only buffer over `len` bytes of `path` at `offset`, mapped
@@ -844,7 +846,7 @@ impl MetalContext {
         self.fault.check()?;
         let _guard =
             self.submit.lock().map_err(|e| anyhow!("submit lock poisoned: {e}"))?;
-        self.residency.flush();
+        self.flush_residency();
         submit_items(&self.queue, program, feedback, &self.fault, 0);
         let value = self.fence_value.fetch_add(1, Ordering::AcqRel) + 1;
         self.queue.signalEvent_value(self.fence.as_event(), value);
@@ -874,7 +876,7 @@ impl MetalContext {
         let (next_cmd, value) = {
             let _guard =
                 self.submit.lock().map_err(|e| anyhow!("submit lock poisoned: {e}"))?;
-            self.residency.flush();
+            self.flush_residency();
             let next_cmd =
                 submit_items(&self.queue, &program, feedback, &self.fault, 0);
             // Reserved now and signalled by the last part: every later
@@ -940,31 +942,54 @@ impl MetalContext {
 
 /// An open [`MetalContext::record_buffers`]; dropping it without
 /// [`Self::finish`] (an error path) ends the recording and forgets it.
-pub struct BufferRecording<'a> {
+pub(crate) struct BufferRecording<'a> {
     ctx: &'a MetalContext,
 }
 
+/// A checkpoint's committed Metal residency set. Request-state allocations
+/// belong to each queue's ordinary residency set.
+pub(crate) struct WeightResidency(Arc<Residency>);
+
+/// Keeps the checkpoint resident for one model's queue.
+pub(crate) struct WeightAttachment {
+    queue: Retained<ProtocolObject<dyn MTL4CommandQueue>>,
+    residency: Arc<Residency>,
+}
+
+impl Drop for WeightAttachment {
+    fn drop(&mut self) {
+        self.queue.removeResidencySet(&self.residency.set);
+    }
+}
+
 impl BufferRecording<'_> {
-    /// Ends the recording and returns the recorded buffers that are still
-    /// alive, in allocation order (temporaries dropped meanwhile are gone).
-    pub fn finish(self) -> Vec<Buffer> {
-        let recorded = self.ctx.recorded.borrow_mut().take().unwrap_or_default();
-        recorded.iter().filter_map(Weak::upgrade).collect()
+    pub(crate) fn finish(self) -> WeightResidency {
+        let weights = self.ctx.recorded.borrow_mut().take().expect("active weight recording");
+        weights.flush();
+        self.ctx.queue.removeResidencySet(&weights.set);
+        WeightResidency(weights)
     }
 }
 
 impl Drop for BufferRecording<'_> {
     fn drop(&mut self) {
-        self.ctx.recorded.borrow_mut().take();
+        if let Some(weights) = self.ctx.recorded.borrow_mut().take() {
+            self.ctx.queue.removeResidencySet(&weights.set);
+        }
     }
 }
 
 /// The context's residency set plus the bookkeeping to re-commit it lazily.
 struct Residency {
     set: Retained<ProtocolObject<dyn MTLResidencySet>>,
-    /// Membership changed since the last commit.
-    dirty: Cell<bool>,
+    changes: Mutex<()>,
+    dirty: AtomicBool,
 }
+
+// SAFETY: Metal resources and residency sets can be retained and used by
+// queues on multiple threads. Serialize the add/remove/commit sequence.
+unsafe impl Send for Residency {}
+unsafe impl Sync for Residency {}
 
 impl Residency {
     fn new(device: &ProtocolObject<dyn MTLDevice>) -> Result<Self> {
@@ -976,11 +1001,11 @@ impl Residency {
             .map_err(|_| anyhow!("failed to create Metal residency set"))?;
         set.commit();
         set.requestResidency();
-        Ok(Self { set, dirty: Cell::new(false) })
+        Ok(Self { set, changes: Mutex::new(()), dirty: AtomicBool::new(false) })
     }
 
     fn new_buffer(
-        self: &Rc<Self>,
+        self: &Arc<Self>,
         device: &ProtocolObject<dyn MTLDevice>,
         len: usize,
     ) -> Result<Buffer> {
@@ -992,7 +1017,7 @@ impl Residency {
     }
 
     fn new_buffer_uninitialized(
-        self: &Rc<Self>,
+        self: &Arc<Self>,
         device: &ProtocolObject<dyn MTLDevice>,
         len: usize,
     ) -> Result<Buffer> {
@@ -1003,13 +1028,12 @@ impl Residency {
             )
             .ok_or_else(|| anyhow!("failed to allocate {len}-byte buffer"))?;
         let address = raw.gpuAddress();
-        self.set.addAllocation(ProtocolObject::<dyn MTLAllocation>::from_ref(&*raw));
-        self.dirty.set(true);
-        Ok(Rc::new(GpuBuffer { raw, address, residency: self.clone() }))
+        self.add(&raw);
+        Ok(GpuBuffer::retain_allocation(raw, address, self.clone()))
     }
 
     fn new_buffer_mapped(
-        self: &Rc<Self>,
+        self: &Arc<Self>,
         device: &ProtocolObject<dyn MTLDevice>,
         path: &std::path::Path,
         offset: u64,
@@ -1065,16 +1089,15 @@ impl Residency {
             bail!("Metal refused a {map_len}-byte mapped buffer of {}", path.display());
         };
         let address = raw.gpuAddress();
-        self.set.addAllocation(ProtocolObject::<dyn MTLAllocation>::from_ref(&*raw));
-        self.dirty.set(true);
-        Ok((Rc::new(GpuBuffer { raw, address, residency: self.clone() }), inner))
+        self.add(&raw);
+        Ok((GpuBuffer::retain_allocation(raw, address, self.clone()), inner))
     }
 
     /// # Safety
     ///
     /// As [`MetalContext::new_buffer_no_copy`].
     unsafe fn new_buffer_no_copy(
-        self: &Rc<Self>,
+        self: &Arc<Self>,
         device: &ProtocolObject<dyn MTLDevice>,
         ptr: NonNull<c_void>,
         len: usize,
@@ -1090,23 +1113,32 @@ impl Residency {
         }
         .ok_or_else(|| anyhow!("Metal refused a {len}-byte no-copy buffer"))?;
         let address = raw.gpuAddress();
-        self.set.addAllocation(ProtocolObject::<dyn MTLAllocation>::from_ref(&*raw));
-        self.dirty.set(true);
-        Ok(Rc::new(GpuBuffer { raw, address, residency: self.clone() }))
+        self.add(&raw);
+        Ok(GpuBuffer::retain_allocation(raw, address, self.clone()))
+    }
+
+    fn add(&self, raw: &ProtocolObject<dyn MTLBuffer>) {
+        let _changes = self.changes.lock().unwrap_or_else(|error| error.into_inner());
+        self.set.addAllocation(ProtocolObject::<dyn MTLAllocation>::from_ref(raw));
+        self.dirty.store(true, Ordering::Release);
     }
 
     fn remove(&self, raw: &ProtocolObject<dyn MTLBuffer>) {
+        let _changes = self.changes.lock().unwrap_or_else(|error| error.into_inner());
         self.set.removeAllocation(ProtocolObject::<dyn MTLAllocation>::from_ref(raw));
-        // Commit now so the memory is released promptly (the set retains
-        // members until commit); additions wait for the next submission.
+        // Commit now so the memory is released promptly.
         self.set.commit();
-        self.dirty.set(false);
+        self.dirty.store(false, Ordering::Release);
     }
 
-    /// Commits pending additions; called before every submission.
+    /// Commits pending additions before queue submission.
     fn flush(&self) {
-        if self.dirty.replace(false) {
-            self.set.commit();
+        if self.dirty.load(Ordering::Acquire) {
+            let _changes = self.changes.lock().unwrap_or_else(|error| error.into_inner());
+            if self.dirty.load(Ordering::Relaxed) {
+                self.set.commit();
+                self.dirty.store(false, Ordering::Release);
+            }
         }
     }
 }
@@ -1116,10 +1148,20 @@ impl Residency {
 pub struct GpuBuffer {
     raw: Retained<ProtocolObject<dyn MTLBuffer>>,
     address: u64,
-    residency: Rc<Residency>,
+    residency: Arc<Residency>,
+    thread_local: PhantomData<Rc<()>>,
 }
 
 impl GpuBuffer {
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn retain_allocation(
+        raw: Retained<ProtocolObject<dyn MTLBuffer>>,
+        address: u64,
+        residency: Arc<Residency>,
+    ) -> Buffer {
+        Arc::new(Self { raw, address, residency, thread_local: PhantomData })
+    }
+
     /// The buffer's GPU virtual address (what argument tables bind).
     pub fn address(&self) -> u64 {
         self.address
@@ -1143,7 +1185,7 @@ impl Drop for GpuBuffer {
 /// with them) recycled across passes.
 struct Pool {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
-    residency: Rc<Residency>,
+    residency: Arc<Residency>,
     free: RefCell<Vec<SlotInner>>,
 }
 

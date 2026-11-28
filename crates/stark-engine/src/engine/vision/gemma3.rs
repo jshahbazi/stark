@@ -70,8 +70,8 @@ impl PreparedGemma3Image {
 
 pub struct Gemma3VisionLanguageModel<B: Backend> {
     engine: Arc<Engine<B>>,
-    language_model: LanguageModel<B>,
-    tower: Gemma3VisionTower<B>,
+    language_model: Arc<LanguageModel<B>>,
+    tower: Option<Gemma3VisionTower<B>>,
     failed: bool,
     identity: VisionArtifactIdentity,
     codec_eos_token: Option<String>,
@@ -385,8 +385,8 @@ impl<B: Backend> Engine<B> {
         let hash = |name| hashes.get(name).cloned().ok_or(InvalidInput("Gemma 3 artifact identity missing"));
         Ok(Gemma3VisionLanguageModel {
             engine: self.clone(),
-            language_model,
-            tower,
+            language_model: Arc::new(language_model),
+            tower: Some(tower),
             failed: false,
             codec_eos_token,
             source,
@@ -405,6 +405,21 @@ impl<B: Backend> Engine<B> {
 }
 
 impl<B: Backend> Gemma3VisionLanguageModel<B> {
+    /// Create a text-only worker owner around the already loaded decoder.
+    pub fn shared_text_lane(&self) -> Self {
+        Self {
+            engine: self.engine.clone(),
+            language_model: self.language_model.clone(),
+            tower: None,
+            failed: self.failed,
+            identity: self.identity.clone(),
+            codec_eos_token: self.codec_eos_token.clone(),
+            source: self.source.clone(),
+            revision: self.revision.clone(),
+            model_dim: self.model_dim,
+        }
+    }
+
     pub fn artifact_identity(&self) -> &VisionArtifactIdentity {
         &self.identity
     }
@@ -572,6 +587,9 @@ impl<B: Backend> Gemma3VisionLanguageModel<B> {
         if cancelled() {
             return Err(NativeVisionError::cancelled());
         }
+        if self.tower.is_none() {
+            return Err(InvalidInput("Gemma 3 image tower is unavailable").into());
+        }
         let patches = preprocess::prepare(encoded)?;
         if cancelled() {
             return Err(NativeVisionError::cancelled());
@@ -639,15 +657,16 @@ impl<B: Backend> Gemma3VisionLanguageModel<B> {
         image: &PreparedGemma3Image,
         cancelled: &mut F,
     ) -> Result<Box<[bf16]>, NativeVisionError<B>> {
+        let tower = self.tower.as_ref().ok_or(InvalidInput("Gemma 3 image tower is unavailable"))?;
         self.failed = true;
         let context = &self.engine.context;
         let mut hidden = context.create_buffer((4096 * 1152 * 2) as usize).map_err(NativeVisionError::backend)?;
         let mut commands =
             context.create_command_buffer(Some("Gemma 3 vision patches"), None).map_err(NativeVisionError::backend)?;
-        let output = self.tower.encode_initial(&image.patches.patches, &mut commands)?;
+        let output = tower.encode_initial(&image.patches.patches, &mut commands)?;
         commands.encode_copy(&output, &mut hidden);
         commands.end_encoding().submit().wait_until_completed().map_err(NativeVisionError::backend)?;
-        for index in 0..self.tower.block_count() {
+        for index in 0..tower.block_count() {
             if cancelled() {
                 // Every submitted patch/block command has completed. Tower
                 // weights are immutable and no decoder state was touched.
@@ -657,7 +676,7 @@ impl<B: Backend> Gemma3VisionLanguageModel<B> {
             let mut commands = context
                 .create_command_buffer(Some("Gemma 3 vision block"), None)
                 .map_err(NativeVisionError::backend)?;
-            let output = self.tower.encode_block(index, &hidden, &mut commands)?;
+            let output = tower.encode_block(index, &hidden, &mut commands)?;
             commands.encode_copy(&output, &mut hidden);
             commands.end_encoding().submit().wait_until_completed().map_err(NativeVisionError::backend)?;
         }
@@ -668,7 +687,7 @@ impl<B: Backend> Gemma3VisionLanguageModel<B> {
         let mut commands = context
             .create_command_buffer(Some("Gemma 3 vision projector"), None)
             .map_err(NativeVisionError::backend)?;
-        let output = self.tower.encode_finish(&hidden, &mut commands)?;
+        let output = tower.encode_finish(&hidden, &mut commands)?;
         let count = (TOKENS * self.model_dim) as usize;
         if (&output).size() != count * size_of::<bf16>() {
             return Err(InvalidInput("Gemma 3 projected image shape mismatch").into());

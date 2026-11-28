@@ -679,8 +679,11 @@ def test_serialized_api_requests_never_interleave_progress(desktop, model, monke
     assert progress[0]["id"] != progress[3]["id"]
 
 
-@pytest.mark.parametrize("action", ["complete", "cancel", "eof", "stop"])
-def test_hy4_api_second_lane_runs_while_first_is_active(desktop, model, monkeypatch, action):
+@pytest.mark.parametrize(
+    ("action", "dynamic"),
+    [("complete", False), ("complete", True), ("cancel", False), ("eof", False), ("stop", False)],
+)
+def test_api_second_lane_runs_while_first_is_active(desktop, model, monkeypatch, action, dynamic):
     import threading
     from concurrent.futures import ThreadPoolExecutor
     from types import SimpleNamespace
@@ -689,6 +692,9 @@ def test_hy4_api_second_lane_runs_while_first_is_active(desktop, model, monkeypa
     from stark_convert.local_api import APIError
 
     running(desktop, model)
+    if dynamic:
+        desktop.context_capacity_known = False
+        desktop.api_context = 0xFFFFFFFF
     primary = desktop.worker
     primary_request = primary.request
     generating, release = threading.Event(), threading.Event()
@@ -704,6 +710,7 @@ def test_hy4_api_second_lane_runs_while_first_is_active(desktop, model, monkeypa
         if payload["operation"] == "tokenize":
             return {"token_count": 2, "token_ids": [4, 5]}
         assert "cache_scope" not in payload
+        assert payload["context_tokens"] == (18 if dynamic else desktop.api_context)
         secondary_generating.set()
         assert release_secondary.wait(5)
         if cancelled.is_set():
@@ -724,7 +731,7 @@ def test_hy4_api_second_lane_runs_while_first_is_active(desktop, model, monkeypa
         stop_sequences=True,
         close=close_secondary,
     )
-    monkeypatch.setattr(primary, "hy4_lanes", (lane,))
+    monkeypatch.setattr(primary, "generation_lanes", (lane,))
     monkeypatch.setattr(primary, "request", hold_primary)
     payload = {"messages": [{"role": "user", "content": "synthetic text"}], "max_tokens": 16}
     cancelled = threading.Event()
@@ -777,7 +784,8 @@ def test_hy4_api_second_lane_runs_while_first_is_active(desktop, model, monkeypa
     assert desktop.job is None and not desktop.api_auxiliary_jobs
 
 
-def test_hy4_admitted_api_lanes_keep_image_exclusive_and_fifo(desktop, model, monkeypatch):
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_admitted_api_lanes_keep_image_exclusive_and_fifo(desktop, model, monkeypatch, dynamic):
     import threading
     from concurrent.futures import ThreadPoolExecutor
     from types import SimpleNamespace
@@ -785,23 +793,26 @@ def test_hy4_admitted_api_lanes_keep_image_exclusive_and_fifo(desktop, model, mo
     from stark_convert.chat import Worker
 
     read = Worker.read
+    lane_limits = [(0xFFFFFFFF, 65536)] * 3 if dynamic else [(4096, 4095), (3072, 3071), (2048, 1024)]
     lanes = tuple(
         SimpleNamespace(context_limit=context, max_new_tokens=maximum, close=lambda: None)
-        for context, maximum in [(4096, 4095), (3072, 3071), (2048, 1024)]
+        for context, maximum in lane_limits
     )
 
     def read_ready(worker):
         reply = read(worker)
         if reply.get("ready") is True:
-            worker.hy4_lanes = lanes
+            worker.generation_lanes = lanes
+            if dynamic:
+                return dict(reply, max_context_tokens=0xFFFFFFFF, max_new_tokens=65536)
         return reply
 
     monkeypatch.setattr(Worker, "read", read_ready)
     identifier = running(desktop, model)
     primary = desktop.worker
-    assert desktop.context_limit == desktop.context == 8192
-    assert desktop.api_models()[0]["context_length"] == 2048
-    assert desktop.api_models()[0]["max_output_tokens"] == 1024
+    assert desktop.context_limit == desktop.context == (0xFFFFFFFF if dynamic else 8192)
+    assert desktop.api_models()[0]["context_length"] == (None if dynamic else 2048)
+    assert desktop.api_models()[0]["max_output_tokens"] == (65536 if dynamic else 1024)
     assert desktop.api_status()["worker_slots"] == 4
 
     started = [threading.Event() for _ in range(6)]

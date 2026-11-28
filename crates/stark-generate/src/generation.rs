@@ -572,7 +572,7 @@ pub(crate) enum ContextCapacity {
 }
 
 impl ContextCapacity {
-    fn limit(self) -> Option<u32> {
+    pub(crate) fn limit(self) -> Option<u32> {
         match self {
             #[cfg(feature = "metal")]
             Self::Shared(sizing) => Some(sizing.context_tokens),
@@ -773,6 +773,9 @@ pub(crate) trait GenerationBackend {
     fn prefix_cache_supported(&self) -> bool {
         false
     }
+
+    /// Synchronize backend state before request planning or prefix lookup.
+    fn begin_generation_request(&mut self) {}
     /// The ordinary reuse grid, a multiple of `PREFILL_CHUNK_TOKENS`.
     fn prefix_cache_chunk_tokens(&self) -> usize {
         prefix_cache::PREFILL_CHUNK_TOKENS
@@ -836,7 +839,8 @@ pub(crate) struct GenerationWorker<B: GenerationBackend> {
     /// `Some(enabled)` when the host requested prefix reuse at startup.
     prefix_cache: Option<bool>,
     budget: Budget,
-    hy4_lane_context_tokens: Vec<u32>,
+    lane_context_tokens: Vec<u32>,
+    legacy_hy4_lanes: bool,
 }
 
 fn valid_ids(
@@ -915,16 +919,19 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             prepared: None,
             prefix_cache,
             budget,
-            hy4_lane_context_tokens: Vec::new(),
+            lane_context_tokens: Vec::new(),
+            legacy_hy4_lanes: false,
         })
     }
 
-    #[cfg(all(feature = "hy4", target_os = "macos", target_arch = "aarch64"))]
-    pub(crate) fn advertise_hy4_lanes(
+    #[cfg(feature = "metal")]
+    pub(crate) fn advertise_lanes(
         &mut self,
         context_tokens: Vec<u32>,
+        legacy_hy4_lanes: bool,
     ) {
-        self.hy4_lane_context_tokens = context_tokens;
+        self.lane_context_tokens = context_tokens;
+        self.legacy_hy4_lanes = legacy_hy4_lanes;
     }
 
     fn prefix_cache_enabled(&self) -> bool {
@@ -1619,6 +1626,15 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             self.backend.clear_prefix_cache();
         }
         let generate = matches!(&request, Ok(Request::Generate { .. }));
+        if matches!(
+            &request,
+            Ok(Request::Generate { .. }
+                | Request::PlanGeneration { .. }
+                | Request::PrepareImage { .. }
+                | Request::GenerateImage { .. })
+        ) {
+            self.backend.begin_generation_request();
+        }
         let result = request.and_then(|request| self.handle(request, output));
         if result.is_err() {
             self.prepared = None;
@@ -1768,8 +1784,13 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         readiness["loaded_memory"] = memory;
     }
     let capacity = worker.backend.context_capacity();
-    if !worker.hy4_lane_context_tokens.is_empty() {
-        readiness["hy4_lane_context_tokens"] = json!(worker.hy4_lane_context_tokens);
+    if !worker.lane_context_tokens.is_empty() {
+        let field = if worker.legacy_hy4_lanes {
+            "hy4_lane_context_tokens"
+        } else {
+            "generation_lane_context_tokens"
+        };
+        readiness[field] = json!(worker.lane_context_tokens);
     }
     readiness["context_sizing_policy"] = json!(capacity.policy());
     if let Some(sizing) = capacity.sizing_metadata() {

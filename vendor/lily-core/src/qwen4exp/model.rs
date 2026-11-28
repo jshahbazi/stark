@@ -9,7 +9,7 @@
 //! the hashed n-gram embedding; and the full-attention layers run Qwen Sparse
 //! Attention once the context exceeds the indexer budget.
 
-use std::path::Path;
+use std::{ops::Deref, path::Path, sync::Arc};
 
 use anyhow::{Result, ensure};
 
@@ -67,7 +67,7 @@ use crate::kernels::spec::ctrl_words;
 use crate::kernels::{Arg, Pos, Rope};
 use crate::kernels::{quant, skinny};
 use crate::metal::{
-    BlitCopy, ComputePass, EncodedPass, MetalContext, PendingPass, SharedEvent,
+    BlitCopy, ComputePass, EncodedPass, MetalContext, PendingPass, SharedEvent, WeightAttachment,
 };
 use crate::moe_ffn::{
     DecodeMoeIo, MoeDims, MoeScratch, PrefillMoeIo, PrefillMoeScratch, decode_moe,
@@ -341,9 +341,54 @@ fn moe_dims(cfg: &Qwen4ExpConfig) -> MoeDims {
     }
 }
 
+/// A checkpoint after the loader has finished all CPU and GPU writes.
+/// The graph uses these tensors only as read inputs, and their clones/views
+/// share immutable storage through atomic Metal handles. The paged n-gram
+/// table is read-only. Neither mutable request state nor a command encoder
+/// is reachable through this owner, and it exposes no public tensor handles.
+pub(super) struct ResidentWeights(ModelWeights);
+
+// SAFETY: Only load_checkpoint can construct these weights, before publishing
+// them. The resident graph is read-only thereafter, including the allocations
+// behind its thread-local Tensor handles. Their atomic reference counts guard
+// the Metal buffer lifetimes, and residency changes are synchronized. This
+// boundary never exports a writable alias to those allocations.
+unsafe impl Send for ResidentWeights {}
+unsafe impl Sync for ResidentWeights {}
+
+impl Deref for ResidentWeights {
+    type Target = ModelWeights;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Enough to initialize a text request lane on a separate Metal queue.
+/// The model configuration and execution controls are lane-local.
+#[derive(Clone)]
+pub struct SharedTextWeights {
+    weights: Arc<ResidentWeights>,
+    config: Arc<Qwen4ExpConfig>,
+    kv_format: KvFormat,
+}
+
+impl SharedTextWeights {
+    pub fn into_model(self) -> Result<(MetalContext, Qwen4ExpModel)> {
+        let context = MetalContext::new()?;
+        let config = Arc::unwrap_or_clone(self.config);
+        let mut model = Qwen4ExpModel::from_weights(&context, config, self.weights)?;
+        model.kv_format = self.kv_format;
+        model.images_enabled = false;
+        Ok((context, model))
+    }
+}
+
 pub struct Qwen4ExpModel {
     pub config: Qwen4ExpConfig,
-    pub(super) weights: ModelWeights,
+    _weight_attachment: WeightAttachment,
+    pub(super) weights: Arc<ResidentWeights>,
+    images_enabled: bool,
     pub(super) attn_scale: f32,
     gdn_scale: f32,
     gdn_gate: GdnGate,
@@ -1059,6 +1104,12 @@ impl Scratch {
         })
     }
 
+    /// Called after an auxiliary request has finished all GPU work.
+    pub fn release_prefill_and_verify(&mut self) {
+        self.prefill = None;
+        self.spec = None;
+    }
+
     /// The arrival probe event (`LILY_PROBE_ARRIVAL`), for benchmarks.
     pub fn arrival_probe(&self) -> Option<&SharedEvent> {
         self.sync.arrival.as_ref()
@@ -1663,7 +1714,7 @@ impl Qwen4ExpModel {
             expert_usage_out,
             session_context,
         )?;
-        Self::from_weights(config, weights)
+        Self::from_weights(ctx, config, Arc::new(ResidentWeights(weights)))
     }
 
     /// Executes a self-contained Uzu converted text artifact through the same
@@ -1695,10 +1746,14 @@ impl Qwen4ExpModel {
             false,
             None,
         )?;
-        Self::from_weights(config, weights)
+        Self::from_weights(ctx, config, Arc::new(ResidentWeights(weights)))
     }
 
-    fn from_weights(config: Qwen4ExpConfig, weights: ModelWeights) -> Result<Self> {
+    fn from_weights(
+        ctx: &MetalContext,
+        config: Qwen4ExpConfig,
+        weights: Arc<ResidentWeights>,
+    ) -> Result<Self> {
         let hasher = match &config.ple {
             Some(p) => Some(NgramHasher::new(
                 &p.layer_multipliers,
@@ -1719,7 +1774,9 @@ impl Qwen4ExpModel {
         let mtp_enabled = weights.mtp.is_some();
         Ok(Self {
             config,
+            _weight_attachment: ctx.attach_weights(&weights.residency),
             weights,
+            images_enabled: true,
             attn_scale,
             gdn_scale,
             gdn_gate,
@@ -1731,6 +1788,14 @@ impl Qwen4ExpModel {
             numerical_trace: RefCell::new(None),
             kv_format: kv_format_from_env()?.unwrap_or_default(),
         })
+    }
+
+    pub fn shared_text_weights(&self) -> SharedTextWeights {
+        SharedTextWeights {
+            weights: self.weights.clone(),
+            config: Arc::new(self.config.clone()),
+            kv_format: self.kv_format,
+        }
     }
 
     /// Runs the vision tower over one preprocessed image and returns its
@@ -1746,6 +1811,7 @@ impl Qwen4ExpModel {
         grid_h: usize,
         grid_w: usize,
     ) -> Result<Tensor> {
+        ensure!(self.has_vision(), "the vision tower is not enabled");
         let (Some(config), Some(weights)) = (&self.config.vision, &self.weights.vision)
         else {
             anyhow::bail!("the vision tower is not loaded");
@@ -1818,7 +1884,7 @@ impl Qwen4ExpModel {
 
     /// Whether the vision tower is loaded.
     pub fn has_vision(&self) -> bool {
-        self.weights.vision.is_some()
+        self.images_enabled && self.weights.vision.is_some()
     }
 
     fn begin_batched<'a>(
@@ -5868,10 +5934,6 @@ impl LanguageModel for Qwen4ExpModel {
         })
     }
 
-    fn weight_buffers(&self) -> Vec<crate::metal::Buffer> {
-        self.weights.buffers.clone()
-    }
-
     fn planned_memory(&self) -> Option<u64> {
         self.weights.planned_memory
     }
@@ -5898,10 +5960,10 @@ impl LanguageModel for Qwen4ExpModel {
     fn vision_tower(&self) -> Option<VisionTower> {
         Some(match (&self.config.vision, &self.weights.vision) {
             (None, _) => VisionTower::Absent,
-            (Some(_), None) => VisionTower::Off,
-            (Some(v), Some(w)) => {
+            (Some(v), Some(w)) if self.images_enabled => {
                 VisionTower::Loaded { bytes: w.bytes(), blocks: v.depth }
             }
+            _ => VisionTower::Off,
         })
     }
 

@@ -164,6 +164,10 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 ## Starting records
 
+The [Hy4 STQ history](speed-hy4-stq.md) connects the native port and OpenCode
+runs. The [shared-slot design](../GENERATION_SLOTS.md) links the evidence for
+Hy4, native decoders, Flint, Ripple and Lily.
+
 | Record | Scope |
 | --- | --- |
 | [20261125-HY4NATIVE-01–10: Hy4-flash AngelSlim Q3_K](2026-11-25-hy4-native-q3-k.md) | The image-loaded streamed worker matched reference AR and depth-two greedy outputs at 4K and restored a 3,072-token prefix exactly. The grouped F32 path agreed on all 13 natural-text top-1 rows. The final paired mapped diagnostic matched IDs and missed the reference stage times. |
@@ -182,6 +186,8 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 | [HY4STQ-NATIVE-02 · Hy4 STQ catalog and defaults](2026-11-27-hy4-stq-catalog-defaults.md) | Pinned native install, measured settings by default and flexible OpenCode context. |
 | [HY4STQ-SERVE-01 · Hy4 STQ shared-weight text slots](2026-11-27-hy4-stq-dual-slot.md) | Two text slots over one weight load and managed OpenCode fan-out qualification. |
 | [HY4STQ-SERVE-02 · Default Hy4 STQ text slots](2026-11-27-hy4-stq-four-slots.md) | Up to four active text requests under one shared memory budget. |
+| [GEN-SERVE-02 · Lily shared generation slots](2026-11-27-lily-shared-generation-slots.md) | Four text lanes with one Metal weight residency, flexible context, solo decode timings, MTP and primary-only images. |
+| [GEN-SERVE-01 · Shared desktop text slots](2026-11-27-shared-generation-slots.md) | Common worker handoff, backend-specific slot admission, and native Qwen qualification. |
 | [20261126-HY4TOOLS-01 · Hy4-flash tool calling](2026-11-26-hy4-tool-calling.md) | Signed desktop build verified typed tool calls, streamed reasoning and tool-result replay on the catalog artifact. |
 | [20261126-HY4OC-01 · Hy4-flash defaults through OpenCode](2026-11-26-hy4-opencode-defaults.md) | Paired 16K–27K OpenCode runs on the legacy and automatic tuned profiles with memory-fitted context and prefix reuse. |
 | [20261126-HY4OC-02 · Resident Hy4-flash through OpenCode](2026-11-26-hy4-resident-opencode.md) | Resident Q3_K with 4,096-row prefill reached 35.74–40.77 decode tok/s across the three earlier OpenCode turns, with identical inputs, outputs and draft counts. Startup took 97.50 s. |

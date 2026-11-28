@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 
 use crate::kernels::hc::stock::OfficialHcReadWeights;
-use crate::metal::{Buffer, MetalContext};
+use crate::metal::{MetalContext, WeightResidency};
 use crate::safetensors::Checkpoint;
 use crate::tensor::Tensor;
 use std::path::PathBuf;
@@ -154,13 +154,8 @@ pub struct ModelWeights {
     pub mtp: Option<Box<MtpWeights>>,
     /// The vision tower, when the checkpoint has it and the caller wanted it.
     pub vision: Option<Box<VisionWeights>>,
-    /// The expert cache when the experts are served from a slab of slots
-    /// (`LoadOptions::expert_slots`); the layers' `MoeWeights` view it.
-    /// Every GPU buffer the load allocated for the weights above (views
-    /// share them), without the expert cache's slab and slot tables and
-    /// without the paged n-gram table, which is a file mapping: what the
-    /// server's `--pin-weights` locks. Handles only; the memory is the same.
-    pub buffers: Vec<Buffer>,
+    /// Residency of the frozen GPU weights, shared by every attached queue.
+    pub(super) residency: WeightResidency,
     /// The machine memory the load planned for: `LILY_MEMORY_GB` when set
     /// (a smaller machine simulated), else the physical memory (`None` when
     /// neither is known), exactly what `auto_expert_slots` sized the expert
@@ -756,7 +751,7 @@ pub fn load_checkpoint(
     };
 
     loader.finish()?;
-    let buffers = recording.finish();
+    let residency = recording.finish();
     Ok(ModelWeights {
         embed_tokens,
         lm_head,
@@ -764,7 +759,7 @@ pub fn load_checkpoint(
         layers,
         mtp,
         vision,
-        buffers,
+        residency,
         planned_memory: machine_memory,
         memory_limit: None,
         session_reserve: None,

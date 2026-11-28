@@ -181,7 +181,7 @@ pub(crate) trait RequestInput: BufRead {
     ) -> io::Result<bool>;
 }
 
-#[cfg(all(feature = "hy4", target_os = "macos", target_arch = "aarch64"))]
+#[cfg(feature = "metal")]
 impl RequestInput for BufReader<std::fs::File> {
     fn wait_readable(
         &mut self,

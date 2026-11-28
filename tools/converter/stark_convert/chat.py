@@ -450,13 +450,13 @@ class Worker:
         self.generation_budget_inputs = False
         self._ready_seen = False
 
-    def __init__(self, executable, model, timeout, gpu_memory_callback=None):
+    def __init__(self, executable, model, timeout, gpu_memory_callback=None, *, enable_generation_lanes=False):
         self._init_protocol(timeout)
         self.model_path = Path(model)
         self._closed = False
-        self.hy4_lanes = ()
-        self._pending_hy4_lanes = []
-        self._hy4_lane_lock = threading.Lock()
+        self.generation_lanes = ()
+        self._pending_generation_lanes = []
+        self._generation_lane_lock = threading.Lock()
         self.executable = Path(executable)
         try:
             # Bind later image qualification to the exact executable observed
@@ -472,6 +472,7 @@ class Worker:
             config = {}
         converted_vision = isinstance(config, dict) and config.get("type") in VISION_MODEL_TYPES
         family = model_image_family(config, Path(model)) if isinstance(config, dict) and not converted_vision else None
+        self._legacy_hy4_lane_protocol = (family or {}).get("profile") == HY4_STQ_VISION_PROFILE
         if converted_vision or family is not None:
             from .image_checks import ImageCheckError, preflight_family_memory
 
@@ -494,18 +495,21 @@ class Worker:
                     STARK_CANCEL_FD=str(read_fd),
                     STARK_REQUEST_BUDGET_MIB=str(REQUEST_BUDGET_MIB),
                 )
-                env.pop("STARK_HY4_LANE_FDS", None)
+                for key in ("STARK_GENERATION_LANE_FDS", "STARK_HY4_LANE_FDS"):
+                    env.pop(key, None)
                 inherited = (read_fd,)
-                slots = env.get("STARK_HY4_CONCURRENT_SLOTS", "4")
+                legacy_slots = env.get("STARK_HY4_CONCURRENT_SLOTS", "4") if self._legacy_hy4_lane_protocol else "4"
+                slots = env.get("STARK_GENERATION_SLOTS", legacy_slots)
                 lane_fds = ()
-                if (family or {}).get("profile") == HY4_STQ_VISION_PROFILE and slots in {"2", "3", "4"}:
+                if enable_generation_lanes and slots in {"2", "3", "4"}:
                     for _ in range(int(slots) - 1):
-                        lane, descriptors = _Hy4Lane.open(timeout, child_pipes)
-                        self._pending_hy4_lanes.append(lane)
+                        lane, descriptors = _GenerationLane.open(timeout, child_pipes)
+                        self._pending_generation_lanes.append(lane)
                         lane_fds += descriptors
                 if lane_fds:
                     inherited += lane_fds
-                    env["STARK_HY4_LANE_FDS"] = ",".join(map(str, lane_fds))
+                    key = "STARK_HY4_LANE_FDS" if self._legacy_hy4_lane_protocol else "STARK_GENERATION_LANE_FDS"
+                    env[key] = ",".join(map(str, lane_fds))
                 self.process, telemetry_fd = _popen_with_gpu_memory(
                     command,
                     callback=gpu_memory_callback,
@@ -518,7 +522,7 @@ class Worker:
                     env=env,
                 )
         except BaseException:
-            for lane in self._pending_hy4_lanes:
+            for lane in self._pending_generation_lanes:
                 lane.close()
             os.close(self.cancel_fd)
             if self.media is not None:
@@ -680,7 +684,7 @@ class Worker:
                 self.prefix_subchunk_tokens = prefix_settings.get("subchunk_tokens")
                 self.cancellation = reply.get("cancellation") == "pipe-v1"
                 self.image_input = image_input_contract(reply.get("image_input"))
-                self._read_hy4_lanes_ready(reply)
+                self._read_generation_lanes_ready(reply)
                 launch_hash = getattr(self, "_launch_worker_sha256", None)
                 self.images = (
                     getattr(self, "media", None) is not None
@@ -733,53 +737,69 @@ class Worker:
     def _output_pipe(self):
         return self.process.stdout
 
-    def _read_hy4_lanes_ready(self, primary):
-        pending = tuple(getattr(self, "_pending_hy4_lanes", ()))
+    def _read_generation_lanes_ready(self, primary):
+        pending = tuple(getattr(self, "_pending_generation_lanes", ()))
         if not pending:
             return
-        capacities = primary.get("hy4_lane_context_tokens", [])
-        if "hy4_lane_context_tokens" not in primary and len(pending) == 1:
-            legacy_capacity = primary.get("hy4_secondary_context_tokens")
-            if legacy_capacity is not None:
-                capacities = [legacy_capacity]
+        key = "generation_lane_context_tokens"
+        capacities = primary.get(key, [])
+        legacy = key not in primary and self._legacy_hy4_lane_protocol
+        if legacy:
+            capacities = primary.get("hy4_lane_context_tokens", [])
+            if "hy4_lane_context_tokens" not in primary and len(pending) == 1:
+                legacy_capacity = primary.get("hy4_secondary_context_tokens")
+                if legacy_capacity is not None:
+                    capacities = [legacy_capacity]
+        capacity_limit = 0xFFFFFFFE if legacy else 0xFFFFFFFF
         if (
             not isinstance(capacities, list)
             or len(capacities) > len(pending)
-            or any(type(capacity) is not int or not 2 <= capacity < 0xFFFFFFFF for capacity in capacities)
+            or any(type(capacity) is not int or not 2 <= capacity <= capacity_limit for capacity in capacities)
         ):
-            raise ChatError("Invalid Hy4 auxiliary worker capacity; restart the model.")
+            raise ChatError("Invalid auxiliary generation worker capacity; restart the model.")
         for lane, capacity in zip(pending, capacities, strict=False):
-            self._read_hy4_lane_ready(primary, lane, capacity)
-        with self._hy4_lane_lock:
+            self._read_generation_lane_ready(primary, lane, capacity)
+        with self._generation_lane_lock:
             if self._closed:
                 raise ChatError("Worker stopped; chat closed.")
             for lane in pending[len(capacities) :]:
                 lane.close()
-            self.hy4_lanes = pending[: len(capacities)]
-            self._pending_hy4_lanes = []
+            self.generation_lanes = pending[: len(capacities)]
+            self._pending_generation_lanes = []
 
-    def _read_hy4_lane_ready(self, primary, lane, capacity):
+    def _read_generation_lane_ready(self, primary, lane, capacity):
         ready = lane.read()
         if (
             ready.get("ready") is not True
             or ready.get("mode") != "text-generation-v1"
+            or primary.get("mode") != "text-generation-v1"
             or ready.get("max_context_tokens") != capacity
             or type(ready.get("max_new_tokens")) is not int
-            or ready["max_new_tokens"] < 1
+            or not 1 <= ready["max_new_tokens"] < capacity
             or ready.get("vocab_size") != primary.get("vocab_size")
             or lane.mtp != self.mtp
             or not lane.cancellation
             or lane.prefix_cache
             or lane.image_input is not None
+            or (capacity == 0xFFFFFFFF and not lane.generation_budget)
         ):
-            raise ChatError("Invalid Hy4 auxiliary worker readiness; restart the model.")
+            raise ChatError("Invalid auxiliary generation worker readiness; restart the model.")
         lane.context_limit = capacity
         lane.streaming = ready.get("streaming") == "text-delta-v1"
         lane.stop_sequences = ready.get("stop_sequences") is True
-        if lane.streaming != (primary.get("streaming") == "text-delta-v1") or lane.stop_sequences != (
-            primary.get("stop_sequences") is True
+        if any(
+            ready.get(key) != primary.get(key)
+            for key in (
+                "streaming",
+                "stop_sequences",
+                "eos_token_ids",
+                "sampling_modes",
+                "generation_budget",
+                "generation_budget_inputs",
+                "thinking_budget_supported",
+            )
         ):
-            raise ChatError("Invalid Hy4 auxiliary worker features; restart the model.")
+            raise ChatError("Invalid auxiliary generation worker features; restart the model.")
 
     def request(self, payload, on_delta=None, cancelled=None, *, on_progress=None):
         lock = getattr(self, "_transaction_lock", None)
@@ -1083,13 +1103,13 @@ class Worker:
                 signal_worker(signal.SIGKILL)
                 self.process.wait()
         finally:
-            lane_lock = getattr(self, "_hy4_lane_lock", None)
+            lane_lock = getattr(self, "_generation_lane_lock", None)
             if lane_lock is not None:
                 with lane_lock:
-                    for lane in (*self.hy4_lanes, *self._pending_hy4_lanes):
+                    for lane in (*self.generation_lanes, *self._pending_generation_lanes):
                         lane.close()
-                    self.hy4_lanes = ()
-                    self._pending_hy4_lanes = []
+                    self.generation_lanes = ()
+                    self._pending_generation_lanes = []
             for pipe in (self.process.stdin, self.process.stdout):
                 try:
                     pipe.close()
@@ -1107,8 +1127,8 @@ class Worker:
                 media.close()
 
 
-class _Hy4Lane(Worker):
-    """A text protocol connection owned by the primary Hy4 process."""
+class _GenerationLane(Worker):
+    """A text protocol connection owned by the primary generation process."""
 
     @classmethod
     def open(cls, timeout, child_pipes):

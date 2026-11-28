@@ -31,12 +31,16 @@ impl NativeBackend {
             return Err("mtp_not_supported");
         };
         let input_rows = u32::try_from(input.len()).map_err(|_| "context_overflow")?;
-        admit_memory_bytes(model.assistant_generation_memory_bytes(
-            head,
-            input_rows,
-            options.context_tokens,
-            options.max_new_tokens,
-        ))?;
+        let mut request_memory = RequestMemory::new(self.shared_slots.clone());
+        let request_bytes =
+            model.assistant_generation_memory_bytes(head, input_rows, options.context_tokens, options.max_new_tokens);
+        if self.shared_slots.is_some() {
+            request_memory.admit(request_bytes, || {
+                model.reclaim_decoder_cached_memory().map_err(|_| "native_generation_failed")
+            })?;
+        } else {
+            admit_memory_bytes(request_bytes)?;
+        }
         let started = Instant::now();
         let control_error = Cell::new(None);
         let cancellation = &mut self.cancellation;

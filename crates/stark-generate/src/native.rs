@@ -4,6 +4,10 @@ use std::{
     io::Read,
     os::unix::fs::OpenOptionsExt,
     path::Path,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -51,12 +55,13 @@ type DenseRetainedState = prefix_cache::BoundaryEntry<(DenseMtpSession<Metal>, u
 type GemmaRetainedState = prefix_cache::BoundaryEntry<(Gemma4AssistantRetainedPrefix<Metal>, u32, &'static str)>;
 
 fn admit_generation_memory(
+    memory: &mut RequestMemory,
     model: &LanguageModel<Metal>,
     input_tokens: usize,
     options: &GenerationOptions,
 ) -> Result<(), &'static str> {
     let input_tokens = u32::try_from(input_tokens).map_err(|_| "context_overflow")?;
-    admit_memory_bytes_with_reclaim(
+    memory.admit(
         model.generation_memory_bytes_for_request(
             input_tokens,
             options.context_tokens,
@@ -87,6 +92,106 @@ fn admit_memory_bytes(request_bytes: Option<usize>) -> Result<(), &'static str> 
 
 fn current_memory_budget() -> usize {
     stark_resource_budget::inference_memory_budget(stark_resource_budget::available_memory_bytes().unwrap_or(0))
+}
+
+#[derive(Default)]
+pub(crate) struct SharedSlots {
+    memory: Mutex<SlotMemory>,
+    auxiliary_epoch: AtomicU64,
+    active_auxiliaries: AtomicUsize,
+}
+
+impl SharedSlots {
+    pub(crate) fn available_budget(
+        &self,
+        budget: usize,
+    ) -> Result<usize, &'static str> {
+        self.memory.lock().map(|memory| memory.available(budget)).map_err(|_| "native_generation_failed")
+    }
+
+    pub(crate) fn auxiliary_activity(&self) -> (usize, u64) {
+        (self.active_auxiliaries.load(Ordering::Acquire), self.auxiliary_epoch.load(Ordering::Acquire))
+    }
+}
+
+#[derive(Default)]
+struct SlotMemory {
+    active_bytes: usize,
+}
+
+impl SlotMemory {
+    fn available(
+        &self,
+        live_budget: usize,
+    ) -> usize {
+        // Free pages do not reflect a peer's promised but unmapped sparse KV
+        // rows. Preserve its full allowance through the end of its GPU work.
+        live_budget.saturating_sub(self.active_bytes)
+    }
+}
+
+pub(crate) struct RequestMemory {
+    shared: Option<Arc<SharedSlots>>,
+    bytes: usize,
+}
+
+impl RequestMemory {
+    pub(crate) fn new(shared: Option<Arc<SharedSlots>>) -> Self {
+        Self {
+            shared,
+            bytes: 0,
+        }
+    }
+
+    pub(crate) fn admit(
+        &mut self,
+        request_bytes: Option<usize>,
+        reclaim: impl FnOnce() -> Result<usize, &'static str>,
+    ) -> Result<(), &'static str> {
+        let Some(shared) = &self.shared else {
+            return admit_memory_bytes_with_reclaim(request_bytes, reclaim);
+        };
+        let bytes = request_bytes.ok_or("resource_budget_exceeded")?;
+        let mut memory = shared.memory.lock().map_err(|_| "native_generation_failed")?;
+        let mut budget = current_memory_budget();
+        if bytes > memory.available(budget) && memory.active_bytes == 0 {
+            reclaim()?;
+            budget = current_memory_budget();
+        }
+        if bytes > memory.available(budget) {
+            return Err("resource_budget_exceeded");
+        }
+        memory.active_bytes += bytes;
+        self.bytes += bytes;
+        Ok(())
+    }
+}
+
+impl Drop for RequestMemory {
+    fn drop(&mut self) {
+        if let Some(shared) = &self.shared
+            && let Ok(mut memory) = shared.memory.lock()
+        {
+            memory.active_bytes -= self.bytes;
+        }
+    }
+}
+
+pub(crate) struct AuxiliaryActivity(Arc<SharedSlots>);
+
+impl AuxiliaryActivity {
+    pub(crate) fn begin(shared: Arc<SharedSlots>) -> Self {
+        shared.active_auxiliaries.fetch_add(1, Ordering::AcqRel);
+        shared.auxiliary_epoch.fetch_add(1, Ordering::AcqRel);
+        Self(shared)
+    }
+}
+
+impl Drop for AuxiliaryActivity {
+    fn drop(&mut self) {
+        self.0.auxiliary_epoch.fetch_add(1, Ordering::AcqRel);
+        self.0.active_auxiliaries.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 fn record_accepted_prefix_round(
@@ -126,13 +231,16 @@ pub(crate) struct NativeBackend {
     dense_pending_prefix: Option<DenseRetainedState>,
     text_snapshot_prefix_cache: Option<TextSnapshotState>,
     text_snapshot_pending_prefix: Option<TextSnapshotState>,
-    gemma4_assistant: Option<Gemma4Assistant<Metal>>,
+    gemma4_assistant: Option<Arc<Gemma4Assistant<Metal>>>,
     gemma_prefix_cache: Option<GemmaRetainedState>,
     gemma_pending_prefix: Option<GemmaRetainedState>,
+    shared_slots: Option<Arc<SharedSlots>>,
+    auxiliary: bool,
+    prefix_epoch: u64,
 }
 
 enum NativeModel {
-    Text(Box<LanguageModel<Metal>>),
+    Text(Arc<LanguageModel<Metal>>),
     Vision(Box<VisionLanguageModel<Metal>>),
     Gemma4Vision(Box<Gemma4VisionLanguageModel<Metal>>),
     Gemma3Vision(Box<Gemma3VisionLanguageModel<Metal>>),
@@ -335,9 +443,80 @@ pub(crate) struct NativePreparedImage {
 }
 
 impl NativeBackend {
+    pub(crate) fn take_additional_slots(
+        &mut self,
+        requested: usize,
+    ) -> Vec<Self> {
+        if requested == 0 || (self.context_capacity.limit().is_none() && !self.supports_automatic_context_planning()) {
+            return Vec::new();
+        }
+        let shared = self.shared_slots.get_or_insert_with(|| Arc::new(SharedSlots::default())).clone();
+        (0..requested)
+            .map(|_| Self {
+                model: match &self.model {
+                    NativeModel::Text(model) => NativeModel::Text(model.clone()),
+                    NativeModel::Vision(model) => NativeModel::Vision(Box::new(model.shared_text_lane())),
+                    NativeModel::Gemma4Vision(model) => NativeModel::Gemma4Vision(Box::new(model.shared_text_lane())),
+                    NativeModel::Gemma3Vision(model) => NativeModel::Gemma3Vision(Box::new(model.shared_text_lane())),
+                },
+                context_capacity: self.context_capacity,
+                idle_engine: None,
+                vocab_size: self.vocab_size,
+                eos_token_ids: self.eos_token_ids.clone(),
+                cancellation: None,
+                runtime_identity: self.runtime_identity.clone(),
+                prefix_cache: None,
+                pending_prefix: None,
+                last_mtp: None,
+                dense_prefix_cache: None,
+                dense_pending_prefix: None,
+                text_snapshot_prefix_cache: None,
+                text_snapshot_pending_prefix: None,
+                gemma4_assistant: self.gemma4_assistant.clone(),
+                gemma_prefix_cache: None,
+                gemma_pending_prefix: None,
+                shared_slots: Some(shared.clone()),
+                auxiliary: true,
+                prefix_epoch: 0,
+            })
+            .collect()
+    }
+
+    pub(crate) fn set_cancellation(
+        &mut self,
+        cancellation: CancelSignal,
+    ) {
+        self.cancellation = Some(cancellation);
+    }
+
+    fn slot_memory_budget(
+        &self,
+        budget: usize,
+    ) -> Result<usize, &'static str> {
+        self.shared_slots.as_ref().map_or(Ok(budget), |shared| shared.available_budget(budget))
+    }
+
+    fn prefix_epoch_changed(&self) -> bool {
+        self.shared_slots.as_ref().is_some_and(|shared| {
+            shared.active_auxiliaries.load(Ordering::Acquire) != 0
+                || shared.auxiliary_epoch.load(Ordering::Acquire) != self.prefix_epoch
+        })
+    }
+
     fn reclaim_text_cache(&self) -> Result<(), &'static str> {
         let NativeModel::Text(model) = &self.model else {
             return Ok(());
+        };
+        // Let in-flight GPU retirements complete normally on other lanes.
+        // While they hold reservations, their live buffers cannot be reclaimed.
+        let _slot_idle = if let Some(shared) = &self.shared_slots {
+            let guard = shared.memory.lock().map_err(|_| "native_generation_failed")?;
+            if guard.active_bytes != 0 {
+                return Ok(());
+            }
+            Some(guard)
+        } else {
+            None
         };
         model.reclaim_cached_memory().map_err(|_| "native_generation_failed")?;
         Ok(())
@@ -531,7 +710,7 @@ impl NativeBackend {
                 ))
             }
         } else {
-            NativeModel::Text(Box::new(engine.load_language_model(path).map_err(|_| "model_load_failed")?))
+            NativeModel::Text(Arc::new(engine.load_language_model(path).map_err(|_| "model_load_failed")?))
         };
         let (tokenizer, stops) = match &model {
             NativeModel::Text(model) => (model.tokenizer(), &model.generation_config().stop_token_ids),
@@ -569,7 +748,9 @@ impl NativeBackend {
         let gemma4_assistant = match &model {
             NativeModel::Gemma4Vision(model) if path.join("assistant").exists() => {
                 admit_memory_bytes(Some(320 * 1024 * 1024))?;
-                Some(model.load_assistant_component(&path.join("assistant")).map_err(|_| "assistant_load_failed")?)
+                Some(Arc::new(
+                    model.load_assistant_component(&path.join("assistant")).map_err(|_| "assistant_load_failed")?,
+                ))
             },
             _ => None,
         };
@@ -594,6 +775,9 @@ impl NativeBackend {
             gemma4_assistant,
             gemma_prefix_cache: None,
             gemma_pending_prefix: None,
+            shared_slots: None,
+            auxiliary: false,
+            prefix_epoch: 0,
         })
     }
 }
@@ -601,11 +785,25 @@ impl NativeBackend {
 impl GenerationBackend for NativeBackend {
     type PreparedImage = NativePreparedImage;
 
+    fn begin_generation_request(&mut self) {
+        let Some(shared) = &self.shared_slots else {
+            return;
+        };
+        let (active, epoch) = shared.auxiliary_activity();
+        if active != 0 || epoch != self.prefix_epoch {
+            self.clear_prefix_cache();
+        }
+        self.prefix_epoch = epoch;
+    }
+
     fn idle_maintenance_interval(&self) -> Option<Duration> {
         self.idle_engine.as_ref().map(|_| Duration::from_millis(500))
     }
 
     fn maintain_idle_queue(&mut self) -> Result<(), &'static str> {
+        if self.shared_slots.as_ref().is_some_and(|shared| shared.active_auxiliaries.load(Ordering::Acquire) != 0) {
+            return Ok(());
+        }
         if let Some(engine) = &self.idle_engine {
             engine.maintain_idle_queue().map_err(|_| "native_idle_maintenance_failed")?;
         }
@@ -643,7 +841,7 @@ impl GenerationBackend for NativeBackend {
         let NativeModel::Gemma4Vision(model) = &self.model else {
             return None;
         };
-        let head = self.gemma4_assistant.as_ref();
+        let head = self.gemma4_assistant.as_deref();
         let identity = head.and_then(|head| model.assistant_artifact_identity(head));
         Some(serde_json::json!({
             "image_tower_resident":model.image_tower_resident(),
@@ -690,7 +888,7 @@ impl GenerationBackend for NativeBackend {
         if !matches!(self.model, NativeModel::Text(_)) {
             return Ok(None);
         }
-        let mut budget = memory_budget_bytes;
+        let mut budget = self.slot_memory_budget(memory_budget_bytes)?;
         let warm = self.warm_planning_candidate(request);
         // A cache is only creditable after checking the actual IDs, scope,
         // context and selected MTP path. An inapplicable owner is released
@@ -698,7 +896,7 @@ impl GenerationBackend for NativeBackend {
         if self.prefix_cache_retained() && warm.is_none() {
             self.clear_prefix_cache();
             self.reclaim_text_cache()?;
-            budget = current_memory_budget();
+            budget = self.slot_memory_budget(current_memory_budget())?;
         }
         let mut best = self.choose_context_plan(request, budget);
         // Below the caller's maximum, reclaim free scratch pages (including
@@ -707,7 +905,7 @@ impl GenerationBackend for NativeBackend {
         // warm allowance never flushes useful allocator cache pages.
         if best.is_none_or(|capacity| capacity < request.maximum) {
             self.reclaim_text_cache()?;
-            budget = current_memory_budget();
+            budget = self.slot_memory_budget(current_memory_budget())?;
             best = self.choose_context_plan(request, budget);
         }
         // Warm capacities are isolated points: a matching retained state may
@@ -727,7 +925,7 @@ impl GenerationBackend for NativeBackend {
             self.clear_prefix_cache();
             self.reclaim_text_cache()?;
             // Speculative release bytes are never used for final admission.
-            best = self.choose_context_plan(request, current_memory_budget());
+            best = self.choose_context_plan(request, self.slot_memory_budget(current_memory_budget())?);
         }
         Ok(best)
     }
@@ -774,6 +972,8 @@ impl GenerationBackend for NativeBackend {
         on_text: Option<&mut TextCallback<'_>>,
         on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
+        let _auxiliary_activity =
+            self.shared_slots.as_ref().filter(|_| self.auxiliary).cloned().map(AuxiliaryActivity::begin);
         self.last_mtp = None;
         if self.gemma4_assistant.is_some() && options.mtp_drafts > 0 {
             return self.generate_gemma4_assistant(input, options, on_text, on_progress);
@@ -786,6 +986,9 @@ impl GenerationBackend for NativeBackend {
     }
 
     fn supports_images(&self) -> bool {
+        if self.auxiliary {
+            return false;
+        }
         match &self.model {
             NativeModel::Gemma4Vision(model) => model.image_tower_resident(),
             NativeModel::Vision(_) | NativeModel::Gemma3Vision(_) => true,
@@ -1005,6 +1208,10 @@ impl GenerationBackend for NativeBackend {
     }
 
     fn publish_prefix_cache(&mut self) {
+        if self.prefix_epoch_changed() {
+            self.clear_prefix_cache();
+            return;
+        }
         if let Some(entry) = self.gemma_pending_prefix.take() {
             self.gemma_prefix_cache = Some(entry);
         }
@@ -1057,6 +1264,7 @@ impl NativeBackend {
         self.dense_pending_prefix = None;
         self.text_snapshot_prefix_cache = None;
         self.text_snapshot_pending_prefix = None;
+        let mut request_memory = RequestMemory::new(self.shared_slots.clone());
         let model = &mut self.model;
         if !model.has_dense_mtp() || input.is_empty() {
             return Err("mtp_not_supported");
@@ -1091,7 +1299,7 @@ impl NativeBackend {
             // A reused sparse cache can grow well beyond its previous mapped
             // rows when this request asks for more output. Undeclared contexts
             // were already admitted for their entire unchanged capacity.
-            admit_memory_bytes_with_reclaim(
+            request_memory.admit(
                 model.generation_memory_bytes_reusing_dense_mtp(
                     &entry.state.0,
                     input.len() as u32,
@@ -1108,7 +1316,7 @@ impl NativeBackend {
                 .map_err(|_| control_error.unwrap_or("native_generation_failed"))?;
             session
         } else {
-            admit_memory_bytes_with_reclaim(
+            request_memory.admit(
                 model.dense_generation_memory_bytes(
                     u32::try_from(input.len()).map_err(|_| "context_overflow")?,
                     options.context_tokens,
@@ -1348,6 +1556,7 @@ impl NativeBackend {
             _ => None,
         }
         .ok_or("resource_budget_exceeded")?;
+        let mut request_memory = RequestMemory::new(self.shared_slots.clone());
         let mut state = match (&mut self.model, retained) {
             (NativeModel::Text(model), retained)
                 if model.has_dense_mtp()
@@ -1378,9 +1587,8 @@ impl NativeBackend {
                         options.max_new_tokens,
                     )
                 };
-                admit_memory_bytes_with_reclaim(memory, || {
-                    model.reclaim_cached_memory().map_err(|_| "native_generation_failed")
-                })?;
+                request_memory
+                    .admit(memory, || model.reclaim_cached_memory().map_err(|_| "native_generation_failed"))?;
                 if let Some(entry) = snapshot_retained {
                     let mut state = entry.state.0;
                     model
@@ -1397,7 +1605,7 @@ impl NativeBackend {
                 // Finite sparse admission may previously have covered only a
                 // short request; an unchanged undeclared capacity was charged
                 // in full when its retained state was created.
-                admit_memory_bytes_with_reclaim(
+                request_memory.admit(
                     model.generation_memory_bytes_reusing_state(
                         &entry.state,
                         input.len() as u32,
@@ -1416,7 +1624,7 @@ impl NativeBackend {
             (NativeModel::Text(model), retained) => {
                 drop(retained);
                 if image.is_none() {
-                    admit_generation_memory(model, input.len(), options)?;
+                    admit_generation_memory(&mut request_memory, model, input.len(), options)?;
                 }
                 model
                     .create_empty_state(Some(options.context_tokens), options.seed)
@@ -1456,10 +1664,10 @@ impl NativeBackend {
                         options.max_new_tokens,
                     )
                 };
-                admit_memory_bytes_with_reclaim(
-                    memory_bytes.and_then(|bytes| bytes.checked_add(image_workspace_bytes)),
-                    || model.reclaim_decoder_cached_memory().map_err(|_| "native_generation_failed"),
-                )?;
+                request_memory
+                    .admit(memory_bytes.and_then(|bytes| bytes.checked_add(image_workspace_bytes)), || {
+                        model.reclaim_decoder_cached_memory().map_err(|_| "native_generation_failed")
+                    })?;
                 if let Some(entry) = snapshot_retained {
                     let mut state = entry.state.0;
                     model
@@ -1518,10 +1726,10 @@ impl NativeBackend {
                 } else {
                     memory_bytes
                 };
-                admit_memory_bytes_with_reclaim(
-                    memory_bytes.and_then(|bytes| bytes.checked_add(image_workspace_bytes)),
-                    || model.reclaim_decoder_cached_memory().map_err(|_| "native_generation_failed"),
-                )?;
+                request_memory
+                    .admit(memory_bytes.and_then(|bytes| bytes.checked_add(image_workspace_bytes)), || {
+                        model.reclaim_decoder_cached_memory().map_err(|_| "native_generation_failed")
+                    })?;
                 if let Some(entry) = snapshot_retained {
                     let mut state = entry.state.0;
                     model
@@ -1568,10 +1776,10 @@ impl NativeBackend {
                         options.max_new_tokens,
                     )
                 };
-                admit_memory_bytes_with_reclaim(
-                    memory_bytes.and_then(|bytes| bytes.checked_add(image_workspace_bytes)),
-                    || model.reclaim_decoder_cached_memory().map_err(|_| "native_generation_failed"),
-                )?;
+                request_memory
+                    .admit(memory_bytes.and_then(|bytes| bytes.checked_add(image_workspace_bytes)), || {
+                        model.reclaim_decoder_cached_memory().map_err(|_| "native_generation_failed")
+                    })?;
                 if let Some(entry) = snapshot_retained {
                     let mut state = entry.state.0;
                     model
@@ -1852,6 +2060,26 @@ impl NativeBackend {
 #[cfg(test)]
 mod dense_mtp_stats_tests {
     use super::*;
+
+    #[test]
+    fn shared_slot_memory_charges_peer_allowances_until_each_guard_drops() {
+        let shared = Arc::new(SharedSlots::default());
+        shared.memory.lock().unwrap().active_bytes = 12;
+        let first = RequestMemory {
+            shared: Some(shared.clone()),
+            bytes: 8,
+        };
+        let second = RequestMemory {
+            shared: Some(shared.clone()),
+            bytes: 4,
+        };
+        assert_eq!(shared.memory.lock().unwrap().available(20), 8);
+        assert_eq!(shared.memory.lock().unwrap().available(10), 0);
+        drop(first);
+        assert_eq!(shared.memory.lock().unwrap().available(10), 6);
+        drop(second);
+        assert_eq!(shared.memory.lock().unwrap().available(10), 10);
+    }
 
     #[test]
     fn reclamation_failure_is_fatal_and_invalid_inventory_never_reclaims() {
